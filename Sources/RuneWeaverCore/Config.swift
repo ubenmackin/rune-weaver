@@ -136,7 +136,7 @@ public struct LLMConfig: Sendable, Codable, Equatable {
 
 /// `[memory]` — episodic and semantic memory storage locations.
 public struct MemoryConfig: Sendable, Codable, Equatable {
-    /// LanceDB vector store path for semantic memory.
+    /// JSON keyword store path for semantic memory (LanceDB-compatible shape; vectors deferred).
     public var vectorDBPath: String
     /// SQLite path for episodic memory.
     public var episodesDBPath: String
@@ -212,6 +212,12 @@ public struct SandboxConfig: Sendable, Codable, Equatable {
 
 /// One `[[email.accounts]]` entry. Passwords live in the Keychain,
 /// never in TOML.
+///
+/// The password is resolved at runtime from ``EmailAccount/passwordEnvVar``
+/// via `SecretsManager` (environment first, Keychain service
+/// `com.runeweaver.secrets` second), mirroring
+/// `ProviderConfig.apiKeyEnv`. Only host, port, username, and the
+/// variable name are ever echoed; the secret value is never logged.
 public struct EmailAccount: Sendable, Codable, Equatable {
     /// Account nickname (e.g. `icloud`).
     public var name: String
@@ -239,6 +245,26 @@ public struct EmailAccount: Sendable, Codable, Equatable {
         self.username = username
     }
 
+    /// Environment variable holding this account's password.
+    ///
+    /// Resolved at runtime via `SecretsManager`; the value itself never
+    /// appears in TOML or `config show` output.
+    public var passwordEnvVar: String {
+        Self.passwordEnvVar(forAccountNamed: name)
+    }
+
+    /// Environment variable name for an account's password.
+    /// - Parameter name: Account nickname (e.g. `icloud`).
+    /// - Returns: `EMAIL_<UPPERCASED_NAME>_PASSWORD` with each
+    ///   non-alphanumeric character mapped to `_` so every nickname maps
+    ///   to a valid variable name.
+    public static func passwordEnvVar(forAccountNamed name: String) -> String {
+        let sanitized = name.uppercased().map { character in
+            character.isLetter || character.isNumber ? String(character) : "_"
+        }.joined()
+        return "EMAIL_\(sanitized)_PASSWORD"
+    }
+
     private enum CodingKeys: String, CodingKey {
         case name
         case type
@@ -249,6 +275,9 @@ public struct EmailAccount: Sendable, Codable, Equatable {
 }
 
 /// `[email]` — mail accounts.
+///
+/// Passwords are not stored here; each account's password is resolved at
+/// runtime from `EmailAccount.passwordEnvVar` via `SecretsManager`.
 public struct EmailConfig: Sendable, Codable, Equatable {
     /// Configured mail accounts.
     public var accounts: [EmailAccount]
@@ -256,6 +285,13 @@ public struct EmailConfig: Sendable, Codable, Equatable {
     /// Creates an email config.
     public init(accounts: [EmailAccount] = []) {
         self.accounts = accounts
+    }
+
+    /// Finds an account by name.
+    /// - Parameter name: Account nickname.
+    /// - Returns: Matching account, or `nil` when absent.
+    public func account(named name: String) -> EmailAccount? {
+        accounts.first { $0.name == name }
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -479,6 +515,20 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
                 field: "llm.fallback_provider", message: "must not be empty when set"
             )
         }
+        guard llm.providers[llm.defaultProvider] != nil else {
+            throw ConfigError.validationError(
+                field: "llm.default_provider",
+                message: "unknown provider '\(llm.defaultProvider)' (missing [llm.providers.\(llm.defaultProvider)])"
+            )
+        }
+        if let fallback = llm.fallbackProvider {
+            guard llm.providers[fallback] != nil else {
+                throw ConfigError.validationError(
+                    field: "llm.fallback_provider",
+                    message: "unknown provider '\(fallback)' (missing [llm.providers.\(fallback)])"
+                )
+            }
+        }
         for (name, provider) in llm.providers {
             try validateProvider(provider, name: name)
         }
@@ -510,17 +560,17 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     }
 
     private func validateMemorySection() throws {
-        if memory.vectorDBPath.isEmpty {
+        if memory.vectorDBPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
                 field: "memory.vector_db_path", message: "must not be empty"
             )
         }
-        if memory.episodesDBPath.isEmpty {
+        if memory.episodesDBPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
                 field: "memory.episodes_db_path", message: "must not be empty"
             )
         }
-        if memory.embeddingModel.isEmpty {
+        if memory.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
                 field: "memory.embedding_model", message: "must not be empty"
             )

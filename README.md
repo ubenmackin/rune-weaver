@@ -43,6 +43,109 @@ swift run rune-weaver memory search "project"  # search semantic memory
 
 The CLI (`rune-weaver`) is the MVP interaction layer: `chat`, `config`, `memory`, and `status`. There is no web frontend in this MVP.
 
+## Email in chat (find and summarize)
+
+Chat starts with the self-hosted IMAP tools registered and visible to the model:
+
+- `email.search` — find messages by free text (subject, sender, body); returns ids, headers, and snippets.
+- `email.read` — open one message by id; returns headers plus the text body. Attachments are listed by filename with a deferral note; bytes are never downloaded.
+
+Both tools are `readOnly`, so they run with no approval prompts. The assistant calls them during a turn, reads the results, and summarizes in conversation.
+
+### Live run (reads only, never sends)
+
+1. Configure the account in `~/.runeweaver/config.toml` (see `Config/config.toml.example` and `CONFIG.md`):
+
+```toml
+[[email.accounts]]
+name = "personal"
+type = "imap"
+host = "mail.yourdomain.com"
+port = 993
+username = "you@yourdomain.com"
+# password is never stored here
+```
+
+2. Provide the password without printing it — environment first, Keychain fallback (service `com.runeweaver.secrets`):
+
+```bash
+export EMAIL_PERSONAL_PASSWORD="..."
+# Keychain alternative: store EMAIL_PERSONAL_PASSWORD under service com.runeweaver.secrets
+```
+
+The variable name is `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_PERSONAL_PASSWORD`).
+
+3. Confirm the tools are registered:
+
+```bash
+swift run rune-weaver status
+# Tools: active: email.read, email.search
+```
+
+4. Start chat and ask to find and summarize:
+
+```bash
+swift run rune-weaver chat
+```
+
+```text
+you> Find emails about quarterly report on personal
+weaver> ◈ calling email.search ...
+you> Summarize message 42 from personal
+weaver> ◈ calling email.read ...
+```
+
+The model summarizes the returned headers and snippets/bodies inline. Reads open the mailbox read-only and never change flags; there is no send path. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
+
+Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing:
+
+```bash
+swift test --filter RuneWeaverToolsTests
+```
+
+## Memory in chat (automatic recall)
+
+Every chat turn runs automatic recall before the LLM call, so the assistant remembers across sessions without being asked to look anything up:
+
+- The current user message is the query to `MemoryEngine.recall(query:embedding:limit:)` with nil embeddings (keyword path), merging episodic turns (SQLite + FTS5) plus semantic and profile facts by token overlap.
+- The top 5 hits inject as one ephemeral `system` message right after the system prompt and rolling summary, ahead of the live conversation. Each line is source-labeled (`[episodic]`, `[semantic]`, `[profile]`) under a `Relevant memories ...` header, so the model can attribute context.
+- Injection is token-bounded (2000 characters including the header, roughly 500 tokens) with ellipsis truncation; turns with nothing scoring at or above threshold (0.1) send no recall block. Recall failures never fail the turn, the just-mirrored user turn is filtered as self-echo, and the recall block is never stored in working memory.
+- Explicit writes stay on the `/remember <fact>` path and on-demand reads stay on the `recall_memories` tool; automatic recall is the unprompted read path between them.
+
+### Live run (two sessions, reads only, never prints secrets)
+
+1. In session A, remember one fact and note the session id:
+
+```bash
+swift run rune-weaver chat --session 11111111-1111-1111-1111-111111111111
+```
+
+```text
+you> /remember my dog is named Biscuit
+weaver> Remembered: my dog is named Biscuit
+you> /exit
+```
+
+2. In a fresh session B, ask without mentioning the fact. The answer should use the injected `[profile]` context with no `recall_memories` tool call:
+
+```bash
+swift run rune-weaver chat
+```
+
+```text
+you> What is my dog's name?
+weaver> Your dog is named Biscuit.
+```
+
+3. Confirm the stored state with reads only (no secrets are printed):
+
+```bash
+swift run rune-weaver memory search "dog Biscuit"
+swift run rune-weaver memory facts
+```
+
+A missing recall block means nothing scored above threshold; a wrong answer means the fact never stored (check the `Remembered:` acknowledgement in session A first).
+
 ## Architecture Overview
 
 ```

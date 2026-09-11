@@ -61,7 +61,7 @@ struct StatusCommand: AsyncParsableCommand {
 
         print("")
         print("Tools:")
-        let toolBus = await CLIShared.makeToolBus()
+        let toolBus = await CLIShared.makeToolBus(emailConfig: config.email, memoryEngine: engine)
         let toolNames = await toolBus.toolNames().sorted()
         if toolNames.isEmpty {
             print(TerminalStyle.dim("  no plugin tools registered in this CLI process"))

@@ -39,14 +39,23 @@ public struct LLMResponse: Sendable, Equatable {
     public let delta: String
     /// Whether this chunk ends the response.
     public let isFinished: Bool
+    /// Failure detail when the stream terminated with an error. Nil on success.
+    public let errorMessage: String?
 
     /// Creates a response chunk.
     /// - Parameters:
     ///   - delta: Incremental text.
     ///   - isFinished: Whether the response is complete.
-    public init(delta: String, isFinished: Bool = false) {
+    ///   - errorMessage: Failure detail, if the stream failed. Defaults to nil.
+    public init(delta: String, isFinished: Bool = false, errorMessage: String? = nil) {
         self.delta = delta
         self.isFinished = isFinished
+        self.errorMessage = errorMessage
+    }
+
+    /// Whether this chunk reports a stream failure.
+    public var isError: Bool {
+        errorMessage != nil
     }
 }
 

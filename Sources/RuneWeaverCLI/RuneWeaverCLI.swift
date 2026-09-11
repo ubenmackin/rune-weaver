@@ -1,6 +1,7 @@
 import Foundation
 import RuneWeaverCore
 import RuneWeaverLLM
+import RuneWeaverTools
 
 /// Shared terminal styling, config loading, and provider wiring.
 ///
@@ -250,25 +251,44 @@ enum CLIShared {
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
     ///
-    /// The single source of truth for the CLI registry (currently no
-    /// bundled plugins, so empty). Commands add these to their bus
-    /// instead of constructing divergent registries.
+    /// The single source of truth for the CLI registry. Read-only email
+    /// tools (`email.search`, `email.read`) are built from the `[email]`
+    /// section; memory tools (`remember_fact`, `recall_memories`) are
+    /// built from the shared `MemoryEngine` so chat exposes them to the
+    /// model as tool definitions every turn. Nil inputs yield no plugins
+    /// for that family so legacy call sites stay valid. Commands pass
+    /// their loaded config and shared engine instead of constructing
+    /// divergent registries.
+    /// - Parameters:
+    ///   - emailConfig: Decoded `[email]` section, if any.
+    ///   - memoryEngine: Shared engine for memory tools, if any.
     /// - Returns: Tools to register.
-    static func pluginTools() -> [any Tool] {
-        []
+    static func pluginTools(emailConfig: EmailConfig? = nil, memoryEngine: MemoryEngine? = nil) -> [any Tool] {
+        var tools: [any Tool] = []
+        if let emailConfig {
+            tools += EmailTools.makeTools(emailConfig: emailConfig)
+        }
+        if let memoryEngine {
+            tools += MemoryTools.makeTools(engine: memoryEngine)
+        }
+        return tools
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
     /// - Parameters:
+    ///   - emailConfig: Decoded `[email]` section, if any.
+    ///   - memoryEngine: Shared engine for memory tools, if any.
     ///   - permissionGate: Graduated-trust gate, if any.
     ///   - approvalHandler: Approval hook, if any.
     /// - Returns: Bus with every shared plugin registered.
     static func makeToolBus(
+        emailConfig: EmailConfig? = nil,
+        memoryEngine: MemoryEngine? = nil,
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
-        for tool in pluginTools() {
+        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine) {
             await bus.register(tool: tool)
         }
         return bus

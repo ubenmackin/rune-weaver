@@ -148,6 +148,8 @@ Implementations:
 
 The LLM Router maintains a priority-ordered list of providers and falls through on failure. Users configure providers via the dashboard or config file.
 
+Provider config supports `api_style` (`chat-completions` default, `responses` opt-in for the `/responses` endpoint and SSE shape). The provider HTTP client sends `User-Agent: rune-weaver/<version>` on every request and `x-opencode-session` when a chat session ID is set.
+
 ### 3. Tool Plugin System
 
 Tools are the agent's hands — they do things in the world. Each tool is a self-contained module that declares:
@@ -158,7 +160,7 @@ Tools are the agent's hands — they do things in the world. Each tool is a self
 
 **Plugin Protocol (Swift)**:
 ```swift
-protocol RuneWeaverTool {
+public protocol Tool: Sendable {
     var name: String { get }
     var description: String { get }
     var inputSchema: JSONSchema { get }
@@ -176,17 +178,19 @@ Three tiers of memory, each backed by different storage:
 | Tier | What | Storage | Lifecycle |
 |------|------|---------|-----------|
 | **Working Memory** | Current conversation context | In-memory + SQLite sessions (Core Engine) | Session-scoped, oldest turns fold into a rolling summary when over budget |
-| **Episodic Memory** | Past conversation turns (raw per-turn mirror) plus compacted summaries | SQLite + FTS5 | Permanent, mirrored every turn for resume, summarized via compaction when old |
-| **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed |
+| **Episodic Memory** | Past conversation turns as raw per-turn rows | SQLite + FTS5 | Permanent, mirrored every turn via `mirrorTurn` for resume; `summarizeSessions`/`compactSessions` exist but are not wired into chat |
+| **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed; vectors deferred pending an embeddings backend |
 
 **Memory Flow**:
-1. User says something → goes into Working Memory and is mirrored raw into Episodic Memory for session resume
+1. User says something → goes into Working Memory and is mirrored raw per-turn into Episodic Memory via `mirrorTurn` for session resume
 2. Context fills → oldest working turns fold into the rolling session summary, keeping recent turns intact
-3. Old sessions age → aged episodic turns compact into per-session summaries while staying searchable
-4. Key facts extracted → stored in Semantic Memory as keyword-only rows (no embeddings yet)
-5. On future queries → relevant memories retrieved via keyword overlap (vector similarity deferred until a local embeddings backend exists)
+3. Deterministic remember capture → `remember` / `remember that` / `/remember` parsed by `rememberFactText` and stored via `storeProfileFact` (`storeRememberedFact`), acknowledged without touching the LLM path
+4. Key facts persist → stored in Semantic Memory as keyword-only rows (no embeddings yet), mirrored into the JSON profile
+5. On future queries → `recall` merges episodic, semantic, and profile hits via keyword overlap (vector similarity deferred until a local embeddings backend exists)
 
-**Embeddings**: Vector-backed semantic memory is deferred until a local embeddings backend exists. Until then facts persist as keyword-only rows scored by token overlap. When available, embeddings are generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
+Summarization helpers `summarizeSessions` (non-destructive per-session summaries) and `compactSessions` (replace old rows with a summary episode) exist on the episode store but are not called from chat paths.
+
+**Embeddings**: Vector-backed semantic memory is deferred pending a local embeddings backend. Until then facts persist as keyword-only rows scored by token overlap. When available, embeddings are generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
 
 ### 5. Permission Gate & Sandboxing
 

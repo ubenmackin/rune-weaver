@@ -71,15 +71,18 @@ public struct ToolResult: Sendable, Codable, Equatable {
 ///
 /// Return `true` to allow the execution, `false` to deny it. The bus
 /// invokes this hook before any state-changing tool runs; `readOnly`
-/// and `trusted` tools never consult it.
+/// and `trusted` tools never consult it, though they still honor
+/// explicit `PermissionGate` denials.
 public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput) async -> Bool
 
 /// Central registry dispatching LLM-requested tool calls to plugins.
 ///
 /// The bus owns the tool registry, routes invocations from the
 /// orchestrator to the matching ``Tool``, and enforces the permission
-/// gate before any execution: `readOnly` and `trusted` tools always
-/// run, `requiresApproval` tools consult the ``PermissionGate`` (when
+/// gate before any execution: `readOnly` and `trusted` tools run unless
+/// explicitly denied via ``PermissionGate/deny(_:reason:)`` (checked
+/// first, matching ``PermissionGate/checkPermission(toolCall:tool:)``),
+/// `requiresApproval` tools consult the ``PermissionGate`` (when
 /// one is attached) for graduated-trust grants, denials, and live
 /// coverage before falling back to the approval handler (or being
 /// denied when no handler is set, unless the context is a `dryRun`
@@ -168,10 +171,20 @@ public actor ToolBus {
             return .failure(toolCallID: toolCall.callID, content: "Unknown tool: \(toolCall.toolName)")
         }
         switch tool.permissionLevel {
-        case .readOnly:
-            break
-        case .trusted:
-            break
+        case .readOnly, .trusted:
+            if let gate = permissionGate {
+                switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
+                case .allowed:
+                    break
+                case let .denied(reason):
+                    return .failure(
+                        toolCallID: toolCall.callID,
+                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
+                    )
+                case .requiresApproval:
+                    break
+                }
+            }
         case .requiresApproval:
             if !context.dryRun {
                 if let gate = permissionGate {
@@ -184,34 +197,12 @@ public actor ToolBus {
                             content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
                         )
                     case .requiresApproval:
-                        guard let approvalHandler else {
-                            return .failure(
-                                toolCallID: toolCall.callID,
-                                content: "Tool '\(toolCall.toolName)' requires approval and no approval handler is set"
-                            )
-                        }
-                        let allowed = await approvalHandler(tool, toolCall)
-                        if !allowed {
-                            return .failure(
-                                toolCallID: toolCall.callID,
-                                content: "Tool '\(toolCall.toolName)' was denied by the approval gate"
-                            )
+                        if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                            return denial
                         }
                     }
-                } else {
-                    guard let approvalHandler else {
-                        return .failure(
-                            toolCallID: toolCall.callID,
-                            content: "Tool '\(toolCall.toolName)' requires approval and no approval handler is set"
-                        )
-                    }
-                    let allowed = await approvalHandler(tool, toolCall)
-                    if !allowed {
-                        return .failure(
-                            toolCallID: toolCall.callID,
-                            content: "Tool '\(toolCall.toolName)' was denied by the approval gate"
-                        )
-                    }
+                } else if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                    return denial
                 }
             }
         }
@@ -221,5 +212,31 @@ public actor ToolBus {
         } catch {
             return .failure(toolCallID: toolCall.callID, content: "Tool '\(toolCall.toolName)' failed: \(error.localizedDescription)")
         }
+    }
+
+    /// Resolves `requiresApproval` approval through the attached handler.
+    ///
+    /// Single shared branch for gate-attached and no-gate paths so both
+    /// agree on denial text: a missing handler denies, otherwise the
+    /// handler's verdict decides.
+    /// - Parameters:
+    ///   - tool: Tool requesting approval.
+    ///   - call: Invocation arguments.
+    /// - Returns: Denial result, or nil when the call is approved.
+    private func resolveApproval(tool: any Tool, call: ToolInput) async -> ToolResult? {
+        guard let approvalHandler else {
+            return .failure(
+                toolCallID: call.callID,
+                content: "Tool '\(call.toolName)' requires approval and no approval handler is set"
+            )
+        }
+        let allowed = await approvalHandler(tool, call)
+        if !allowed {
+            return .failure(
+                toolCallID: call.callID,
+                content: "Tool '\(call.toolName)' was denied by the approval gate"
+            )
+        }
+        return nil
     }
 }

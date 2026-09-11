@@ -92,6 +92,9 @@ public actor SecretsManager {
         guard !key.isEmpty else {
             throw SecretsError.invalidInput(reason: "key must not be empty")
         }
+        if let live = liveEnvironmentValue(for: key), !live.isEmpty {
+            return live
+        }
         if let injected = ProcessInfo.processInfo.environment[key], !injected.isEmpty {
             return injected
         }
@@ -151,9 +154,10 @@ public actor SecretsManager {
     /// Resolves an `api_key_env`-style reference: environment variable
     /// first, then the Keychain under the same name.
     ///
-    /// `ProviderConfig.apiKeyEnv` and `HomeAssistantConfig.tokenEnv`
-    /// flow through here so TOML only names the variable while the
-    /// value itself comes from the environment or Keychain.
+    /// `ProviderConfig.apiKeyEnv`, `HomeAssistantConfig.tokenEnv`, and
+    /// `EmailAccount.passwordEnvVar` flow through here so TOML only names
+    /// the variable while the value itself comes from the environment or
+    /// Keychain.
     /// - Parameters:
     ///   - envVar: Environment variable name (and Keychain key).
     ///   - service: Keychain service. Defaults to this manager's service.
@@ -161,6 +165,20 @@ public actor SecretsManager {
     public func resolve(_ envVar: String?, service: String? = nil) throws -> String? {
         guard let envVar, !envVar.isEmpty else { return nil }
         return try retrieve(key: envVar, service: service)
+    }
+
+    /// Reads the live process environment for `key`.
+    ///
+    /// Uses `getenv` so values installed with `setenv` after launch are
+    /// visible. `ProcessInfo.processInfo.environment` is a launch-time
+    /// snapshot and misses such updates. Never logs the value.
+    /// - Parameter key: Environment variable name.
+    /// - Returns: Value, or `nil` when unset or not valid UTF-8.
+    private nonisolated func liveEnvironmentValue(for key: String) -> String? {
+        key.withCString { cKey in
+            guard let cValue = getenv(cKey) else { return nil }
+            return String(validatingCString: cValue)
+        }
     }
 
     #if !canImport(Security)
