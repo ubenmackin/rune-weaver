@@ -1,6 +1,15 @@
 {
-  "originHash" : "2d3954bcdfe9b48056e8828fa0b6f848bfafa6b792d3375ca7a5203254ef6370",
+  "originHash" : "715180a405db2d835b970e1fe018c49c4ce858b522bfb275783f101877945094",
   "pins" : [
+    {
+      "identity" : "bestline-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/bestline-swift.git",
+      "state" : {
+        "revision" : "de068b4aa27a4450b3d1ddc9b2525e17dc336b6e",
+        "version" : "1.0.0"
+      }
+    },
     {
       "identity" : "swift-argument-parser",
       "kind" : "remoteSourceControl",

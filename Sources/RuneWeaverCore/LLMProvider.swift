@@ -41,16 +41,24 @@ public struct LLMResponse: Sendable, Equatable {
     public let isFinished: Bool
     /// Failure detail when the stream terminated with an error. Nil on success.
     public let errorMessage: String?
+    /// Billed tokens for the completed response, when the backend reports
+    /// usage. Only set on the terminal (`isFinished`) chunk; text-only
+    /// consumers accumulate it into the session total for the usage display.
+    /// Nil when the backend reports no usage (e.g. local servers without
+    /// usage reporting).
+    public let totalTokens: Int?
 
     /// Creates a response chunk.
     /// - Parameters:
     ///   - delta: Incremental text.
     ///   - isFinished: Whether the response is complete.
     ///   - errorMessage: Failure detail, if the stream failed. Defaults to nil.
-    public init(delta: String, isFinished: Bool = false, errorMessage: String? = nil) {
+    ///   - totalTokens: Billed tokens for the completed response, if reported. Defaults to nil.
+    public init(delta: String, isFinished: Bool = false, errorMessage: String? = nil, totalTokens: Int? = nil) {
         self.delta = delta
         self.isFinished = isFinished
         self.errorMessage = errorMessage
+        self.totalTokens = totalTokens
     }
 
     /// Whether this chunk reports a stream failure.

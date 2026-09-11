@@ -1182,6 +1182,89 @@ public extension MemoryEngine {
         return stored
     }
 
+    /// Maximum characters kept from a tool outcome in a compact episodic record.
+    ///
+    /// Bounds the outcome portion of `episodicToolRecord(toolName:content:isError:)`
+    /// so one large tool payload never materializes a huge episode row; the
+    /// record truncates with an ellipsis when over budget.
+    static let episodicToolOutcomeLimit = 2000
+
+    /// Builds compact episodic content for one tool execution.
+    ///
+    /// Episodic memory keeps user text and final assistant text verbatim and
+    /// drops interim assistant notes (narration plus `Calling ... [...]`
+    /// placeholder lines) entirely, so tool-call mechanics never reach the
+    /// store. Each meaningful tool execution persists as one compact record
+    /// carrying only the tool name plus its outcome; raw placeholder call
+    /// identifiers and call-argument JSON are never included, and no
+    /// `tool_call_id` metadata is stored alongside the record.
+    /// - Parameters:
+    ///   - toolName: Name of the tool that ran (e.g. `"email.search"`).
+    ///   - content: Raw tool outcome text.
+    ///   - isError: Whether the outcome represents a failure.
+    /// - Returns: Compact record such as `"Used email.search: <outcome>"`
+    ///   (or `"Used email.search (failed): <outcome>"` when `isError`), or
+    ///   nil when the name is blank or the outcome is blank after stripping
+    ///   placeholder lines.
+    static func episodicToolRecord(toolName: String, content: String, isError: Bool) -> String? {
+        let trimmedName = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else { return nil }
+        let trimmedOutcome = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedOutcome.isEmpty else { return nil }
+        let cleaned = strippingToolPlumbing(from: trimmedOutcome)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty else { return nil }
+        let compact = cleaned.count > episodicToolOutcomeLimit
+            ? String(cleaned.prefix(episodicToolOutcomeLimit)) + "…"
+            : cleaned
+        if isError {
+            return "Used \(trimmedName) (failed): \(compact)"
+        }
+        return "Used \(trimmedName): \(compact)"
+    }
+
+    /// Builds compact episodic content from a bus result.
+    ///
+    /// Convenience over `episodicToolRecord(toolName:content:isError:)` so
+    /// orchestration loops pass the executed call name plus its
+    /// ``ToolResult`` without unpacking fields at the call site.
+    /// - Parameters:
+    ///   - toolName: Name of the tool that ran.
+    ///   - result: Result returned by the bus.
+    /// - Returns: Compact record, or nil when the outcome is not meaningful.
+    static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
+        episodicToolRecord(toolName: toolName, content: result.content, isError: result.isError)
+    }
+
+    /// Whether a line looks like persisted tool-call plumbing.
+    ///
+    /// Delegates to the shared `ToolInput/parsePlaceholderLine(_:)` parser
+    /// (the same parser backing Responses replay) so episodic stripping and
+    /// replay never drift; ordinary prose starting with "Calling " (e.g.
+    /// "Calling the bank tomorrow") never counts as plumbing.
+    /// - Parameter line: Single line to inspect.
+    /// - Returns: True when the line has the full placeholder shape.
+    static func isToolPlumbingLine(_ line: String) -> Bool {
+        ToolInput.parsePlaceholderLine(line) != nil
+    }
+
+    /// Removes tool-call plumbing lines from text.
+    ///
+    /// Drops every `Calling ...` placeholder line and trims the remainder,
+    /// preserving all other lines verbatim. Used defensively when building
+    /// compact tool records so a leaked placeholder never reaches episodic
+    /// storage.
+    /// - Parameter text: Candidate text possibly containing placeholders.
+    /// - Returns: Text without plumbing lines, trimmed.
+    static func strippingToolPlumbing(from text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        let kept = lines.filter { !isToolPlumbingLine($0) }
+        return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Stores a remembered fact without throwing.
     ///
     /// Used by the chat REPL for explicit remember requests so a failing
@@ -1386,6 +1469,47 @@ public extension Episode {
             toolCallID: metadata["tool_call_id"],
             createdAt: timestamp
         )
+    }
+
+    /// Converts an episode for session-resume hydration, if replayable.
+    ///
+    /// Legacy correlated tool rows (role `.tool` with a non-blank
+    /// `tool_call_id` in metadata) keep their wiring via `asMessage()` so
+    /// future LLM turns retain tool correlation. Compact episodic tool
+    /// records (`"Used <tool>: <outcome>"`, role `.tool`, no `tool_call_id`
+    /// by policy) have no parent `function_call` in the episodic store —
+    /// interim assistant placeholder notes are never mirrored — so sending
+    /// them as `.tool` messages would orphan them with nil/empty `call_id`.
+    /// They hydrate as replay-safe `.assistant` synthesis carrying the same
+    /// outcome text, so compact outcomes survive resume instead of
+    /// vanishing while the next turn stays replayable.
+    /// - Returns: Equivalent chat message, or nil for blank tool records.
+    func hydrationMessage() -> Message? {
+        guard role == .tool else { return asMessage() }
+        if let callID = metadata["tool_call_id"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !callID.isEmpty
+        {
+            return asMessage()
+        }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return Message(id: id, role: .assistant, content: trimmed, createdAt: timestamp)
+    }
+}
+
+public extension MemoryEngine {
+    /// Converts episodes to replay-safe working history for resume.
+    ///
+    /// Legacy correlated `.tool` rows (with `tool_call_id`) replay with
+    /// their wiring intact; compact `"Used <tool>: <outcome>"` records
+    /// without a call identifier hydrate as `.assistant` synthesis (see
+    /// `Episode.hydrationMessage()`) so outcomes survive resume without
+    /// ever sending orphaned tool messages with nil/empty `call_id` and
+    /// no parent `function_call`.
+    /// - Parameter episodes: Episodes in chronological order.
+    /// - Returns: Messages safe to load into working history.
+    static func hydrationMessages(from episodes: [Episode]) -> [Message] {
+        episodes.compactMap { $0.hydrationMessage() }
     }
 }
 

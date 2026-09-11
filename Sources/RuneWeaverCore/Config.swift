@@ -76,6 +76,17 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var providerType: String?
     /// Request style for OpenAI-compatible endpoints.
     public var apiStyle: APIStyle
+    /// Context window in tokens, when explicitly configured.
+    ///
+    /// Nil means provider-default: the factory resolves an absent
+    /// `context_length` to the backend's own default (MLX 8192,
+    /// llama.cpp 4096, OpenAI-compatible 128000) instead of forcing a
+    /// global value into local windows. The default is nil so an
+    /// omitted key never overstates a local window. Pass an explicit
+    /// value to override. Displayed as the denominator in the chat
+    /// usage line and reported via `ModelInfo.contextLength` once
+    /// resolved.
+    public var contextLength: Int?
 
     /// Creates a provider config.
     public init(
@@ -85,7 +96,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         baseURL: String? = nil,
         apiKeyEnv: String? = nil,
         providerType: String? = nil,
-        apiStyle: APIStyle = .chatCompletions
+        apiStyle: APIStyle = .chatCompletions,
+        contextLength: Int? = nil
     ) {
         self.enabled = enabled
         self.model = model
@@ -94,6 +106,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.apiKeyEnv = apiKeyEnv
         self.providerType = providerType
         self.apiStyle = apiStyle
+        self.contextLength = contextLength
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -104,6 +117,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case apiKeyEnv = "api_key_env"
         case providerType = "provider_type"
         case apiStyle = "api_style"
+        case contextLength = "context_length"
     }
 }
 
@@ -539,6 +553,11 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         if let model = provider.model, model.isEmpty {
             throw ConfigError.validationError(
                 field: "\(prefix).model", message: "must not be empty when set"
+            )
+        }
+        if let length = provider.contextLength, length <= 0 {
+            throw ConfigError.validationError(
+                field: "\(prefix).context_length", message: "must be positive"
             )
         }
         if let serverURL = provider.serverURL {

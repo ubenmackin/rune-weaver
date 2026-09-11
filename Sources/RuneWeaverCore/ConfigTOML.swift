@@ -278,29 +278,57 @@ enum TOMLParser {
 // MARK: - TOML to struct mapping
 
 extension TOMLNode {
-    func string(_ key: String) -> String? {
-        guard let value = values[key] else { return nil }
-        if case let .string(text) = value {
-            return text
-        }
-        return nil
+    /// Whether the key is present with any value type.
+    /// - Parameter key: Key to check.
+    /// - Returns: True when a value was parsed for the key.
+    func has(_ key: String) -> Bool {
+        values[key] != nil
     }
 
-    func bool(_ key: String) -> Bool? {
+    /// Strict optional string: nil when absent, throws when present but
+    /// not a string so wrong-typed values never silently default.
+    /// - Parameters:
+    ///   - key: TOML key.
+    ///   - field: Dotted field path for error reporting.
+    /// - Returns: String value, or nil when absent.
+    /// - Throws: `ConfigError.validationError` when present but not a string.
+    func strictString(_ key: String, field: String) throws -> String? {
         guard let value = values[key] else { return nil }
-        if case let .boolean(flag) = value {
-            return flag
+        guard case let .string(text) = value else {
+            throw ConfigError.validationError(field: field, message: "must be a string")
         }
-        return nil
+        return text
     }
 
-    func int(_ key: String) -> Int? {
+    /// Strict optional boolean: nil when absent, throws when present but
+    /// not a boolean so values like `enabled="yes"` never silently become true.
+    /// - Parameters:
+    ///   - key: TOML key.
+    ///   - field: Dotted field path for error reporting.
+    /// - Returns: Boolean value, or nil when absent.
+    /// - Throws: `ConfigError.validationError` when present but not a boolean.
+    func strictBool(_ key: String, field: String) throws -> Bool? {
         guard let value = values[key] else { return nil }
-        switch value {
-        case let .integer(number): return number
-        case let .double(number): return Int(number)
-        default: return nil
+        guard case let .boolean(flag) = value else {
+            throw ConfigError.validationError(field: field, message: "must be a boolean (true/false)")
         }
+        return flag
+    }
+
+    /// Strict optional integer: nil when absent, throws when present but
+    /// not an integer. Doubles never coerce (so `128.5` throws instead of
+    /// truncating to `128`) and strings/booleans never silently default.
+    /// - Parameters:
+    ///   - key: TOML key.
+    ///   - field: Dotted field path for error reporting.
+    /// - Returns: Integer value, or nil when absent.
+    /// - Throws: `ConfigError.validationError` when present but not an integer.
+    func strictInt(_ key: String, field: String) throws -> Int? {
+        guard let value = values[key] else { return nil }
+        guard case let .integer(number) = value else {
+            throw ConfigError.validationError(field: field, message: "must be an integer")
+        }
+        return number
     }
 }
 
@@ -310,33 +338,35 @@ extension RuneWeaverConfig {
     /// - Parameter root: Parsed TOML document.
     init(decoding root: TOMLNode) throws {
         var config = RuneWeaverConfig.default
-        Self.decodeEngine(root, into: &config)
+        try Self.decodeEngine(root, into: &config)
         try Self.decodeLLM(root, into: &config)
-        Self.decodeMemory(root, into: &config)
-        Self.decodeVoice(root, into: &config)
-        Self.decodeSandbox(root, into: &config)
+        try Self.decodeMemory(root, into: &config)
+        try Self.decodeVoice(root, into: &config)
+        try Self.decodeSandbox(root, into: &config)
         try Self.decodeEmail(root, into: &config)
-        Self.decodeHome(root, into: &config)
+        try Self.decodeHome(root, into: &config)
         self = config
     }
 
-    private static func decodeEngine(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeEngine(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let engine = root.tables["engine"] else { return }
-        if let name = engine.string("name") {
+        if let name = try engine.strictString("name", field: "engine.name") {
             config.engine.name = name
         }
-        if let level = engine.string("log_level") {
+        if let level = try engine.strictString("log_level", field: "engine.log_level") {
             config.engine.logLevel = level
         }
     }
 
     private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let llm = root.tables["llm"] else { return }
-        if let defaultProvider = llm.string("default_provider") {
+        if let defaultProvider = try llm.strictString("default_provider", field: "llm.default_provider") {
             config.llm.defaultProvider = defaultProvider
         }
-        if llm.values.keys.contains("fallback_provider") {
-            config.llm.fallbackProvider = llm.string("fallback_provider")
+        if llm.has("fallback_provider") {
+            // Present-but-wrong-typed values throw via `strictString`
+            // instead of silently becoming nil.
+            config.llm.fallbackProvider = try llm.strictString("fallback_provider", field: "llm.fallback_provider")
         } else {
             config.llm.fallbackProvider = nil
         }
@@ -356,15 +386,22 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes one `[llm.providers.<name>]` entry.
+    ///
+    /// Absent `context_length` decodes to nil (provider-default); the
+    /// factory resolves nil per backend (MLX 8192, llama.cpp 4096,
+    /// OpenAI-compatible 128000). Present-but-wrong-typed values throw
+    /// instead of silently defaulting.
     /// - Parameters:
     ///   - node: Parsed provider table.
     ///   - name: Provider entry name (for error field paths).
     /// - Returns: Decoded provider config.
     /// - Throws: ``ConfigError/validationError(field:message:)`` when
-    ///   `api_style` names an unknown style.
+    ///   `api_style` names an unknown style or any present value has the
+    ///   wrong type.
     private static func decodeProvider(_ node: TOMLNode, name: String) throws -> ProviderConfig {
+        let prefix = "llm.providers.\(name)"
         let apiStyle: APIStyle
-        if let raw = node.string("api_style") {
+        if let raw = try node.strictString("api_style", field: "\(prefix).api_style") {
             guard let style = APIStyle(rawValue: raw) else {
                 throw ConfigError.validationError(
                     field: "llm.providers.\(name).api_style",
@@ -372,57 +409,53 @@ extension RuneWeaverConfig {
                 )
             }
             apiStyle = style
-        } else if node.values["api_style"] != nil {
-            throw ConfigError.validationError(
-                field: "llm.providers.\(name).api_style",
-                message: "must be one of \(APIStyle.allCases.map(\.rawValue).joined(separator: ", "))"
-            )
         } else {
             apiStyle = .chatCompletions
         }
-        return ProviderConfig(
-            enabled: node.bool("enabled") ?? true,
-            model: node.string("model"),
-            serverURL: node.string("server_url"),
-            baseURL: node.string("base_url"),
-            apiKeyEnv: node.string("api_key_env"),
-            providerType: node.string("provider_type"),
-            apiStyle: apiStyle
+        return try ProviderConfig(
+            enabled: node.strictBool("enabled", field: "\(prefix).enabled") ?? true,
+            model: node.strictString("model", field: "\(prefix).model"),
+            serverURL: node.strictString("server_url", field: "\(prefix).server_url"),
+            baseURL: node.strictString("base_url", field: "\(prefix).base_url"),
+            apiKeyEnv: node.strictString("api_key_env", field: "\(prefix).api_key_env"),
+            providerType: node.strictString("provider_type", field: "\(prefix).provider_type"),
+            apiStyle: apiStyle,
+            contextLength: node.strictInt("context_length", field: "\(prefix).context_length")
         )
     }
 
-    private static func decodeMemory(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeMemory(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let memory = root.tables["memory"] else { return }
-        if let path = memory.string("vector_db_path") {
+        if let path = try memory.strictString("vector_db_path", field: "memory.vector_db_path") {
             config.memory.vectorDBPath = path
         }
-        if let path = memory.string("episodes_db_path") {
+        if let path = try memory.strictString("episodes_db_path", field: "memory.episodes_db_path") {
             config.memory.episodesDBPath = path
         }
-        if let model = memory.string("embedding_model") {
+        if let model = try memory.strictString("embedding_model", field: "memory.embedding_model") {
             config.memory.embeddingModel = model
         }
     }
 
-    private static func decodeVoice(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeVoice(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let voice = root.tables["voice"] else { return }
-        if let provider = voice.string("stt_provider") {
+        if let provider = try voice.strictString("stt_provider", field: "voice.stt_provider") {
             config.voice.sttProvider = provider
         }
-        if let model = voice.string("whisper_model") {
+        if let model = try voice.strictString("whisper_model", field: "voice.whisper_model") {
             config.voice.whisperModel = model
         }
-        if let provider = voice.string("tts_provider") {
+        if let provider = try voice.strictString("tts_provider", field: "voice.tts_provider") {
             config.voice.ttsProvider = provider
         }
     }
 
-    private static func decodeSandbox(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeSandbox(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let sandbox = root.tables["sandbox"] else { return }
-        if let path = sandbox.string("staging_path") {
+        if let path = try sandbox.strictString("staging_path", field: "sandbox.staging_path") {
             config.sandbox.stagingPath = path
         }
-        if let count = sandbox.int("auto_approve_after") {
+        if let count = try sandbox.strictInt("auto_approve_after", field: "sandbox.auto_approve_after") {
             config.sandbox.autoApproveAfter = count
         }
     }
@@ -434,41 +467,41 @@ extension RuneWeaverConfig {
     }
 
     private static func decodeEmailAccount(_ node: TOMLNode) throws -> EmailAccount {
-        guard let name = node.string("name") else {
+        guard let name = try node.strictString("name", field: "email.accounts.name") else {
             throw ConfigError.missingRequired(field: "email.accounts.name")
         }
-        guard let host = node.string("host") else {
+        guard let host = try node.strictString("host", field: "email.accounts[\(name)].host") else {
             throw ConfigError.missingRequired(
                 field: "email.accounts[\(name)].host"
             )
         }
-        guard let username = node.string("username") else {
+        guard let username = try node.strictString("username", field: "email.accounts[\(name)].username") else {
             throw ConfigError.missingRequired(
                 field: "email.accounts[\(name)].username"
             )
         }
-        return EmailAccount(
+        return try EmailAccount(
             name: name,
-            type: node.string("type") ?? "imap",
+            type: node.strictString("type", field: "email.accounts[\(name)].type") ?? "imap",
             host: host,
-            port: node.int("port") ?? 993,
+            port: node.strictInt("port", field: "email.accounts[\(name)].port") ?? 993,
             username: username
         )
     }
 
-    private static func decodeHome(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeHome(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let home = root.tables["home"] else { return }
         let homekitNodes = home.arrays["homekit"] ?? home.singleAsArray("homekit")
-        config.home.homekit = homekitNodes.map { node in
-            HomeKitConfig(enabled: node.bool("enabled") ?? true)
+        config.home.homekit = try homekitNodes.map { node in
+            try HomeKitConfig(enabled: node.strictBool("enabled", field: "home.homekit.enabled") ?? true)
         }
         let assistantNodes =
             home.arrays["home_assistant"] ?? home.singleAsArray("home_assistant")
-        config.home.homeAssistant = assistantNodes.map { node in
-            HomeAssistantConfig(
-                enabled: node.bool("enabled") ?? true,
-                url: node.string("url"),
-                tokenEnv: node.string("token_env")
+        config.home.homeAssistant = try assistantNodes.map { node in
+            try HomeAssistantConfig(
+                enabled: node.strictBool("enabled", field: "home.home_assistant.enabled") ?? true,
+                url: node.strictString("url", field: "home.home_assistant.url"),
+                tokenEnv: node.strictString("token_env", field: "home.home_assistant.token_env")
             )
         }
     }

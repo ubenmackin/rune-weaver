@@ -99,6 +99,61 @@ public struct ResponseMetadata: Sendable, Codable, Equatable {
     }
 }
 
+/// Formats session-cumulative billed token usage for chat display.
+///
+/// The chat REPL accumulates billed `totalTokens` across turns into a
+/// session total and renders it against the active provider's
+/// `ModelInfo.contextLength` window as `used/window, percent%`. The sum
+/// is cumulative billing across turns (each turn's prompt already
+/// includes history, so turns double-count shared history by design);
+/// it is not a live measure of current context-window fill.
+public enum SessionTokenDisplay: Sendable {
+    /// Whole-percent share of the reference window represented by the
+    /// session-billed total.
+    ///
+    /// Capped at 100: the session total is cumulative billing across turns
+    /// (each turn's prompt already includes history, so turns double-count
+    /// shared history by design) and can exceed the window (e.g.
+    /// `200000/128000`); the line still shows the raw `used/window` pair
+    /// so the overage stays visible.
+    /// - Parameters:
+    ///   - used: Session-cumulative billed tokens.
+    ///   - window: Context window in tokens from the provider config.
+    /// - Returns: Rounded percent capped at 100, or zero when the window is not positive.
+    public static func percent(used: Int, window: Int) -> Int {
+        guard window > 0, used > 0 else { return 0 }
+        return min(100, Int((Double(used) / Double(window) * 100).rounded()))
+    }
+
+    /// Usage without model or parentheses for embedding in sentences.
+    /// - Parameters:
+    ///   - used: Session-cumulative billed tokens.
+    ///   - window: Context window in tokens.
+    /// - Returns: String like `12408/1000000, 1%`.
+    public static func formatted(used: Int, window: Int) -> String {
+        "\(used)/\(window), \(percent(used: used, window: window))%"
+    }
+
+    /// Full dimmed chat line with optional model prefix and parentheses.
+    /// - Parameters:
+    ///   - model: Serving model name, omitted when empty.
+    ///   - used: Session-cumulative billed tokens.
+    ///   - window: Context window in tokens.
+    /// - Returns: String like `(gpt-4o-mini · 12408/1000000, 1%)`.
+    public static func label(model: String, used: Int, window: Int) -> String {
+        let prefix = model.isEmpty ? "" : "\(model) · "
+        return "(\(prefix)\(formatted(used: used, window: window)))"
+    }
+}
+
+/// Backwards-compatible alias for ``SessionTokenDisplay``.
+///
+/// The old name implied the session sum measures live context-window
+/// fill; it actually accumulates billed tokens across turns. Use
+/// ``SessionTokenDisplay`` in new code.
+@available(*, deprecated, renamed: "SessionTokenDisplay")
+public typealias ContextUsageDisplay = SessionTokenDisplay
+
 /// One streamed event from a chat completion.
 ///
 /// Providers that speak OpenAI-compatible SSE map each server event to
@@ -180,7 +235,10 @@ public extension ChunkStreamingProvider {
     ///
     /// Text deltas yield ``LLMResponse`` deltas verbatim. Tool calls
     /// have no text representation and are skipped here; consume
-    /// ``chatChunks(messages:tools:)`` to observe them. Transport
+    /// ``chatChunks(messages:tools:)`` to observe them. The terminal
+    /// `done` chunk carries the response's billed `totalTokens` (when
+    /// reported) so text-only consumers can accumulate session usage
+    /// without consuming chunks directly. Transport
     /// `.error` chunks terminate the stream with an `isError` response
     /// (they are never surfaced as assistant text) so failures cannot
     /// leak into conversation history; the stream always terminates with
@@ -200,8 +258,8 @@ public extension ChunkStreamingProvider {
                         continuation.yield(LLMResponse(delta: text))
                     case .toolCall:
                         continue
-                    case .done:
-                        continuation.yield(LLMResponse(delta: "", isFinished: true))
+                    case let .done(meta):
+                        continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: meta.usage?.totalTokens))
                         break chunkLoop
                     case let .error(message):
                         let detail = message.isEmpty ? "unknown error" : message
@@ -323,9 +381,9 @@ func openAIChatRequestBody(
 
 /// Parses one persisted assistant placeholder line into a structured call.
 ///
-/// The orchestrator stores tool-only assistant turns via
-/// `ToolInput/placeholderContent(for:)` as one line per call:
-/// `Calling <name> <single-line arguments> [<callID>]`. Replaying those
+/// Delegates to the shared `ToolInput/parsePlaceholderLine(_:)` parser
+/// (the same parser backing episodic plumbing stripping in `MemoryEngine`)
+/// so Responses replay and episodic stripping never drift. Replaying those
 /// lines as Responses `function_call` items restores the `call_id`
 /// correlation with the following `function_call_output` items. Real
 /// provider call identifiers (for example `call_01a…` hex suffixes)
@@ -334,30 +392,8 @@ func openAIChatRequestBody(
 ///   whitespace is ignored).
 /// - Returns: Structured call, or nil when the line is not a placeholder.
 func parseResponsesPlaceholderLine(_ line: String) -> ToolCall? {
-    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard trimmed.hasPrefix("Calling ") else { return nil }
-    guard trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "[") else { return nil }
-    guard trimmed.distance(from: trimmed.startIndex, to: bracketStart) > "Calling ".count else { return nil }
-    let beforeBracket = trimmed[trimmed.index(before: bracketStart)]
-    guard beforeBracket == " " || beforeBracket == "\t" else { return nil }
-    let afterBracket = trimmed.index(after: bracketStart)
-    let endIndex = trimmed.index(before: trimmed.endIndex)
-    guard afterBracket <= endIndex else { return nil }
-    let callID = String(trimmed[afterBracket ..< endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !callID.isEmpty, !callID.contains(" "), !callID.contains("\t"), !callID.contains("["), !callID.contains("]") else { return nil }
-    let remainderStart = trimmed.index(trimmed.startIndex, offsetBy: "Calling ".count)
-    let remainderEnd = trimmed.index(before: bracketStart)
-    guard remainderStart < remainderEnd else { return nil }
-    let remainder = String(trimmed[remainderStart ..< remainderEnd]).trimmingCharacters(in: .whitespaces)
-    guard !remainder.isEmpty else { return nil }
-    if let firstSpace = remainder.firstIndex(where: { $0 == " " || $0 == "\t" }) {
-        let name = String(remainder[..<firstSpace])
-        let args = String(remainder[remainder.index(after: firstSpace)...]).trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty, !name.contains(" "), !name.contains("\t") else { return nil }
-        return ToolCall(id: callID, name: name, argumentsJSON: args.isEmpty ? "{}" : args)
-    }
-    guard !remainder.contains(" "), !remainder.contains("\t") else { return nil }
-    return ToolCall(id: callID, name: remainder, argumentsJSON: "{}")
+    guard let parsed = ToolInput.parsePlaceholderLine(line) else { return nil }
+    return ToolCall(id: parsed.callID, name: parsed.toolName, argumentsJSON: parsed.argumentsJSON)
 }
 
 /// Splits an assistant message into structured calls plus leftover text.

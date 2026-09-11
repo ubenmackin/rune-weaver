@@ -1,0 +1,208 @@
+// RuneWeaver - Tests - Episodic tool plumbing
+import Foundation
+@testable import RuneWeaverCore
+import Testing
+
+/// Builds an isolated engine on a fresh temporary directory.
+///
+/// Each test gets its own episodes database, vector directory, and profile
+/// file so fixture writes never leak between tests.
+/// - Returns: Engine plus the base directory owning its files.
+private func makeToolPlumbingEngine() -> (engine: MemoryEngine, base: URL) {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let engine = MemoryEngine(
+        episodesDBPath: base.appendingPathComponent("episodes.db").path,
+        vectorDBPath: base.appendingPathComponent("vectors").path,
+        profilePath: base.appendingPathComponent("profile.json").path
+    )
+    return (engine, base)
+}
+
+/// Fixture tool returning a canned outcome for episodic tests.
+private struct FixturePlumbingTool: Tool, Sendable {
+    /// Registered tool name.
+    let name: String
+    /// Canned outcome text.
+    let output: String
+    /// Human-readable description.
+    var description: String {
+        "Fixture stub for \(name)."
+    }
+
+    /// Empty-object schema.
+    let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+    /// Always allowed without prompts.
+    let permissionLevel = PermissionLevel.readOnly
+
+    /// Returns the canned outcome.
+    /// - Parameters:
+    ///   - input: Invocation arguments.
+    ///   - context: Ambient execution context.
+    /// - Returns: Canned success output echoing the call identifier.
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .success(output, callID: input.callID)
+    }
+}
+
+/// Scripted provider replaying canned texts in call order.
+///
+/// Each `chat` call consumes the next entry so orchestration loops observe
+/// a tool round followed by a final synthesis turn without real inference.
+/// Access is lock-guarded for Swift 6 data-race safety.
+private final class ScriptedPlumbingLLM: LLMProvider, @unchecked Sendable {
+    /// Stable test model metadata.
+    let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    /// Guards script state below.
+    private let lock = NSLock()
+    /// Canned texts in call order.
+    private var texts: [String]
+    /// Next script index.
+    private var index = 0
+
+    /// Creates a scripted provider.
+    /// - Parameter texts: Canned texts in call order.
+    init(texts: [String]) {
+        self.texts = texts
+    }
+
+    /// Replays the next canned text as a finished stream.
+    /// - Parameters:
+    ///   - messages: Ignored conversation history.
+    ///   - tools: Ignored available tools.
+    /// - Returns: Stream yielding one finished chunk.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let text: String = {
+            lock.lock()
+            defer { lock.unlock() }
+            let next = index < texts.count ? texts[index] : texts.last ?? ""
+            index += 1
+            return next
+        }()
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: text, isFinished: true))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    /// - Parameter text: Ignored texts.
+    /// - Returns: Empty vectors.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+@Suite("Episodic Tool Plumbing")
+struct EpisodicToolPlumbingTests {
+    @Test
+    func `Tool record keeps tool name plus outcome`() {
+        let result = ToolResult(toolCallID: "call_fixture_aaa111", content: "Found 2 emails about the lighthouse")
+        let record = MemoryEngine.episodicToolRecord(toolName: "email.search", result: result)
+        #expect(record != nil)
+        #expect(record?.contains("email.search") == true)
+        #expect(record?.contains("Found 2 emails about the lighthouse") == true)
+        #expect(record?.contains("call_fixture_aaa111") == false)
+        #expect(record?.contains("Calling ") == false)
+    }
+
+    @Test
+    func `Tool record skips blank outcomes and marks failures`() {
+        let blank = ToolResult(toolCallID: "call_x", content: "   \n\t  ")
+        #expect(MemoryEngine.episodicToolRecord(toolName: "email.search", result: blank) == nil)
+        #expect(MemoryEngine.episodicToolRecord(toolName: "  ", content: "ok", isError: false) == nil)
+        let failed = MemoryEngine.episodicToolRecord(
+            toolName: "calendar.list",
+            content: "Denied by approval gate",
+            isError: true
+        )
+        #expect(failed?.contains("calendar.list") == true)
+        #expect(failed?.contains("Denied by approval gate") == true)
+        let shared = OrchestratorToolLoop.episodicToolRecord(
+            toolName: "calendar.list",
+            result: ToolResult(toolCallID: "call_y", content: "Denied by approval gate", isError: true)
+        )
+        #expect(shared == failed)
+    }
+
+    @Test
+    func `Stripping removes placeholder lines and keeps other text`() {
+        let calls = [
+            ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"lighthouse"}"#, callID: "call_fixture_aaa111")
+        ]
+        let placeholder = ToolInput.placeholderContent(for: calls)
+        #expect(MemoryEngine.isToolPlumbingLine(placeholder))
+        #expect(!MemoryEngine.isToolPlumbingLine("I found two emails."))
+        let mixed = "I will check.\n" + placeholder + "\nDone."
+        let stripped = MemoryEngine.strippingToolPlumbing(from: mixed)
+        #expect(stripped.contains("I will check."))
+        #expect(stripped.contains("Done."))
+        #expect(!stripped.contains("Calling "))
+        #expect(!stripped.contains("call_fixture_aaa111"))
+    }
+
+    @Test
+    func `Tool-heavy turn persists clean content without placeholder IDs or call JSON`() async throws {
+        let (engine, base) = makeToolPlumbingEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        await bus.register(tool: FixturePlumbingTool(name: "email.search", output: "Found 2 emails about the lighthouse keeper"))
+        await bus.register(tool: FixturePlumbingTool(name: "calendar.list", output: "No events tomorrow"))
+        let narration = "I will check both sources."
+        let finalText = "Done: found lighthouse emails and no calendar events."
+        let llm = ScriptedPlumbingLLM(texts: [narration, finalText])
+        let emailArgs = #"{"query":"lighthouse"}"#
+        let calendarArgs = #"{"date":"tomorrow"}"#
+        let firstID = "call_fixture_aaa111"
+        let secondID = "call_fixture_bbb222"
+        let resolver: OrchestratorToolResolver = { messages, _ in
+            if messages.contains(where: { $0.role == .tool }) {
+                return []
+            }
+            return [
+                ToolInput(toolName: "email.search", argumentsJSON: emailArgs, callID: firstID),
+                ToolInput(toolName: "calendar.list", argumentsJSON: calendarArgs, callID: secondID)
+            ]
+        }
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: resolver,
+            memoryEngine: engine
+        )
+        let sessionID = UUID()
+        let userText = "Check email and calendar for lighthouse"
+        let response = try await orchestrator.process(input: UserInput(text: userText, sessionID: sessionID))
+        #expect(response.text == finalText)
+        #expect(response.toolActions.count == 2)
+
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.role == .assistant && $0.content.contains("Calling ") })
+        #expect(history.contains { $0.role == .assistant && $0.content.contains(firstID) })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == firstID })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == secondID })
+
+        let episodes = try await engine.episodes(for: sessionID)
+        try #require(episodes.count == 4)
+        #expect(episodes.contains { $0.role == .user && $0.content == userText })
+        #expect(episodes.contains { $0.role == .assistant && $0.content == finalText })
+        #expect(episodes.contains {
+            $0.role == .tool && $0.content.contains("email.search") && $0.content.contains("Found 2 emails about the lighthouse keeper")
+        })
+        #expect(episodes.contains {
+            $0.role == .tool && $0.content.contains("calendar.list") && $0.content.contains("No events tomorrow")
+        })
+        let joined = episodes.map(\.content).joined(separator: "\n")
+        #expect(!joined.contains("Calling "))
+        #expect(!joined.contains(firstID))
+        #expect(!joined.contains(secondID))
+        #expect(!joined.contains(emailArgs))
+        #expect(!joined.contains(calendarArgs))
+        #expect(!joined.contains(narration))
+        for episode in episodes {
+            #expect(episode.metadata["tool_call_id"] == nil)
+        }
+    }
+}

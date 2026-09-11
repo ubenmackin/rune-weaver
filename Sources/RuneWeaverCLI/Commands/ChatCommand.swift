@@ -123,78 +123,6 @@ private final class ChatSignalManager: @unchecked Sendable {
     }
 }
 
-/// Exactly-once resume state for a blocking standard-input read.
-///
-/// Blocking `readLine` cannot be cancelled mid-read, so both the
-/// background completion and task cancellation race to resume. The
-/// locked flag guarantees the continuation resumes exactly once: a
-/// cancelled REPL unblocks promptly with nil while the late background
-/// read is ignored, and a completed read wins when it finishes first.
-/// All state is guarded by `lock` with `defer`-guarded unlock.
-private final class StdinReadState: @unchecked Sendable {
-    /// Guards resume state below.
-    private let lock = NSLock()
-    /// Whether the continuation has resumed.
-    private var didResume = false
-    /// Pending continuation awaiting the background read.
-    private var continuation: CheckedContinuation<String?, Never>?
-
-    /// Stores the continuation awaiting the background read.
-    ///
-    /// When cancellation already won the race, resumes immediately with
-    /// nil so the waiter never hangs on a stored-but-never-resumed
-    /// continuation.
-    /// - Parameter continuation: Continuation to resume exactly once.
-    func set(_ continuation: CheckedContinuation<String?, Never>) {
-        let alreadyResumed: Bool = {
-            lock.lock()
-            defer { lock.unlock() }
-            if didResume {
-                return true
-            }
-            self.continuation = continuation
-            return false
-        }()
-        if alreadyResumed {
-            continuation.resume(returning: nil)
-        }
-    }
-
-    /// Resumes exactly once, ignoring late racers.
-    /// - Parameter value: Line without the newline, or nil on EOF or cancellation.
-    func resume(returning value: String?) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
-        didResume = true
-        continuation?.resume(returning: value)
-        continuation = nil
-    }
-}
-
-/// Reads one line from standard input without blocking the cooperative pool.
-///
-/// Dispatches blocking `readLine` to a background queue and suspends
-/// until input arrives, so async REPL and approval paths never block
-/// the executor. Task cancellation resumes with nil exactly once via
-/// `StdinReadState` so a cancelled REPL unblocks promptly while the
-/// late background read is ignored; the background completion path is
-/// the only other resumer.
-/// - Returns: The line without the newline, or nil on EOF or cancellation.
-private func readStdinLine() async -> String? {
-    let state = StdinReadState()
-    return await withTaskCancellationHandler {
-        await withCheckedContinuation { continuation in
-            state.set(continuation)
-            DispatchQueue.global(qos: .userInitiated).async {
-                state.resume(returning: readLine(strippingNewline: true))
-            }
-        }
-    } onCancel: {
-        state.resume(returning: nil)
-    }
-}
-
 /// Maps a REPL answer to a graduated-trust tier.
 ///
 /// Accepts the numbered menu (`1`–`5`), tier names, and `y`/`yes` as a
@@ -243,6 +171,9 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 /// threshold. Assistant tokens stream back with a typewriter effect,
 /// requested tool calls are shown inline (yellow) with their results, and
 /// `requiresApproval` tools prompt for confirmation before running.
+/// Prompts use line editing on a TTY (left/right in-place edits, up/down
+/// through prior prompts persisted in `~/.runeweaver/history/chat_history`
+/// outside episodic memory).
 /// Ctrl+C, EOF, `/exit`, and `/quit` all shut the session down gracefully.
 struct ChatCommand: AsyncParsableCommand {
     /// Top-level command configuration.
@@ -319,8 +250,14 @@ struct ChatCommand: AsyncParsableCommand {
             do {
                 let limit = await conversations.maxMessages
                 let episodes = try await memoryEngine.recentEpisodes(for: sessionID, limit: limit)
-                if !episodes.isEmpty {
-                    await conversations.setHistory(episodes.map { $0.asMessage() }, for: sessionID)
+                // Hydration keeps tool outcomes replay-safe: legacy `.tool`
+                // rows with `tool_call_id` replay with wiring intact while
+                // compact `"Used <tool>: <outcome>"` records hydrate as
+                // `.assistant` synthesis. See
+                // `MemoryEngine.hydrationMessages(from:)`.
+                let replayable = MemoryEngine.hydrationMessages(from: episodes)
+                if !replayable.isEmpty {
+                    await conversations.setHistory(replayable, for: sessionID)
                 }
             } catch {
                 cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
@@ -336,9 +273,9 @@ struct ChatCommand: AsyncParsableCommand {
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
             print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
-            print(TerminalStyle.tool("  Allow? "), terminator: "")
-            fflush(stdout)
-            let answer = await readStdinLine()
+            // Approval reads go through the line editor like the main
+            // prompt so arrow keys edit instead of echoing escape codes.
+            let answer = await ChatLineEditing.readLine(prompt: TerminalStyle.tool("  Allow? "))
             guard let duration = chatTrustDuration(for: answer) else {
                 return false
             }
@@ -376,7 +313,8 @@ struct ChatCommand: AsyncParsableCommand {
             sessionID: sessionID,
             systemPrompt: effectiveSystemPrompt,
             maxToolIterations: max(1, maxToolIterations),
-            memoryEngine: memoryEngine
+            memoryEngine: memoryEngine,
+            sessionTokens: CLILockedValue(0)
         )
         await runChatREPL(
             provider: active,
@@ -400,7 +338,8 @@ struct ChatCommand: AsyncParsableCommand {
 /// Shared dependencies for one chat REPL session.
 ///
 /// Bundles the REPL collaborators so turn helpers stay within the
-/// parameter budget while keeping call sites readable.
+/// parameter budget while keeping call sites readable. The session token
+/// total accumulates `totalTokens` across turns for the usage display.
 private struct ChatTurnContext: Sendable {
     /// Session and history owner.
     let conversations: ConversationManager
@@ -414,6 +353,8 @@ private struct ChatTurnContext: Sendable {
     let maxToolIterations: Int
     /// Shared engine receiving one episode per turn.
     let memoryEngine: MemoryEngine
+    /// Session-cumulative billed tokens rendered via `SessionTokenDisplay`.
+    let sessionTokens: CLILockedValue<Int>
 }
 
 /// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT.
@@ -423,8 +364,12 @@ private struct ChatTurnContext: Sendable {
 /// polled by the loop, which is data-race free under Swift 6
 /// concurrency. Installation is reference-counted and restores the
 /// prior handler when the last session exits. Standard-input reads
-/// suspend on a background queue via `readStdinLine()` so the
-/// cooperative pool is never blocked.
+/// suspend on a background queue via `ChatLineEditing.readLine(prompt:)`
+/// so the cooperative pool is never blocked. Prompts use Bestline line
+/// editing when attached to a TTY (left/right in-place edits, up/down
+/// history) with history persisted across sessions in
+/// `~/.runeweaver/history/chat_history`, outside episodic memory; piped
+/// input falls back to plain `readLine`.
 /// - Parameters:
 ///   - provider: Active LLM backend serving completions.
 ///   - context: Shared REPL dependencies for this session.
@@ -438,10 +383,12 @@ private func runChatREPL(
         ChatSignalManager.shared.uninstall(interrupt)
     }
 
+    var history = ChatHistoryStore(fileURL: ChatHistoryStore.defaultHistoryFileURL())
+    await history.loadAsync()
+    ChatLineEditing.preload(history.entries)
+
     while !interrupt.isTripped {
-        print(TerminalStyle.user("you> "), terminator: "")
-        fflush(stdout)
-        guard let line = await readStdinLine() else {
+        guard let line = await ChatLineEditing.readLine(prompt: TerminalStyle.user("you> ")) else {
             break
         }
         if interrupt.isTripped {
@@ -450,6 +397,14 @@ private func runChatREPL(
         let input = line.trimmingCharacters(in: .whitespacesAndNewlines)
         if input.isEmpty {
             continue
+        }
+        if history.record(input) {
+            ChatLineEditing.note(input)
+            do {
+                try await history.saveAsync()
+            } catch {
+                cliPrintError(TerminalStyle.dim("Could not save prompt history; continuing."))
+            }
         }
         if let action = await handleSlashCommand(
             input,
@@ -664,14 +619,16 @@ private func runAssistantTurn(
 /// Up to `maxToolIterations` tool rounds run, followed by one final
 /// synthesis turn so the last tool results are always answered; when the
 /// synthesis turn still requests tools the loop stops with an exceeded
-/// notice without executing the extra calls. The assistant turn is always
-/// recorded, using the shared
+/// notice without executing the extra calls. Working memory always keeps
+/// the full assistant note via the shared
 /// `OrchestratorToolLoop.assistantNoteContent(text:calls:)` policy
-/// (truncated arguments, name, and call identifier) when the model sends
-/// tool calls without text, so tool results keep their parent. Empty tool
-/// results skip only the episodic mirror via the shared
-/// `OrchestratorToolLoop` policy so hydrated history matches live history
-/// and keyword search stays free of empty turns.
+/// (truncated arguments, name, and call identifier) so tool results keep
+/// their parent for LLM replay. Episodic memory stays clean by skipping
+/// interim assistant notes and mirroring each meaningful tool execution
+/// as one compact `"Used <tool>: <outcome>"` record via the shared
+/// `OrchestratorToolLoop.episodicToolRecord(toolName:result:)` policy with
+/// no placeholder lines, call identifiers, or call-argument JSON, so
+/// keyword search stays free of tool-call mechanics and empty turns.
 /// - Parameters:
 ///   - provider: Chunk-streaming LLM backend.
 ///   - context: Shared REPL dependencies for this session.
@@ -718,8 +675,12 @@ private func runChunkedTurn(
             return
         }
         if let usage {
-            let label = model.isEmpty ? "" : "\(model) · "
-            print(TerminalStyle.dim("(\(label)\(usage.totalTokens) tokens)"))
+            let used = context.sessionTokens.withLock { value in
+                value += usage.totalTokens
+                return value
+            }
+            let window = provider.modelInfo.contextLength
+            print(TerminalStyle.dim(SessionTokenDisplay.label(model: model, used: used, window: window)))
         }
         if calls.isEmpty {
             guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
@@ -741,28 +702,24 @@ private func runChunkedTurn(
         let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
         let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
         await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
-        await context.memoryEngine.mirrorTurn(
-            content: assistantContent,
-            sessionID: context.sessionID,
-            role: .assistant,
-            failurePolicy: .report,
-            onFailure: chatMirrorFailureHandler
-        )
+        // Working memory keeps the full placeholder so the next Responses body
+        // can replay every `function_call` with its matching output. Episodic
+        // memory skips interim assistant notes entirely so narration and
+        // placeholder call mechanics never reach the store.
         for call in calls {
-            print(TerminalStyle.tool("◈ calling \(call.name) \(cliInline(call.argumentsJSON, limit: 160))"))
+            print(TerminalStyle.tool("◈ calling \(call.name) \(ToolInput.inline(call.argumentsJSON, limit: 160))"))
             let result = await context.toolBus.execute(
                 toolCall: ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id),
                 context: ToolContext(conversationID: context.sessionID)
             )
             let marker = result.isError ? "✕" : "→"
-            print(TerminalStyle.dim("  \(marker) \(cliInline(result.content, limit: 300))"))
+            print(TerminalStyle.dim("  \(marker) \(ToolInput.inline(result.content, limit: 300))"))
             await context.conversations.append(result.asMessage(), to: context.sessionID)
-            if OrchestratorToolLoop.shouldStoreToolResult(result.content) {
+            if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.name, result: result) {
                 await context.memoryEngine.mirrorTurn(
-                    content: result.content,
+                    content: record,
                     sessionID: context.sessionID,
                     role: .tool,
-                    toolCallID: result.toolCallID,
                     failurePolicy: .report,
                     onFailure: chatMirrorFailureHandler
                 )
@@ -779,7 +736,10 @@ private func runChunkedTurn(
 /// the text path; use a `ChunkStreamingProvider` backend for full tool
 /// support. Automatic recall injects the same source-labeled system context
 /// as the chunked path. Storage decisions delegate to the shared
-/// `OrchestratorToolLoop` policy like every other loop.
+/// `OrchestratorToolLoop` policy like every other loop. Billed usage
+/// reported on the terminal `LLMResponse` chunk accumulates into the same
+/// session total and renders the same session-billed usage line as the
+/// chunked path; backends that report no usage simply show no line.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
@@ -802,6 +762,8 @@ private func runTextTurn(
     print(TerminalStyle.assistant("weaver> "), terminator: "")
     var text = ""
     var streamError: String?
+    var billedTokens: Int?
+    var finished = false
     for await part in provider.chat(messages: history, tools: tools) {
         if let message = part.errorMessage {
             streamError = message.isEmpty ? "unknown error" : message
@@ -813,6 +775,8 @@ private func runTextTurn(
             fflush(stdout)
         }
         if part.isFinished {
+            finished = true
+            billedTokens = part.totalTokens
             break
         }
     }
@@ -820,6 +784,16 @@ private func runTextTurn(
     if let streamError {
         print(TerminalStyle.error("Request failed: \(streamError)"))
         return
+    }
+    // Surface usage exactly like the chunked path when the backend
+    // reported it; text-only backends without usage reporting skip the line.
+    if finished, let billed = billedTokens {
+        let used = context.sessionTokens.withLock { value in
+            value += billed
+            return value
+        }
+        let window = provider.modelInfo.contextLength
+        print(TerminalStyle.dim(SessionTokenDisplay.label(model: provider.modelInfo.name, used: used, window: window)))
     }
     guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
     await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)

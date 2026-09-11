@@ -106,7 +106,7 @@ struct MemoryFactsCommand: AsyncParsableCommand {
         print("")
         print("Semantic facts: \(vectorFacts.count) · Episodes: \(episodeCount)")
         for fact in vectorFacts.prefix(5) {
-            print("  - \(cliInline(fact.content, limit: 160))")
+            print("  - \(ToolInput.inline(fact.content, limit: 160))")
         }
         if vectorFacts.count > 5 {
             print(TerminalStyle.dim("  …and \(vectorFacts.count - 5) more. Use 'memory search' to explore."))

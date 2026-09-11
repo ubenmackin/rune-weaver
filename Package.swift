@@ -18,7 +18,8 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.5.0"),
         .package(url: "https://github.com/apple/swift-collections", from: "1.1.0"),
         .package(url: "https://github.com/apple/swift-log", from: "1.5.4"),
-        .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.3.0")
+        .package(url: "https://github.com/swift-server/swift-service-lifecycle", from: "2.3.0"),
+        .package(url: "https://github.com/mattt/bestline-swift.git", from: "1.0.0")
     ],
     targets: [
         .target(
@@ -66,7 +67,8 @@ let package = Package(
                 "RuneWeaverClient",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
-                .product(name: "Logging", package: "swift-log")
+                .product(name: "Logging", package: "swift-log"),
+                .product(name: "Bestline", package: "bestline-swift")
             ]
         ),
         .testTarget(
@@ -88,6 +90,10 @@ let package = Package(
         .testTarget(
             name: "RuneWeaverClientTests",
             dependencies: ["RuneWeaverCore", "RuneWeaverClient"]
+        ),
+        .testTarget(
+            name: "RuneWeaverCLITests",
+            dependencies: ["RuneWeaverCLI"]
         )
     ]
 )
