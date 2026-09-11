@@ -175,17 +175,18 @@ Three tiers of memory, each backed by different storage:
 
 | Tier | What | Storage | Lifecycle |
 |------|------|---------|-----------|
-| **Working Memory** | Current conversation context | In-memory (Core Engine) | Session-scoped |
-| **Episodic Memory** | Past conversations, summaries | SQLite + FTS5 | Permanent, auto-summarized |
-| **Semantic Memory** | Facts, preferences, user profile | LanceDB (vector) + SQLite (structured) | Permanent, indexed |
+| **Working Memory** | Current conversation context | In-memory + SQLite sessions (Core Engine) | Session-scoped, oldest turns fold into a rolling summary when over budget |
+| **Episodic Memory** | Past conversation turns (raw per-turn mirror) plus compacted summaries | SQLite + FTS5 | Permanent, mirrored every turn for resume, summarized via compaction when old |
+| **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed |
 
 **Memory Flow**:
-1. User says something → goes into Working Memory
-2. Conversation ends or context fills → summarized into Episodic Memory
-3. Key facts extracted → stored in Semantic Memory with embeddings
-4. On future queries → relevant memories retrieved via vector similarity + keyword search
+1. User says something → goes into Working Memory and is mirrored raw into Episodic Memory for session resume
+2. Context fills → oldest working turns fold into the rolling session summary, keeping recent turns intact
+3. Old sessions age → aged episodic turns compact into per-session summaries while staying searchable
+4. Key facts extracted → stored in Semantic Memory as keyword-only rows (no embeddings yet)
+5. On future queries → relevant memories retrieved via keyword overlap (vector similarity deferred until a local embeddings backend exists)
 
-**Embeddings**: Generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
+**Embeddings**: Vector-backed semantic memory is deferred until a local embeddings backend exists. Until then facts persist as keyword-only rows scored by token overlap. When available, embeddings are generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
 
 ### 5. Permission Gate & Sandboxing
 
@@ -467,7 +468,7 @@ token_env = "HA_TOKEN"
 1. **Swift over Python for core**: Performance, type safety, native Apple integration. Python is for plugins only.
 2. **Actor model for concurrency**: Each subsystem (LLM, tools, memory) is a Swift actor, preventing data races.
 3. **WebSocket for client-server**: Low-latency, bidirectional. Clients connect over WireGuard VPN.
-4. **LanceDB over ChromaDB**: Embedded (no server), Rust-backed (fast), native Swift bindings available.
+4. **JSON keyword store (LanceDB-compatible shape), vector deferred**: Semantic memory persists as keyword-only JSON rows scored by token overlap until a local embeddings backend exists. The store exposes the LanceDB table shape (append facts, cosine similarity, metadata filtering) so a native LanceDB binding can replace the file backend without changing callers. ChromaDB rejected (server process, heavier footprint).
 5. **Playwright over Selenium**: Modern API, better async support, multi-browser, cleaner subprocess model.
 6. **Graduated trust over binary permissions**: More nuanced than "always ask" or "never ask." Respects user's comfort level.
 

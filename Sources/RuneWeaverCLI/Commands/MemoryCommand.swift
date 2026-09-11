@@ -37,19 +37,28 @@ struct MemorySearchCommand: AsyncParsableCommand {
     var config: String?
 
     /// Recalls memories and prints them ranked by relevance.
+    ///
+    /// Recall merges episodic, semantic, and profile tiers per tier limit,
+    /// then display is capped to the requested total so `--limit 5` never
+    /// prints more than five rows.
     mutating func run() async throws {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ValidationError("Query must not be empty.")
         }
+        guard limit > 0 else {
+            throw ValidationError("--limit must be positive (got \(limit)).")
+        }
         let loaded = try CLIConfigLoader.loadConfig(path: config)
         let engine = CLIShared.memoryEngine(for: loaded.config.memory)
-        let results = try await engine.recall(query: query, limit: max(1, limit))
-        guard !results.isEmpty else {
+        let requested = limit
+        let results = try await engine.recall(query: query, limit: requested)
+        let displayed = Array(results.prefix(requested))
+        guard !displayed.isEmpty else {
             print(TerminalStyle.dim("No memories found for '\(query)'."))
             return
         }
-        print("Found \(results.count) result\(results.count == 1 ? "" : "s") for '\(query)':")
-        for (index, result) in results.enumerated() {
+        print("Found \(displayed.count) result\(displayed.count == 1 ? "" : "s") for '\(query)':")
+        for (index, result) in displayed.enumerated() {
             let score = String(format: "%.3f", result.score)
             print("")
             print("\(index + 1). [\(result.source.rawValue)] (score \(score))")

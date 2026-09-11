@@ -188,6 +188,34 @@ enum CLIProviderBuilder {
     }
 }
 
+/// Compiler-checked lock-guarded box for CLI shared state.
+///
+/// Encapsulates `NSLock` so the static itself stays an immutable
+/// `static let` and every mutation runs inside `withLock` (which uses
+/// `defer` for unlock), keeping access data-race free under Swift 6
+/// concurrency without `nonisolated(unsafe)` mutable state.
+final class CLILockedValue<Value: Sendable>: @unchecked Sendable {
+    /// Guarded value.
+    private var value: Value
+    /// Guards `value`.
+    private let lock = NSLock()
+
+    /// Creates a box.
+    /// - Parameter value: Initial value.
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    /// Runs `body` with exclusive access to the value.
+    /// - Parameter body: Mutation or read to perform while locked.
+    /// - Returns: Body result.
+    func withLock<T>(_ body: (inout Value) throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body(&value)
+    }
+}
+
 /// Single shared store source for the CLI process.
 ///
 /// `status`, `memory`, and `chat` must not each open independent
@@ -199,11 +227,10 @@ enum CLIProviderBuilder {
 /// stays consistent.
 enum CLIShared {
     /// Cached engines keyed by episodes + vector paths.
-    /// Guarded by `lock`; marked `nonisolated(unsafe)` so Swift 6
-    /// concurrency checks accept the lock-protected access below.
-    private nonisolated(unsafe) static var engines: [String: MemoryEngine] = [:]
-    /// Guards `engines`.
-    private static let lock = NSLock()
+    ///
+    /// Immutable box; all access runs inside `withLock` so no
+    /// `nonisolated(unsafe)` mutable state is needed.
+    private static let engines = CLILockedValue<[String: MemoryEngine]>([:])
 
     /// Returns the shared engine for the given memory config,
     /// creating and caching it on first use.
@@ -211,15 +238,14 @@ enum CLIShared {
     /// - Returns: Shared engine for those paths.
     static func memoryEngine(for config: MemoryConfig) -> MemoryEngine {
         let key = "\(config.episodesDBPath)\0\(config.vectorDBPath)"
-        lock.lock()
-        if let existing = engines[key] {
-            lock.unlock()
-            return existing
+        return engines.withLock { cached in
+            if let existing = cached[key] {
+                return existing
+            }
+            let engine = MemoryEngine(config: config)
+            cached[key] = engine
+            return engine
         }
-        let engine = MemoryEngine(config: config)
-        engines[key] = engine
-        lock.unlock()
-        return engine
     }
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
@@ -251,18 +277,16 @@ enum CLIShared {
 
 /// Collapses whitespace and truncates text for single-line inline display.
 ///
-/// Used for tool arguments and tool results shown inside the chat stream.
+/// Thin CLI alias over the single shared `ToolInput.inline(_:limit:)` helper
+/// in `RuneWeaverCore` so chat display and persisted placeholders compact
+/// identically. Tool arguments use 160, tool results use 300; callers pass
+/// the limit explicitly so budgets never diverge through a default.
 /// - Parameters:
 ///   - text: Text to compact.
-///   - limit: Maximum characters before truncation. Defaults to 300.
+///   - limit: Maximum characters before truncation.
 /// - Returns: Single-line text, suffixed with `…` when truncated.
-func cliInline(_ text: String, limit: Int = 300) -> String {
-    let singleLine = text
-        .replacingOccurrences(of: "\n", with: " ")
-        .replacingOccurrences(of: "\t", with: " ")
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-    guard singleLine.count > limit else { return singleLine }
-    return String(singleLine.prefix(limit)) + "…"
+func cliInline(_ text: String, limit: Int) -> String {
+    ToolInput.inline(text, limit: limit)
 }
 
 /// Prints a message to standard error.

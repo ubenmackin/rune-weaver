@@ -61,3 +61,43 @@ public struct ToolContext: Sendable, Equatable {
         self.dryRun = dryRun
     }
 }
+
+// MARK: - Tool call placeholder
+
+public extension ToolInput {
+    /// Builds the assistant placeholder stored when a turn contains only tool calls.
+    ///
+    /// Single shared builder for the CLI chat loop and `Orchestrator` so the
+    /// same semantic event persists identical working and episodic content
+    /// regardless of entry point. Each call renders as
+    /// `Calling <name> <single-line arguments> [<callID>]` joined by
+    /// newlines, falling back to `Calling tool…` for an empty batch.
+    /// - Parameter calls: Tool calls needing a parent assistant note.
+    /// - Returns: Placeholder content for the assistant turn.
+    static func placeholderContent(for calls: [ToolInput]) -> String {
+        guard !calls.isEmpty else { return "Calling tool…" }
+        let lines = calls.map { call in
+            "Calling \(call.toolName) \(inline(call.argumentsJSON, limit: 160)) [\(call.callID)]"
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Collapses whitespace and truncates text for single-line display.
+    ///
+    /// Single shared inline helper for persisted placeholders and CLI
+    /// display so both entry points compact text identically. Callers
+    /// pass an explicit `limit` (tool arguments use 160, tool results
+    /// use 300) so display budgets never diverge through a default.
+    /// - Parameters:
+    ///   - text: Text to compact.
+    ///   - limit: Maximum characters before truncation.
+    /// - Returns: Single-line text, suffixed with `…` when truncated.
+    static func inline(_ text: String, limit: Int) -> String {
+        let singleLine = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard singleLine.count > limit else { return singleLine }
+        return String(singleLine.prefix(limit)) + "…"
+    }
+}

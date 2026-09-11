@@ -86,11 +86,21 @@ public enum VectorStoreError: Error, Sendable, Equatable {
 /// ``VectorStoreError/dimensionMismatch(expected:got:)``. Use
 /// ``VectorStore/reindex()`` to compact the file and revalidate every
 /// row after bulk edits or manual file changes.
+///
+/// Blocking JSON file work runs off the actor executor via the
+/// nonisolated `runStoreIO(_:)` helper (background queue plus
+/// continuation) so mutations stay suspension-friendly: in-memory state
+/// updates on the actor, then the snapshot persists in the background.
 public actor VectorStore {
     /// Directory holding `facts.json` (the LanceDB dataset stand-in).
     public let directoryPath: String
     /// Embedding width fixed by the first stored fact, if any.
     public private(set) var dimension: Int?
+    /// Maximum results returned per query.
+    ///
+    /// Bounds keyword and vector fan-out so huge limits never materialize
+    /// unbounded result arrays.
+    private static let maxResults = 1000
 
     /// Facts indexed by identifier.
     private var facts: [UUID: StoredFact] = [:]
@@ -107,13 +117,16 @@ public actor VectorStore {
         let loaded = Self.loadBestEffort(directoryPath: directoryPath)
         self.facts = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
         if self.dimension == nil {
-            self.dimension = loaded.map(\.embedding.count).first { $0 > 0 }
+            let widths = Set(loaded.map(\.embedding.count).filter { $0 > 0 })
+            self.dimension = widths.count == 1 ? widths.first : nil
         }
     }
 
     // MARK: - Writes
 
     /// Stores a fact with its embedding (upsert by new `id`).
+    ///
+    /// Blocking file work runs off the actor executor via the background helper.
     /// - Parameters:
     ///   - content: Fact text.
     ///   - embedding: Embedding vector. Must match ``dimension``.
@@ -124,9 +137,9 @@ public actor VectorStore {
         content: String,
         embedding: [Float],
         metadata: [String: String] = [:]
-    ) throws -> StoredFact {
+    ) async throws -> StoredFact {
         let fact = StoredFact(content: content, embedding: embedding, metadata: metadata)
-        try upsert(fact)
+        try await upsert(fact)
         return fact
     }
 
@@ -134,9 +147,10 @@ public actor VectorStore {
     ///
     /// Empty embeddings are keyword-only rows: they skip dimension
     /// enforcement so extraction without a model never pollutes the
-    /// store width.
+    /// store width. In-memory state updates on the actor; the file
+    /// mirror persists off the executor.
     /// - Parameter fact: Fact to persist.
-    public func upsert(_ fact: StoredFact) throws {
+    public func upsert(_ fact: StoredFact) async throws {
         if !fact.embedding.isEmpty {
             try checkDimension(fact.embedding.count)
         }
@@ -155,15 +169,16 @@ public actor VectorStore {
         if dimension == nil, !stored.embedding.isEmpty {
             dimension = stored.embedding.count
         }
-        try save()
+        try await persistSnapshot()
     }
 
     /// Inserts or replaces a batch of facts by `id`.
     ///
     /// Empty (keyword-only) embeddings are allowed alongside sized
-    /// rows; all non-empty rows must share one width.
+    /// rows; all non-empty rows must share one width. In-memory state
+    /// updates on the actor; the file mirror persists off the executor.
     /// - Parameter facts: Facts to persist.
-    public func upsert(_ facts: [StoredFact]) throws {
+    public func upsert(_ facts: [StoredFact]) async throws {
         guard !facts.isEmpty else { return }
         let widths = Set(facts.map(\.embedding.count).filter { $0 > 0 })
         guard widths.count <= 1 else {
@@ -190,20 +205,24 @@ public actor VectorStore {
         if dimension == nil, let width = widths.first {
             dimension = width
         }
-        try save()
+        try await persistSnapshot()
     }
 
     /// Removes a fact. Missing identifiers are a no-op.
+    ///
+    /// The file mirror persists off the actor executor.
     /// - Parameter id: Fact identifier.
-    public func remove(id: UUID) throws {
+    public func remove(id: UUID) async throws {
         guard facts.removeValue(forKey: id) != nil else { return }
-        try save()
+        try await persistSnapshot()
     }
 
     /// Removes every fact, keeping the configured dimension.
-    public func clear() throws {
+    ///
+    /// The file mirror persists off the actor executor.
+    public func clear() async throws {
         facts.removeAll()
-        try save()
+        try await persistSnapshot()
     }
 
     // MARK: - Reads
@@ -230,38 +249,40 @@ public actor VectorStore {
     /// Queries by cosine similarity with optional metadata filtering.
     ///
     /// Only facts whose metadata contains every `metadataFilter`
-    /// key/value pair are considered. Results are sorted by score
-    /// descending; ties break newest first.
+    /// key/value pair are considered. Empty, width-mismatched, and
+    /// zero-norm vectors score `0` via `cosineSimilarity` and are
+    /// filtered out so only positively similar facts return. Results
+    /// are sorted by score descending; ties break newest first, then by
+    /// identifier so unordered dictionary iteration stays deterministic.
     /// - Parameters:
     ///   - embedding: Query vector.
-    ///   - limit: Maximum results. Defaults to 5.
+    ///   - limit: Maximum results. Defaults to 5. Non-positive limits
+    ///     return an empty list. Larger limits are capped.
     ///   - metadataFilter: Required metadata pairs. Defaults to nil.
-    /// - Returns: Scored facts, best first.
+    /// - Returns: Scored facts with positive similarity, best first.
     public func query(
         embedding: [Float],
         limit: Int = 5,
         metadataFilter: [String: String]? = nil
     ) -> [ScoredFact] {
-        let candidates = facts.values.filter { fact in
-            guard let metadataFilter, !metadataFilter.isEmpty else { return true }
-            return metadataFilter.allSatisfy { fact.metadata[$0.key] == $0.value }
-        }
+        guard limit > 0 else { return [] }
+        let clamped = min(limit, Self.maxResults)
+        let candidates = filterCandidates(metadataFilter: metadataFilter)
         let scored = candidates.map { fact in
             ScoredFact(fact: fact, score: Self.cosineSimilarity(embedding, fact.embedding))
-        }
-        return scored
-            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.fact.createdAt > $1.fact.createdAt }
-            .prefix(max(1, limit))
-            .map(\.self)
+        }.filter { $0.score > 0 }
+        return Array(Self.sortScored(scored).prefix(clamped))
     }
 
     /// Keyword search over fact content with optional metadata filtering.
     ///
     /// Used when no query embedding is available: case-insensitive
-    /// token overlap scoring, ties broken newest first.
+    /// token overlap scoring, ties broken newest first, then by
+    /// identifier so unordered dictionary iteration stays deterministic.
     /// - Parameters:
     ///   - query: Search text.
-    ///   - limit: Maximum results. Defaults to 5.
+    ///   - limit: Maximum results. Defaults to 5. Non-positive limits
+    ///     return an empty list. Larger limits are capped.
     ///   - metadataFilter: Required metadata pairs. Defaults to nil.
     /// - Returns: Scored facts, best first. Empty for blank queries.
     public func search(
@@ -269,49 +290,63 @@ public actor VectorStore {
         limit: Int = 5,
         metadataFilter: [String: String]? = nil
     ) -> [ScoredFact] {
-        let queryTokens = Self.tokenize(query)
+        guard limit > 0 else { return [] }
+        let clamped = min(limit, Self.maxResults)
+        let queryTokens = Tokenization.tokenize(query)
         guard !queryTokens.isEmpty else { return [] }
-        let candidates = facts.values.filter { fact in
-            guard let metadataFilter, !metadataFilter.isEmpty else { return true }
-            return metadataFilter.allSatisfy { fact.metadata[$0.key] == $0.value }
-        }
+        let candidates = filterCandidates(metadataFilter: metadataFilter)
         let scored = candidates.compactMap { fact -> ScoredFact? in
-            let contentTokens = Set(Self.tokenize(fact.content))
-            let overlap = queryTokens.intersection(contentTokens).count
-            let substring = fact.content.range(of: query, options: .caseInsensitive) != nil
-            guard overlap > 0 || substring else { return nil }
-            return ScoredFact(fact: fact, score: Double(overlap * 2 + (substring ? 1 : 0)))
+            let contentTokens = Tokenization.tokenize(fact.content)
+            guard let raw = Tokenization.keywordScore(
+                queryTokens: queryTokens,
+                contentTokens: contentTokens,
+                content: fact.content,
+                query: query
+            ) else { return nil }
+            return ScoredFact(fact: fact, score: Double(raw))
         }
-        return scored
-            .sorted { $0.score != $1.score ? $0.score > $1.score : $0.fact.createdAt > $1.fact.createdAt }
-            .prefix(max(1, limit))
-            .map(\.self)
+        return Array(Self.sortScored(scored).prefix(clamped))
     }
 
     // MARK: - Re-indexing
 
-    /// Rebuilds the on-disk index from memory.
+    /// Rebuilds the on-disk index from disk and memory.
     ///
-    /// Re-sorts facts (newest first), drops exact-duplicate rows
-    /// (same content and metadata, keeping the newest), revalidates a
-    /// single embedding dimension across all rows, and rewrites
-    /// `facts.json` atomically. Call after bulk edits or manual file
-    /// changes; also reloads anything written to disk externally.
+    /// Reloads from disk first (reconciling externally added rows),
+    /// merges the result with in-memory facts so unsaved rows are never
+    /// discarded, then re-sorts facts (newest first), drops
+    /// exact-duplicate rows (same content and metadata, keeping the
+    /// newest), revalidates a single embedding dimension across all
+    /// rows, and rewrites `facts.json` atomically. A corrupt file throws
+    /// without mutating memory or overwriting disk, so reindex never
+    /// wipes the store; only a missing file loads as empty. Call after
+    /// bulk edits or manual file changes.
     /// - Returns: Fact count after compaction.
+    /// - Throws: `VectorStoreError/persistenceFailed(_:)` when the file
+    ///   exists but cannot be read or decoded, or when stored rows have
+    ///   mixed embedding dimensions.
+    ///
+    /// The disk reload and the file rewrite run off the actor executor
+    /// via the background helper; merging, deduping, and dimension
+    /// checks run on the actor over the combined snapshot.
     @discardableResult
-    public func reindex() throws -> Int {
-        let onDisk = Self.loadBestEffort(directoryPath: directoryPath)
-        for fact in onDisk where facts[fact.id] == nil {
-            facts[fact.id] = fact
+    public func reindex() async throws -> Int {
+        let directoryPath = self.directoryPath
+        let memorySnapshot = facts
+        let onDisk = try await runStoreIO {
+            try Self.loadThrowing(directoryPath: directoryPath)
         }
-        let sorted = facts.values.sorted { $0.createdAt > $1.createdAt }
-        var seen: Set<String> = []
+        let combined = (onDisk + Array(memorySnapshot.values)).sorted { $0.createdAt > $1.createdAt }
+        var seenIDs: Set<UUID> = []
+        var seenContent: Set<String> = []
         var compacted: [UUID: StoredFact] = [:]
-        compacted.reserveCapacity(sorted.count)
-        for fact in sorted {
+        compacted.reserveCapacity(combined.count)
+        for fact in combined {
+            guard !seenIDs.contains(fact.id) else { continue }
             let key = "\(fact.content)\n\(fact.metadata.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ","))"
-            guard !seen.contains(key) else { continue }
-            seen.insert(key)
+            guard !seenContent.contains(key) else { continue }
+            seenIDs.insert(fact.id)
+            seenContent.insert(key)
             compacted[fact.id] = fact
         }
         let widths = Set(compacted.values.map(\.embedding.count).filter { $0 > 0 })
@@ -319,22 +354,56 @@ public actor VectorStore {
             throw VectorStoreError.persistenceFailed("Stored facts have mixed embedding dimensions: \(widths.sorted())")
         }
         facts = compacted
-        if dimension == nil, let width = widths.first {
-            dimension = width
-        }
-        try save()
+        dimension = widths.first
+        try await persistSnapshot()
         return facts.count
     }
 
     /// Reloads facts from disk, replacing memory.
+    ///
+    /// Recomputes `dimension` from the loaded widths unconditionally so
+    /// externally changed files never leave a stale width behind: a
+    /// single width sets the dimension, while mixed or missing widths
+    /// clear it to nil.
     public func reload() {
         facts = Dictionary(uniqueKeysWithValues: Self.loadBestEffort(directoryPath: directoryPath).map { ($0.id, $0) })
-        if dimension == nil {
-            dimension = facts.values.map(\.embedding.count).first { $0 > 0 }
-        }
+        let widths = Set(facts.values.map(\.embedding.count).filter { $0 > 0 })
+        dimension = widths.count == 1 ? widths.first : nil
     }
 
     // MARK: - Similarity
+
+    /// Filters facts by required metadata pairs.
+    ///
+    /// Shared by `query` and `search` so metadata filtering stays
+    /// single-sourced across vector and keyword recall.
+    /// - Parameter metadataFilter: Required metadata pairs. Defaults to nil.
+    /// - Returns: Facts matching every pair, or all facts when the filter is nil or empty.
+    private func filterCandidates(metadataFilter: [String: String]?) -> [StoredFact] {
+        facts.values.filter { fact in
+            guard let metadataFilter, !metadataFilter.isEmpty else { return true }
+            return metadataFilter.allSatisfy { fact.metadata[$0.key] == $0.value }
+        }
+    }
+
+    /// Sorts scored facts best first with deterministic ties.
+    ///
+    /// Shared by `query` and `search`: score descending, then newest
+    /// first, then identifier so unordered dictionary iteration stays
+    /// deterministic.
+    /// - Parameter scored: Scored facts to order.
+    /// - Returns: Facts sorted best first.
+    private static func sortScored(_ scored: [ScoredFact]) -> [ScoredFact] {
+        scored.sorted {
+            if $0.score != $1.score {
+                return $0.score > $1.score
+            }
+            if $0.fact.createdAt != $1.fact.createdAt {
+                return $0.fact.createdAt > $1.fact.createdAt
+            }
+            return $0.fact.id.uuidString < $1.fact.id.uuidString
+        }
+    }
 
     /// Cosine similarity between two vectors.
     /// - Parameters:
@@ -356,13 +425,6 @@ public actor VectorStore {
         }
         guard lhsNorm > 0, rhsNorm > 0 else { return 0 }
         return dot / (lhsNorm.squareRoot() * rhsNorm.squareRoot())
-    }
-
-    /// Lowercased alphanumeric tokens for keyword scoring.
-    /// - Parameter text: Text to tokenize.
-    /// - Returns: Token set.
-    private static func tokenize(_ text: String) -> Set<String> {
-        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init).filter { !$0.isEmpty })
     }
 
     // MARK: - Persistence
@@ -395,15 +457,57 @@ public actor VectorStore {
         return (try? decoder.decode([StoredFact].self, from: data)) ?? []
     }
 
-    /// Writes all facts to `facts.json` atomically.
-    private func save() throws {
+    /// Loads persisted facts, throwing on corrupt data (used by `reindex`).
+    ///
+    /// A missing file loads as empty so a fresh store reindexes cleanly;
+    /// an existing file that cannot be read or decoded throws instead of
+    /// returning empty, so callers never compact memory into an empty set
+    /// and overwrite good data.
+    /// - Parameter directoryPath: Store directory.
+    /// - Returns: Stored facts, empty only when the file is missing.
+    /// - Throws: `VectorStoreError/persistenceFailed(_:)` when the file
+    ///   exists but cannot be read or decoded.
+    private static func loadThrowing(directoryPath: String) throws -> [StoredFact] {
+        let url = fileURL(directoryPath: directoryPath)
+        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .secondsSince1970
+            return try decoder.decode([StoredFact].self, from: data)
+        } catch {
+            throw VectorStoreError.persistenceFailed("Could not read vector store: \(error.localizedDescription)")
+        }
+    }
+
+    /// Persists the in-memory snapshot off the actor executor.
+    ///
+    /// Captures the ordered facts and directory on the actor, then writes
+    /// the file on a background queue so the actor stays
+    /// suspension-friendly while the write completes.
+    private func persistSnapshot() async throws {
+        let ordered = facts.values.sorted { $0.createdAt > $1.createdAt }
+        let directoryPath = self.directoryPath
+        try await runStoreIO {
+            try Self.writeSnapshot(ordered, directoryPath: directoryPath)
+        }
+    }
+
+    /// Writes an ordered snapshot to `facts.json` atomically.
+    ///
+    /// Nonisolated file helper shared by every mutation so blocking
+    /// directory creation, encoding, and writes never run on the actor
+    /// executor.
+    /// - Parameters:
+    ///   - ordered: Facts to write, newest first.
+    ///   - directoryPath: Store directory. `~` is expanded.
+    private static func writeSnapshot(_ ordered: [StoredFact], directoryPath: String) throws {
         let url = Self.fileURL(directoryPath: directoryPath)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .secondsSince1970
             encoder.outputFormatting = [.sortedKeys]
-            let ordered = facts.values.sorted { $0.createdAt > $1.createdAt }
             let data = try encoder.encode(ordered)
             try data.write(to: url, options: .atomic)
         } catch let error as VectorStoreError {

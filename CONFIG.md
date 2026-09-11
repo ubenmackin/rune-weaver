@@ -78,6 +78,8 @@ api_style = "responses"  # muse-spark family; omit or use "chat-completions" for
 | `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite path for episodic memory (conversation history). Must not be empty. |
 | `embedding_model` | string | `"all-MiniLM-L6-v2"` | Embedding model identifier. Must not be empty. |
 
+Vector-backed semantic memory is deferred until a local embeddings backend exists. Until then `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-only vector rows — so `memory facts` lists them without requiring embeddings.
+
 ### `[voice]`
 
 | Key | Type | Default | Description |
