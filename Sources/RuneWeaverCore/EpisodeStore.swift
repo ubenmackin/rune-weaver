@@ -13,11 +13,21 @@ import Foundation
 /// triggers. Where the SQLite3 module is unavailable the store falls
 /// back to JSON files beside the configured database path so behavior
 /// stays identical.
+///
+/// Blocking SQLite/JSON work runs off the actor executor via the
+/// nonisolated `runStoreIO(_:)` helper (background queue plus
+/// continuation) so actor methods stay suspension-friendly.
 public actor EpisodeStore {
     /// Filesystem path of the SQLite database (or JSON sidecar anchor).
     public let dbPath: String
     /// Summarizer applied when compacting old sessions.
     private let summarizer: EpisodeSummarizer
+    /// Maximum rows returned per read.
+    ///
+    /// Bounds `episodes`, `recent`, and `search` so huge limits (e.g.
+    /// `.max`) never materialize unbounded arrays; the SQLite layer
+    /// additionally clamps to `Int32.max` at the bind boundary.
+    private static let maxResults = 1000
 
     /// Creates a store, migrating the schema on first use.
     /// - Parameters:
@@ -32,6 +42,9 @@ public actor EpisodeStore {
     // MARK: - Writes
 
     /// Stores one conversation turn.
+    ///
+    /// Blocking SQLite/JSON work runs off the actor executor via the
+    /// background helper so the actor stays suspension-friendly.
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
     ///   - role: Who produced the content.
@@ -44,88 +57,169 @@ public actor EpisodeStore {
         role: Message.Role,
         content: String,
         metadata: [String: String] = [:]
-    ) throws -> Episode {
+    ) async throws -> Episode {
         let episode = Episode(sessionID: sessionID, role: role, content: content, metadata: metadata)
-        try store(episode)
+        try await store(episode)
         return episode
     }
 
     /// Stores an already-constructed episode (upsert by `id`).
     /// - Parameter episode: Episode to persist.
-    public func store(_ episode: Episode) throws {
-        try EpisodeStoreIO.write(episodes: [episode], dbPath: dbPath, merge: true)
+    public func store(_ episode: Episode) async throws {
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.write(episodes: [episode], dbPath: dbPath, merge: true)
+        }
     }
 
     /// Stores a batch of episodes (upsert by `id`).
     /// - Parameter episodes: Episodes to persist.
-    public func store(_ episodes: [Episode]) throws {
+    public func store(_ episodes: [Episode]) async throws {
         guard !episodes.isEmpty else { return }
-        try EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)
+        }
     }
 
     // MARK: - Reads
 
     /// Returns episodes for one session, oldest first.
+    ///
+    /// When `limit` is set, returns the oldest `limit` episodes, not the
+    /// newest. Use `recentEpisodes(for:limit:)` for resume hydration
+    /// needing the newest turns. Storage order (`timestamp`, `rowid`) is
+    /// preserved so rapid turns sharing a timestamp hydrate deterministically.
+    /// The blocking read runs off the actor executor via the background helper.
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
-    ///   - limit: Maximum episodes. Defaults to nil (all).
+    ///   - limit: Maximum episodes. Defaults to nil (all). When set,
+    ///     the oldest `limit` rows are returned. Non-positive limits
+    ///     return an empty list. Larger limits are capped.
     /// - Returns: Matching episodes in chronological order.
-    public func episodes(for sessionID: UUID, limit: Int? = nil) throws -> [Episode] {
-        let all = try EpisodeStoreIO.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
-        return all.sorted { $0.timestamp < $1.timestamp }
+    public func episodes(for sessionID: UUID, limit: Int? = nil) async throws -> [Episode] {
+        if let limit, limit <= 0 {
+            return []
+        }
+        let clamped = limit.map { min($0, Self.maxResults) }
+        let dbPath = self.dbPath
+        return try await runStoreIO {
+            try EpisodeStoreIO.episodes(sessionID: sessionID, dbPath: dbPath, limit: clamped)
+        }
+    }
+
+    /// Returns the newest episodes for one session, oldest first.
+    ///
+    /// Bounded resume path: fetches only the last `limit` turns instead
+    /// of loading the whole session, then returns them in chronological
+    /// order for direct history use. Storage order is preserved for
+    /// deterministic hydration of same-timestamp turns. The blocking read
+    /// runs off the actor executor via the background helper.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - limit: Maximum episodes. Non-positive limits return an empty list.
+    ///     Larger limits are capped.
+    /// - Returns: Newest episodes in chronological order.
+    public func recentEpisodes(for sessionID: UUID, limit: Int) async throws -> [Episode] {
+        guard limit > 0 else { return [] }
+        let dbPath = self.dbPath
+        let clamped = min(limit, Self.maxResults)
+        return try await runStoreIO {
+            try EpisodeStoreIO.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: clamped)
+        }
     }
 
     /// Returns the most recent episodes across all sessions.
-    /// - Parameter limit: Maximum episodes. Defaults to 20.
+    ///
+    /// The blocking read runs off the actor executor via the background helper.
+    /// - Parameter limit: Maximum episodes. Defaults to 20. Non-positive
+    ///   limits return an empty list. Larger limits are capped.
     /// - Returns: Episodes newest first.
-    public func recent(limit: Int = 20) throws -> [Episode] {
-        try EpisodeStoreIO.recent(dbPath: dbPath, limit: max(1, limit))
+    public func recent(limit: Int = 20) async throws -> [Episode] {
+        guard limit > 0 else { return [] }
+        let dbPath = self.dbPath
+        let clamped = min(limit, Self.maxResults)
+        return try await runStoreIO {
+            try EpisodeStoreIO.recent(dbPath: dbPath, limit: clamped)
+        }
     }
 
     /// Full-text search over episode content.
     ///
     /// Uses the FTS5 index (`porter` tokenizer, BM25 rank) when SQLite
     /// is available; otherwise falls back to case-insensitive token
-    /// overlap scoring over the JSON sidecar.
+    /// overlap scoring over the JSON sidecar. The blocking read runs off
+    /// the actor executor via the background helper.
     /// - Parameters:
     ///   - query: Search text.
-    ///   - limit: Maximum results. Defaults to 10.
+    ///   - limit: Maximum results. Defaults to 10. Non-positive limits
+    ///     return an empty list. Larger limits are capped.
     /// - Returns: Matching episodes, best first. Empty for blank queries.
-    public func search(query: String, limit: Int = 10) throws -> [Episode] {
+    public func search(query: String, limit: Int = 10) async throws -> [Episode] {
+        guard limit > 0 else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        return try EpisodeStoreIO.search(query: trimmed, dbPath: dbPath, limit: max(1, limit))
+        let dbPath = self.dbPath
+        let clamped = min(limit, Self.maxResults)
+        return try await runStoreIO {
+            try EpisodeStoreIO.search(query: trimmed, dbPath: dbPath, limit: clamped)
+        }
     }
 
     /// All session identifiers that have stored episodes.
+    ///
+    /// The blocking read runs off the actor executor via the background helper.
     /// - Returns: Session identifiers.
-    public func sessionIDs() throws -> [UUID] {
-        try EpisodeStoreIO.sessionIDs(dbPath: dbPath)
+    public func sessionIDs() async throws -> [UUID] {
+        let dbPath = self.dbPath
+        return try await runStoreIO {
+            try EpisodeStoreIO.sessionIDs(dbPath: dbPath)
+        }
     }
 
     /// Total stored episode count.
+    ///
+    /// The blocking read runs off the actor executor via the background helper.
     /// - Returns: Row count.
-    public func count() throws -> Int {
-        try EpisodeStoreIO.count(dbPath: dbPath)
+    public func count() async throws -> Int {
+        let dbPath = self.dbPath
+        return try await runStoreIO {
+            try EpisodeStoreIO.count(dbPath: dbPath)
+        }
     }
 
     // MARK: - Deletes
 
     /// Deletes one episode. Missing rows are a no-op.
+    ///
+    /// The blocking delete runs off the actor executor via the background helper.
     /// - Parameter id: Episode identifier.
-    public func delete(id: UUID) throws {
-        try EpisodeStoreIO.delete(id: id, dbPath: dbPath)
+    public func delete(id: UUID) async throws {
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.delete(id: id, dbPath: dbPath)
+        }
     }
 
     /// Deletes every episode for a session. Unknown sessions are a no-op.
+    ///
+    /// The blocking delete runs off the actor executor via the background helper.
     /// - Parameter sessionID: Owning session identifier.
-    public func deleteSession(_ sessionID: UUID) throws {
-        try EpisodeStoreIO.deleteSession(sessionID, dbPath: dbPath)
+    public func deleteSession(_ sessionID: UUID) async throws {
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.deleteSession(sessionID, dbPath: dbPath)
+        }
     }
 
     /// Deletes all episodes.
-    public func clear() throws {
-        try EpisodeStoreIO.clear(dbPath: dbPath)
+    ///
+    /// The blocking delete runs off the actor executor via the background helper.
+    public func clear() async throws {
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.clear(dbPath: dbPath)
+        }
     }
 
     // MARK: - Auto-summarization
@@ -133,7 +227,8 @@ public actor EpisodeStore {
     /// Summarizes sessions whose episodes are older than a cutoff.
     ///
     /// Non-destructive: the store is left untouched and the caller
-    /// decides what to do with the returned summaries.
+    /// decides what to do with the returned summaries. The blocking read
+    /// runs off the actor executor via the background helper.
     /// - Parameters:
     ///   - olderThan: Episodes at or before this date are summarized.
     ///   - summarizer: Override summarizer. Defaults to the store's own.
@@ -141,9 +236,12 @@ public actor EpisodeStore {
     public func summarizeSessions(
         olderThan: Date,
         summarizer: EpisodeSummarizer? = nil
-    ) throws -> [EpisodeSummary] {
+    ) async throws -> [EpisodeSummary] {
         let summarize = summarizer ?? self.summarizer
-        let old = try EpisodeStoreIO.episodes(olderThan: olderThan, dbPath: dbPath)
+        let dbPath = self.dbPath
+        let old = try await runStoreIO {
+            try EpisodeStoreIO.episodes(olderThan: olderThan, dbPath: dbPath)
+        }
         guard !old.isEmpty else { return [] }
         let grouped = Dictionary(grouping: old) { $0.sessionID }
         return grouped.map { sessionID, episodes in
@@ -165,7 +263,11 @@ public actor EpisodeStore {
     /// Each session with episodes at or before `olderThan` is summarized
     /// and its old rows are replaced by a single `system` episode
     /// carrying the summary, so keyword search keeps working while the
-    /// table stays small.
+    /// table stays small. Each session compacts via `EpisodeStoreIO.compact`:
+    /// SQLite runs delete plus insert atomically in one transaction while
+    /// the JSON fallback writes the replacement first and then deletes so
+    /// a crash never loses both. Blocking I/O runs off the actor executor
+    /// via the background helper.
     /// - Parameters:
     ///   - olderThan: Episodes at or before this date are compacted.
     ///   - summarizer: Override summarizer. Defaults to the store's own.
@@ -174,18 +276,25 @@ public actor EpisodeStore {
     public func compactSessions(
         olderThan: Date,
         summarizer: EpisodeSummarizer? = nil
-    ) throws -> [EpisodeSummary] {
-        let summaries = try summarizeSessions(olderThan: olderThan, summarizer: summarizer)
+    ) async throws -> [EpisodeSummary] {
+        let summaries = try await summarizeSessions(olderThan: olderThan, summarizer: summarizer)
         guard !summaries.isEmpty else { return [] }
+        let dbPath = self.dbPath
         for summary in summaries {
-            try EpisodeStoreIO.deleteSession(beforeOrAt: olderThan, sessionID: summary.sessionID, dbPath: dbPath)
             let replacement = Episode(
                 sessionID: summary.sessionID,
                 role: .system,
                 content: "Summary of \(summary.messageCount) earlier messages: \(summary.summary)",
                 metadata: ["compacted": "true"]
             )
-            try store(replacement)
+            try await runStoreIO {
+                try EpisodeStoreIO.compact(
+                    sessionID: summary.sessionID,
+                    beforeOrAt: olderThan,
+                    replacement: replacement,
+                    dbPath: dbPath
+                )
+            }
         }
         return summaries
     }
@@ -193,9 +302,13 @@ public actor EpisodeStore {
     /// Rebuilds the FTS5 index from the `episodes` table.
     ///
     /// Useful after bulk imports or if the index ever drifts from the
-    /// table. A no-op for the JSON fallback.
-    public func rebuildSearchIndex() throws {
-        try EpisodeStoreIO.rebuildFTS(dbPath: dbPath)
+    /// table. A no-op for the JSON fallback. The blocking rebuild runs
+    /// off the actor executor via the background helper.
+    public func rebuildSearchIndex() async throws {
+        let dbPath = self.dbPath
+        try await runStoreIO {
+            try EpisodeStoreIO.rebuildFTS(dbPath: dbPath)
+        }
     }
 }
 
@@ -222,16 +335,37 @@ enum EpisodeStoreIO {
     }
 
     /// Reads one session's episodes, oldest first.
+    ///
+    /// When `limit` is set, returns the oldest `limit` rows. See
+    /// `recentEpisodes(sessionID:dbPath:limit:)` for the newest window.
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
     ///   - dbPath: SQLite path (or JSON sidecar anchor).
-    ///   - limit: Maximum rows, nil for all.
+    ///   - limit: Maximum rows, nil for all. When set, the oldest rows
+    ///     are returned.
     /// - Returns: Matching episodes.
     static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
         #if canImport(SQLite3)
             return try SQLiteEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #else
             return try JSONEpisodeStore.episodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+        #endif
+    }
+
+    /// Reads one session's newest episodes, oldest first.
+    ///
+    /// Bounded resume path returning the last `limit` turns in
+    /// chronological order.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - dbPath: SQLite path (or JSON sidecar anchor).
+    ///   - limit: Maximum rows.
+    /// - Returns: Newest episodes in chronological order.
+    static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
+        #if canImport(SQLite3)
+            return try SQLiteEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
+        #else
+            return try JSONEpisodeStore.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: limit)
         #endif
     }
 
@@ -334,6 +468,25 @@ enum EpisodeStoreIO {
         #endif
     }
 
+    /// Replaces one session's old episodes with a summary episode.
+    ///
+    /// SQLite compacts in one transaction so a crash between delete and
+    /// insert never loses both; the JSON fallback writes the replacement
+    /// first and then deletes the old rows so a crash never loses both
+    /// (at worst both remain).
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - beforeOrAt: Inclusive upper bound on `timestamp` for deleted rows.
+    ///   - replacement: Summary episode to insert.
+    ///   - dbPath: SQLite path (or JSON sidecar anchor).
+    static func compact(sessionID: UUID, beforeOrAt: Date, replacement: Episode, dbPath: String) throws {
+        #if canImport(SQLite3)
+            try SQLiteEpisodeStore.compact(sessionID: sessionID, beforeOrAt: beforeOrAt, replacement: replacement, dbPath: dbPath)
+        #else
+            try JSONEpisodeStore.compact(sessionID: sessionID, beforeOrAt: beforeOrAt, replacement: replacement, dbPath: dbPath)
+        #endif
+    }
+
     /// Deletes all episodes.
     /// - Parameter dbPath: SQLite path (or JSON sidecar anchor).
     static func clear(dbPath: String) throws {
@@ -367,20 +520,13 @@ enum EpisodeStoreIO {
         /// - Parameter dbPath: SQLite file path. `~` is expanded.
         /// - Returns: Open database handle. Caller must close it.
         private static func open(dbPath: String) throws -> OpaquePointer? {
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            let directory = (expanded as NSString).deletingLastPathComponent
-            if !directory.isEmpty {
-                try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-            }
-            var handle: OpaquePointer?
-            let status = expanded.withCString { sqlite3_open($0, &handle) }
-            guard status == SQLITE_OK, handle != nil else {
-                if let handle {
-                    sqlite3_close(handle)
-                }
-                throw EpisodeStoreError.storeUnavailable("Could not open SQLite store at \(dbPath)")
-            }
-            try exec(
+            let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: EpisodeStoreError.storeUnavailable)
+            try SQLiteHelpers.exec(
+                handle: handle,
+                sql: "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;",
+                failure: EpisodeStoreError.persistenceFailed
+            )
+            try SQLiteHelpers.exec(
                 handle: handle,
                 sql: """
                 CREATE TABLE IF NOT EXISTS episodes(
@@ -404,7 +550,8 @@ enum EpisodeStoreIO {
                     INSERT INTO episodes_fts(episodes_fts, rowid, content) VALUES('delete', old.rowid, old.content);
                     INSERT INTO episodes_fts(rowid, content) VALUES(new.rowid, new.content);
                 END;
-                """
+                """,
+                failure: EpisodeStoreError.persistenceFailed
             )
             return handle
         }
@@ -414,13 +561,7 @@ enum EpisodeStoreIO {
         ///   - handle: Open database handle.
         ///   - sql: SQL to execute.
         private static func exec(handle: OpaquePointer?, sql: String) throws {
-            var errorMessage: UnsafeMutablePointer<CChar>?
-            let status = sql.withCString { sqlite3_exec(handle, $0, nil, nil, &errorMessage) }
-            defer { sqlite3_free(errorMessage) }
-            guard status == SQLITE_OK else {
-                let detail = errorMessage.map { String(cString: $0) } ?? "unknown error"
-                throw EpisodeStoreError.persistenceFailed(detail)
-            }
+            try SQLiteHelpers.exec(handle: handle, sql: sql, failure: EpisodeStoreError.persistenceFailed)
         }
 
         /// Binds optional text, mapping nil to NULL.
@@ -429,11 +570,19 @@ enum EpisodeStoreIO {
         ///   - index: One-based bind index.
         ///   - value: Text value, or nil for NULL.
         private static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
-            if let value {
-                _ = value.withCString { sqlite3_bind_text(statement, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
-            } else {
-                sqlite3_bind_null(statement, index)
-            }
+            SQLiteHelpers.bindText(statement, index: index, value: value)
+        }
+
+        /// Clamps a limit to the SQLite bind range.
+        ///
+        /// `sqlite3_bind_int` truncates wider values, so a large limit
+        /// (e.g. `.max`) would wrap negative, which SQLite treats as
+        /// unlimited. Clamping keeps `LIMIT` semantics identical across
+        /// the SQLite and JSON stores.
+        /// - Parameter limit: Requested maximum rows (positive).
+        /// - Returns: Value safe for `sqlite3_bind_int`.
+        private static func sqliteLimit(_ limit: Int) -> Int32 {
+            Int32(min(limit, Int(Int32.max)))
         }
 
         /// Encodes metadata as a JSON object string.
@@ -459,7 +608,7 @@ enum EpisodeStoreIO {
         ///   - index: Zero-based column index.
         /// - Returns: Column text, or nil when NULL.
         private static func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
-            sqlite3_column_text(statement, index).map { String(cString: $0) }
+            SQLiteHelpers.columnText(statement, index: index)
         }
 
         /// Reads the episode at the statement's current row.
@@ -497,19 +646,21 @@ enum EpisodeStoreIO {
                     + "ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, role=excluded.role, "
                     + "content=excluded.content, timestamp=excluded.timestamp, metadata=excluded.metadata;"
                 for episode in episodes {
-                    var statement: OpaquePointer?
-                    guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                        throw EpisodeStoreError.persistenceFailed("Could not prepare episode upsert")
-                    }
-                    defer { sqlite3_finalize(statement) }
-                    bindText(statement, index: 1, value: episode.id.uuidString)
-                    bindText(statement, index: 2, value: episode.sessionID.uuidString)
-                    bindText(statement, index: 3, value: episode.role.rawValue)
-                    bindText(statement, index: 4, value: episode.content)
-                    sqlite3_bind_double(statement, 5, episode.timestamp.timeIntervalSince1970)
-                    bindText(statement, index: 6, value: encodeMetadata(episode.metadata))
-                    guard sqlite3_step(statement) == SQLITE_DONE else {
-                        throw EpisodeStoreError.persistenceFailed("Could not write episode \(episode.id)")
+                    do {
+                        var statement: OpaquePointer?
+                        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                            throw EpisodeStoreError.persistenceFailed("Could not prepare episode upsert")
+                        }
+                        defer { sqlite3_finalize(statement) }
+                        bindText(statement, index: 1, value: episode.id.uuidString)
+                        bindText(statement, index: 2, value: episode.sessionID.uuidString)
+                        bindText(statement, index: 3, value: episode.role.rawValue)
+                        bindText(statement, index: 4, value: episode.content)
+                        sqlite3_bind_double(statement, 5, episode.timestamp.timeIntervalSince1970)
+                        bindText(statement, index: 6, value: encodeMetadata(episode.metadata))
+                        guard sqlite3_step(statement) == SQLITE_DONE else {
+                            throw EpisodeStoreError.persistenceFailed("Could not write episode \(episode.id)")
+                        }
                     }
                 }
                 try exec(handle: handle, sql: "COMMIT;")
@@ -520,12 +671,19 @@ enum EpisodeStoreIO {
         }
 
         /// Reads one session's episodes, oldest first.
+        ///
+        /// When `limit` is set, returns the oldest `limit` rows. See
+        /// `recentEpisodes(sessionID:dbPath:limit:)` for the newest window.
         /// - Parameters:
         ///   - sessionID: Owning session identifier.
         ///   - dbPath: SQLite file path.
-        ///   - limit: Maximum rows, nil for all.
+        ///   - limit: Maximum rows, nil for all. When set, the oldest rows
+        ///     are returned. Non-positive limits return an empty list.
         /// - Returns: Matching episodes.
         static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
+            if let limit, limit <= 0 {
+                return []
+            }
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
@@ -542,7 +700,7 @@ enum EpisodeStoreIO {
             defer { sqlite3_finalize(statement) }
             bindText(statement, index: 1, value: sessionID.uuidString)
             if let limit {
-                sqlite3_bind_int(statement, 2, Int32(max(1, limit)))
+                sqlite3_bind_int(statement, 2, sqliteLimit(limit))
             }
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -551,6 +709,40 @@ enum EpisodeStoreIO {
                 }
             }
             return results
+        }
+
+        /// Reads one session's newest episodes, oldest first.
+        ///
+        /// Bounded resume path: selects the last `limit` rows via
+        /// `ORDER BY timestamp DESC LIMIT` then returns them in
+        /// chronological order so hydration can use them directly.
+        /// - Parameters:
+        ///   - sessionID: Owning session identifier.
+        ///   - dbPath: SQLite file path.
+        ///   - limit: Maximum rows. Non-positive limits return an empty list.
+        /// - Returns: Newest episodes in chronological order.
+        static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "WHERE session_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw EpisodeStoreError.persistenceFailed("Could not prepare recent episode read")
+            }
+            defer { sqlite3_finalize(statement) }
+            bindText(statement, index: 1, value: sessionID.uuidString)
+            sqlite3_bind_int(statement, 2, sqliteLimit(limit))
+            var results: [Episode] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let episode = readEpisode(statement) {
+                    results.append(episode)
+                }
+            }
+            return Array(results.reversed())
         }
 
         /// Reads episodes at or before a cutoff, oldest first.
@@ -564,7 +756,8 @@ enum EpisodeStoreIO {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
-            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes WHERE timestamp <= ? ORDER BY timestamp ASC, rowid ASC;"
+            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "WHERE timestamp <= ? ORDER BY timestamp ASC, rowid ASC;"
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare cutoff read")
             }
@@ -582,20 +775,22 @@ enum EpisodeStoreIO {
         /// Reads the newest episodes across all sessions.
         /// - Parameters:
         ///   - dbPath: SQLite file path.
-        ///   - limit: Maximum rows.
+        ///   - limit: Maximum rows. Non-positive limits return an empty list.
         /// - Returns: Episodes newest first.
         static func recent(dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             var statement: OpaquePointer?
-            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
+            let sql = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare recent read")
             }
             defer { sqlite3_finalize(statement) }
-            sqlite3_bind_int(statement, 1, Int32(max(1, limit)))
+            sqlite3_bind_int(statement, 1, sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let episode = readEpisode(statement) {
@@ -606,12 +801,24 @@ enum EpisodeStoreIO {
         }
 
         /// Full-text search over episode content (FTS5 with LIKE fallback).
+        ///
+        /// Runs the FTS5 `porter`/BM25 query first; when it succeeds with
+        /// hits those are returned, and when it succeeds empty or fails
+        /// the search falls back to a case-insensitive `LIKE` scan (SQLite
+        /// `LIKE` is case-insensitive for ASCII, matching the JSON fallback;
+        /// `%`, `_`, and `\` escaped) so literal queries still recall.
+        /// The fallback matches the full phrase or any query token (`OR`)
+        /// to mirror `Tokenization.keywordScore` token-overlap recall used
+        /// by the JSON store. Patterns are capped to stay well under
+        /// `SQLITE_MAX_VARIABLE_NUMBER` so long queries degrade
+        /// gracefully instead of failing `prepare`.
         /// - Parameters:
         ///   - query: Search text.
         ///   - dbPath: SQLite file path.
-        ///   - limit: Maximum results.
+        ///   - limit: Maximum results. Non-positive limits return an empty list.
         /// - Returns: Matching episodes, best first.
         static func search(query: String, dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
@@ -620,12 +827,12 @@ enum EpisodeStoreIO {
             let sql = """
             SELECT e.id, e.session_id, e.role, e.content, e.timestamp, e.metadata
             FROM episodes_fts JOIN episodes e ON e.rowid = episodes_fts.rowid
-            WHERE episodes_fts MATCH ? ORDER BY rank LIMIT ?;
+            WHERE episodes_fts MATCH ? ORDER BY rank, e.rowid DESC LIMIT ?;
             """
             var statement: OpaquePointer?
             if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
                 bindText(statement, index: 1, value: ftsQuery)
-                sqlite3_bind_int(statement, 2, Int32(max(1, limit)))
+                sqlite3_bind_int(statement, 2, sqliteLimit(limit))
                 var results: [Episode] = []
                 var step = sqlite3_step(statement)
                 while step == SQLITE_ROW {
@@ -636,20 +843,39 @@ enum EpisodeStoreIO {
                 }
                 let succeeded = (step == SQLITE_DONE)
                 sqlite3_finalize(statement)
-                if succeeded {
+                if succeeded, !results.isEmpty {
                     return results
                 }
+                // Fall through to the LIKE scan when FTS succeeds empty
+                // or errors after prepare, so stemming gaps and token
+                // mismatches still recall literal matches.
             } else if statement != nil {
                 sqlite3_finalize(statement)
             }
+            let maxLikePatterns = 50
+            let tokens = Array(Tokenization.tokenize(query).sorted().prefix(maxLikePatterns - 1))
+            guard !tokens.isEmpty else { return [] }
+            var patterns = ["%\(likeEscaped(query))%"]
+            for token in tokens {
+                let pattern = "%\(likeEscaped(token))%"
+                let duplicated = patterns.contains { $0.caseInsensitiveCompare(pattern) == .orderedSame }
+                if !duplicated {
+                    patterns.append(pattern)
+                }
+                guard patterns.count < maxLikePatterns else { break }
+            }
+            let conditions = patterns.map { _ in "content LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
+            let likeSQL = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "WHERE (\(conditions)) ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
             var fallback: OpaquePointer?
-            let likeSQL = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes WHERE content LIKE ? ORDER BY timestamp DESC LIMIT ?;"
             guard sqlite3_prepare_v2(handle, likeSQL, -1, &fallback, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare episode search")
             }
             defer { sqlite3_finalize(fallback) }
-            bindText(fallback, index: 1, value: "%\(query)%")
-            sqlite3_bind_int(fallback, 2, Int32(max(1, limit)))
+            for (index, pattern) in patterns.enumerated() {
+                bindText(fallback, index: Int32(index + 1), value: pattern)
+            }
+            sqlite3_bind_int(fallback, Int32(patterns.count + 1), sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(fallback) == SQLITE_ROW {
                 if let episode = readEpisode(fallback) {
@@ -659,16 +885,38 @@ enum EpisodeStoreIO {
             return results
         }
 
-        /// Escapes user text into a safe FTS5 phrase query.
+        /// Escapes LIKE metacharacters so literal text never acts as a wildcard.
         /// - Parameter query: Raw search text.
-        /// - Returns: Quoted phrase with embedded quotes doubled.
+        /// - Returns: Text with `\`, `%`, and `_` backslash-escaped.
+        private static func likeEscaped(_ query: String) -> String {
+            var escaped = query.replacingOccurrences(of: "\\", with: "\\\\")
+            escaped = escaped.replacingOccurrences(of: "%", with: "\\%")
+            escaped = escaped.replacingOccurrences(of: "_", with: "\\_")
+            return escaped
+        }
+
+        /// Escapes user text into a safe FTS5 phrase query.
+        ///
+        /// Every whitespace-separated token becomes a quoted `OR` phrase
+        /// (embedded quotes doubled) with no token-count truncation so
+        /// long queries keep full recall.
+        /// - Parameter query: Raw search text.
+        /// - Returns: Quoted phrases joined by `OR`.
         private static func ftsEscaped(_ query: String) -> String {
             let tokens = query.split { $0.isWhitespace || $0.isNewline }.map { String($0) }.filter { !$0.isEmpty }
             guard !tokens.isEmpty else { return "\"\"" }
-            let phrases = tokens.prefix(10).map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
+            let phrases = tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
             return phrases.joined(separator: " OR ")
         }
+    }
 
+    // MARK: - SQLiteEpisodeStore Maintenance
+
+    /// Session lookups and maintenance for the SQLite store.
+    ///
+    /// Split into an extension so the main store body stays within
+    /// the `type_body_length` budget.
+    extension SQLiteEpisodeStore {
         /// All session identifiers with stored episodes.
         /// - Parameter dbPath: SQLite file path.
         /// - Returns: Session identifiers.
@@ -776,6 +1024,61 @@ enum EpisodeStoreIO {
             }
         }
 
+        /// Atomically replaces one session's old episodes with a summary episode.
+        ///
+        /// Deletes rows at or before `beforeOrAt` and inserts `replacement`
+        /// in one `BEGIN IMMEDIATE`/`COMMIT` transaction so a failure rolls
+        /// back both halves instead of losing history without a summary.
+        /// - Parameters:
+        ///   - sessionID: Owning session identifier.
+        ///   - beforeOrAt: Inclusive upper bound on `timestamp` for deleted rows.
+        ///   - replacement: Summary episode to insert.
+        ///   - dbPath: SQLite file path.
+        static func compact(sessionID: UUID, beforeOrAt: Date, replacement: Episode, dbPath: String) throws {
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                var deleteStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(
+                    handle,
+                    "DELETE FROM episodes WHERE session_id = ? AND timestamp <= ?;",
+                    -1,
+                    &deleteStatement,
+                    nil
+                ) == SQLITE_OK else {
+                    throw EpisodeStoreError.persistenceFailed("Could not prepare cutoff delete")
+                }
+                defer { sqlite3_finalize(deleteStatement) }
+                bindText(deleteStatement, index: 1, value: sessionID.uuidString)
+                sqlite3_bind_double(deleteStatement, 2, beforeOrAt.timeIntervalSince1970)
+                guard sqlite3_step(deleteStatement) == SQLITE_DONE else {
+                    throw EpisodeStoreError.persistenceFailed("Could not compact session \(sessionID)")
+                }
+                let insertSQL = "INSERT INTO episodes(id, session_id, role, content, timestamp, metadata) VALUES(?, ?, ?, ?, ?, ?) "
+                    + "ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id, role=excluded.role, "
+                    + "content=excluded.content, timestamp=excluded.timestamp, metadata=excluded.metadata;"
+                var insertStatement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, insertSQL, -1, &insertStatement, nil) == SQLITE_OK else {
+                    throw EpisodeStoreError.persistenceFailed("Could not prepare compaction insert")
+                }
+                defer { sqlite3_finalize(insertStatement) }
+                bindText(insertStatement, index: 1, value: replacement.id.uuidString)
+                bindText(insertStatement, index: 2, value: replacement.sessionID.uuidString)
+                bindText(insertStatement, index: 3, value: replacement.role.rawValue)
+                bindText(insertStatement, index: 4, value: replacement.content)
+                sqlite3_bind_double(insertStatement, 5, replacement.timestamp.timeIntervalSince1970)
+                bindText(insertStatement, index: 6, value: encodeMetadata(replacement.metadata))
+                guard sqlite3_step(insertStatement) == SQLITE_DONE else {
+                    throw EpisodeStoreError.persistenceFailed("Could not write compaction summary \(replacement.id)")
+                }
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+        }
+
         /// Deletes all episodes and rebuilds the empty index.
         /// - Parameter dbPath: SQLite file path.
         static func clear(dbPath: String) throws {
@@ -812,19 +1115,62 @@ enum EpisodeStoreIO {
         }
 
         /// Reads every stored episode, oldest first.
+        ///
+        /// Ties on `timestamp` break by file creation order (the JSON
+        /// equivalent of SQLite `rowid`), then by identifier, so rapid
+        /// turns sharing a timestamp hydrate deterministically and in
+        /// the same insertion order as the SQLite backend.
         /// - Parameter dbPath: Anchor path for the sidecar directory.
         /// - Returns: Stored episodes, empty when the directory is missing.
         private static func readAll(dbPath: String) throws -> [Episode] {
+            try readEntries(dbPath: dbPath).sorted {
+                if $0.episode.timestamp != $1.episode.timestamp {
+                    return $0.episode.timestamp < $1.episode.timestamp
+                }
+                switch ($0.created, $1.created) {
+                case let (lhs?, rhs?):
+                    if lhs != rhs {
+                        return lhs < rhs
+                    }
+                case (nil, _?):
+                    return true
+                case (_?, nil):
+                    return false
+                case (nil, nil):
+                    break
+                }
+                return $0.episode.id.uuidString < $1.episode.id.uuidString
+            }.map(\.episode)
+        }
+
+        /// Reads every stored episode with its file creation date.
+        ///
+        /// The creation date preserves insertion order for
+        /// same-timestamp turns, mirroring SQLite `rowid` ordering.
+        /// - Parameter dbPath: Anchor path for the sidecar directory.
+        /// - Returns: Episodes paired with file creation dates (nil when
+        ///   unavailable), empty when the directory is missing.
+        private static func readEntries(dbPath: String) throws -> [(episode: Episode, created: Date?)] {
             let directoryURL = directory(dbPath: dbPath)
             guard FileManager.default.fileExists(atPath: directoryURL.path) else { return [] }
             do {
-                let files = try FileManager.default.contentsOfDirectory(at: directoryURL, includingPropertiesForKeys: nil)
+                let files = try FileManager.default.contentsOfDirectory(
+                    at: directoryURL,
+                    includingPropertiesForKeys: [.creationDateKey],
+                    options: []
+                )
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .secondsSince1970
-                let episodes = try files
-                    .filter { $0.pathExtension == "json" }
-                    .map { try decoder.decode(Episode.self, from: Data(contentsOf: $0)) }
-                return episodes.sorted { $0.timestamp < $1.timestamp }
+                var entries: [(episode: Episode, created: Date?)] = []
+                entries.reserveCapacity(files.count)
+                for file in files where file.pathExtension == "json" {
+                    let episode = try decoder.decode(Episode.self, from: Data(contentsOf: file))
+                    let created = (try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate
+                    entries.append((episode: episode, created: created))
+                }
+                return entries
+            } catch let error as EpisodeStoreError {
+                throw error
             } catch {
                 throw EpisodeStoreError.persistenceFailed("Could not read episodes: \(error.localizedDescription)")
             }
@@ -858,15 +1204,37 @@ enum EpisodeStoreIO {
         }
 
         /// Reads one session's episodes, oldest first.
+        ///
+        /// When `limit` is set, returns the oldest `limit` rows. See
+        /// `recentEpisodes(sessionID:dbPath:limit:)` for the newest window.
         /// - Parameters:
         ///   - sessionID: Owning session identifier.
         ///   - dbPath: Anchor path for the sidecar directory.
-        ///   - limit: Maximum rows, nil for all.
+        ///   - limit: Maximum rows, nil for all. When set, the oldest rows
+        ///     are returned. Non-positive limits return an empty list.
         /// - Returns: Matching episodes.
         static func episodes(sessionID: UUID, dbPath: String, limit: Int?) throws -> [Episode] {
+            if let limit, limit <= 0 {
+                return []
+            }
             let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
             guard let limit else { return matching }
-            return Array(matching.prefix(max(1, limit)))
+            return Array(matching.prefix(limit))
+        }
+
+        /// Reads one session's newest episodes, oldest first.
+        ///
+        /// Bounded resume path returning the last `limit` turns in
+        /// chronological order.
+        /// - Parameters:
+        ///   - sessionID: Owning session identifier.
+        ///   - dbPath: Anchor path for the sidecar directory.
+        ///   - limit: Maximum rows. Non-positive limits return an empty list.
+        /// - Returns: Newest episodes in chronological order.
+        static func recentEpisodes(sessionID: UUID, dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
+            let matching = try readAll(dbPath: dbPath).filter { $0.sessionID == sessionID }
+            return Array(matching.suffix(limit))
         }
 
         /// Reads episodes at or before a cutoff, oldest first.
@@ -879,43 +1247,62 @@ enum EpisodeStoreIO {
         }
 
         /// Reads the newest episodes across all sessions.
+        ///
+        /// Ties on `timestamp` break by file creation order descending
+        /// (the JSON equivalent of SQLite `rowid DESC`), then by
+        /// identifier, mirroring the SQLite backend.
         /// - Parameters:
         ///   - dbPath: Anchor path for the sidecar directory.
-        ///   - limit: Maximum rows.
+        ///   - limit: Maximum rows. Non-positive limits return an empty list.
         /// - Returns: Episodes newest first.
         static func recent(dbPath: String, limit: Int) throws -> [Episode] {
-            let sorted = try readAll(dbPath: dbPath).sorted { $0.timestamp > $1.timestamp }
-            return Array(sorted.prefix(max(1, limit)))
+            guard limit > 0 else { return [] }
+            let sorted = try readEntries(dbPath: dbPath).sorted {
+                if $0.episode.timestamp != $1.episode.timestamp {
+                    return $0.episode.timestamp > $1.episode.timestamp
+                }
+                switch ($0.created, $1.created) {
+                case let (lhs?, rhs?):
+                    if lhs != rhs {
+                        return lhs > rhs
+                    }
+                case (nil, _?):
+                    return false
+                case (_?, nil):
+                    return true
+                case (nil, nil):
+                    break
+                }
+                return $0.episode.id.uuidString > $1.episode.id.uuidString
+            }.map(\.episode)
+            return Array(sorted.prefix(limit))
         }
 
         /// Token-overlap search over episode content.
         /// - Parameters:
         ///   - query: Search text.
         ///   - dbPath: Anchor path for the sidecar directory.
-        ///   - limit: Maximum results.
+        ///   - limit: Maximum results. Non-positive limits return an empty list.
         /// - Returns: Matching episodes, best first.
         static func search(query: String, dbPath: String, limit: Int) throws -> [Episode] {
+            guard limit > 0 else { return [] }
             let all = try readAll(dbPath: dbPath)
-            let queryTokens = tokenize(query)
+            let queryTokens = Tokenization.tokenize(query)
             guard !queryTokens.isEmpty else { return [] }
             let scored = all.compactMap { episode -> (Episode, Int)? in
-                let contentTokens = Set(tokenize(episode.content))
-                let overlap = queryTokens.intersection(contentTokens).count
-                let substring = episode.content.range(of: query, options: .caseInsensitive) != nil
-                guard overlap > 0 || substring else { return nil }
-                return (episode, overlap * 2 + (substring ? 1 : 0))
+                let contentTokens = Tokenization.tokenize(episode.content)
+                guard let raw = Tokenization.keywordScore(
+                    queryTokens: queryTokens,
+                    contentTokens: contentTokens,
+                    content: episode.content,
+                    query: query
+                ) else { return nil }
+                return (episode, raw)
             }
             return scored
                 .sorted { $0.1 != $1.1 ? $0.1 > $1.1 : $0.0.timestamp > $1.0.timestamp }
-                .prefix(max(1, limit))
+                .prefix(limit)
                 .map(\.0)
-        }
-
-        /// Lowercased alphanumeric tokens for overlap scoring.
-        /// - Parameter text: Text to tokenize.
-        /// - Returns: Token set.
-        private static func tokenize(_ text: String) -> Set<String> {
-            Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }.map { String($0) }.filter { !$0.isEmpty })
         }
 
         /// All session identifiers with stored episodes.
@@ -964,6 +1351,28 @@ enum EpisodeStoreIO {
         static func deleteSession(beforeOrAt: Date, sessionID: UUID, dbPath: String) throws {
             for episode in try readAll(dbPath: dbPath)
                 where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt
+            {
+                try delete(id: episode.id, dbPath: dbPath)
+            }
+        }
+
+        /// Replaces one session's old episodes with a summary episode.
+        ///
+        /// Crash-safe for the file backend: writes the replacement first,
+        /// then deletes the old rows, so a crash between the halves never
+        /// loses both (at worst both remain). Unlike the SQLite backend,
+        /// the two halves are separate file operations, not one transaction.
+        /// The replacement is excluded by identifier so it survives even
+        /// when its timestamp falls at or before `beforeOrAt`.
+        /// - Parameters:
+        ///   - sessionID: Owning session identifier.
+        ///   - beforeOrAt: Inclusive upper bound on `timestamp` for deleted rows.
+        ///   - replacement: Summary episode to insert.
+        ///   - dbPath: Anchor path for the sidecar directory.
+        static func compact(sessionID: UUID, beforeOrAt: Date, replacement: Episode, dbPath: String) throws {
+            try write(episodes: [replacement], dbPath: dbPath, merge: true)
+            for episode in try readAll(dbPath: dbPath)
+                where episode.sessionID == sessionID && episode.timestamp <= beforeOrAt && episode.id != replacement.id
             {
                 try delete(id: episode.id, dbPath: dbPath)
             }

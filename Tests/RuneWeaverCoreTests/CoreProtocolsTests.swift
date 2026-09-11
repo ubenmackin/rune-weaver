@@ -100,4 +100,72 @@ struct CoreProtocolsTests {
             #expect(field == "llm.providers.custom.api_style")
         }
     }
+
+    @Test
+    func `Episode write then recall round-trips through file store`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let engine = MemoryEngine(
+            episodesDBPath: base.appendingPathComponent("episodes.db").path,
+            vectorDBPath: base.appendingPathComponent("vectors").path,
+            profilePath: base.appendingPathComponent("profile.json").path
+        )
+        let sessionID = UUID()
+        try await engine.storeEpisodic(
+            content: "The lighthouse keeper collects brass compasses",
+            sessionID: sessionID
+        )
+        let results = try await engine.recall(query: "lighthouse compasses", limit: 5)
+        #expect(results.contains { $0.content.contains("lighthouse") && $0.source == .episodic })
+    }
+
+    @Test
+    func `Recall without embedding returns episodic and profile content`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let engine = MemoryEngine(
+            episodesDBPath: base.appendingPathComponent("episodes.db").path,
+            vectorDBPath: base.appendingPathComponent("vectors").path,
+            profilePath: base.appendingPathComponent("profile.json").path
+        )
+        try await engine.storeEpisodic(
+            content: "Discussed espresso brewing with the Chemex dripper",
+            sessionID: UUID()
+        )
+        try await engine.storeProfileFact(content: "I love espresso brewed with Chemex", source: "chat")
+        let results = try await engine.recall(query: "espresso Chemex", limit: 5)
+        #expect(results.contains { $0.source == .episodic && $0.content.contains("Chemex") })
+        #expect(results.contains { $0.source == .profile && $0.content.contains("espresso") })
+        #expect(results == results.sorted { $0.score > $1.score })
+    }
+}
+
+@Suite("Chat Memory Helpers")
+struct ChatMemoryHelperTests {
+    @Test
+    func `Remember phrases parse all forms`() {
+        #expect(MemoryEngine.rememberFactText(from: "remember my dog is named Biscuit") == "my dog is named Biscuit")
+        #expect(MemoryEngine.rememberFactText(from: "remember that my dog is named Biscuit") == "my dog is named Biscuit")
+        #expect(MemoryEngine.rememberFactText(from: "/remember my dog is named Biscuit") == "my dog is named Biscuit")
+        #expect(MemoryEngine.rememberFactText(from: "Remember That the gate code is 1234") == "the gate code is 1234")
+        #expect(MemoryEngine.rememberFactText(from: "hello world") == nil)
+    }
+
+    @Test
+    func `Chat helpers isolate store failures`() async {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: base) }
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let blocker = base.appendingPathComponent("blocker")
+        _ = FileManager.default.createFile(atPath: blocker.path, contents: nil)
+        let engine = MemoryEngine(
+            episodesDBPath: blocker.appendingPathComponent("episodes.db").path,
+            vectorDBPath: blocker.appendingPathComponent("vectors").path,
+            profilePath: base.appendingPathComponent("profile.json").path
+        )
+        let chatStored = await engine.storeChatTurn(content: "hello", sessionID: UUID())
+        #expect(chatStored == false)
+        let remembered = await engine.storeRememberedFact(content: "I love testing")
+        #expect(remembered == false)
+    }
 }

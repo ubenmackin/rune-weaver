@@ -57,7 +57,7 @@ enum TOMLParser {
             in: .whitespacesAndNewlines
         )
         let path = try tablePath(pathText, line: line)
-        return appendArrayNode(at: path, in: root)
+        return try appendArrayNode(at: path, in: root, line: line)
     }
 
     private static func parseTableHeader(_ stripped: String, line: Int, root: TOMLNode) throws -> TOMLNode {
@@ -70,7 +70,7 @@ enum TOMLParser {
             in: .whitespacesAndNewlines
         )
         let path = try tablePath(pathText, line: line)
-        return tableNode(at: path, in: root)
+        return try tableNode(at: path, in: root, line: line)
     }
 
     private static func parseKeyValue(_ stripped: String, line: Int, into node: TOMLNode) throws {
@@ -91,26 +91,50 @@ enum TOMLParser {
         return parts.map { String($0) }
     }
 
-    private static func tableNode(at path: [String], in root: TOMLNode) -> TOMLNode {
+    /// Resolves (creating when absent) the table node at `path`.
+    /// - Parameters:
+    ///   - path: Dotted table path segments. Must be non-empty.
+    ///   - root: Document root.
+    ///   - line: 1-based line number for error reporting.
+    /// - Returns: Table node for the path.
+    /// - Throws: ``ConfigError/parseError(line:message:)`` when a cached
+    ///   entry is unexpectedly missing.
+    private static func tableNode(at path: [String], in root: TOMLNode, line: Int) throws -> TOMLNode {
         var node = root
         for part in path {
             if node.tables[part] == nil {
                 node.tables[part] = TOMLNode()
             }
-            node = node.tables[part]!
+            guard let next = node.tables[part] else {
+                throw ConfigError.parseError(line: line, message: "missing table '\(part)'")
+            }
+            node = next
         }
         return node
     }
 
-    private static func appendArrayNode(at path: [String], in root: TOMLNode) -> TOMLNode {
+    /// Appends a new entry for the array-of-tables at `path`.
+    /// - Parameters:
+    ///   - path: Dotted array path segments. Must be non-empty.
+    ///   - root: Document root.
+    ///   - line: 1-based line number for error reporting.
+    /// - Returns: Fresh entry node.
+    /// - Throws: ``ConfigError/parseError(line:message:)`` when the path
+    ///   is empty or a cached entry is unexpectedly missing.
+    private static func appendArrayNode(at path: [String], in root: TOMLNode, line: Int) throws -> TOMLNode {
         var node = root
         for part in path.dropLast() {
             if node.tables[part] == nil {
                 node.tables[part] = TOMLNode()
             }
-            node = node.tables[part]!
+            guard let next = node.tables[part] else {
+                throw ConfigError.parseError(line: line, message: "missing table '\(part)'")
+            }
+            node = next
         }
-        let leaf = path.last!
+        guard let leaf = path.last else {
+            throw ConfigError.parseError(line: line, message: "malformed array-of-tables header")
+        }
         let entry = TOMLNode()
         node.arrays[leaf, default: []].append(entry)
         return entry

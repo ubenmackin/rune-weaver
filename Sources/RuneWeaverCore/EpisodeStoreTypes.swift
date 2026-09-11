@@ -123,9 +123,100 @@ public func defaultEpisodeSummarizer(_ episodes: [Episode]) -> String {
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         return "[\(episode.role.rawValue)] \(trimmed)"
     }
-    let joined = parts.joined(separator: "; ")
-    if joined.count > 4000 {
-        return String(joined.prefix(4000)) + "…"
-    }
-    return joined
+    return extractiveSummary(lines: parts, truncationLength: 4000)
 }
+
+/// Builds an extractive summary from preformatted lines.
+///
+/// Joins `lines` with `"; "` and truncates to exactly
+/// `truncationLength` characters inclusive of the trailing ellipsis
+/// so callers share one truncation policy. Text at or under the limit
+/// returns unchanged with no ellipsis.
+/// Used by both the episode and session summarizers.
+/// - Parameters:
+///   - lines: Preformatted `"[role] first line"` entries.
+///   - truncationLength: Maximum characters in the returned text,
+///     including the ellipsis when truncation applies. Non-positive
+///     limits return an empty string.
+/// - Returns: Joined text, truncated to `truncationLength` characters
+///   inclusive of the ellipsis when over budget.
+func extractiveSummary(lines: [String], truncationLength: Int) -> String {
+    guard truncationLength > 0 else { return "" }
+    let joined = lines.joined(separator: "; ")
+    guard joined.count > truncationLength else { return joined }
+    if truncationLength == 1 {
+        return "…"
+    }
+    return String(joined.prefix(truncationLength - 1)) + "…"
+}
+
+#if canImport(SQLite3)
+    import SQLite3
+
+    /// Shared SQLite primitives for the episode and session stores.
+    ///
+    /// Centralizes directory creation, handle opening, statement
+    /// execution, and text binding so both stores share one
+    /// `sqlite3_*` policy. Callers map failures to their domain
+    /// errors via the `unavailable`/`failure` closures.
+    enum SQLiteHelpers {
+        /// Opens a database handle, creating parent directories.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - unavailable: Maps an open failure to the caller's domain error.
+        /// - Returns: Open database handle. Caller must close it.
+        static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let directory = (expanded as NSString).deletingLastPathComponent
+            if !directory.isEmpty {
+                try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+            }
+            var handle: OpaquePointer?
+            let status = expanded.withCString { sqlite3_open($0, &handle) }
+            guard status == SQLITE_OK, handle != nil else {
+                if let handle {
+                    sqlite3_close(handle)
+                }
+                throw unavailable("Could not open SQLite store at \(dbPath)")
+            }
+            return handle
+        }
+
+        /// Executes a multi-statement SQL string.
+        /// - Parameters:
+        ///   - handle: Open database handle.
+        ///   - sql: SQL to execute.
+        ///   - failure: Maps an execution failure to the caller's domain error.
+        static func exec(handle: OpaquePointer?, sql: String, failure: (String) -> some Error) throws {
+            var errorMessage: UnsafeMutablePointer<CChar>?
+            let status = sql.withCString { sqlite3_exec(handle, $0, nil, nil, &errorMessage) }
+            defer { sqlite3_free(errorMessage) }
+            guard status == SQLITE_OK else {
+                let detail = errorMessage.map { String(cString: $0) } ?? "unknown error"
+                throw failure(detail)
+            }
+        }
+
+        /// Binds optional text, mapping nil to NULL.
+        /// - Parameters:
+        ///   - statement: Prepared statement.
+        ///   - index: One-based bind index.
+        ///   - value: Text value, or nil for NULL.
+        static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
+            if let value {
+                _ = value.withCString { sqlite3_bind_text(statement, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+            } else {
+                sqlite3_bind_null(statement, index)
+            }
+        }
+
+        /// Column-text helper returning nil for NULL columns.
+        /// - Parameters:
+        ///   - statement: Stepped statement positioned on a row.
+        ///   - index: Zero-based column index.
+        /// - Returns: Column text, or nil when NULL.
+        static func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
+            sqlite3_column_text(statement, index).map { String(cString: $0) }
+        }
+    }
+#endif

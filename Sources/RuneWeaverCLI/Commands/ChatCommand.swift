@@ -6,26 +6,192 @@ import RuneWeaverLLM
 /// Cooperative SIGINT state for the chat REPL.
 ///
 /// Tripped by the `SIGINT` dispatch source and polled by the REPL loop.
-/// Lock-guarded (instead of a signal-handler-mutated global) so it is
-/// data-race free under Swift 6 concurrency.
-private final class ChatInterruptState: @unchecked Sendable {
-    /// Whether SIGINT has been delivered.
-    private var tripped = false
-    /// Guards `tripped` across the signal queue and the REPL task.
-    private let lock = NSLock()
+/// State lives in the shared `CLILockedValue` box so every access runs
+/// inside `withLock`, keeping it data-race free under Swift 6
+/// concurrency without manual lock handling.
+private final class ChatInterruptState: Sendable {
+    /// Lock-guarded delivery flag.
+    private let flag = CLILockedValue(false)
 
     /// Records SIGINT delivery.
     func trip() {
-        lock.lock()
-        tripped = true
-        lock.unlock()
+        flag.withLock { $0 = true }
     }
 
     /// Whether SIGINT has been delivered.
     var isTripped: Bool {
+        flag.withLock { $0 }
+    }
+}
+
+/// Centralized SIGINT installation shared by chat REPL sessions.
+///
+/// Installs the ignore plus dispatch-source handler once and restores
+/// the prior handler when the last session exits, so concurrent REPLs
+/// never race on the global signal disposition. Every registered state
+/// is tripped on SIGINT; sessions unregister on exit.
+/// - Note: All mutable state below is guarded by `lock`, and every
+///   critical section uses `defer`-guarded unlock, which justifies
+///   `@unchecked Sendable`: no mutable state is ever accessed without
+///   holding the lock.
+private final class ChatSignalManager: @unchecked Sendable {
+    /// Shared installation for the process.
+    static let shared = ChatSignalManager()
+
+    /// Guards installation state below.
+    private let lock = NSLock()
+    /// Prior handler to restore when the last session exits.
+    private var previousHandler: (@convention(c) (Int32) -> Void)?
+    /// Whether a prior handler is stored.
+    private var hasPreviousHandler = false
+    /// Active dispatch source while installed.
+    private var source: DispatchSourceSignal?
+    /// States tripped on SIGINT.
+    private var states: [ChatInterruptState] = []
+    /// Serial queue owning the signal source.
+    private let queue = DispatchQueue(label: "com.runeweaver.chat-sigint")
+
+    /// Snapshot captured under lock for deferred signal restoration.
+    ///
+    /// Replaces a three-member tuple so the uninstall path stays within
+    /// the `large_tuple` lint budget without splitting the locked
+    /// critical section.
+    private struct SignalRestorePlan {
+        /// Whether the source was torn down and the prior handler needs restoring.
+        let shouldRestore: Bool
+        /// Prior handler captured at install time.
+        let previous: (@convention(c) (Int32) -> Void)?
+        /// Whether a prior handler was captured.
+        let hadPrevious: Bool
+    }
+
+    /// Registers a REPL state, installing the handler on first use.
+    /// - Parameter state: REPL interrupt flag to trip on SIGINT.
+    func install(_ state: ChatInterruptState) {
+        let shouldInstall: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            states.append(state)
+            return source == nil
+        }()
+        guard shouldInstall else { return }
         lock.lock()
         defer { lock.unlock() }
-        return tripped
+        // Re-check under the lock so two concurrent installs only install once.
+        guard source == nil else { return }
+        previousHandler = signal(SIGINT, SIG_IGN)
+        hasPreviousHandler = true
+        let created = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
+        created.setEventHandler { [weak self] in self?.tripAll() }
+        created.resume()
+        source = created
+    }
+
+    /// Unregisters a REPL state, restoring the prior handler when last exits.
+    /// - Parameter state: REPL interrupt flag to remove.
+    func uninstall(_ state: ChatInterruptState) {
+        let plan: SignalRestorePlan = {
+            lock.lock()
+            defer { lock.unlock() }
+            states.removeAll { $0 === state }
+            let shouldRestore = states.isEmpty && source != nil
+            let previous = previousHandler
+            let hadPrevious = hasPreviousHandler
+            if shouldRestore {
+                source?.cancel()
+                source = nil
+                previousHandler = nil
+                hasPreviousHandler = false
+            }
+            return SignalRestorePlan(shouldRestore: shouldRestore, previous: previous, hadPrevious: hadPrevious)
+        }()
+        if plan.shouldRestore, plan.hadPrevious {
+            signal(SIGINT, plan.previous ?? SIG_DFL)
+        }
+    }
+
+    /// Trips every registered REPL state.
+    private func tripAll() {
+        let snapshot: [ChatInterruptState] = {
+            lock.lock()
+            defer { lock.unlock() }
+            return states
+        }()
+        for state in snapshot {
+            state.trip()
+        }
+    }
+}
+
+/// Exactly-once resume state for a blocking standard-input read.
+///
+/// Blocking `readLine` cannot be cancelled mid-read, so both the
+/// background completion and task cancellation race to resume. The
+/// locked flag guarantees the continuation resumes exactly once: a
+/// cancelled REPL unblocks promptly with nil while the late background
+/// read is ignored, and a completed read wins when it finishes first.
+/// All state is guarded by `lock` with `defer`-guarded unlock.
+private final class StdinReadState: @unchecked Sendable {
+    /// Guards resume state below.
+    private let lock = NSLock()
+    /// Whether the continuation has resumed.
+    private var didResume = false
+    /// Pending continuation awaiting the background read.
+    private var continuation: CheckedContinuation<String?, Never>?
+
+    /// Stores the continuation awaiting the background read.
+    ///
+    /// When cancellation already won the race, resumes immediately with
+    /// nil so the waiter never hangs on a stored-but-never-resumed
+    /// continuation.
+    /// - Parameter continuation: Continuation to resume exactly once.
+    func set(_ continuation: CheckedContinuation<String?, Never>) {
+        let alreadyResumed: Bool = {
+            lock.lock()
+            defer { lock.unlock() }
+            if didResume {
+                return true
+            }
+            self.continuation = continuation
+            return false
+        }()
+        if alreadyResumed {
+            continuation.resume(returning: nil)
+        }
+    }
+
+    /// Resumes exactly once, ignoring late racers.
+    /// - Parameter value: Line without the newline, or nil on EOF or cancellation.
+    func resume(returning value: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !didResume else { return }
+        didResume = true
+        continuation?.resume(returning: value)
+        continuation = nil
+    }
+}
+
+/// Reads one line from standard input without blocking the cooperative pool.
+///
+/// Dispatches blocking `readLine` to a background queue and suspends
+/// until input arrives, so async REPL and approval paths never block
+/// the executor. Task cancellation resumes with nil exactly once via
+/// `StdinReadState` so a cancelled REPL unblocks promptly while the
+/// late background read is ignored; the background completion path is
+/// the only other resumer.
+/// - Returns: The line without the newline, or nil on EOF or cancellation.
+private func readStdinLine() async -> String? {
+    let state = StdinReadState()
+    return await withTaskCancellationHandler {
+        await withCheckedContinuation { continuation in
+            state.set(continuation)
+            DispatchQueue.global(qos: .userInitiated).async {
+                state.resume(returning: readLine(strippingNewline: true))
+            }
+        }
+    } onCancel: {
+        state.resume(returning: nil)
     }
 }
 
@@ -84,7 +250,7 @@ struct ChatCommand: AsyncParsableCommand {
     @Option(name: .long, help: "System prompt prepended to the conversation.")
     var systemPrompt: String?
 
-    /// Maximum tool-call rounds per assistant turn.
+    /// Maximum tool-call rounds per assistant turn, plus one final synthesis turn.
     @Option(name: .long, help: "Maximum tool-call rounds per assistant turn.")
     var maxToolIterations: Int = 8
 
@@ -111,6 +277,7 @@ struct ChatCommand: AsyncParsableCommand {
         }
 
         let sessionID = try resolveSessionID(session)
+        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
         var active = selected
         // Tag cloud requests with the chat session when the backend supports it.
         // Local providers never send the session header, so they are left untouched.
@@ -118,8 +285,30 @@ struct ChatCommand: AsyncParsableCommand {
             sessioned.sessionID = sessionID.uuidString
             active = sessioned
         }
-        let conversations = ConversationManager()
+        // Working memory (ConversationManager sessions/messages tables) is the
+        // live source of truth; episodic storage (MemoryEngine episodes tables)
+        // in the same file is the durable mirror. Hydration flows one way,
+        // episodic into working, only for fresh sessions so `/clear` (which
+        // clears both stores) never resurrects cleared history on resume.
+        let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
+        do {
+            try await conversations.loadAll()
+        } catch {
+            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
+        }
+        let hadPersistedSession = await conversations.session(id: sessionID) != nil
         await conversations.ensureSession(id: sessionID)
+        if await conversations.messageCount(for: sessionID) == 0, !hadPersistedSession {
+            do {
+                let limit = await conversations.maxMessages
+                let episodes = try await memoryEngine.recentEpisodes(for: sessionID, limit: limit)
+                if !episodes.isEmpty {
+                    await conversations.setHistory(episodes.map { $0.asMessage() }, for: sessionID)
+                }
+            } catch {
+                cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
+            }
+        }
         let permissionGate = PermissionGate()
         let toolBus = await CLIShared.makeToolBus(permissionGate: permissionGate)
         await toolBus.setApprovalHandler { tool, call in
@@ -127,7 +316,7 @@ struct ChatCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
             print(TerminalStyle.tool("  Allow? "), terminator: "")
             fflush(stdout)
-            let answer = readLine(strippingNewline: true)
+            let answer = await readStdinLine()
             guard let duration = chatTrustDuration(for: answer) else {
                 return false
             }
@@ -140,13 +329,17 @@ struct ChatCommand: AsyncParsableCommand {
 
         print(TerminalStyle.dim("Connected to \(active.name) (\(active.modelInfo.name)). Session \(sessionID.uuidString)."))
         print(TerminalStyle.dim("Type /help for commands, /exit to quit. Ctrl+C shuts down gracefully."))
-        await runChatREPL(
-            provider: active,
+        let context = ChatTurnContext(
             conversations: conversations,
             toolBus: toolBus,
             sessionID: sessionID,
             systemPrompt: systemPrompt,
-            maxToolIterations: max(1, maxToolIterations)
+            maxToolIterations: max(1, maxToolIterations),
+            memoryEngine: memoryEngine
+        )
+        await runChatREPL(
+            provider: active,
+            context: context
         )
     }
 
@@ -163,41 +356,51 @@ struct ChatCommand: AsyncParsableCommand {
     }
 }
 
+/// Shared dependencies for one chat REPL session.
+///
+/// Bundles the REPL collaborators so turn helpers stay within the
+/// parameter budget while keeping call sites readable.
+private struct ChatTurnContext: Sendable {
+    /// Session and history owner.
+    let conversations: ConversationManager
+    /// Tool registry consulted for model-requested calls.
+    let toolBus: ToolBus
+    /// Session identifier for this REPL.
+    let sessionID: UUID
+    /// Developer instructions prepended to every turn.
+    let systemPrompt: String?
+    /// Maximum tool-call rounds per assistant turn, plus one final synthesis turn.
+    let maxToolIterations: Int
+    /// Shared engine receiving one episode per turn.
+    let memoryEngine: MemoryEngine
+}
+
 /// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT.
 ///
-/// SIGINT is observed via a `DispatchSourceSignal` (block-based, no C
-/// handler globals) tripping a lock-guarded flag polled by the loop,
-/// which is data-race free under Swift 6 concurrency.
+/// SIGINT is observed via the shared `ChatSignalManager` (block-based
+/// dispatch source, no C handler globals) tripping a lock-boxed flag
+/// polled by the loop, which is data-race free under Swift 6
+/// concurrency. Installation is reference-counted and restores the
+/// prior handler when the last session exits. Standard-input reads
+/// suspend on a background queue via `readStdinLine()` so the
+/// cooperative pool is never blocked.
 /// - Parameters:
 ///   - provider: Active LLM backend serving completions.
-///   - conversations: Session and history owner.
-///   - toolBus: Tool registry consulted for model-requested calls.
-///   - sessionID: Session identifier for this REPL.
-///   - systemPrompt: Developer instructions prepended to every turn.
-///   - maxToolIterations: Maximum tool-call rounds per assistant turn.
+///   - context: Shared REPL dependencies for this session.
 private func runChatREPL(
     provider: any LLMProvider,
-    conversations: ConversationManager,
-    toolBus: ToolBus,
-    sessionID: UUID,
-    systemPrompt: String?,
-    maxToolIterations: Int
+    context: ChatTurnContext
 ) async {
     let interrupt = ChatInterruptState()
-    signal(SIGINT, SIG_IGN)
-    let signalQueue = DispatchQueue(label: "com.runeweaver.chat-sigint")
-    let signalSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
-    signalSource.setEventHandler { interrupt.trip() }
-    signalSource.resume()
+    ChatSignalManager.shared.install(interrupt)
     defer {
-        signalSource.cancel()
-        signal(SIGINT, SIG_DFL)
+        ChatSignalManager.shared.uninstall(interrupt)
     }
 
     while !interrupt.isTripped {
         print(TerminalStyle.user("you> "), terminator: "")
         fflush(stdout)
-        guard let line = readLine(strippingNewline: true) else {
+        guard let line = await readStdinLine() else {
             break
         }
         if interrupt.isTripped {
@@ -207,23 +410,118 @@ private func runChatREPL(
         if input.isEmpty {
             continue
         }
-        if let action = await handleSlashCommand(input, conversations: conversations, sessionID: sessionID) {
+        if let action = await handleSlashCommand(
+            input,
+            conversations: context.conversations,
+            sessionID: context.sessionID,
+            memoryEngine: context.memoryEngine
+        ) {
             if action == .quit {
                 break
             }
             continue
         }
-        await conversations.append(Message(role: .user, content: input), to: sessionID)
+        if let fact = MemoryEngine.rememberFactText(from: input) {
+            await appendUserAndHandleRemember(
+                input: input,
+                fact: fact,
+                conversations: context.conversations,
+                sessionID: context.sessionID,
+                engine: context.memoryEngine
+            )
+            continue
+        }
+        await context.conversations.append(Message(role: .user, content: input), to: context.sessionID)
+        await context.memoryEngine.mirrorTurn(
+            content: input,
+            sessionID: context.sessionID,
+            role: .user,
+            failurePolicy: .report,
+            onFailure: chatMirrorFailureHandler
+        )
         await runAssistantTurn(
             provider: provider,
-            conversations: conversations,
-            toolBus: toolBus,
-            sessionID: sessionID,
-            systemPrompt: systemPrompt,
-            maxToolIterations: maxToolIterations
+            context: context
         )
     }
-    print(TerminalStyle.dim("Chat session closed. Session \(sessionID.uuidString) ended."))
+    print(TerminalStyle.dim("Chat session closed. Session \(context.sessionID.uuidString) ended."))
+}
+
+/// Reports episodic mirror failures as a dim warning on standard error.
+///
+/// Single handler passed with `.report` to the shared
+/// `MemoryEngine.mirrorTurn(_:...)` helper so the failure message stays
+/// single-sourced in `RuneWeaverCore`.
+private let chatMirrorFailureHandler: @Sendable (String) -> Void = { message in
+    cliPrintError(TerminalStyle.dim(message))
+}
+
+/// Stores an explicit remember request and acknowledges it.
+///
+/// Shares acknowledgement text with the orchestrator via
+/// `MemoryEngine.rememberAcknowledgementText(for:stored:)` so every caller
+/// stores the same assistant turn. The acknowledgement is recorded in
+/// working memory and mirrored to episodic memory like any other turn;
+/// empty or punctuation-only facts print usage after the turn is mirrored,
+/// and storage failures print a dim note without touching the LLM path.
+/// - Parameters:
+///   - fact: Stripped fact text.
+///   - engine: Shared memory engine for the session.
+///   - conversations: Session and history owner.
+///   - sessionID: Current session identifier.
+private func chatStoreRememberedFact(
+    _ fact: String,
+    engine: MemoryEngine,
+    conversations: ConversationManager,
+    sessionID: UUID
+) async {
+    let storable = MemoryEngine.isStorableFact(fact)
+    let stored = storable ? await engine.storeRememberedFact(content: fact, source: "chat") : false
+    let acknowledgement = MemoryEngine.rememberAcknowledgementText(for: fact, stored: stored)
+    await conversations.append(Message(role: .assistant, content: acknowledgement), to: sessionID)
+    await engine.mirrorTurn(
+        content: acknowledgement,
+        sessionID: sessionID,
+        role: .assistant,
+        failurePolicy: .report,
+        onFailure: chatMirrorFailureHandler
+    )
+    if stored || !storable {
+        print(TerminalStyle.dim(acknowledgement))
+    } else {
+        cliPrintError(TerminalStyle.dim(acknowledgement))
+    }
+}
+
+/// Appends a remember request to working memory and stores the fact.
+///
+/// Shared by the REPL and slash-command paths so `remember` and
+/// `/remember` behave identically. Every turn is recorded in working
+/// and episodic memory, including the acknowledgement assistant turn;
+/// empty or punctuation-only requests still print usage after both turns
+/// are mirrored.
+/// - Parameters:
+///   - input: Raw user input preserved as the working-memory turn.
+///   - fact: Stripped fact text from the remember parser.
+///   - conversations: Session and history owner.
+///   - sessionID: Current session identifier.
+///   - engine: Shared engine for episodic and fact storage.
+private func appendUserAndHandleRemember(
+    input: String,
+    fact: String,
+    conversations: ConversationManager,
+    sessionID: UUID,
+    engine: MemoryEngine
+) async {
+    await conversations.append(Message(role: .user, content: input), to: sessionID)
+    await engine.mirrorTurn(
+        content: input,
+        sessionID: sessionID,
+        role: .user,
+        failurePolicy: .report,
+        onFailure: chatMirrorFailureHandler
+    )
+    await chatStoreRememberedFact(fact, engine: engine, conversations: conversations, sessionID: sessionID)
 }
 
 /// REPL slash-command outcome.
@@ -239,21 +537,39 @@ private enum REPLAction {
 ///   - input: Raw trimmed user input.
 ///   - conversations: Session and history owner.
 ///   - sessionID: Current session identifier.
+///   - memoryEngine: Shared engine for `/remember` captures.
 /// - Returns: The loop action, or nil when `input` is not a command.
 private func handleSlashCommand(
     _ input: String,
     conversations: ConversationManager,
-    sessionID: UUID
+    sessionID: UUID,
+    memoryEngine: MemoryEngine
 ) async -> REPLAction? {
+    if input.hasPrefix("/"), let fact = MemoryEngine.rememberFactText(from: input) {
+        await appendUserAndHandleRemember(
+            input: input,
+            fact: fact,
+            conversations: conversations,
+            sessionID: sessionID,
+            engine: memoryEngine
+        )
+        return .keepGoing
+    }
     guard input.hasPrefix("/") else { return nil }
-    switch input.lowercased() {
+    let lower = input.lowercased()
+    switch lower {
     case "/exit", "/quit":
         return .quit
     case "/help":
-        print(TerminalStyle.dim("Commands: /help, /clear, /session, /exit"))
+        print(TerminalStyle.dim("Commands: /help, /clear, /session, /remember <fact>, /exit"))
         return .keepGoing
     case "/clear":
         await conversations.clear(sessionID: sessionID)
+        do {
+            try await memoryEngine.deleteSession(sessionID)
+        } catch {
+            cliPrintError(TerminalStyle.dim("Could not clear episodic history; continuing."))
+        }
         print(TerminalStyle.dim("Conversation cleared."))
         return .keepGoing
     case "/session":
@@ -265,57 +581,23 @@ private func handleSlashCommand(
     }
 }
 
-/// Builds the working history with the system prompt first.
-///
-/// Shared dedup with the orchestrator via `Array.withSystemPrompt(_:)`:
-/// an identical leading system message is kept, a stale one is replaced,
-/// and prompts are never stacked.
-/// - Parameters:
-///   - conversations: Session and history owner.
-///   - sessionID: Session identifier.
-///   - systemPrompt: Developer instructions, if any.
-/// - Returns: Messages for the next LLM call.
-private func chatWorkingHistory(
-    conversations: ConversationManager,
-    sessionID: UUID,
-    systemPrompt: String?
-) async -> [Message] {
-    let history = await conversations.history(for: sessionID)
-    return history.withSystemPrompt(systemPrompt)
-}
-
 /// Runs one assistant turn, dispatching to the chunk or text path.
 /// - Parameters:
 ///   - provider: Active LLM backend.
-///   - conversations: Session and history owner.
-///   - toolBus: Tool registry for model-requested calls.
-///   - sessionID: Session identifier.
-///   - systemPrompt: Developer instructions, if any.
-///   - maxToolIterations: Maximum tool-call rounds.
+///   - context: Shared REPL dependencies for this session.
 private func runAssistantTurn(
     provider: any LLMProvider,
-    conversations: ConversationManager,
-    toolBus: ToolBus,
-    sessionID: UUID,
-    systemPrompt: String?,
-    maxToolIterations: Int
+    context: ChatTurnContext
 ) async {
     if let chunked = provider as? any ChunkStreamingProvider {
         await runChunkedTurn(
             provider: chunked,
-            conversations: conversations,
-            toolBus: toolBus,
-            sessionID: sessionID,
-            systemPrompt: systemPrompt,
-            maxToolIterations: maxToolIterations
+            context: context
         )
     } else {
         await runTextTurn(
             provider: provider,
-            conversations: conversations,
-            toolBus: toolBus,
-            sessionID: sessionID,
-            systemPrompt: systemPrompt
+            context: context
         )
     }
 }
@@ -324,31 +606,31 @@ private func runAssistantTurn(
 ///
 /// Text deltas print as they arrive (typewriter effect); model-requested
 /// tool calls print in yellow, execute via the bus, and show their results
-/// inline before the next LLM round.
+/// inline before the next LLM round. Up to `maxToolIterations` tool rounds
+/// run, followed by one final synthesis turn so the last tool results are
+/// always answered; when the synthesis turn still requests tools the loop
+/// stops with an exceeded notice without executing the extra calls. The
+/// assistant turn is always recorded, using the shared
+/// `OrchestratorToolLoop.assistantNoteContent(text:calls:)` policy
+/// (truncated arguments, name, and call identifier) when the model sends
+/// tool calls without text, so tool results keep their parent. Empty tool
+/// results skip only the episodic mirror via the shared
+/// `OrchestratorToolLoop` policy so hydrated history matches live history
+/// and keyword search stays free of empty turns.
 /// - Parameters:
 ///   - provider: Chunk-streaming LLM backend.
-///   - conversations: Session and history owner.
-///   - toolBus: Tool registry for model-requested calls.
-///   - sessionID: Session identifier.
-///   - systemPrompt: Developer instructions, if any.
-///   - maxToolIterations: Maximum tool-call rounds before giving up.
+///   - context: Shared REPL dependencies for this session.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
-    conversations: ConversationManager,
-    toolBus: ToolBus,
-    sessionID: UUID,
-    systemPrompt: String?,
-    maxToolIterations: Int
+    context: ChatTurnContext
 ) async {
-    let tools = await toolBus.availableTools()
+    let tools = await context.toolBus.availableTools()
     let definitions = tools.map { ToolDefinition($0) }
-    var rounds = 0
-    while rounds < maxToolIterations {
-        rounds += 1
-        let history = await chatWorkingHistory(
-            conversations: conversations,
-            sessionID: sessionID,
-            systemPrompt: systemPrompt
+    var toolRounds = 0
+    while true {
+        let history = await context.conversations.workingHistory(
+            for: context.sessionID,
+            systemPrompt: context.systemPrompt
         )
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         var text = ""
@@ -381,46 +663,77 @@ private func runChunkedTurn(
             print(TerminalStyle.dim("(\(label)\(usage.totalTokens) tokens)"))
         }
         if calls.isEmpty {
-            await conversations.append(Message(role: .assistant, content: text), to: sessionID)
+            guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
+            await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
+            await context.memoryEngine.mirrorTurn(
+                content: text,
+                sessionID: context.sessionID,
+                role: .assistant,
+                failurePolicy: .report,
+                onFailure: chatMirrorFailureHandler
+            )
             return
         }
-        let note = text.isEmpty
-            ? "Calling \(calls.map(\.name).joined(separator: ", "))…"
-            : text
-        await conversations.append(Message(role: .assistant, content: note), to: sessionID)
+        toolRounds += 1
+        if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
+            print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
+            return
+        }
+        let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
+        let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
+        await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
+        await context.memoryEngine.mirrorTurn(
+            content: assistantContent,
+            sessionID: context.sessionID,
+            role: .assistant,
+            failurePolicy: .report,
+            onFailure: chatMirrorFailureHandler
+        )
         for call in calls {
             print(TerminalStyle.tool("◈ calling \(call.name) \(cliInline(call.argumentsJSON, limit: 160))"))
-            let result = await toolBus.execute(
+            let result = await context.toolBus.execute(
                 toolCall: ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id),
-                context: ToolContext(conversationID: sessionID)
+                context: ToolContext(conversationID: context.sessionID)
             )
             let marker = result.isError ? "✕" : "→"
-            print(TerminalStyle.dim("  \(marker) \(cliInline(result.content))"))
-            await conversations.append(result.asMessage(), to: sessionID)
+            print(TerminalStyle.dim("  \(marker) \(cliInline(result.content, limit: 300))"))
+            await context.conversations.append(result.asMessage(), to: context.sessionID)
+            if OrchestratorToolLoop.shouldStoreToolResult(result.content) {
+                await context.memoryEngine.mirrorTurn(
+                    content: result.content,
+                    sessionID: context.sessionID,
+                    role: .tool,
+                    toolCallID: result.toolCallID,
+                    failurePolicy: .report,
+                    onFailure: chatMirrorFailureHandler
+                )
+            }
         }
     }
-    print(TerminalStyle.error("Tool loop exceeded \(maxToolIterations) rounds; stopping."))
 }
 
 /// Runs one assistant turn via the text-only stream (no tool visibility).
+///
+/// The text-only `LLMProvider.chat` stream carries no tool calls, so this
+/// path cannot resolve or execute tools via the shared resolver. When tools
+/// are registered an explicit warning is emitted that tools are disabled in
+/// the text path; use a `ChunkStreamingProvider` backend for full tool
+/// support. Storage decisions delegate to the shared
+/// `OrchestratorToolLoop` policy like every other loop.
 /// - Parameters:
 ///   - provider: Active LLM backend.
-///   - conversations: Session and history owner.
-///   - toolBus: Tool registry (used for history context).
-///   - sessionID: Session identifier.
-///   - systemPrompt: Developer instructions, if any.
+///   - context: Shared REPL dependencies for this session.
 private func runTextTurn(
     provider: any LLMProvider,
-    conversations: ConversationManager,
-    toolBus: ToolBus,
-    sessionID: UUID,
-    systemPrompt: String?
+    context: ChatTurnContext
 ) async {
-    let tools = await toolBus.availableTools()
-    let history = await chatWorkingHistory(
-        conversations: conversations,
-        sessionID: sessionID,
-        systemPrompt: systemPrompt
+    let tools = await context.toolBus.availableTools()
+    if !tools.isEmpty {
+        print(TerminalStyle.dim("Tools are disabled in the text-only path (\(tools.count) available); continuing without tool calls."))
+    }
+    let history = await context.conversations.workingHistory(
+        for: context.sessionID,
+        systemPrompt: context.systemPrompt
     )
     print(TerminalStyle.assistant("weaver> "), terminator: "")
     var text = ""
@@ -435,5 +748,13 @@ private func runTextTurn(
         }
     }
     print("")
-    await conversations.append(Message(role: .assistant, content: text), to: sessionID)
+    guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
+    await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
+    await context.memoryEngine.mirrorTurn(
+        content: text,
+        sessionID: context.sessionID,
+        role: .assistant,
+        failurePolicy: .report,
+        onFailure: chatMirrorFailureHandler
+    )
 }

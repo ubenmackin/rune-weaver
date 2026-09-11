@@ -3,9 +3,16 @@ import Foundation
 /// A single turn in a conversation history.
 ///
 /// Messages are the unit of context passed to an ``LLMProvider``.
-/// They persist in working memory for the session and are summarized
-/// into episodic memory when the session ends.
+/// They persist in working memory for the session and are mirrored raw
+/// into episodic memory every turn for session resume.
 public struct Message: Sendable, Codable, Equatable, Identifiable {
+    /// Prefix marking the rolling summary of truncated turns.
+    ///
+    /// Single source of truth shared by `ConversationManager.history(for:)`
+    /// (which prepends the summary) and `[Message].withSystemPrompt(_:)`
+    /// (which preserves it) so the marker never drifts.
+    public static let rollingSummaryPrefix = "Earlier in this conversation:"
+
     /// Conversation role for this message.
     public enum Role: String, Sendable, Codable, Equatable {
         /// Developer- or system-provided instructions.
@@ -57,19 +64,33 @@ public extension [Message] {
     /// This is the single dedup helper shared by the orchestrator and the
     /// CLI chat loop: an identical leading system message is kept as-is, a
     /// stale leading system message is replaced (never stacked), and an
-    /// empty/nil prompt leaves the history untouched.
+    /// empty/nil prompt leaves the history untouched. A rolling summary
+    /// injected by `ConversationManager.history(for:)` (a leading `system`
+    /// message starting with `Message/rollingSummaryPrefix`) is always
+    /// preserved: the prompt is prepended ahead of it instead of
+    /// replacing it. When the history is `[summary, stalePrompt, ...]`
+    /// the stale prompt at `[1]` is dropped so repeated calls never
+    /// accumulate stacked prompts.
     /// - Parameter prompt: Developer instructions to ensure, if any.
     /// - Returns: Messages for the next LLM call.
     func withSystemPrompt(_ prompt: String?) -> [Message] {
         guard let prompt, !prompt.isEmpty else {
             return self
         }
-        if let first, first.role == .system {
-            if first.content == prompt {
-                return self
-            }
-            return [Message(role: .system, content: prompt)] + Array(dropFirst())
+        let promptMessage = Message(role: .system, content: prompt)
+        guard let first, first.role == .system else {
+            return [promptMessage] + self
         }
-        return [Message(role: .system, content: prompt)] + self
+        if first.content == prompt {
+            return self
+        }
+        if first.content.hasPrefix(Message.rollingSummaryPrefix) {
+            var rest = self
+            if rest.count > 1, rest[1].role == .system, !rest[1].content.hasPrefix(Message.rollingSummaryPrefix) {
+                rest.remove(at: 1)
+            }
+            return [promptMessage] + rest
+        }
+        return [promptMessage] + Array(dropFirst())
     }
 }
