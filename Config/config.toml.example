@@ -20,6 +20,7 @@ server_url = "http://localhost:8080"  # MLX server
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
 base_url = "https://openrouter.ai/api/v1"
+# api_style = "chat-completions"  # chat-completions (default) | responses
 
 [llm.providers.local]
 enabled = false

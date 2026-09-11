@@ -39,6 +39,7 @@ Each provider entry supports the same keys. Only set what that backend needs.
 | `base_url` | string \| unset | unset | Cloud base URL for OpenAI-compatible endpoints. Must be an absolute URL when set. |
 | `api_key_env` | string \| unset | unset | Environment variable (and Keychain key) holding the API key. Resolved via `SecretsManager`; never put the key itself in TOML. |
 | `provider_type` | string \| unset | unset | Backend type for generic local entries (e.g. `"llamacpp"`). |
+| `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family; use `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models requiring Anthropic-style messages input are unsupported. |
 
 Shipped defaults (`RuneWeaverConfig.default`):
 
@@ -57,6 +58,16 @@ base_url = "https://openrouter.ai/api/v1"
 enabled = false
 provider_type = "llamacpp"
 server_url = "http://localhost:8081"
+```
+
+`api_style` selects the OpenAI-compatible request shape per provider. It defaults to `"chat-completions"`. Set `api_style = "responses"` for the `muse-spark` family; keep `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models that require an Anthropic-messages request shape are unsupported.
+
+```toml
+[llm.providers.openrouter]
+enabled = true
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+api_style = "responses"  # muse-spark family; omit or use "chat-completions" for glm, kimi, deepseek, mimo, hy, longcat
 ```
 
 ### `[memory]`
@@ -169,6 +180,8 @@ base_url = "https://openrouter.ai/api/v1"
 ```
 
 The router tries `default_provider` first and falls through to `fallback_provider` on failure. Any OpenAI-compatible endpoint works the same way — point `base_url` at it and set `api_key_env`.
+
+Every OpenAI-compatible request sends `User-Agent: rune-weaver/0.1.0` (matching the CLI version). Chat sessions also send `x-opencode-session: <session-UUID>` on chat, embeddings, and `GET /models` probes so a gateway can correlate turns; local providers (MLX, llama.cpp) never send the session header.
 
 ## Secrets Management
 

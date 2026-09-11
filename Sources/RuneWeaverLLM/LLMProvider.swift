@@ -246,6 +246,23 @@ func openAIBaseURL(from raw: String) -> String {
     return trimmed + "/v1"
 }
 
+/// Decodes a tool's JSON Schema to a JSON object for request encoding.
+/// - Parameter tool: Tool definition to encode.
+/// - Returns: Schema as a JSON object.
+/// - Throws: ``LLMProviderError/invalidResponse(_:)`` when the schema
+///   is not a JSON object.
+func encodeToolParameters(_ tool: ToolDefinition) throws -> [String: Any] {
+    guard let data = tool.parameters.rawValue.data(using: .utf8),
+          let parsed = try? JSONSerialization.jsonObject(with: data),
+          let object = parsed as? [String: Any]
+    else {
+        throw LLMProviderError.invalidResponse(
+            "Tool '\(tool.name)' has an invalid JSON Schema; expected a JSON object"
+        )
+    }
+    return object
+}
+
 /// Builds a JSON request body for `/chat/completions`.
 /// - Parameters:
 ///   - model: Model identifier.
@@ -284,14 +301,7 @@ func openAIChatRequestBody(
     }
     if !tools.isEmpty {
         body["tools"] = try tools.map { tool -> [String: Any] in
-            guard let data = tool.parameters.rawValue.data(using: .utf8),
-                  let parsed = try? JSONSerialization.jsonObject(with: data),
-                  parsed is [String: Any]
-            else {
-                throw LLMProviderError.invalidResponse(
-                    "Tool '\(tool.name)' has an invalid JSON Schema; expected a JSON object"
-                )
-            }
+            let parsed = try encodeToolParameters(tool)
             return [
                 "type": "function",
                 "function": [
@@ -307,6 +317,63 @@ func openAIChatRequestBody(
         return try JSONSerialization.data(withJSONObject: body)
     } catch {
         throw LLMProviderError.invalidResponse("Could not encode chat request: \(error.localizedDescription)")
+    }
+}
+
+/// Builds a JSON request body for `/responses`.
+/// - Parameters:
+///   - model: Model identifier.
+///   - messages: Conversation history, with system messages first.
+///   - tools: Tool definitions, omitted when empty.
+///   - stream: Whether to request server-sent events.
+/// - Returns: JSON-encoded request body.
+/// - Throws: ``LLMProviderError/invalidResponse(_:)`` when a tool
+///   schema is not valid JSON or the body cannot be encoded.
+func openAIResponsesRequestBody(
+    model: String,
+    messages: [Message],
+    tools: [ToolDefinition],
+    stream: Bool
+) throws -> Data {
+    let systemMessages = messages.filter { $0.role == .system }
+    let conversationMessages = messages.filter { $0.role != .system }
+    let ordered = systemMessages + conversationMessages
+    var wireInput: [[String: Any]] = ordered.map { message in
+        if message.role == .tool {
+            return [
+                "type": "function_call_output",
+                "call_id": message.toolCallID ?? "",
+                "output": message.content
+            ]
+        }
+        return [
+            "role": OpenAIWireRole.string(for: message.role),
+            "content": [["type": "input_text", "text": message.content]]
+        ]
+    }
+    if wireInput.isEmpty {
+        wireInput = [["role": "user", "content": [["type": "input_text", "text": ""]]]]
+    }
+    var body: [String: Any] = [
+        "model": model,
+        "input": wireInput,
+        "stream": stream
+    ]
+    if !tools.isEmpty {
+        body["tools"] = try tools.map { tool -> [String: Any] in
+            let parsed = try encodeToolParameters(tool)
+            return [
+                "type": "function",
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": parsed
+            ]
+        }
+    }
+    do {
+        return try JSONSerialization.data(withJSONObject: body)
+    } catch {
+        throw LLMProviderError.invalidResponse("Could not encode responses request: \(error.localizedDescription)")
     }
 }
 
@@ -384,6 +451,126 @@ struct OpenAIStreamChunkDTO: Decodable, Sendable {
     var usage: OpenAIUsageDTO?
 }
 
+/// A function call item inside a Responses stream event.
+struct OpenAIResponsesFunctionCallItemDTO: Decodable, Sendable {
+    /// Item type (expected `"function_call"`).
+    var type: String?
+    /// Invoked function name.
+    var name: String?
+    /// Arguments JSON string.
+    var arguments: String?
+    /// Call identifier under the Responses key.
+    var callId: String?
+    /// Call identifier under the legacy key.
+    var id: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case name
+        case arguments
+        case callId = "call_id"
+        case id
+    }
+}
+
+/// Usage block inside a completed Responses response.
+struct OpenAIResponsesUsageDTO: Decodable, Sendable {
+    /// Request tokens.
+    var inputTokens: Int?
+    /// Generated tokens.
+    var outputTokens: Int?
+    /// Total tokens.
+    var totalTokens: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case inputTokens = "input_tokens"
+        case outputTokens = "output_tokens"
+        case totalTokens = "total_tokens"
+    }
+}
+
+/// Completed response nested in a `response.completed` event.
+struct OpenAIResponsesCompletedDTO: Decodable, Sendable {
+    /// Serving model name.
+    var model: String?
+    /// Token accounting for the completed response.
+    var usage: OpenAIResponsesUsageDTO?
+}
+
+/// Error detail nested in a Responses error event.
+struct OpenAIResponsesErrorDetailDTO: Decodable, Sendable {
+    /// Human-readable error message.
+    var message: String?
+    /// Machine-readable error code.
+    var code: String?
+}
+
+/// One server-sent event payload from `/responses`.
+struct OpenAIResponsesStreamEventDTO: Decodable, Sendable {
+    /// Event type (e.g. `"response.output_text.delta"`).
+    var type: String?
+    /// Incremental text for output-text deltas.
+    var delta: String?
+    /// Invoked function name for top-level function-call events.
+    var name: String?
+    /// Arguments JSON string for top-level function-call events.
+    var arguments: String?
+    /// Call identifier for top-level function-call events.
+    var callId: String?
+    /// Item identifier for delta fragments (`item_id`).
+    var itemId: String?
+    /// Function-call item for output-item events.
+    var item: OpenAIResponsesFunctionCallItemDTO?
+    /// Completed response for `response.completed` events.
+    var response: OpenAIResponsesCompletedDTO?
+    /// Error detail, when the server sends an object shape.
+    var errorDetail: OpenAIResponsesErrorDetailDTO?
+    /// Error message, when the server sends a string shape or a `message` field.
+    var message: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case type
+        case delta
+        case name
+        case arguments
+        case callId = "call_id"
+        case id
+        case itemId = "item_id"
+        case item
+        case response
+        case error
+        case message
+    }
+
+    /// Decodes tolerantly so unknown or mixed shapes never fail the stream.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = (try? container.decodeIfPresent(String.self, forKey: .type)) ?? nil
+        delta = (try? container.decodeIfPresent(String.self, forKey: .delta)) ?? nil
+        name = (try? container.decodeIfPresent(String.self, forKey: .name)) ?? nil
+        arguments = (try? container.decodeIfPresent(String.self, forKey: .arguments)) ?? nil
+        callId = (try? container.decodeIfPresent(String.self, forKey: .callId)) ?? nil
+        if callId == nil {
+            callId = (try? container.decodeIfPresent(String.self, forKey: .id)) ?? nil
+        }
+        itemId = (try? container.decodeIfPresent(String.self, forKey: .itemId)) ?? nil
+        item = (try? container.decodeIfPresent(OpenAIResponsesFunctionCallItemDTO.self, forKey: .item)) ?? nil
+        response = (try? container.decodeIfPresent(OpenAIResponsesCompletedDTO.self, forKey: .response)) ?? nil
+        message = (try? container.decodeIfPresent(String.self, forKey: .message)) ?? nil
+        let errorText: String? = (try? container.decodeIfPresent(String.self, forKey: .error)) ?? nil
+        if let errorText {
+            errorDetail = OpenAIResponsesErrorDetailDTO(message: errorText, code: nil)
+        } else {
+            errorDetail = (try? container.decodeIfPresent(OpenAIResponsesErrorDetailDTO.self, forKey: .error)) ?? nil
+        }
+    }
+
+    /// Best-effort error message from either error shape.
+    var errorMessage: String? {
+        errorDetail?.message ?? errorDetail?.code ?? message
+    }
+}
+
 /// One embedding vector in an embeddings response.
 struct OpenAIEmbeddingDTO: Decodable, Sendable {
     /// Embedding vector.
@@ -446,6 +633,131 @@ struct OpenAIToolCallAccumulator: Sendable {
     }
 }
 
+/// Accumulates split Responses tool-call fragments into whole calls.
+///
+/// The Responses stream may split one function call across several
+/// events: an added item carrying the name, delta fragments carrying
+/// only `delta` plus `item_id`, and a done event carrying the complete
+/// arguments. Buffering by `item_id`/`call_id` reassembles split
+/// arguments instead of dropping them to empty `{}`.
+struct OpenAIResponsesToolCallAccumulator: Sendable {
+    /// Buffered state per call key.
+    var buffers: [String: Buffer] = [:]
+    /// First-seen key order for deterministic emission.
+    var order: [String] = []
+
+    /// Buffered fragments for one call.
+    struct Buffer: Sendable {
+        /// Call identifier reported to the router.
+        var callId: String = ""
+        /// Tool name.
+        var name: String = ""
+        /// Concatenated arguments JSON.
+        var arguments: String = ""
+    }
+
+    /// Number of buffered calls.
+    var count: Int {
+        order.count
+    }
+
+    /// Ingests one stream event, buffering tool-call fragments.
+    /// - Parameters:
+    ///   - event: Decoded stream event.
+    ///   - nextIndex: Fallback index for synthesized call IDs.
+    mutating func ingest(_ event: OpenAIResponsesStreamEventDTO, nextIndex: Int) {
+        guard let type = event.type else { return }
+        if type == "response.function_call_arguments.delta" {
+            let key = event.itemId ?? event.callId ?? "call_\(nextIndex)"
+            ensure(key: key, fallbackId: event.callId)
+            if let delta = event.delta ?? event.arguments, var buffer = buffers[key] {
+                buffer.arguments += delta
+                buffers[key] = buffer
+            }
+            if let name = event.name, !name.isEmpty {
+                appendName(name, for: key)
+            }
+            return
+        }
+        if type == "response.function_call_arguments.done" {
+            let key = event.itemId ?? event.callId ?? "call_\(nextIndex)"
+            ensure(key: key, fallbackId: event.callId)
+            if let name = event.name, !name.isEmpty {
+                buffers[key]?.name = name
+            }
+            if let callId = event.callId, !callId.isEmpty {
+                buffers[key]?.callId = callId
+            }
+            let args = event.arguments ?? event.delta ?? ""
+            if !args.isEmpty {
+                buffers[key]?.arguments = args
+            }
+            return
+        }
+        guard let call = OpenAISSEPump.responsesToolCall(from: event, nextIndex: nextIndex) else { return }
+        let key = event.itemId ?? event.item?.id ?? call.id
+        ensure(key: key, fallbackId: call.id)
+        if !call.name.isEmpty {
+            if buffers[key]?.name.isEmpty ?? true {
+                buffers[key]?.name = call.name
+            } else if buffers[key]?.name != call.name, var buffer = buffers[key] {
+                buffer.name += call.name
+                buffers[key] = buffer
+            }
+        }
+        let explicitCallId = event.item?.callId ?? event.callId
+        if let explicitCallId, !explicitCallId.isEmpty, buffers[key]?.callId.isEmpty ?? false {
+            buffers[key]?.callId = explicitCallId
+        }
+        if call.argumentsJSON != "{}" {
+            if buffers[key]?.arguments.isEmpty ?? true {
+                buffers[key]?.arguments = call.argumentsJSON
+            } else if (buffers[key]?.arguments.count ?? 0) < call.argumentsJSON.count {
+                buffers[key]?.arguments = call.argumentsJSON
+            }
+        }
+    }
+
+    /// Finished calls in first-seen order, dropping empties.
+    /// - Returns: Reassembled tool calls.
+    func finishedCalls() -> [ToolCall] {
+        order.compactMap { key in
+            guard let buffer = buffers[key], !buffer.name.isEmpty else { return nil }
+            return ToolCall(
+                id: buffer.callId.isEmpty ? key : buffer.callId,
+                name: buffer.name,
+                argumentsJSON: buffer.arguments.isEmpty ? "{}" : buffer.arguments
+            )
+        }
+    }
+
+    /// Ensures a buffer exists for the given key.
+    /// - Parameters:
+    ///   - key: Buffer key (`item_id` or `call_id`).
+    ///   - fallbackId: Call identifier used for new buffers.
+    private mutating func ensure(key: String, fallbackId: String?) {
+        if buffers[key] == nil {
+            buffers[key] = Buffer(callId: fallbackId ?? key)
+            order.append(key)
+        } else if let fallbackId, !fallbackId.isEmpty, buffers[key]?.callId.isEmpty ?? false {
+            buffers[key]?.callId = fallbackId
+        }
+    }
+
+    /// Appends a name fragment for the given key.
+    /// - Parameters:
+    ///   - name: Name fragment.
+    ///   - key: Buffer key.
+    private mutating func appendName(_ name: String, for key: String) {
+        if buffers[key]?.name.isEmpty ?? true {
+            buffers[key]?.name = name
+        } else if var buffer = buffers[key] {
+            buffer.name += name
+            buffers[key] = buffer
+        }
+    }
+}
+
 /// Minimal shared client for OpenAI-compatible backends.
 ///
 /// All three bundled providers (MLX, llama.cpp, generic cloud) speak
@@ -458,16 +770,26 @@ struct OpenAICompatibleHTTPClient: Sendable {
     let apiKey: String?
     /// Model identifier sent with every request.
     let model: String
+    /// Request style selecting the wire endpoint and SSE shape.
+    let apiStyle: APIStyle
+    /// Chat session identifier sent as `x-opencode-session`, when set.
+    let sessionID: String?
+    /// User-Agent sent on every request. Kept in sync with the CLI version.
+    static let userAgent = "rune-weaver/0.1.0"
 
     /// Creates a client.
     /// - Parameters:
     ///   - baseURL: Server URL with or without `/v1`.
     ///   - apiKey: Bearer token, if required.
     ///   - model: Model identifier.
-    init(baseURL: String, apiKey: String? = nil, model: String) {
+    ///   - apiStyle: Request style. Defaults to Chat Completions.
+    ///   - sessionID: Chat session identifier sent as `x-opencode-session`. Defaults to nil (header omitted).
+    init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil) {
         self.baseURL = openAIBaseURL(from: baseURL)
         self.apiKey = apiKey
         self.model = model
+        self.apiStyle = apiStyle
+        self.sessionID = sessionID
     }
 
     /// Builds an authorized JSON request.
@@ -484,21 +806,38 @@ struct OpenAICompatibleHTTPClient: Sendable {
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        if let sessionID, !sessionID.isEmpty {
+            request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+        }
         request.httpBody = body
         return request
     }
 
-    /// Streams chat chunks for the given history and tools.
+    /// Streams chunks through a shared request and pump pipeline.
     /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
+    ///   - path: Path relative to the API root.
+    ///   - label: Request label used in error messages.
+    ///   - makeBody: Encodes the JSON request body.
+    ///   - pump: Pumps SSE bytes into chunk events.
     /// - Returns: Chunk stream ending in `done` or `error`.
-    func streamChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
+    func makeStreamingChunks(
+        path: String,
+        label: String,
+        makeBody: () throws -> Data,
+        pump: @Sendable @escaping (
+            URLSession.AsyncBytes,
+            String,
+            AsyncStream<LLMResponseChunk>.Continuation
+        ) async -> Void
+    ) -> AsyncStream<LLMResponseChunk> {
         let body: Data
         do {
-            body = try openAIChatRequestBody(model: model, messages: messages, tools: tools, stream: true)
+            body = try makeBody()
         } catch {
-            let message: String = if let providerError = error as? LLMProviderError, case let .invalidResponse(detail) = providerError {
+            let message: String = if let providerError = error as? LLMProviderError,
+                                     case let .invalidResponse(detail) = providerError
+            {
                 detail
             } else {
                 error.localizedDescription
@@ -508,42 +847,72 @@ struct OpenAICompatibleHTTPClient: Sendable {
                 continuation.finish()
             }
         }
-        guard let request = makeRequest(path: "/chat/completions", body: body) else {
+        guard let request = makeRequest(path: path, body: body) else {
+            let base = baseURL
+            let style = label.lowercased()
             return AsyncStream { continuation in
-                continuation.yield(.error("Malformed chat URL: \(baseURL)"))
+                continuation.yield(.error("Malformed \(style) URL: \(base)"))
                 continuation.finish()
             }
         }
         let clientModel = model
+        let clientBase = baseURL
         return AsyncStream { continuation in
             let task = Task {
                 do {
                     let (bytes, response) = try await URLSession.shared.bytes(for: request)
                     guard let http = response as? HTTPURLResponse else {
-                        continuation.yield(.error("No HTTP response from \(self.baseURL)"))
+                        continuation.yield(.error("No HTTP response from \(clientBase)"))
                         continuation.finish()
                         return
                     }
                     guard (200 ..< 300).contains(http.statusCode) else {
-                        let detail = await OpenAICompatibleHTTPClient.responseDetail(from: bytes)
-                        continuation.yield(.error("Chat request failed (\(http.statusCode)): \(detail)"))
+                        let detail = await OpenAISSEPump.responseDetail(from: bytes)
+                        continuation.yield(.error("\(label) request failed (\(http.statusCode)): \(detail)"))
                         continuation.finish()
                         return
                     }
-                    await OpenAICompatibleHTTPClient.pumpSSE(
-                        bytes: bytes,
-                        fallbackModel: clientModel,
-                        continuation: continuation
-                    )
+                    await pump(bytes, clientModel, continuation)
                 } catch is CancellationError {
                     continuation.finish()
                 } catch {
-                    continuation.yield(.error("Chat stream failed: \(error.localizedDescription)"))
+                    continuation.yield(.error("\(label) stream failed: \(error.localizedDescription)"))
                     continuation.finish()
                 }
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
+    }
+
+    /// Streams chat chunks for the given history and tools.
+    /// - Parameters:
+    ///   - messages: Conversation history.
+    ///   - tools: Tool definitions the model may call.
+    /// - Returns: Chunk stream ending in `done` or `error`.
+    func streamChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
+        if apiStyle == .responses {
+            return streamResponsesChunks(messages: messages, tools: tools)
+        }
+        return makeStreamingChunks(
+            path: "/chat/completions",
+            label: "Chat",
+            makeBody: { try openAIChatRequestBody(model: model, messages: messages, tools: tools, stream: true) },
+            pump: OpenAISSEPump.pumpSSE
+        )
+    }
+
+    /// Streams chunks via the Responses API for the given history and tools.
+    /// - Parameters:
+    ///   - messages: Conversation history, with system messages first.
+    ///   - tools: Tool definitions the model may call.
+    /// - Returns: Chunk stream ending in `done` or `error`.
+    func streamResponsesChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
+        makeStreamingChunks(
+            path: "/responses",
+            label: "Responses",
+            makeBody: { try openAIResponsesRequestBody(model: model, messages: messages, tools: tools, stream: true) },
+            pump: OpenAISSEPump.pumpResponsesSSE
+        )
     }
 
     /// Requests embeddings for the given texts.
@@ -588,6 +957,10 @@ struct OpenAICompatibleHTTPClient: Sendable {
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         }
+        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
+        if let sessionID, !sessionID.isEmpty {
+            request.setValue(sessionID, forHTTPHeaderField: "x-opencode-session")
+        }
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
@@ -596,11 +969,17 @@ struct OpenAICompatibleHTTPClient: Sendable {
             return false
         }
     }
+}
 
+/// Pumps SSE byte streams into chunk events.
+///
+/// Extracted from `OpenAICompatibleHTTPClient` so the client type stays
+/// within lint body-length budgets. Behavior is unchanged.
+enum OpenAISSEPump {
     /// Reads a short error preview from an errored byte stream.
     /// - Parameter bytes: Response byte stream.
     /// - Returns: Decoded preview, or a placeholder.
-    private static func responseDetail(from bytes: URLSession.AsyncBytes) async -> String {
+    static func responseDetail(from bytes: URLSession.AsyncBytes) async -> String {
         var preview = ""
         do {
             for try await line in bytes.lines {
@@ -621,7 +1000,7 @@ struct OpenAICompatibleHTTPClient: Sendable {
     ///   - bytes: Response byte stream.
     ///   - fallbackModel: Model name when the server omits it.
     ///   - continuation: Stream continuation to feed.
-    private static func pumpSSE(
+    static func pumpSSE(
         bytes: URLSession.AsyncBytes,
         fallbackModel: String,
         continuation: AsyncStream<LLMResponseChunk>.Continuation
@@ -708,6 +1087,162 @@ struct OpenAICompatibleHTTPClient: Sendable {
             continuation.yield(.toolCall(call))
         }
         continuation.yield(.done(ResponseMetadata(model: lastModel, usage: lastUsage, finishReason: lastFinishReason)))
+        continuation.finish()
+    }
+
+    /// One outcome of a Responses stream event.
+    enum ResponsesEventEffect {
+        /// Emit incremental text.
+        case textDelta(String)
+        /// Record completion details.
+        case completed(model: String?, usage: TokenUsage?)
+        /// Fail the stream with a message.
+        case error(String)
+        /// Buffer a tool call for the end of the stream.
+        case toolCall(ToolCall)
+        /// No observable effect.
+        case ignored
+    }
+
+    /// Maps one Responses event to its stream effect.
+    /// - Parameters:
+    ///   - event: Decoded stream event.
+    ///   - nextIndex: Fallback index for synthesized call IDs.
+    /// - Returns: Effect for the main pump loop to apply.
+    static func effect(for event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ResponsesEventEffect {
+        guard let type = event.type else {
+            if let message = event.errorMessage {
+                return .error(message)
+            }
+            return .ignored
+        }
+        switch type {
+        case "response.output_text.delta":
+            guard let delta = event.delta, !delta.isEmpty else {
+                return .ignored
+            }
+            return .textDelta(delta)
+        case "response.completed":
+            let model = event.response?.model.flatMap { $0.isEmpty ? nil : $0 }
+            return .completed(model: model, usage: responsesUsage(from: event.response?.usage))
+        case "error", "response.failed", "response.error":
+            return .error(event.errorMessage ?? "unknown error")
+        default:
+            if let call = responsesToolCall(from: event, nextIndex: nextIndex) {
+                return .toolCall(call)
+            }
+            return .ignored
+        }
+    }
+
+    /// Extracts a tool call from a function-call event.
+    /// - Parameters:
+    ///   - event: Decoded stream event.
+    ///   - nextIndex: Fallback index for synthesized call IDs.
+    /// - Returns: Reassembled tool call, or nil when the event carries none.
+    static func responsesToolCall(from event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ToolCall? {
+        guard let type = event.type else {
+            return nil
+        }
+        if let item = event.item, item.type == "function_call" {
+            let name = item.name ?? event.name ?? ""
+            guard !name.isEmpty else {
+                return nil
+            }
+            let rawArguments = item.arguments ?? event.arguments ?? ""
+            let callId = item.callId ?? item.id ?? event.callId ?? "call_\(nextIndex)"
+            return ToolCall(id: callId, name: name, argumentsJSON: rawArguments.isEmpty ? "{}" : rawArguments)
+        }
+        if type.contains("function_call") {
+            guard let name = event.name, !name.isEmpty else {
+                return nil
+            }
+            let rawArguments = event.arguments ?? ""
+            let callId = event.callId ?? "call_\(nextIndex)"
+            return ToolCall(id: callId, name: name, argumentsJSON: rawArguments.isEmpty ? "{}" : rawArguments)
+        }
+        return nil
+    }
+
+    /// Converts a Responses usage block to token accounting.
+    /// - Parameter dto: Decoded usage block.
+    /// - Returns: Token usage, or nil when absent.
+    static func responsesUsage(from dto: OpenAIResponsesUsageDTO?) -> TokenUsage? {
+        guard let dto else {
+            return nil
+        }
+        return TokenUsage(
+            promptTokens: dto.inputTokens ?? 0,
+            completionTokens: dto.outputTokens ?? 0,
+            totalTokens: dto.totalTokens ?? 0
+        )
+    }
+
+    /// Pumps Responses SSE lines into chunk events.
+    /// - Parameters:
+    ///   - bytes: Response byte stream.
+    ///   - fallbackModel: Model name when the server omits it.
+    ///   - continuation: Stream continuation to feed.
+    static func pumpResponsesSSE(
+        bytes: URLSession.AsyncBytes,
+        fallbackModel: String,
+        continuation: AsyncStream<LLMResponseChunk>.Continuation
+    ) async {
+        var lastModel = fallbackModel
+        var lastUsage: TokenUsage?
+        var accumulator = OpenAIResponsesToolCallAccumulator()
+        do {
+            for try await line in bytes.lines {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty || trimmed.hasPrefix(":") {
+                    continue
+                }
+                guard trimmed.hasPrefix("data:") else {
+                    continue
+                }
+                let payload = trimmed.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+                if payload == "[DONE]" {
+                    break
+                }
+                guard let data = payload.data(using: .utf8),
+                      let event = try? JSONDecoder().decode(OpenAIResponsesStreamEventDTO.self, from: data)
+                else { continue }
+                let nextIndex = accumulator.count
+                accumulator.ingest(event, nextIndex: nextIndex)
+                switch effect(for: event, nextIndex: nextIndex) {
+                case let .textDelta(delta):
+                    continuation.yield(.textDelta(delta))
+                case let .completed(model, usage):
+                    if let model {
+                        lastModel = model
+                    }
+                    if let usage {
+                        lastUsage = usage
+                    }
+                case let .error(message):
+                    continuation.yield(.error(message))
+                    continuation.finish()
+                    return
+                case .toolCall:
+                    // Buffered in the accumulator and emitted at the end,
+                    // once delta fragments have reassembled.
+                    continue
+                case .ignored:
+                    continue
+                }
+            }
+        } catch is CancellationError {
+            continuation.finish()
+            return
+        } catch {
+            continuation.yield(.error("Responses stream failed: \(error.localizedDescription)"))
+            continuation.finish()
+            return
+        }
+        for call in accumulator.finishedCalls() {
+            continuation.yield(.toolCall(call))
+        }
+        continuation.yield(.done(ResponseMetadata(model: lastModel, usage: lastUsage, finishReason: nil)))
         continuation.finish()
     }
 }
