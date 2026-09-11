@@ -151,18 +151,24 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 ///
 /// Loads `config.toml`, selects an LLM provider (with `--provider`
 /// overriding `llm.default_provider`), and enters a read-eval-print loop.
-/// Email plugins (`email.search`, `email.read`) and memory plugins
+/// Email plugins (`email.search`, `email.read`, `email.attachment`) and memory plugins
 /// (`remember_fact`, `recall_memories`) register at startup via
 /// `CLIShared.makeToolBus(pluginTools())` and are sent to the model as
-/// `ToolDefinition`s every turn. Email tools are `readOnly` and memory
-/// tools are `trusted` per the owner memory-write trust ruling, so both
-/// families run without approval prompts; their results feed back into
+/// `ToolDefinition`s every turn. Email search and read are `readOnly`
+/// and memory tools are `trusted` per the owner memory-write trust ruling,
+/// so those families run without approval prompts, while
+/// `email.attachment` is `requiresApproval` and stages downloads under
+/// the sandbox staging area (`attachments/` subdirectory, 10 MB cap);
+/// their results feed back into
 /// the next LLM round so the assistant summarizes them in conversation.
 /// Email is verified live against Volcrypt IMAP (`mail.volcrypt.com:993`,
-/// account `volcrypt` via `EMAIL_VOLCRYPT_PASSWORD` in the environment or
-/// Keychain service `com.runeweaver.secrets`): reads only, no send path,
-/// secrets never printed or logged, attachments listed with download
-/// deferred to phase two. Configured email accounts print at startup
+/// account `volcrypt` via `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
+/// (`imap.mail.me.com:993`, account `icloud` via the
+/// `EMAIL_ICLOUD_PASSWORD` app-specific password) in the environment or
+/// Keychain service `com.runeweaver.secrets`: reads only, no send path,
+/// secrets never printed or logged, attachments listed with
+/// filename/MIME/size and downloaded via `email.attachment` into the
+/// sandbox staging area (10 MB cap, approval required). Configured email accounts print at startup
 /// (name plus `username@host:port`, never secrets) so the model and the
 /// user know which nickname to use. Every user turn also runs automatic
 /// recall (bounded keyword `recall`
@@ -263,13 +269,19 @@ struct ChatCommand: AsyncParsableCommand {
                 cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
             }
         }
-        // Email tools are `readOnly` and memory tools are `trusted` per
-        // the owner memory-write trust ruling, so both bypass the approval
-        // handler by design (see `ToolBus.execute`): the handler below only
-        // fires for `requiresApproval` tools, so find-and-summarize and
-        // remember/recall run prompt-free with memory writes audit-logged.
+        // Email search/read are `readOnly` and memory tools are `trusted`
+        // per the owner memory-write trust ruling, so both bypass the
+        // approval handler by design (see `ToolBus.execute`): the handler
+        // below only fires for `requiresApproval` tools (including
+        // `email.attachment`), so find-and-summarize and remember/recall
+        // run prompt-free with memory writes audit-logged.
         let permissionGate = PermissionGate()
-        let toolBus = await CLIShared.makeToolBus(emailConfig: loaded.config.email, memoryEngine: memoryEngine, permissionGate: permissionGate)
+        let toolBus = await CLIShared.makeToolBus(
+            emailConfig: loaded.config.email,
+            memoryEngine: memoryEngine,
+            permissionGate: permissionGate,
+            sandboxConfig: loaded.config.sandbox
+        )
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
             print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
@@ -292,7 +304,7 @@ struct ChatCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("Tools: \(startupTools.joined(separator: ", "))."))
         }
         // Verified-live email accounts print here so the user knows which
-        // nickname to name in prompts (e.g. "on volcrypt"). Only
+        // nickname to name in prompts (e.g. "on volcrypt" or "on icloud"). Only
         // non-sensitive fields print; passwords never appear.
         let startupEmailAccounts = loaded.config.email.accounts.sorted(by: { $0.name < $1.name })
         if !startupEmailAccounts.isEmpty {
@@ -355,6 +367,37 @@ private struct ChatTurnContext: Sendable {
     let memoryEngine: MemoryEngine
     /// Session-cumulative billed tokens rendered via `SessionTokenDisplay`.
     let sessionTokens: CLILockedValue<Int>
+}
+
+/// Builds the session trailer line for one assistant turn.
+///
+/// Accumulates the turn's billed total into the session counter only
+/// when the backend reported usage, then always formats the
+/// session-cumulative label with the serving model name so the trailer
+/// prints after every assistant message (each LLM round inside the tool
+/// loop, which satisfies the every-turn intent) even when usage is absent.
+/// - Parameters:
+///   - modelName: Serving model name from the stream (`meta.model`), falling back to `modelInfo.name`.
+///   - sessionTokens: Session-cumulative billed token counter.
+///   - turnTotalTokens: Turn's billed total, if the backend reported usage.
+///   - window: Context window from `modelInfo`.
+/// - Returns: Trailer label for dimmed display.
+enum ChatSessionTrailer {
+    /// Formats the trailer and advances the session counter when needed.
+    static func line(
+        modelName: String,
+        sessionTokens: CLILockedValue<Int>,
+        turnTotalTokens: Int?,
+        window: Int
+    ) -> String {
+        let used = sessionTokens.withLock { value in
+            if let turnTotalTokens {
+                value += turnTotalTokens
+            }
+            return value
+        }
+        return SessionTokenDisplay.label(model: modelName, used: used, window: window)
+    }
 }
 
 /// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT.
@@ -559,7 +602,7 @@ private func handleSlashCommand(
         return .quit
     case "/help":
         print(TerminalStyle.dim("Commands: /help, /clear, /session, /remember <fact>, /exit"))
-        print(TerminalStyle.dim("Email is read-only via chat: ask to find or summarize (e.g. find emails about quarterly report on volcrypt)."))
+        print(TerminalStyle.dim("Email is read-only via chat: ask to find or summarize (e.g. find emails about quarterly report on volcrypt or icloud)."))
         return .keepGoing
     case "/clear":
         await conversations.clear(sessionID: sessionID)
@@ -629,6 +672,12 @@ private func runAssistantTurn(
 /// `OrchestratorToolLoop.episodicToolRecord(toolName:result:)` policy with
 /// no placeholder lines, call identifiers, or call-argument JSON, so
 /// keyword search stays free of tool-call mechanics and empty turns.
+/// The session trailer always prints after each LLM round (each assistant
+/// message inside the `while true` tool loop, which satisfies the
+/// after-every-turn intent) using the serving model name when the stream
+/// reports it (falling back to the provider model name) and the
+/// session-cumulative total, advancing the counter only when the round
+/// reported usage.
 /// - Parameters:
 ///   - provider: Chunk-streaming LLM backend.
 ///   - context: Shared REPL dependencies for this session.
@@ -653,7 +702,7 @@ private func runChunkedTurn(
         var calls: [ToolCall] = []
         var streamError: String?
         var usage: TokenUsage?
-        var model = ""
+        var servedModel = ""
         for await chunk in provider.chatChunks(messages: history, tools: definitions) {
             switch chunk {
             case let .textDelta(delta):
@@ -663,8 +712,10 @@ private func runChunkedTurn(
             case let .toolCall(call):
                 calls.append(call)
             case let .done(meta):
-                model = meta.model
                 usage = meta.usage
+                if !meta.model.isEmpty {
+                    servedModel = meta.model
+                }
             case let .error(message):
                 streamError = message
             }
@@ -674,14 +725,13 @@ private func runChunkedTurn(
             print(TerminalStyle.error("Request failed: \(streamError)"))
             return
         }
-        if let usage {
-            let used = context.sessionTokens.withLock { value in
-                value += usage.totalTokens
-                return value
-            }
-            let window = provider.modelInfo.contextLength
-            print(TerminalStyle.dim(SessionTokenDisplay.label(model: model, used: used, window: window)))
-        }
+        let trailerModel = servedModel.isEmpty ? provider.modelInfo.name : servedModel
+        print(TerminalStyle.dim(ChatSessionTrailer.line(
+            modelName: trailerModel,
+            sessionTokens: context.sessionTokens,
+            turnTotalTokens: usage?.totalTokens,
+            window: provider.modelInfo.contextLength
+        )))
         if calls.isEmpty {
             guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
             await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
@@ -739,7 +789,8 @@ private func runChunkedTurn(
 /// `OrchestratorToolLoop` policy like every other loop. Billed usage
 /// reported on the terminal `LLMResponse` chunk accumulates into the same
 /// session total and renders the same session-billed usage line as the
-/// chunked path; backends that report no usage simply show no line.
+/// chunked path; the trailer always prints with the provider model name,
+/// leaving the session total unchanged when the backend reports no usage.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
@@ -763,11 +814,13 @@ private func runTextTurn(
     var text = ""
     var streamError: String?
     var billedTokens: Int?
-    var finished = false
     for await part in provider.chat(messages: history, tools: tools) {
         if let message = part.errorMessage {
             streamError = message.isEmpty ? "unknown error" : message
-            break
+            // Record the failure but keep draining the stream so the
+            // provider continuation is released and any trailing usage
+            // or error chunks are observed instead of leaking.
+            continue
         }
         if !part.delta.isEmpty {
             text += part.delta
@@ -775,9 +828,12 @@ private func runTextTurn(
             fflush(stdout)
         }
         if part.isFinished {
-            finished = true
-            billedTokens = part.totalTokens
-            break
+            // Record billed usage and keep draining until the stream
+            // finishes instead of breaking early, so later usage or
+            // error chunks are not missed and the continuation closes.
+            if let total = part.totalTokens {
+                billedTokens = total
+            }
         }
     }
     print("")
@@ -785,16 +841,12 @@ private func runTextTurn(
         print(TerminalStyle.error("Request failed: \(streamError)"))
         return
     }
-    // Surface usage exactly like the chunked path when the backend
-    // reported it; text-only backends without usage reporting skip the line.
-    if finished, let billed = billedTokens {
-        let used = context.sessionTokens.withLock { value in
-            value += billed
-            return value
-        }
-        let window = provider.modelInfo.contextLength
-        print(TerminalStyle.dim(SessionTokenDisplay.label(model: provider.modelInfo.name, used: used, window: window)))
-    }
+    print(TerminalStyle.dim(ChatSessionTrailer.line(
+        modelName: provider.modelInfo.name,
+        sessionTokens: context.sessionTokens,
+        turnTotalTokens: billedTokens,
+        window: provider.modelInfo.contextLength
+    )))
     guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
     await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
     await context.memoryEngine.mirrorTurn(

@@ -334,7 +334,8 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 ├── config.toml          # Non-sensitive configuration
 ├── sandbox/             # Staging area for file writes
 │   ├── pending/         # Awaiting approval
-│   └── approved/        # Approved for real filesystem
+│   ├── approved/        # Approved for real filesystem
+│   └── attachments/     # `email.attachment` downloads only (10 MB cap, requiresApproval)
 ├── memory/
 │   ├── episodes.db      # SQLite: conversation history
 │   └── vectors/         # LanceDB: semantic memory

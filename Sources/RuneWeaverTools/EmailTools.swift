@@ -1,27 +1,34 @@
 import Foundation
 import RuneWeaverCore
 
-/// Read-only `email.search` tool over self-hosted IMAP.
+/// Read-only `email.search` tool over IMAP.
 ///
 /// Searches subject, sender, and body through the `python3 imaplib`
 /// bridge and returns headers plus a short text snippet per hit.
+/// An empty, whitespace-only, or lone `"*"` query lists the most-recent
+/// messages via `SEARCH ALL` (newest first, capped by `limit`) instead of
+/// sending a literal `TEXT "*"` that matches nothing on iCloud.
 /// Always `readOnly`: it opens the mailbox read-only with
 /// `(BODY.PEEK[])` fetches and never mutates flags or messages.
-/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`).
+/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`)
+/// and iCloud IMAP (`imap.mail.me.com:993` with an app-specific
+/// password via `EMAIL_ICLOUD_PASSWORD`).
 public struct EmailSearchTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.search"
     /// When the LLM should use this tool.
     public let description =
-        "Searches a self-hosted IMAP mailbox (subject, sender, and body). "
+        "Searches an IMAP mailbox (subject, sender, and body). "
             + "Use when the user asks to find or summarize email. "
+            + "Use query \"*\" or empty for the most-recent messages. "
             + "Returns matching message ids, headers, and snippets."
     /// Function-calling contract for `account`, `query`, and `limit`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. volcrypt)"},"query":{"type":"string","description":"Free-text query "#
-                + #"matched against subject, sender, and body"},"limit":{"type":"integer","description":"Maximum hits "#
+                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"query":{"type":"string","description":"Free-text query "#
+                + #"matched against subject, sender, and body; \"*\" or empty "#
+                + #"lists most-recent messages"},"limit":{"type":"integer","description":"Maximum hits "#
                 + #"(1-50, default 10)","minimum":1,"maximum":50}},"required":["account","query"],"additionalProperties":false}"#
         )
     /// Always allowed: search never changes mailbox state.
@@ -88,17 +95,20 @@ public struct EmailSearchTool: Tool, Sendable {
         guard !accountName.isEmpty else {
             return .failure("Invalid email.search arguments: 'account' must not be empty.", callID: input.callID)
         }
-        guard !query.isEmpty else {
-            return .failure("Invalid email.search arguments: 'query' must not be empty.", callID: input.callID)
-        }
         do {
             try EmailIMAPValidation.validateSearchQuery(query)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        let account = emailConfig.account(named: accountName)
-            ?? emailConfig.accounts.first(where: { $0.name.lowercased() == accountName.lowercased() })
-        guard let account else {
+        // Wildcard/empty maps to ALL: a trimmed empty query or a lone "*"
+        // lists the most-recent messages instead of sending a literal
+        // TEXT "*" that matches nothing on iCloud (imap.mail.me.com:993).
+        // The normalized empty string triggers SEARCH ALL in the Python
+        // bridge; the envelope echoes the effective query so the audit
+        // shows what IMAP actually ran. Read-only, verified TLS, capped
+        // limit, and no secret logging are unchanged.
+        let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
+        guard let account = emailConfig.account(matching: accountName) else {
             let available = emailConfig.accounts.map(\.name)
             return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
         }
@@ -109,8 +119,8 @@ public struct EmailSearchTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
-            let hits = try await gateway.search(credentials: credentials, query: query, limit: args.limit)
-            let content = try EmailBridgeParsing.encodeSearchEnvelope(account: account.name, query: query, messages: hits)
+            let hits = try await gateway.search(credentials: credentials, query: effectiveQuery, limit: args.limit)
+            let content = try EmailBridgeParsing.encodeSearchEnvelope(account: account.name, query: effectiveQuery, messages: hits)
             return .success(content, callID: input.callID)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
@@ -118,26 +128,32 @@ public struct EmailSearchTool: Tool, Sendable {
     }
 }
 
-/// Read-only `email.read` tool over self-hosted IMAP.
+/// Read-only `email.read` tool over IMAP.
 ///
 /// Returns headers plus the decoded text body. Attachment bytes are
-/// never returned: skipped parts are listed by filename with a note
-/// that downloads are deferred to phase two. Always `readOnly`.
-/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`).
+/// never returned: parts are listed by filename, MIME type, and byte
+/// size with a note pointing at `email.attachment` for downloads.
+/// Always `readOnly`. Verified live against Volcrypt IMAP
+/// (`mail.volcrypt.com:993`) and iCloud IMAP
+/// (`imap.mail.me.com:993` with an app-specific password via
+/// `EMAIL_ICLOUD_PASSWORD`).
 public struct EmailReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.read"
     /// When the LLM should use this tool.
     public let description =
-        "Reads one email by id from a self-hosted IMAP mailbox. "
+        "Reads one email by id from an IMAP mailbox. "
             + "Use when the user asks to open or summarize a specific message. "
-            + "Returns headers plus the text body; attachments are listed but not downloaded (deferred to phase two)."
-    /// Function-calling contract for `account` and `id`.
+            + "Returns headers plus the text body; attachments are listed with filename, MIME type, and byte size (use email.attachment to download)."
+    /// Function-calling contract for `account` and `id` (plus accepted aliases).
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. volcrypt)"},"id":{"type":"string","description":"IMAP message id "#
-                + #"from email.search"}},"required":["account","id"],"additionalProperties":false}"#
+                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message id "#
+                + #"from email.search"},"messageId":{"type":"string","description":"Alias "#
+                + #"for id"},"message_id":{"type":"string","description":"Alias for id"},"#
+                + #""uid":{"type":"string","description":"Alias for id"}},"required":["account"],"anyOf":[{"required":["id"]},"#
+                + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}],"additionalProperties":false}"#
         )
     /// Always allowed: reading never changes mailbox state.
     public let permissionLevel = PermissionLevel.readOnly
@@ -198,9 +214,7 @@ public struct EmailReadTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        let account = emailConfig.account(named: accountName)
-            ?? emailConfig.accounts.first(where: { $0.name.lowercased() == accountName.lowercased() })
-        guard let account else {
+        guard let account = emailConfig.account(matching: accountName) else {
             let available = emailConfig.accounts.map(\.name)
             return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
         }
@@ -220,33 +234,468 @@ public struct EmailReadTool: Tool, Sendable {
     }
 }
 
-/// Factory registering the read-only email tools on a `ToolBus`.
+/// `email.attachment` tool over IMAP.
 ///
-/// Both tools integrate with `EmailCredentialResolver` (environment
-/// first, Keychain service `com.runeweaver.secrets` second) so
-/// passwords never live in `config.toml` and never reach the LLM
-/// prompt. Verified live against Volcrypt IMAP
-/// (`mail.volcrypt.com:993`, account `volcrypt` via
-/// `EMAIL_VOLCRYPT_PASSWORD`) read-only with verified TLS; iCloud
-/// accounts resolve through the same path but stay untested until
-/// phase two.
+/// Downloads one attachment part by zero-based index into the sandbox
+/// staging area only (never to the real filesystem) and returns the
+/// staged path with filename, MIME type, and byte size. Parts over the
+/// size cap are skipped without writing, returning a note instead.
+/// Declared `requiresApproval` so the graduated-trust gate prompts
+/// before any download. Reads only: it opens the mailbox read-only
+/// with `(BODY.PEEK[])` fetches and never sends mail. Secrets are
+/// resolved at execution time and never logged.
+public struct EmailAttachmentTool: Tool, Sendable {
+    /// Stable tool name referenced by the LLM and memory.
+    public let name = "email.attachment"
+    /// When the LLM should use this tool.
+    public let description =
+        "Downloads one email attachment by index into the sandbox staging area. "
+            + "Use when the user asks to save or open an attachment listed by email.read. "
+            + "Writes only under the sandbox staging area; parts over the size cap are skipped with a note."
+    /// Function-calling contract for `account`, `id`, and `index` (plus accepted aliases).
+    public let inputSchema =
+        JSONSchema(
+            rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
+                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message id "#
+                + #"from email.search"},"messageId":{"type":"string","description":"Alias "#
+                + #"for id"},"message_id":{"type":"string","description":"Alias for id"},"#
+                + #""uid":{"type":"string","description":"Alias for id"},"index":{"type":"integer","description":"Zero-based attachment position "#
+                + #"from email.read","minimum":0},"attachmentIndex":{"type":"integer","description":"Alias for index","minimum":0},"#
+                + #""attachment_index":{"type":"integer","description":"Alias for index","#
+                + #"minimum":0}},"required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
+                + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},{"anyOf":[{"required":["index"]},"#
+                + #"{"required":["attachmentIndex"]},{"required":["attachment_index"]}]}],"additionalProperties":false}"#
+        )
+    /// Gated: downloads stage files and always prompt without a trust grant.
+    public let permissionLevel = PermissionLevel.requiresApproval
+
+    /// Maximum decoded bytes staged per attachment (10 MB).
+    public static let maxAttachmentBytes = 10 * 1024 * 1024
+    /// Subdirectory of the staging area holding downloaded attachments.
+    public static let attachmentsSubdirectory = "attachments"
+
+    /// Configured mail accounts.
+    private let emailConfig: EmailConfig
+    /// IMAP gateway (subprocess bridge by default, stub in tests).
+    private let gateway: any EmailIMAPGateway
+    /// Sandbox staging configuration. Writes stay under `stagingPath`.
+    private let sandboxConfig: SandboxConfig
+
+    /// Creates an attachment tool.
+    /// - Parameters:
+    ///   - emailConfig: Decoded `[email]` section.
+    ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
+    ///   - sandboxConfig: Sandbox staging configuration. Defaults to the built-in staging path.
+    public init(
+        emailConfig: EmailConfig,
+        gateway: (any EmailIMAPGateway)? = nil,
+        sandboxConfig: SandboxConfig = SandboxConfig()
+    ) {
+        self.emailConfig = emailConfig
+        self.gateway = gateway ?? SubprocessIMAPGateway()
+        self.sandboxConfig = sandboxConfig
+    }
+
+    /// Downloads one attachment part into the sandbox staging area.
+    /// - Parameters:
+    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), and `index` aliases.
+    ///   - context: Ambient execution context. `dryRun` fetches but never writes.
+    /// - Returns: JSON envelope with the staged path or a skip note, or a failure without secrets.
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
+        do {
+            let args = try decodedArgs(from: input)
+            let target = try validatedTarget(from: args)
+            let account = try resolvedAccount(named: target.accountName)
+            let fetched = try await fetchedAttachment(
+                for: account,
+                messageID: target.messageID,
+                index: target.attachmentIndex
+            )
+            if fetched.sizeBytes > Self.maxAttachmentBytes || fetched.data.count > Self.maxAttachmentBytes {
+                return oversizedEnvelope(target: target, accountName: account.name, fetched: fetched, callID: input.callID)
+            }
+            let destination = try stagedDestinationURL(
+                target: target,
+                accountName: account.name,
+                filename: fetched.filename
+            )
+            if context.dryRun {
+                return dryRunEnvelope(
+                    target: target,
+                    accountName: account.name,
+                    fetched: fetched,
+                    destination: destination,
+                    callID: input.callID
+                )
+            }
+            return storedEnvelope(
+                target: target,
+                accountName: account.name,
+                fetched: fetched,
+                destination: destination,
+                callID: input.callID
+            )
+        } catch let cancel as CancellationError {
+            throw cancel
+        } catch {
+            return .failure(error.localizedDescription, callID: input.callID)
+        }
+    }
+
+    /// Builds the skip note for an oversized part.
+    /// - Parameter sizeBytes: Decoded size of the skipped part.
+    /// - Returns: Human-readable note naming the size cap.
+    public static func oversizeNote(sizeBytes: Int) -> String {
+        "Attachment skipped: \(sizeBytes) bytes exceeds the 10 MB download cap."
+    }
+
+    /// Resolves the sandbox-confined destination for a download.
+    /// - Parameters:
+    ///   - stagingPath: Configured staging directory (`~` is expanded).
+    ///   - account: Account nickname used in the file prefix.
+    ///   - messageID: Message UID used in the file prefix.
+    ///   - index: Attachment position used in the file prefix.
+    ///   - filename: Original attachment filename, sanitized to its base name.
+    /// - Returns: Destination URL strictly under the staging area.
+    /// - Throws: A failure when the staging path is empty or escapes the sandbox.
+    public static func stagedDestination(
+        stagingPath: String,
+        account: String,
+        messageID: String,
+        index: Int,
+        filename: String
+    ) throws -> URL {
+        let trimmed = stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid sandbox staging path")
+        }
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        // Resolve symlinks on both sides so a symlinked staging directory
+        // cannot bypass confinement. The check runs before `createDirectory`
+        // and `write` create anything; callers stage only under the
+        // returned URL.
+        let stagingURL = URL(fileURLWithPath: expanded, isDirectory: true).standardized
+        let resolvedStaging = stagingURL.resolvingSymlinksInPath()
+        let sanitized = sanitizedFilename(filename, fallback: "attachment-\(index)")
+        let prefix = "\(safeSegment(account))-\(safeSegment(messageID))-\(index)-\(sanitized)"
+        let destination = stagingURL
+            .appendingPathComponent(attachmentsSubdirectory, isDirectory: true)
+            .appendingPathComponent(prefix, isDirectory: false)
+            .standardized
+        let resolvedDestination = destination.resolvingSymlinksInPath()
+        let stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
+        guard resolvedDestination.path.hasPrefix(stagingPrefix) else {
+            throw EmailIMAPError.bridgeFailed("Attachment path escapes the sandbox staging area")
+        }
+        return destination
+    }
+
+    /// Sanitizes a filename to its base name, falling back when empty.
+    ///
+    /// Strips path separators (`/` and `\`), NUL, colons, and ASCII
+    /// control characters, drops leading dots and dashes so the result
+    /// cannot hide as dotfiles or parse as a flag, and truncates to
+    /// 255 characters (`NAME_MAX`) to stay within filesystem limits.
+    /// - Parameters:
+    ///   - filename: Original filename.
+    ///   - fallback: Name used when the base name is empty.
+    /// - Returns: Base name safe to append under the staging area.
+    public static func sanitizedFilename(_ filename: String, fallback: String) -> String {
+        let base = (filename as NSString).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var cleaned = base
+            .replacingOccurrences(of: "\0", with: "_")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        cleaned = cleaned.unicodeScalars.map { scalar -> String in
+            let value = scalar.value
+            if value < 32 || value == 127 {
+                return "_"
+            }
+            return String(scalar)
+        }.joined()
+        while cleaned.hasPrefix(".") || cleaned.hasPrefix("-") {
+            cleaned.removeFirst()
+        }
+        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleaned.count > 255 {
+            cleaned = String(cleaned.prefix(255))
+        }
+        guard !cleaned.isEmpty, cleaned != ".", cleaned != ".." else {
+            return fallback
+        }
+        return cleaned
+    }
+
+    /// Maps an account or message segment to filesystem-safe text.
+    /// - Parameter segment: Raw account or message identifier.
+    /// - Returns: Text with only alphanumerics, dash, underscore, and dot.
+    public static func safeSegment(_ segment: String) -> String {
+        let mapped = segment.unicodeScalars.map { scalar -> String in
+            let value = scalar.value
+            let isDigit = value >= 48 && value <= 57
+            let isUpper = value >= 65 && value <= 90
+            let isLower = value >= 97 && value <= 122
+            let isDash = value == 45
+            let isUnderscore = value == 95
+            let isDot = value == 46
+            if isDigit || isUpper || isLower || isDash || isUnderscore || isDot {
+                return String(scalar)
+            }
+            return "_"
+        }.joined()
+        return mapped.isEmpty ? "_" : mapped
+    }
+}
+
+/// Trimmed attachment routing for `email.attachment`.
+private struct AttachmentTarget {
+    let accountName: String
+    let messageID: String
+    let attachmentIndex: Int
+}
+
+extension EmailAttachmentTool {
+    /// Decodes attachment arguments, rejecting bad ids and indexes early.
+    /// - Parameter input: Raw tool invocation.
+    /// - Returns: Decoded args.
+    /// - Throws: Failure message when decoding or validation fails.
+    private func decodedArgs(from input: ToolInput) throws -> EmailAttachmentArgs {
+        let args: EmailAttachmentArgs
+        do {
+            args = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(input.argumentsJSON.utf8))
+        } catch {
+            throw EmailIMAPError.bridgeFailed(
+                "Invalid email.attachment arguments: expected {\"account\": \"<name>\", \"id\": \"<message-id>\", \"index\": <0-based>}."
+            )
+        }
+        try EmailIMAPValidation.validateMessageID(args.messageID)
+        try EmailIMAPValidation.validateAttachmentIndex(args.attachmentIndex)
+        return args
+    }
+
+    /// Trims and re-validates decoded attachment routing.
+    /// - Parameter args: Decoded attachment arguments.
+    /// - Returns: Trimmed routing.
+    /// - Throws: Failure message when routing is empty or invalid.
+    private func validatedTarget(from args: EmailAttachmentArgs) throws -> AttachmentTarget {
+        let accountName = args.trimmedAccount
+        let messageID = args.trimmedMessageID
+        let attachmentIndex = args.attachmentIndex
+        guard !accountName.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'account' must not be empty.")
+        }
+        guard !messageID.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'id' must not be empty.")
+        }
+        try EmailIMAPValidation.validateMessageID(messageID)
+        try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
+        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex)
+    }
+
+    /// Resolves the configured account by exact then case-insensitive name.
+    /// - Parameter accountName: Trimmed account nickname.
+    /// - Returns: Matching account.
+    /// - Throws: `EmailIMAPError.unknownAccount` when no account matches.
+    private func resolvedAccount(named accountName: String) throws -> EmailAccount {
+        if let account = emailConfig.account(matching: accountName) {
+            return account
+        }
+        throw EmailIMAPError.unknownAccount(name: accountName, available: emailConfig.accounts.map(\.name))
+    }
+
+    /// Resolves credentials and fetches attachment bytes through the gateway.
+    /// - Parameters:
+    ///   - account: Matched account for credential resolution.
+    ///   - messageID: Trimmed message identifier.
+    ///   - index: Zero-based attachment position.
+    /// - Returns: Downloaded bytes.
+    private func fetchedAttachment(
+        for account: EmailAccount,
+        messageID: String,
+        index: Int
+    ) async throws -> EmailAttachmentData {
+        let credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
+        return try await gateway.attachment(
+            credentials: credentials,
+            messageID: messageID,
+            attachmentIndex: index
+        )
+    }
+
+    /// Encodes an attachment envelope as a success result.
+    /// - Parameters:
+    ///   - envelope: Envelope to encode.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success result, or a failure when encoding fails.
+    private func successEnvelope(_ envelope: EmailAttachmentEnvelope, callID: String) -> ToolOutput {
+        do {
+            let content = try EmailBridgeParsing.encodeAttachmentEnvelope(envelope)
+            return .success(content, callID: callID)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+    }
+
+    /// Builds the skip result for a part over the size cap.
+    /// - Parameters:
+    ///   - target: Trimmed routing.
+    ///   - accountName: Resolved account name for the envelope.
+    ///   - fetched: Downloaded metadata for the skipped part.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with the skip note.
+    private func oversizedEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        callID: String
+    ) -> ToolOutput {
+        let note = Self.oversizeNote(sizeBytes: fetched.sizeBytes)
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: nil,
+            skipped: true,
+            note: note
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
+    /// Resolves the sandbox-confined destination for a download.
+    /// - Parameters:
+    ///   - target: Trimmed routing.
+    ///   - accountName: Resolved account name for the file prefix.
+    ///   - filename: Original attachment filename.
+    /// - Returns: Destination under the staging area.
+    private func stagedDestinationURL(
+        target: AttachmentTarget,
+        accountName: String,
+        filename: String
+    ) throws -> URL {
+        try Self.stagedDestination(
+            stagingPath: sandboxConfig.stagingPath,
+            account: accountName,
+            messageID: target.messageID,
+            index: target.attachmentIndex,
+            filename: filename
+        )
+    }
+
+    /// Builds the dry-run result without writing any bytes.
+    ///
+    /// Keeps `path` nil per the `EmailAttachmentEnvelope` contract (`path`
+    /// is nil when skipped); the would-be staging path is reported in the
+    /// note instead so no caller mistakes a dry run for a staged file.
+    /// - Parameters:
+    ///   - target: Trimmed routing.
+    ///   - accountName: Resolved account name for the envelope.
+    ///   - fetched: Downloaded metadata.
+    ///   - destination: Staging path that would have been written.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with the dry-run note.
+    private func dryRunEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        destination: URL,
+        callID: String
+    ) -> ToolOutput {
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: nil,
+            skipped: true,
+            note: "Dry run: would save to \(destination.path) without downloading."
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
+    /// Stages bytes under the sandbox and builds the success result.
+    /// - Parameters:
+    ///   - target: Trimmed routing.
+    ///   - accountName: Resolved account name for the envelope.
+    ///   - fetched: Downloaded bytes to stage.
+    ///   - destination: Sandbox-confined file URL.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with the staged path, or a staging failure.
+    private func storedEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        destination: URL,
+        callID: String
+    ) -> ToolOutput {
+        do {
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fetched.data.write(to: destination, options: .atomic)
+        } catch {
+            return .failure("Could not stage attachment: \(error.localizedDescription)", callID: callID)
+        }
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: destination.path,
+            skipped: false,
+            note: nil
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+}
+
+/// Factory registering the email tools on a `ToolBus`.
+///
+/// Search and read stay `readOnly` while attachment downloads are
+/// `requiresApproval` so the graduated-trust gate prompts before any
+/// file is staged. All tools integrate with
+/// `EmailCredentialResolver` (environment first, Keychain service
+/// `com.runeweaver.secrets` second) so passwords never live in
+/// `config.toml` and never reach the LLM prompt. Verified live against
+/// Volcrypt IMAP (`mail.volcrypt.com:993`, account `volcrypt` via
+/// `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
+/// (`imap.mail.me.com:993`, account `icloud` via the
+/// `EMAIL_ICLOUD_PASSWORD` app-specific password) read-only with
+/// verified TLS; attachment bytes stage under the sandbox staging
+/// area only.
 public enum EmailTools {
     /// Tool names in registration order.
-    public static let toolNames = ["email.search", "email.read"]
+    public static let toolNames = ["email.search", "email.read", "email.attachment"]
 
-    /// Builds the read-only email tools for an email config.
+    /// Builds the email tools for an email config.
     /// - Parameters:
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
-    /// - Returns: Search and read tools in registration order.
+    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads.
+    /// - Returns: Search, read, and attachment tools in registration order.
     public static func makeTools(
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil
+        gateway: (any EmailIMAPGateway)? = nil,
+        sandboxConfig: SandboxConfig = SandboxConfig()
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
         let search: any Tool = EmailSearchTool(emailConfig: emailConfig, gateway: shared)
         let read: any Tool = EmailReadTool(emailConfig: emailConfig, gateway: shared)
-        return [search, read]
+        let attachment: any Tool = EmailAttachmentTool(
+            emailConfig: emailConfig,
+            gateway: shared,
+            sandboxConfig: sandboxConfig
+        )
+        return [search, read, attachment]
     }
 
     /// Registers the email tools, replacing same-named entries.
@@ -254,12 +703,14 @@ public enum EmailTools {
     ///   - bus: Bus receiving the tools (surfaced via `status`).
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
+    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads.
     public static func register(
         on bus: ToolBus,
         emailConfig: EmailConfig,
-        gateway: (any EmailIMAPGateway)? = nil
+        gateway: (any EmailIMAPGateway)? = nil,
+        sandboxConfig: SandboxConfig = SandboxConfig()
     ) async {
-        for tool in makeTools(emailConfig: emailConfig, gateway: gateway) {
+        for tool in makeTools(emailConfig: emailConfig, gateway: gateway, sandboxConfig: sandboxConfig) {
             await bus.register(tool: tool)
         }
     }

@@ -53,6 +53,22 @@ public enum EmailIMAPValidation: Sendable {
         }
     }
 
+    /// Whether a search query requests every message (most-recent listing).
+    ///
+    /// A trimmed empty query, a whitespace-only query, or a lone `"*"`
+    /// wildcard maps to `SEARCH ALL` so `email.search` with `"*"`,
+    /// `""`, or `"   "` returns the most-recent messages instead of
+    /// sending a literal `TEXT "*"` that matches nothing on iCloud
+    /// (`imap.mail.me.com:993`) and some Volcrypt mailboxes. Mirrors the
+    /// Python bridge check (`if not query or query == "*"`). Never logs
+    /// or echoes input.
+    /// - Parameter query: Raw or trimmed free-text query.
+    /// - Returns: True when the query should list recent messages via `ALL`.
+    public static func isAllQuery(_ query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || trimmed == "*"
+    }
+
     /// Whether raw tool arguments contain an unescaped JSON escape for CR/LF.
     ///
     /// Detects `\r`, `\n`, `\u000d`, `\u000a` (hex case-insensitive) with
@@ -125,6 +141,15 @@ public enum EmailIMAPValidation: Sendable {
             throw EmailIMAPError.bridgeFailed("Invalid message id")
         }
     }
+
+    /// Validates an attachment index, rejecting negative positions.
+    /// - Parameter index: Zero-based position into the attachment list.
+    /// - Throws: `EmailIMAPError.bridgeFailed` when the index is negative.
+    public static func validateAttachmentIndex(_ index: Int) throws {
+        guard index >= 0 else {
+            throw EmailIMAPError.bridgeFailed("Invalid attachment index")
+        }
+    }
 }
 
 /// Read-only IMAP gateway used by the email tools.
@@ -138,7 +163,7 @@ public protocol EmailIMAPGateway: Sendable {
     /// Searches subject, sender, and body for `query`.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
-    ///   - query: Free-text query matched against subject/sender/body.
+    ///   - query: Free-text query matched against subject/sender/body (`"*"`/empty means most-recent via `ALL`).
     ///   - limit: Maximum hits (already clamped to `1...50`).
     /// - Returns: Hits, newest first.
     func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit]
@@ -147,8 +172,20 @@ public protocol EmailIMAPGateway: Sendable {
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - messageID: IMAP UID of the message.
-    /// - Returns: Headers plus text body with attachments deferred.
+    /// - Returns: Headers plus text body with attachment metadata.
     func fetch(credentials: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage
+
+    /// Fetches one attachment part by zero-based index.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - messageID: IMAP UID of the message.
+    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
+    /// - Returns: Attachment bytes with filename, MIME type, and size.
+    func attachment(
+        credentials: ResolvedEmailCredentials,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData
 }
 
 /// Bridge request document sent to the Python helper over stdin.
@@ -173,8 +210,10 @@ struct EmailIMAPBridgeRequest: Encodable {
     let query: String?
     /// Maximum hits (search only).
     let limit: Int?
-    /// Message UID (fetch only).
+    /// Message UID (fetch and attachment only).
     let messageID: String?
+    /// Zero-based attachment position (attachment only).
+    let attachmentIndex: Int?
 
     /// Creates a search request.
     /// - Parameters:
@@ -192,7 +231,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             mailbox: "INBOX",
             query: query,
             limit: limit,
-            messageID: nil
+            messageID: nil,
+            attachmentIndex: nil
         )
     }
 
@@ -211,7 +251,33 @@ struct EmailIMAPBridgeRequest: Encodable {
             mailbox: "INBOX",
             query: nil,
             limit: nil,
-            messageID: messageID
+            messageID: messageID,
+            attachmentIndex: nil
+        )
+    }
+
+    /// Creates an attachment request.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - messageID: Message UID.
+    ///   - attachmentIndex: Zero-based attachment position.
+    /// - Returns: Attachment request for `INBOX`.
+    static func attachment(
+        credentials: ResolvedEmailCredentials,
+        messageID: String,
+        attachmentIndex: Int
+    ) -> Self {
+        Self(
+            op: "attachment",
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password,
+            mailbox: "INBOX",
+            query: nil,
+            limit: nil,
+            messageID: messageID,
+            attachmentIndex: attachmentIndex
         )
     }
 }
@@ -228,17 +294,26 @@ struct EmailIMAPBridgeRequest: Encodable {
 /// verification) with a 30-second connect timeout. Search rejects
 /// CR/LF in the query and fetch allowlists message ids to UID syntax
 /// (`^[0-9][0-9:,]*$`) so crafted input cannot inject additional IMAP
-/// commands. Search uses `OR SUBJECT/FROM/BODY` (via `CHARSET UTF-8`
-/// with a plain fallback for servers without `UTF-8` search) so one
-/// query covers subject, sender, and body. MIME parsing prefers
-/// `text/plain`, falls back to stripped `text/html`, and lists
-/// attachment filenames without downloading bytes beyond headers.
-/// iCloud accounts work over the same IMAP path but remain untested
-/// until phase two, which also owns attachment downloads.
+/// commands, and attachment validates the part index as a
+/// non-negative integer. Search uses `OR SUBJECT/FROM/BODY` (via
+/// `CHARSET UTF-8` with a plain fallback for servers without `UTF-8`
+/// search) so one query covers subject, sender, and body. An empty,
+/// whitespace-only, or lone `"*"` query maps to `SEARCH ALL` and returns
+/// the most-recent messages (UID order, newest first, capped by `limit`)
+/// so `query: "*"` with `limit: 1` answers "last email subject" on iCloud
+/// where a literal `TEXT "*"` matches nothing. MIME parsing
+/// prefers `text/plain`, falls back to stripped `text/html`, and lists
+/// attachment filename, MIME type, and decoded byte size. The
+/// `attachment` op returns one part base64-encoded in walk order so the
+/// Swift tool can stage it under the sandbox; both the bridge (pre-flight
+/// abort before base64 encoding) and the Swift tool enforce the 10 MB
+/// download size cap. iCloud accounts use the same IMAP path
+/// (`imap.mail.me.com:993` with an app-specific password via
+/// `EMAIL_ICLOUD_PASSWORD`), verified live read-only.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
     static let source = #"""
-    import sys, json, imaplib, email, re, ssl
+    import sys, json, imaplib, email, re, ssl, base64
     from email import policy
     from email.header import decode_header
     from email.utils import getaddresses
@@ -301,8 +376,8 @@ enum EmailIMAPBridgeScript {
         except Exception:
             return ""
 
-    def attachments_of(msg):
-        found = []
+    def attachment_parts(msg):
+        parts = []
         if msg.is_multipart():
             for part in msg.walk():
                 if part.is_multipart():
@@ -313,8 +388,32 @@ enum EmailIMAPBridgeScript {
                     name = decode_value(filename) if filename else "unnamed-attachment"
                     if not name.strip():
                         name = "unnamed-attachment"
-                    found.append({"filename": name, "contentType": part.get_content_type() or "application/octet-stream"})
+                    ctype = part.get_content_type() or "application/octet-stream"
+                    try:
+                        payload = part.get_payload(decode=True) or b""
+                    except Exception:
+                        payload = b""
+                    parts.append((name, ctype, payload))
+        return parts
+
+    def attachments_of(msg):
+        found = []
+        for (name, ctype, payload) in attachment_parts(msg):
+            found.append({"filename": name, "contentType": ctype, "sizeBytes": len(payload)})
         return found
+
+    def attachment_index_of(req):
+        raw = req.get("attachmentIndex")
+        if raw is None:
+            raw = req.get("attachment_index")
+        if raw is None:
+            raw = req.get("index")
+        if isinstance(raw, bool):
+            return None
+        try:
+            return int(raw)
+        except Exception:
+            return None
 
     def snippet_of(text, limit=200):
         single = re.sub(r"\s+", " ", text or "").strip()
@@ -345,6 +444,18 @@ enum EmailIMAPBridgeScript {
                 return
             if not re.fullmatch(r"[0-9][0-9:,]*", early_mid):
                 fail("Invalid message id")
+                return
+        elif op == "attachment":
+            early_mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
+            if not early_mid:
+                fail("Missing message id")
+                return
+            if not re.fullmatch(r"[0-9][0-9:,]*", early_mid):
+                fail("Invalid message id")
+                return
+            early_idx = attachment_index_of(req)
+            if early_idx is None or early_idx < 0:
+                fail("Invalid attachment index")
                 return
         host = req.get("host") or ""
         try:
@@ -392,7 +503,7 @@ enum EmailIMAPBridgeScript {
                     limit = 10
                 limit = max(1, min(limit, 50))
                 try:
-                    if not query:
+                    if not query or query == "*":
                         typ, data = conn.uid("search", None, "ALL")
                     else:
                         esc = query.replace("\\", "\\\\").replace('"', '\\"')
@@ -469,9 +580,9 @@ enum EmailIMAPBridgeScript {
                     note = None
                     if deferred:
                         if len(listed) == 1:
-                            note = "1 attachment skipped; attachment download is deferred to phase two."
+                            note = "1 attachment listed; use email.attachment to download."
                         else:
-                            note = "%d attachments skipped; attachment download is deferred to phase two." % len(listed)
+                            note = "%d attachments listed; use email.attachment to download." % len(listed)
                     sys.stdout.write(json.dumps({"ok": True, "message": {
                         "id": mid,
                         "subject": decode_value(msg["Subject"]),
@@ -486,6 +597,57 @@ enum EmailIMAPBridgeScript {
                     sys.stdout.flush()
                 except Exception as exc:
                     fail("IMAP fetch failed: %s" % exc)
+                    return
+            elif op == "attachment":
+                mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
+                if not mid:
+                    fail("Missing message id")
+                    return
+                if not re.fullmatch(r"[0-9][0-9:,]*", mid):
+                    fail("Invalid message id")
+                    return
+                idx = attachment_index_of(req)
+                if idx is None or idx < 0:
+                    fail("Invalid attachment index")
+                    return
+                try:
+                    raw = None
+                    ftyp, fdata = conn.uid("fetch", mid, "(BODY.PEEK[])")
+                    if ftyp != "OK" or not fdata or fdata == [None]:
+                        ftyp, fdata = conn.fetch(mid, "(BODY.PEEK[])")
+                    if ftyp == "OK" and fdata:
+                        for chunk in fdata:
+                            if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
+                                raw = chunk[1]
+                                break
+                    if not raw:
+                        fail("Message %s not found" % mid)
+                        return
+                    msg = email.message_from_bytes(raw, policy=policy.default)
+                    parts = attachment_parts(msg)
+                    if idx < 0 or idx >= len(parts):
+                        fail("Invalid attachment index %d (message has %d attachments)" % (idx, len(parts)))
+                        return
+                    name, ctype, payload = parts[idx]
+                    if len(payload) > 10485760:
+                        sys.stdout.write(json.dumps({"ok": True, "attachment": {
+                            "filename": name,
+                            "contentType": ctype,
+                            "sizeBytes": len(payload),
+                            "contentBase64": None,
+                            "oversize": True,
+                        }}))
+                        sys.stdout.flush()
+                        return
+                    sys.stdout.write(json.dumps({"ok": True, "attachment": {
+                        "filename": name,
+                        "contentType": ctype,
+                        "sizeBytes": len(payload),
+                        "contentBase64": base64.b64encode(payload).decode("ascii"),
+                    }}))
+                    sys.stdout.flush()
+                except Exception as exc:
+                    fail("IMAP attachment fetch failed: %s" % exc)
                     return
             else:
                 fail("Unknown IMAP op '%s'" % op)
@@ -533,12 +695,16 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     /// Searches via the Python helper.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
-    ///   - query: Free-text query.
+    ///   - query: Free-text query (`"*"`/empty lists most-recent via `ALL`).
     ///   - limit: Maximum hits.
     /// - Returns: Hits, newest first.
     public func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit] {
         try EmailIMAPValidation.validateSearchQuery(query)
-        let request = EmailIMAPBridgeRequest.search(credentials: credentials, query: query, limit: limit)
+        // Normalize wildcard/empty to ALL here as well so direct gateway
+        // callers get most-recent messages even before the Python `ALL`
+        // branch runs. Read-only, verified TLS, and caps are unchanged.
+        let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = EmailIMAPBridgeRequest.search(credentials: credentials, query: effectiveQuery, limit: limit)
         let data = try await run(request: request)
         do {
             return try EmailBridgeParsing.parseSearchPayload(data)
@@ -553,13 +719,41 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - messageID: Message UID.
-    /// - Returns: Headers plus text body.
+    /// - Returns: Headers plus text body with attachment metadata.
     public func fetch(credentials: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
         try EmailIMAPValidation.validateMessageID(messageID)
         let request = EmailIMAPBridgeRequest.fetch(credentials: credentials, messageID: messageID)
         let data = try await run(request: request)
         do {
             return try EmailBridgeParsing.parseFetchPayload(data)
+        } catch let error as EmailIMAPError {
+            throw error
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+    }
+
+    /// Fetches one attachment part via the Python helper.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - messageID: Message UID.
+    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
+    /// - Returns: Attachment bytes with filename, MIME type, and size.
+    public func attachment(
+        credentials: ResolvedEmailCredentials,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData {
+        try EmailIMAPValidation.validateMessageID(messageID)
+        try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
+        let request = EmailIMAPBridgeRequest.attachment(
+            credentials: credentials,
+            messageID: messageID,
+            attachmentIndex: attachmentIndex
+        )
+        let data = try await run(request: request)
+        do {
+            return try EmailBridgeParsing.parseAttachmentPayload(data)
         } catch let error as EmailIMAPError {
             throw error
         } catch {
@@ -631,6 +825,9 @@ private func runIMAPBridgeIO(payload: Data, pythonExecutable: String?) async thr
 /// Blocking file helper for `runIMAPBridgeIO(payload:pythonExecutable:)`.
 /// Must run on a background queue, never on the async executor: it calls
 /// blocking `Process.waitUntilExit()` and `readDataToEndOfFile()`.
+/// Stdout and stderr drain on background queues started before
+/// `waitUntilExit` so a large attachment payload (base64 well beyond the
+/// ~64 KB pipe buffer) cannot deadlock with the Python writer.
 /// The password travels only in `payload` and the subprocess pipe — it
 /// is never logged and never echoed in errors.
 /// - Parameters:
@@ -639,6 +836,27 @@ private func runIMAPBridgeIO(payload: Data, pythonExecutable: String?) async thr
 /// - Returns: Raw stdout bytes.
 /// - Throws: `EmailIMAPError` without any secret value.
 private func runIMAPBridgeBlocking(payload: Data, pythonExecutable: String?) throws -> Data {
+    final class PipeDrain: @unchecked Sendable {
+        private let lock = NSLock()
+        private var data = Data()
+        func set(_ value: Data) {
+            lock.lock()
+            defer { lock.unlock() }
+            data = value
+        }
+
+        func get() -> Data {
+            lock.lock()
+            defer { lock.unlock() }
+            return data
+        }
+    }
+    final class SendableHandle: @unchecked Sendable {
+        let handle: FileHandle
+        init(_ handle: FileHandle) {
+            self.handle = handle
+        }
+    }
     let process = Process()
     if let pythonExecutable, !pythonExecutable.isEmpty {
         process.executableURL = URL(fileURLWithPath: pythonExecutable)
@@ -660,17 +878,38 @@ private func runIMAPBridgeBlocking(payload: Data, pythonExecutable: String?) thr
             "Could not launch python3 for IMAP access: \(error.localizedDescription)"
         )
     }
+    // Drain both pipes concurrently before waiting: a 10 MB attachment
+    // (~13 MB base64) would otherwise fill the pipe while Python blocks
+    // on write and Swift blocks on wait.
+    let stdoutDrain = PipeDrain()
+    let stderrDrain = PipeDrain()
+    let drainGroup = DispatchGroup()
+    let outputHandle = SendableHandle(outputPipe.fileHandleForReading)
+    let errorHandle = SendableHandle(errorPipe.fileHandleForReading)
+    drainGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+        stdoutDrain.set(outputHandle.handle.readDataToEndOfFile())
+        drainGroup.leave()
+    }
+    drainGroup.enter()
+    DispatchQueue.global(qos: .utility).async {
+        stderrDrain.set(errorHandle.handle.readDataToEndOfFile())
+        drainGroup.leave()
+    }
     do {
         try inputPipe.fileHandleForWriting.write(contentsOf: payload)
     } catch {
         process.terminate()
+        drainGroup.wait()
         throw EmailIMAPError.bridgeFailed("Could not write IMAP request: \(error.localizedDescription)")
     }
     try? inputPipe.fileHandleForWriting.close()
     process.waitUntilExit()
-    let output = outputPipe.fileHandleForReading.readDataToEndOfFile()
+    drainGroup.wait()
+    let output = stdoutDrain.get()
+    let stderr = stderrDrain.get()
     if process.terminationStatus != 0 {
-        let detail = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        let detail = String(data: stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let detail, !detail.isEmpty {
             throw EmailIMAPError.bridgeFailed("IMAP helper failed: \(detail)")
@@ -680,7 +919,7 @@ private func runIMAPBridgeBlocking(payload: Data, pythonExecutable: String?) thr
         )
     }
     if output.isEmpty {
-        let detail = String(data: errorPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+        let detail = String(data: stderr, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if detail.isEmpty {
             throw EmailIMAPError.decodeFailed("IMAP helper returned no output")

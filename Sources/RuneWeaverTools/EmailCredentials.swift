@@ -179,3 +179,45 @@ public enum EmailCredentialResolver {
         )
     }
 }
+
+/// Well-known IMAP details for the iCloud account.
+///
+/// iCloud serves read-only IMAP at `imap.mail.me.com:993` and requires
+/// an app-specific password (never the Apple Account password). The
+/// value is resolved through the shared
+/// `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` convention as
+/// `EMAIL_ICLOUD_PASSWORD` (environment first, Keychain service
+/// `com.runeweaver.secrets` second), so the bridge and tools need no
+/// iCloud-specific code path. This namespace single-sources the host,
+/// port, and setup pointer so docs, diagnostics, and tests stay
+/// consistent. All members are non-sensitive; the secret itself is
+/// never stored here.
+public enum EmailICloud: Sendable {
+    /// Account nickname used in `[email.accounts]`.
+    public static let accountName = "icloud"
+    /// iCloud IMAP hostname.
+    public static let host = "imap.mail.me.com"
+    /// iCloud IMAP port (IMAP over TLS).
+    public static let port = 993
+    /// Variable holding the iCloud app-specific password.
+    public static let passwordEnvVar = "EMAIL_ICLOUD_PASSWORD"
+    /// Where to generate the app-specific password.
+    public static let appSpecificPasswordHelp =
+        "Generate at Apple Account > Sign-In and Security > App-Specific Passwords "
+            + "(requires two-factor authentication); use the generated value for EMAIL_ICLOUD_PASSWORD, "
+            + "never the Apple Account password."
+
+    /// Builds the configured iCloud account entry.
+    /// - Parameter username: iCloud login username (e.g. `user@icloud.com`).
+    /// - Returns: `EmailAccount` for `imap.mail.me.com:993`.
+    public static func account(username: String) -> EmailAccount {
+        EmailAccount(name: accountName, type: "imap", host: host, port: port, username: username)
+    }
+
+    /// Whether an account entry targets iCloud IMAP.
+    /// - Parameter account: Configured account to check.
+    /// - Returns: True when the host and port match iCloud IMAP.
+    public static func matches(_ account: EmailAccount) -> Bool {
+        account.host.lowercased() == host && account.port == port
+    }
+}
