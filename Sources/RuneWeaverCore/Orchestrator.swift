@@ -115,13 +115,24 @@ public enum OrchestratorToolLoop {
     /// Returns the assistant content to persist for a tool round.
     ///
     /// Blank model text falls back to the shared placeholder so tool results
-    /// keep their parent turn.
+    /// keep their parent turn. When the model sends both text and tool calls
+    /// in one turn, both are kept (text plus placeholder lines) so the next
+    /// Responses body can still replay every `function_call` with its
+    /// matching `function_call_output` instead of orphaning tool results.
     /// - Parameters:
     ///   - text: Latest assistant text.
     ///   - calls: Tool calls needing a parent assistant note.
-    /// - Returns: `text` when non-blank, else the placeholder record.
+    /// - Returns: Placeholder when text is blank, text when there are no
+    ///   calls, otherwise text plus the placeholder record.
     public static func assistantNoteContent(text: String, calls: [ToolInput]) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? ToolInput.placeholderContent(for: calls) : text
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return ToolInput.placeholderContent(for: calls)
+        }
+        if calls.isEmpty {
+            return text
+        }
+        return text + "\n" + ToolInput.placeholderContent(for: calls)
     }
 
     /// Whether a tool result is worth mirroring to episodic memory.
