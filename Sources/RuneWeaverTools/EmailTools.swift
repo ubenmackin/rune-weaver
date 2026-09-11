@@ -5,8 +5,9 @@ import RuneWeaverCore
 ///
 /// Searches subject, sender, and body through the `python3 imaplib`
 /// bridge and returns headers plus a short text snippet per hit.
-/// Always `readOnly`: it opens the mailbox read-only with `BODY.PEEK`
-/// fetches and never mutates flags or messages.
+/// Always `readOnly`: it opens the mailbox read-only with
+/// `(BODY.PEEK[])` fetches and never mutates flags or messages.
+/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`).
 public struct EmailSearchTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.search"
@@ -19,7 +20,7 @@ public struct EmailSearchTool: Tool, Sendable {
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. personal)"},"query":{"type":"string","description":"Free-text query "#
+                + #"from [email.accounts] (e.g. volcrypt)"},"query":{"type":"string","description":"Free-text query "#
                 + #"matched against subject, sender, and body"},"limit":{"type":"integer","description":"Maximum hits "#
                 + #"(1-50, default 10)","minimum":1,"maximum":50}},"required":["account","query"],"additionalProperties":false}"#
         )
@@ -95,7 +96,9 @@ public struct EmailSearchTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        guard let account = emailConfig.account(named: accountName) else {
+        let account = emailConfig.account(named: accountName)
+            ?? emailConfig.accounts.first(where: { $0.name.lowercased() == accountName.lowercased() })
+        guard let account else {
             let available = emailConfig.accounts.map(\.name)
             return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
         }
@@ -120,6 +123,7 @@ public struct EmailSearchTool: Tool, Sendable {
 /// Returns headers plus the decoded text body. Attachment bytes are
 /// never returned: skipped parts are listed by filename with a note
 /// that downloads are deferred to phase two. Always `readOnly`.
+/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`).
 public struct EmailReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.read"
@@ -132,7 +136,7 @@ public struct EmailReadTool: Tool, Sendable {
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. personal)"},"id":{"type":"string","description":"IMAP message id "#
+                + #"from [email.accounts] (e.g. volcrypt)"},"id":{"type":"string","description":"IMAP message id "#
                 + #"from email.search"}},"required":["account","id"],"additionalProperties":false}"#
         )
     /// Always allowed: reading never changes mailbox state.
@@ -194,7 +198,9 @@ public struct EmailReadTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        guard let account = emailConfig.account(named: accountName) else {
+        let account = emailConfig.account(named: accountName)
+            ?? emailConfig.accounts.first(where: { $0.name.lowercased() == accountName.lowercased() })
+        guard let account else {
             let available = emailConfig.accounts.map(\.name)
             return .failure(EmailIMAPError.unknownAccount(name: accountName, available: available).localizedDescription, callID: input.callID)
         }
@@ -219,8 +225,11 @@ public struct EmailReadTool: Tool, Sendable {
 /// Both tools integrate with `EmailCredentialResolver` (environment
 /// first, Keychain service `com.runeweaver.secrets` second) so
 /// passwords never live in `config.toml` and never reach the LLM
-/// prompt. iCloud accounts resolve through the same path but stay
-/// untested until phase two.
+/// prompt. Verified live against Volcrypt IMAP
+/// (`mail.volcrypt.com:993`, account `volcrypt` via
+/// `EMAIL_VOLCRYPT_PASSWORD`) read-only with verified TLS; iCloud
+/// accounts resolve through the same path but stay untested until
+/// phase two.
 public enum EmailTools {
     /// Tool names in registration order.
     public static let toolNames = ["email.search", "email.read"]

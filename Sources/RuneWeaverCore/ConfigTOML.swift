@@ -337,6 +337,8 @@ extension RuneWeaverConfig {
         }
         if llm.values.keys.contains("fallback_provider") {
             config.llm.fallbackProvider = llm.string("fallback_provider")
+        } else {
+            config.llm.fallbackProvider = nil
         }
         guard let providers = llm.tables["providers"] else { return }
         let decoded = try decodeProviders(providers)

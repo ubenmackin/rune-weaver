@@ -50,37 +50,45 @@ Chat starts with the self-hosted IMAP tools registered and visible to the model:
 - `email.search` — find messages by free text (subject, sender, body); returns ids, headers, and snippets.
 - `email.read` — open one message by id; returns headers plus the text body. Attachments are listed by filename with a deferral note; bytes are never downloaded.
 
-Both tools are `readOnly`, so they run with no approval prompts. The assistant calls them during a turn, reads the results, and summarizes in conversation.
+Both tools are `readOnly`, so they run with no approval prompts. The assistant calls them during a turn, reads the results, and summarizes in conversation. Verified live against Volcrypt IMAP read-only; there is no send path.
 
 ### Live run (reads only, never sends)
 
-1. Configure the account in `~/.runeweaver/config.toml` (see `Config/config.toml.example` and `CONFIG.md`):
+1. Configure the Volcrypt account in `~/.runeweaver/config.toml` (see `Config/config.toml.example` and `CONFIG.md`):
 
 ```toml
 [[email.accounts]]
-name = "personal"
+name = "volcrypt"
 type = "imap"
-host = "mail.yourdomain.com"
+host = "mail.volcrypt.com"
 port = 993
-username = "you@yourdomain.com"
+username = "you@volcrypt.com"
 # password is never stored here
 ```
 
 2. Provide the password without printing it — environment first, Keychain fallback (service `com.runeweaver.secrets`):
 
 ```bash
-export EMAIL_PERSONAL_PASSWORD="..."
-# Keychain alternative: store EMAIL_PERSONAL_PASSWORD under service com.runeweaver.secrets
+export EMAIL_VOLCRYPT_PASSWORD="..."
+# Keychain alternative: store EMAIL_VOLCRYPT_PASSWORD under service com.runeweaver.secrets
 ```
 
-The variable name is `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_PERSONAL_PASSWORD`).
+The variable name is `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_VOLCRYPT_PASSWORD`). Lookup is environment first, then the Keychain item `(service: com.runeweaver.secrets, account: EMAIL_VOLCRYPT_PASSWORD)`.
 
-3. Confirm the tools are registered:
+3. Confirm the tools and account are registered:
 
 ```bash
 swift run rune-weaver status
 # Tools: active: email.read, email.search
 ```
+
+```bash
+swift run rune-weaver chat
+# Tools: email.read, email.search.
+# Email accounts: volcrypt (you@volcrypt.com@mail.volcrypt.com:993).
+```
+
+Account names match case-insensitively, so `volcrypt`, `Volcrypt`, and `VOLCRYPT` all resolve. Only the name plus `username@host:port` ever prints; passwords never appear in output, logs, or the model prompt.
 
 4. Start chat and ask to find and summarize:
 
@@ -89,19 +97,23 @@ swift run rune-weaver chat
 ```
 
 ```text
-you> Find emails about quarterly report on personal
+you> Find emails about quarterly report on volcrypt
 weaver> ◈ calling email.search ...
-you> Summarize message 42 from personal
+you> Summarize message 42 from volcrypt
 weaver> ◈ calling email.read ...
 ```
 
-The model summarizes the returned headers and snippets/bodies inline. Reads open the mailbox read-only and never change flags; there is no send path. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
+The verified flow is search then read: `email.search` lists matching ids, headers, and 200-character snippets (plain text preferred, HTML stripped to text), then `email.read` returns headers plus the text body for one id. The model summarizes the returned headers and snippets/bodies inline.
+
+Reads open `INBOX` read-only and fetch with `(BODY.PEEK[])` so flags never change; TLS is always verified with a 30-second connect timeout; search uses `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback; queries reject CR/LF and ids allowlist to UID syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject IMAP commands. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
 
 Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing:
 
 ```bash
 swift test --filter RuneWeaverToolsTests
 ```
+
+iCloud stays on the same IMAP path but remains phase two: it is only attempted when `EMAIL_ICLOUD_PASSWORD` is already present, and iCloud-specific or attachment-download gaps are reported, not fixed here. Attachment bytes are never downloaded — skipped parts list by filename with a note that downloads are deferred to phase two.
 
 ## Memory in chat (automatic recall)
 

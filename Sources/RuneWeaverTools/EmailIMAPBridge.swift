@@ -131,8 +131,9 @@ public enum EmailIMAPValidation: Sendable {
 ///
 /// The production implementation shells out to `python3 imaplib`;
 /// tests inject a stub. Both paths stay read-only: the mailbox is
-/// opened with `readonly=True` and only `BODY.PEEK` fetches are used
-/// so `\Seen` is never set.
+/// opened with `readonly=True` and only `(BODY.PEEK[])` fetches are
+/// used so `\Seen` is never set even when the server ignores the
+/// read-only open.
 public protocol EmailIMAPGateway: Sendable {
     /// Searches subject, sender, and body for `query`.
     /// - Parameters:
@@ -220,18 +221,20 @@ struct EmailIMAPBridgeRequest: Encodable {
 /// Reads one `EmailIMAPBridgeRequest` JSON object from stdin and
 /// prints one JSON response to stdout (`{"ok":true,...}` or
 /// `{"ok":false,"error":"..."}`). The mailbox is opened read-only and
-/// every fetch uses `BODY.PEEK` so messages stay unseen. TLS is always
-/// verified via `ssl.create_default_context()` (fail closed; private-CA
-/// homelab hosts pin via `ctx.load_verify_locations()` instead of
-/// disabling verification). Search rejects CR/LF in the query and fetch
-/// allowlists message ids to UID syntax (`^[0-9][0-9:,]*$`) so crafted
-/// input cannot inject additional IMAP commands. Search uses
-/// `OR SUBJECT/FROM/BODY` so one query covers subject, sender, and
-/// body. MIME parsing prefers `text/plain`, falls back to stripped
-/// `text/html`, and lists attachment filenames without downloading
-/// bytes beyond headers. iCloud accounts work over the same IMAP path
-/// but remain untested until phase two, which also owns attachment
-/// downloads.
+/// every fetch uses `(BODY.PEEK[])` so messages stay unseen even when
+/// the server ignores the read-only open. TLS is always verified via
+/// `ssl.create_default_context()` (fail closed; private-CA homelab
+/// hosts pin via `ctx.load_verify_locations()` instead of disabling
+/// verification) with a 30-second connect timeout. Search rejects
+/// CR/LF in the query and fetch allowlists message ids to UID syntax
+/// (`^[0-9][0-9:,]*$`) so crafted input cannot inject additional IMAP
+/// commands. Search uses `OR SUBJECT/FROM/BODY` (via `CHARSET UTF-8`
+/// with a plain fallback for servers without `UTF-8` search) so one
+/// query covers subject, sender, and body. MIME parsing prefers
+/// `text/plain`, falls back to stripped `text/html`, and lists
+/// attachment filenames without downloading bytes beyond headers.
+/// iCloud accounts work over the same IMAP path but remain untested
+/// until phase two, which also owns attachment downloads.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
     static let source = #"""
@@ -356,7 +359,10 @@ enum EmailIMAPBridgeScript {
             return
         try:
             ctx = ssl.create_default_context()
-            conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+            try:
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=30)
+            except TypeError:
+                conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
         except Exception as exc:
             fail("Could not connect to %s@%s:%s: %s" % (username, host, port, exc))
             return
@@ -391,7 +397,15 @@ enum EmailIMAPBridgeScript {
                     else:
                         esc = query.replace("\\", "\\\\").replace('"', '\\"')
                         criteria = 'OR OR SUBJECT "%s" FROM "%s" BODY "%s"' % (esc, esc, esc)
-                        typ, data = conn.uid("search", None, criteria)
+                        ctyp, cdata = None, None
+                        try:
+                            ctyp, cdata = conn.uid("search", "CHARSET", "UTF-8", criteria)
+                        except Exception:
+                            ctyp, cdata = None, None
+                        if ctyp == "OK" and cdata is not None:
+                            typ, data = ctyp, cdata
+                        else:
+                            typ, data = conn.uid("search", None, criteria)
                     if typ != "OK":
                         fail("IMAP search failed")
                         return
@@ -401,7 +415,7 @@ enum EmailIMAPBridgeScript {
                     messages = []
                     for uid in wanted:
                         try:
-                            ftyp, fdata = conn.uid("fetch", uid, "(RFC822)")
+                            ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
                         except Exception:
                             continue
                         if ftyp != "OK" or not fdata:
@@ -437,9 +451,9 @@ enum EmailIMAPBridgeScript {
                     return
                 try:
                     raw = None
-                    ftyp, fdata = conn.uid("fetch", mid, "(RFC822)")
+                    ftyp, fdata = conn.uid("fetch", mid, "(BODY.PEEK[])")
                     if ftyp != "OK" or not fdata or fdata == [None]:
-                        ftyp, fdata = conn.fetch(mid, "(RFC822)")
+                        ftyp, fdata = conn.fetch(mid, "(BODY.PEEK[])")
                     if ftyp == "OK" and fdata:
                         for chunk in fdata:
                             if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
