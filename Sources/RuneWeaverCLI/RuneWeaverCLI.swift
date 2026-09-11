@@ -251,22 +251,25 @@ enum CLIShared {
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
     ///
-    /// The single source of truth for the CLI registry. Read-only email
-    /// tools (`email.search`, `email.read`) are built from the `[email]`
-    /// section; memory tools (`remember_fact`, `recall_memories`) are
-    /// built from the shared `MemoryEngine` so chat exposes them to the
-    /// model as tool definitions every turn. Nil inputs yield no plugins
-    /// for that family so legacy call sites stay valid. Commands pass
-    /// their loaded config and shared engine instead of constructing
-    /// divergent registries.
+    /// The single source of truth for the CLI registry. Email search and
+    /// read (`email.search`, `email.read`) are `readOnly` and built from
+    /// the `[email]` section, while attachment downloads
+    /// (`email.attachment`) are `requiresApproval` and stage under the
+    /// `[sandbox]` staging path; memory tools (`remember_fact`,
+    /// `recall_memories`) are built from the shared `MemoryEngine` so
+    /// chat exposes them to the model as tool definitions every turn.
+    /// Nil inputs yield no plugins for that family so legacy call sites
+    /// stay valid. Commands pass their loaded config and shared engine
+    /// instead of constructing divergent registries.
     /// - Parameters:
     ///   - emailConfig: Decoded `[email]` section, if any.
     ///   - memoryEngine: Shared engine for memory tools, if any.
+    ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
     /// - Returns: Tools to register.
-    static func pluginTools(emailConfig: EmailConfig? = nil, memoryEngine: MemoryEngine? = nil) -> [any Tool] {
+    static func pluginTools(emailConfig: EmailConfig? = nil, memoryEngine: MemoryEngine? = nil, sandboxConfig: SandboxConfig? = nil) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
-            tools += EmailTools.makeTools(emailConfig: emailConfig)
+            tools += EmailTools.makeTools(emailConfig: emailConfig, sandboxConfig: sandboxConfig ?? SandboxConfig())
         }
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine)
@@ -280,15 +283,17 @@ enum CLIShared {
     ///   - memoryEngine: Shared engine for memory tools, if any.
     ///   - permissionGate: Graduated-trust gate, if any.
     ///   - approvalHandler: Approval hook, if any.
+    ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
     /// - Returns: Bus with every shared plugin registered.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
         permissionGate: PermissionGate? = nil,
-        approvalHandler: ToolApprovalHandler? = nil
+        approvalHandler: ToolApprovalHandler? = nil,
+        sandboxConfig: SandboxConfig? = nil
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
-        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine) {
+        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine, sandboxConfig: sandboxConfig) {
             await bus.register(tool: tool)
         }
         return bus

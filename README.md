@@ -45,14 +45,17 @@ The CLI (`rune-weaver`) is the MVP interaction layer: `chat`, `config`, `memory`
 
 ## Email in chat (find and summarize)
 
-Chat starts with the self-hosted IMAP tools registered and visible to the model:
+Chat starts with the IMAP tools registered and visible to the model (self-hosted plus iCloud):
 
 - `email.search` — find messages by free text (subject, sender, body); returns ids, headers, and snippets.
-- `email.read` — open one message by id; returns headers plus the text body. Attachments are listed by filename with a deferral note; bytes are never downloaded.
+- `email.read` — open one message by id; returns headers plus the text body. Attachments are listed with filename, MIME type, and byte size; use `email.attachment` to download.
+- `email.attachment` — download one attachment by index into the sandbox staging area only (`sandbox/attachments/`, 10 MB cap, `requiresApproval`).
 
-Both tools are `readOnly`, so they run with no approval prompts. The assistant calls them during a turn, reads the results, and summarizes in conversation. Verified live against Volcrypt IMAP read-only; there is no send path.
+Search and read are `readOnly`, so they run with no approval prompts; `email.attachment` is `requiresApproval` and prompts before staging. The assistant calls them during a turn, reads the results, and summarizes in conversation. Verified live against Volcrypt IMAP and iCloud IMAP (`imap.mail.me.com:993`) read-only; there is no send path.
 
 ### Live run (reads only, never sends)
+
+#### Volcrypt
 
 1. Configure the Volcrypt account in `~/.runeweaver/config.toml` (see `Config/config.toml.example` and `CONFIG.md`):
 
@@ -79,12 +82,12 @@ The variable name is `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_VOL
 
 ```bash
 swift run rune-weaver status
-# Tools: active: email.read, email.search
+# Tools: active: email.attachment, email.read, email.search
 ```
 
 ```bash
 swift run rune-weaver chat
-# Tools: email.read, email.search.
+# Tools: email.attachment, email.read, email.search.
 # Email accounts: volcrypt (you@volcrypt.com@mail.volcrypt.com:993).
 ```
 
@@ -105,6 +108,67 @@ weaver> ◈ calling email.read ...
 
 The verified flow is search then read: `email.search` lists matching ids, headers, and 200-character snippets (plain text preferred, HTML stripped to text), then `email.read` returns headers plus the text body for one id. The model summarizes the returned headers and snippets/bodies inline.
 
+#### iCloud (app-specific password)
+
+iCloud uses the same read-only tools over `imap.mail.me.com:993`. Apple requires an app-specific password for IMAP — the Apple Account password never works here.
+
+1. Generate an app-specific password (requires two-factor authentication on the Apple Account):
+
+- Sign in at Apple Account (`account.apple.com`) > Sign-In and Security > App-Specific Passwords.
+- Generate a new app-specific password (e.g. labeled `rune-weaver`), copy the generated value.
+- To revoke later, return to the same screen and revoke the label; revoking only stops IMAP logins using that value.
+
+2. Configure the iCloud account in `~/.runeweaver/config.toml` (see `Config/config.toml.example` and `CONFIG.md`):
+
+```toml
+[[email.accounts]]
+name = "icloud"
+type = "imap"
+host = "imap.mail.me.com"
+port = 993
+username = "user@icloud.com"
+# password is never stored here
+```
+
+3. Provide the app-specific password without printing it — environment first, Keychain fallback (service `com.runeweaver.secrets`):
+
+```bash
+export EMAIL_ICLOUD_PASSWORD="xxxx-xxxx-xxxx-xxxx"
+# Keychain alternative: store EMAIL_ICLOUD_PASSWORD under service com.runeweaver.secrets
+```
+
+The variable name follows the same convention as every account, `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_ICLOUD_PASSWORD`). Lookup is environment first, then the Keychain item `(service: com.runeweaver.secrets, account: EMAIL_ICLOUD_PASSWORD)`. The value must be the generated app-specific password, never the Apple Account password.
+
+4. Confirm the tools and account are registered:
+
+```bash
+swift run rune-weaver status
+# Tools: active: email.attachment, email.read, email.search
+```
+
+```bash
+swift run rune-weaver chat
+# Tools: email.attachment, email.read, email.search.
+# Email accounts: icloud (user@icloud.com@imap.mail.me.com:993).
+```
+
+Account names match case-insensitively, so `icloud`, `Icloud`, and `ICLOUD` all resolve. Only the name plus `username@host:port` ever prints; passwords never appear in output, logs, or the model prompt.
+
+5. Start chat and ask to find and summarize:
+
+```bash
+swift run rune-weaver chat
+```
+
+```text
+you> Find emails about quarterly report on icloud
+weaver> ◈ calling email.search ...
+you> Summarize message 42 from icloud
+weaver> ◈ calling email.read ...
+```
+
+The verified iCloud flow is the same search-then-read: `email.search` against `INBOX` followed by `email.read` for one id, summarized inline by the model.
+
 Reads open `INBOX` read-only and fetch with `(BODY.PEEK[])` so flags never change; TLS is always verified with a 30-second connect timeout; search uses `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback; queries reject CR/LF and ids allowlist to UID syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject IMAP commands. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
 
 Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing:
@@ -113,7 +177,7 @@ Without credentials the tools report a missing-password hint instead of connecti
 swift test --filter RuneWeaverToolsTests
 ```
 
-iCloud stays on the same IMAP path but remains phase two: it is only attempted when `EMAIL_ICLOUD_PASSWORD` is already present, and iCloud-specific or attachment-download gaps are reported, not fixed here. Attachment bytes are never downloaded — skipped parts list by filename with a note that downloads are deferred to phase two.
+Verified live against both Volcrypt and iCloud mailboxes read-only. Attachments list with filename, MIME type, and byte size; use `email.attachment` to download into the sandbox staging area (10 MB cap, approval required).
 
 ## Memory in chat (automatic recall)
 

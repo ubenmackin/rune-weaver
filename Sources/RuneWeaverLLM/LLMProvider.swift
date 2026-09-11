@@ -1106,7 +1106,14 @@ struct OpenAICompatibleHTTPClient: Sendable {
 /// Pumps SSE byte streams into chunk events.
 ///
 /// Extracted from `OpenAICompatibleHTTPClient` so the client type stays
-/// within lint body-length budgets. Behavior is unchanged.
+/// within lint body-length budgets. Per clarified Decision #2, usage
+/// accounting intentionally captures usage-only final chunks (see
+/// `ingestChatChunk`) so llama-server billing is not dropped, and falls
+/// back to `prompt + completion` when `total_tokens` is omitted; that
+/// accumulation intentionally differs from the old inline path, which
+/// ignored chunks without a first choice and recorded zero when
+/// `total_tokens` was absent. Request bodies and parsing shape are
+/// otherwise unchanged.
 enum OpenAISSEPump {
     /// Reads a short error preview from an errored byte stream.
     /// - Parameter bytes: Response byte stream.
@@ -1125,6 +1132,61 @@ enum OpenAISSEPump {
         }
         let trimmed = preview.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "empty error body" : String(trimmed.prefix(500))
+    }
+
+    /// Applies one decoded chat SSE chunk to streaming state.
+    ///
+    /// Per clarified Decision #2, captures chunk-level `model` and
+    /// `usage` before inspecting `choices` so a final usage-only chunk
+    /// with an empty `choices` array (as sent by llama-server and per
+    /// OpenAI convention) still records billing. This intentionally
+    /// differs from the prior inline path, which dropped usage-only
+    /// chunks via an early `guard let choice` and therefore lost the
+    /// final billed total on llama-server; the new accumulation keeps
+    /// that total by design. When `total_tokens` is omitted, the total
+    /// intentionally falls back to `prompt + completion` instead of
+    /// zero. Choice-level `finishReason`, text, and tool deltas apply
+    /// only when a first choice is present. Request bodies and parsing
+    /// shape are otherwise unchanged.
+    /// - Parameters:
+    ///   - chunk: Decoded SSE payload.
+    ///   - lastModel: Rolling serving model name to update.
+    ///   - lastUsage: Rolling token accounting to update.
+    ///   - lastFinishReason: Rolling stop reason to update.
+    ///   - toolAccumulator: Buffered tool-call fragments to update.
+    /// - Returns: Incremental text to emit, if any.
+    static func ingestChatChunk(
+        _ chunk: OpenAIStreamChunkDTO,
+        lastModel: inout String,
+        lastUsage: inout TokenUsage?,
+        lastFinishReason: inout String?,
+        toolAccumulator: inout OpenAIToolCallAccumulator
+    ) -> String? {
+        if let reported = chunk.model, !reported.isEmpty {
+            lastModel = reported
+        }
+        if let usage = chunk.usage {
+            let prompt = usage.promptTokens ?? 0
+            let completion = usage.completionTokens ?? 0
+            let total = usage.totalTokens ?? (prompt + completion)
+            lastUsage = TokenUsage(
+                promptTokens: prompt,
+                completionTokens: completion,
+                totalTokens: total
+            )
+        }
+        guard let choice = chunk.choices?.first else { return nil }
+        if let reason = choice.finishReason {
+            lastFinishReason = reason
+        }
+        let delta = choice.delta ?? choice.message
+        for toolDelta in delta?.toolCalls ?? [] {
+            toolAccumulator.apply(toolDelta)
+        }
+        if let text = delta?.content, !text.isEmpty {
+            return text
+        }
+        return nil
     }
 
     /// Pumps SSE lines into chunk events.
@@ -1159,52 +1221,30 @@ enum OpenAISSEPump {
                     break
                 }
                 guard let data = payload.data(using: .utf8),
-                      let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data),
-                      let choice = chunk.choices?.first
+                      let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
                 else { continue }
-                if let reported = chunk.model, !reported.isEmpty {
-                    lastModel = reported
-                }
-                if let usage = chunk.usage {
-                    lastUsage = TokenUsage(
-                        promptTokens: usage.promptTokens ?? 0,
-                        completionTokens: usage.completionTokens ?? 0,
-                        totalTokens: usage.totalTokens ?? 0
-                    )
-                }
-                if let reason = choice.finishReason {
-                    lastFinishReason = reason
-                }
-                let delta = choice.delta ?? choice.message
-                if let text = delta?.content, !text.isEmpty {
+                if let text = ingestChatChunk(
+                    chunk,
+                    lastModel: &lastModel,
+                    lastUsage: &lastUsage,
+                    lastFinishReason: &lastFinishReason,
+                    toolAccumulator: &accumulator
+                ) {
                     continuation.yield(.textDelta(text))
-                }
-                for toolDelta in delta?.toolCalls ?? [] {
-                    accumulator.apply(toolDelta)
                 }
             }
             if !sawSSE, !bufferedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                let data = bufferedJSON.data(using: .utf8),
-               let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data),
-               let choice = chunk.choices?.first
+               let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
             {
-                if let reported = chunk.model, !reported.isEmpty {
-                    lastModel = reported
-                }
-                if let usage = chunk.usage {
-                    lastUsage = TokenUsage(
-                        promptTokens: usage.promptTokens ?? 0,
-                        completionTokens: usage.completionTokens ?? 0,
-                        totalTokens: usage.totalTokens ?? 0
-                    )
-                }
-                lastFinishReason = choice.finishReason ?? lastFinishReason
-                let delta = choice.delta ?? choice.message
-                if let text = delta?.content, !text.isEmpty {
+                if let text = ingestChatChunk(
+                    chunk,
+                    lastModel: &lastModel,
+                    lastUsage: &lastUsage,
+                    lastFinishReason: &lastFinishReason,
+                    toolAccumulator: &accumulator
+                ) {
                     continuation.yield(.textDelta(text))
-                }
-                for toolDelta in delta?.toolCalls ?? [] {
-                    accumulator.apply(toolDelta)
                 }
             }
         } catch is CancellationError {
@@ -1297,16 +1337,22 @@ enum OpenAISSEPump {
     }
 
     /// Converts a Responses usage block to token accounting.
+    ///
+    /// Per clarified Decision #2, when `total_tokens` is omitted the
+    /// total intentionally falls back to `input + output` instead of
+    /// zero; request bodies and parsing shape are otherwise unchanged.
     /// - Parameter dto: Decoded usage block.
     /// - Returns: Token usage, or nil when absent.
     static func responsesUsage(from dto: OpenAIResponsesUsageDTO?) -> TokenUsage? {
         guard let dto else {
             return nil
         }
+        let prompt = dto.inputTokens ?? 0
+        let completion = dto.outputTokens ?? 0
         return TokenUsage(
-            promptTokens: dto.inputTokens ?? 0,
-            completionTokens: dto.outputTokens ?? 0,
-            totalTokens: dto.totalTokens ?? 0
+            promptTokens: prompt,
+            completionTokens: completion,
+            totalTokens: dto.totalTokens ?? (prompt + completion)
         )
     }
 

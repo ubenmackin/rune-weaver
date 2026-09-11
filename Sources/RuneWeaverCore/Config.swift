@@ -308,6 +308,19 @@ public struct EmailConfig: Sendable, Codable, Equatable {
         accounts.first { $0.name == name }
     }
 
+    /// Finds an account by exact name, falling back to a case-insensitive match.
+    ///
+    /// Single-sources the exact-then-case-insensitive lookup shared by the
+    /// email tools so account resolution never drifts between call sites.
+    /// - Parameter name: Trimmed account nickname.
+    /// - Returns: Matching account, or `nil` when absent.
+    public func account(matching name: String) -> EmailAccount? {
+        if let exact = account(named: name) {
+            return exact
+        }
+        return accounts.first { $0.name.lowercased() == name.lowercased() }
+    }
+
     private enum CodingKeys: String, CodingKey {
         case accounts
     }

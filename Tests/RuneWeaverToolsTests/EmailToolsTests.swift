@@ -9,6 +9,8 @@ private struct StubEmailGateway: EmailIMAPGateway, Sendable {
     var hits: [EmailSearchHit] = []
     /// Message returned by `fetch`.
     var message: EmailFullMessage?
+    /// Bytes returned by `attachment`.
+    var attachment: EmailAttachmentData?
     /// Error thrown instead of returning, when set.
     var failure: String?
 
@@ -28,6 +30,66 @@ private struct StubEmailGateway: EmailIMAPGateway, Sendable {
         }
         return message
     }
+
+    func attachment(
+        credentials _: ResolvedEmailCredentials,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData {
+        if let failure {
+            throw EmailIMAPError.bridgeFailed(failure)
+        }
+        guard let attachment else {
+            throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
+        }
+        return attachment
+    }
+}
+
+/// Box capturing the normalized query seen by the gateway without touching the network.
+private final class QueryCapture: @unchecked Sendable {
+    /// Guard for the captured query.
+    private let lock = NSLock()
+    /// Last query passed to `search`, if any.
+    private var stored: String?
+    /// Records the query.
+    func set(_ value: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = value
+    }
+
+    /// Returns the last recorded query.
+    var value: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+/// Capturing gateway recording the normalized search query for ALL-mapping tests.
+private struct CapturingEmailGateway: EmailIMAPGateway, Sendable {
+    /// Hits returned by `search`, already newest first.
+    var hits: [EmailSearchHit] = []
+    /// Box receiving the query passed to `search`.
+    let capture: QueryCapture
+
+    func search(credentials _: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit] {
+        capture.set(query)
+        return Array(hits.prefix(limit))
+    }
+
+    func fetch(credentials _: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
+        throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
+    }
+
+    func attachment(
+        credentials _: ResolvedEmailCredentials,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData {
+        throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
+    }
 }
 
 /// Search bridge stdout fixture with two hits.
@@ -38,8 +100,23 @@ private let searchFixture = """
 ]}
 """
 
-/// Fetch bridge stdout fixture with one skipped attachment.
+/// Fetch bridge stdout fixture with one listed attachment including byte size.
 private let fetchFixtureWithAttachment = """
+{"ok": true, "message": {
+  "id": "42",
+  "subject": "Quarterly report",
+  "from": "boss@example.com",
+  "to": "you@yourdomain.com",
+  "date": "Mon, 01 Sep 2025 09:00:00 +0000",
+  "body": "Please review the quarterly numbers attached.",
+  "attachments": [{"filename": "report.pdf", "contentType": "application/pdf", "sizeBytes": 11}],
+  "attachmentsDeferred": true,
+  "attachmentsNote": "1 attachment listed; use email.attachment to download."
+}}
+"""
+
+/// Legacy fetch payload without `sizeBytes`, decoding as unknown size.
+private let fetchFixtureLegacyAttachment = """
 {"ok": true, "message": {
   "id": "42",
   "subject": "Quarterly report",
@@ -49,7 +126,17 @@ private let fetchFixtureWithAttachment = """
   "body": "Please review the quarterly numbers attached.",
   "attachments": [{"filename": "report.pdf", "contentType": "application/pdf"}],
   "attachmentsDeferred": true,
-  "attachmentsNote": "1 attachment skipped; attachment download is deferred to phase two."
+  "attachmentsNote": "1 attachment listed; use email.attachment to download."
+}}
+"""
+
+/// Attachment bridge stdout fixture with base64 bytes.
+private let attachmentFixture = """
+{"ok": true, "attachment": {
+  "filename": "report.pdf",
+  "contentType": "application/pdf",
+  "sizeBytes": 11,
+  "contentBase64": "aGVsbG8gd29ybGQ="
 }}
 """
 
@@ -82,6 +169,18 @@ private func withTestPassword(_ body: () async throws -> Void) async rethrows {
     try await body()
 }
 
+/// Test email config with the iCloud account over `imap.mail.me.com:993`.
+private func testICloudEmailConfig(username: String = "user@icloud.com") -> EmailConfig {
+    EmailConfig(accounts: [EmailICloud.account(username: username)])
+}
+
+/// Sets the iCloud account password in the environment for credential resolution.
+private func withICloudTestPassword(_ body: () async throws -> Void) async rethrows {
+    setenv("EMAIL_ICLOUD_PASSWORD", "test-icloud-secret", 1)
+    defer { unsetenv("EMAIL_ICLOUD_PASSWORD") }
+    try await body()
+}
+
 // Serialized: `withTestPassword` mutates the process environment via
 // `setenv`/`unsetenv`, which is process-global and races when tests run
 // in parallel. Serial execution keeps credential setup deterministic.
@@ -98,15 +197,61 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Fetch bridge payload decodes body and defers attachments`() throws {
+    func `Fetch bridge payload decodes body and lists attachments`() throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureWithAttachment.utf8))
         #expect(message.id == "42")
         #expect(message.subject == "Quarterly report")
         #expect(message.body.contains("quarterly numbers"))
         #expect(message.attachments.count == 1)
         #expect(message.attachments[0].filename == "report.pdf")
+        #expect(message.attachments[0].contentType == "application/pdf")
+        #expect(message.attachments[0].sizeBytes == 11)
         #expect(message.attachmentsDeferred == true)
-        #expect((message.attachmentsNote ?? "").contains("phase two"))
+        #expect((message.attachmentsNote ?? "").contains("email.attachment"))
+    }
+
+    @Test
+    func `Fetch bridge payload without size decodes as unknown size`() throws {
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureLegacyAttachment.utf8))
+        #expect(message.attachments.count == 1)
+        #expect(message.attachments[0].filename == "report.pdf")
+        #expect(message.attachments[0].sizeBytes == nil)
+    }
+
+    @Test
+    func `Attachment bridge payload decodes bytes`() throws {
+        let fetched = try EmailBridgeParsing.parseAttachmentPayload(Data(attachmentFixture.utf8))
+        #expect(fetched.filename == "report.pdf")
+        #expect(fetched.contentType == "application/pdf")
+        #expect(fetched.sizeBytes == 11)
+        #expect(fetched.data == Data("hello world".utf8))
+    }
+
+    @Test
+    func `Attachment bridge error payload throws`() {
+        let payload = Data(#"{"ok": false, "error": "Invalid attachment index 5 (message has 1 attachments)"}"#.utf8)
+        do {
+            _ = try EmailBridgeParsing.parseAttachmentPayload(payload)
+            Issue.record("Expected bridge failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Invalid attachment index"))
+        }
+    }
+
+    @Test
+    func `Attachment args accept id and index aliases`() throws {
+        let direct = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        #expect(direct.messageID == "42")
+        #expect(direct.attachmentIndex == 0)
+        let camel = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","messageId":"43","attachmentIndex":1}"#.utf8))
+        #expect(camel.messageID == "43")
+        #expect(camel.attachmentIndex == 1)
+        let snake = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","message_id":"44","attachment_index":2}"#.utf8))
+        #expect(snake.messageID == "44")
+        #expect(snake.attachmentIndex == 2)
+        let uid = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","uid":"45","index":3}"#.utf8))
+        #expect(uid.messageID == "45")
+        #expect(uid.attachmentIndex == 3)
     }
 
     @Test
@@ -151,14 +296,15 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Email tools are readOnly`() {
+    func `Email tools expose search read and gated attachment`() {
         let config = testEmailConfig()
         let tools = EmailTools.makeTools(emailConfig: config, gateway: StubEmailGateway())
-        #expect(tools.count == 2)
-        for tool in tools {
-            #expect(tool.permissionLevel == .readOnly)
-        }
-        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read"]))
+        #expect(tools.count == 3)
+        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment"]))
+        let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
+        #expect(levels["email.search"] == .readOnly)
+        #expect(levels["email.read"] == .readOnly)
+        #expect(levels["email.attachment"] == .requiresApproval)
     }
 
     @Test
@@ -171,8 +317,8 @@ struct EmailToolsTests {
             await bus.register(tool: tool)
         }
         let names = await bus.toolNames()
-        #expect(names.sorted() == ["email.read", "email.search"])
-        try await withTestPassword {
+        #expect(names.sorted() == ["email.attachment", "email.read", "email.search"])
+        await withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":10}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == false)
@@ -192,7 +338,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        try await withTestPassword {
+        await withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":5}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == false)
@@ -201,7 +347,7 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Read tool returns headers body and deferral note`() async throws {
+    func `Read tool returns headers body and attachment metadata`() async throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureWithAttachment.utf8))
         let gateway = StubEmailGateway(message: message)
         let config = testEmailConfig()
@@ -215,19 +361,113 @@ struct EmailToolsTests {
             #expect(output.content.contains("Quarterly report"))
             #expect(output.content.contains("quarterly numbers"))
             #expect(output.content.contains("report.pdf"))
-            #expect(output.content.contains("phase two"))
+            #expect(output.content.contains("application/pdf") || output.content.contains("application\\/pdf"))
+            #expect(output.content.contains("sizeBytes"))
+            #expect(output.content.contains("email.attachment"))
         }
     }
 
     @Test
-    func `Search tool rejects empty query`() async throws {
+    func `Search validation maps wildcard and empty to ALL`() {
+        #expect(EmailIMAPValidation.isAllQuery("") == true)
+        #expect(EmailIMAPValidation.isAllQuery("   ") == true)
+        #expect(EmailIMAPValidation.isAllQuery("*") == true)
+        #expect(EmailIMAPValidation.isAllQuery(" * ") == true)
+        #expect(EmailIMAPValidation.isAllQuery("quarterly") == false)
+        #expect(EmailIMAPValidation.isAllQuery("**") == false)
+    }
+
+    @Test
+    func `Search tool maps empty query to most-recent`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let capture = QueryCapture()
+        let tool = EmailSearchTool(emailConfig: testEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"  "}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(capture.value == "")
+            #expect(output.content.contains("Quarterly report"))
+        }
+    }
+
+    @Test
+    func `Search tool maps wildcard star to most-recent`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let capture = QueryCapture()
+        let tool = EmailSearchTool(emailConfig: testEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":1}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(capture.value == "")
+            struct Envelope: Decodable { let query: String; let count: Int; let messages: [EmailSearchHit] }
+            let envelope = try JSONDecoder().decode(Envelope.self, from: Data(output.content.utf8))
+            #expect(envelope.count == 1)
+            #expect(envelope.messages.count == 1)
+            #expect(envelope.messages[0].id == "42")
+            #expect(envelope.messages[0].subject == "Quarterly report")
+            #expect(envelope.messages[0].from == "boss@example.com")
+            #expect(!envelope.messages[0].date.isEmpty)
+        }
+    }
+
+    @Test
+    func `Search tool respects limit returning newest first`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
         let config = testEmailConfig()
-        let tool = EmailSearchTool(emailConfig: config, gateway: StubEmailGateway())
-        let output = try await tool.execute(
-            input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"  "}"#),
-            context: ToolContext(conversationID: UUID())
-        )
-        #expect(output.isError == true)
+        let tool = EmailSearchTool(emailConfig: config, gateway: StubEmailGateway(hits: hits))
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":1}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            struct Envelope: Decodable { let count: Int; let messages: [EmailSearchHit] }
+            let envelope = try JSONDecoder().decode(Envelope.self, from: Data(output.content.utf8))
+            #expect(envelope.count == 1)
+            #expect(envelope.messages[0].id == "42")
+            let full = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":2}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            let fullEnvelope = try JSONDecoder().decode(Envelope.self, from: Data(full.content.utf8))
+            #expect(fullEnvelope.count == 2)
+            #expect(fullEnvelope.messages.map(\.id) == ["42", "41"])
+        }
+    }
+
+    @Test
+    func `Wildcard icloud search returns most-recent with headers`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let capture = QueryCapture()
+        let tool = EmailSearchTool(emailConfig: testICloudEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
+        try await withICloudTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"icloud","query":"*","limit":1}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(capture.value == "")
+            #expect(output.content.contains("Quarterly report"))
+            #expect(output.content.contains("boss@example.com"))
+            #expect(!output.content.contains("test-icloud-secret"))
+        }
+    }
+
+    @Test
+    func `Bridge script maps wildcard star to ALL newest first`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("query == \"*\""))
+        #expect(source.contains("\"ALL\""))
+        #expect(source.contains("[-limit:]"))
+        #expect(source.contains("reverse()"))
+        #expect(source.contains("(BODY.PEEK[])"))
+        #expect(source.contains("readonly=True"))
     }
 
     @Test
@@ -258,6 +498,12 @@ struct EmailToolsTests {
             context: ToolContext(conversationID: UUID())
         )
         #expect(badRead.isError == true)
+        let attachment = EmailAttachmentTool(emailConfig: config, gateway: StubEmailGateway())
+        let badAttachment = try await attachment.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(badAttachment.isError == true)
     }
 
     @Test
@@ -364,6 +610,17 @@ struct EmailToolsTests {
         #expect(source.contains("re.fullmatch"))
         #expect(source.contains("[0-9][0-9:,]*"))
         #expect(source.contains("Invalid message id"))
+        #expect(source.contains("Invalid attachment index"))
+    }
+
+    @Test
+    func `Bridge script lists sizes and fetches one attachment`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("sizeBytes"))
+        #expect(source.contains("contentBase64"))
+        #expect(source.contains("attachment_parts"))
+        #expect(source.contains("\"attachment\""))
+        #expect(source.contains("base64.b64encode"))
     }
 
     @Test
@@ -418,5 +675,289 @@ struct EmailToolsTests {
             #expect(output.isError == false)
             #expect(output.content.contains("Just saying hi."))
         }
+    }
+
+    @Test
+    func `ICloud well-known details match IMAP convention`() {
+        #expect(EmailICloud.accountName == "icloud")
+        #expect(EmailICloud.host == "imap.mail.me.com")
+        #expect(EmailICloud.port == 993)
+        #expect(EmailICloud.passwordEnvVar == "EMAIL_ICLOUD_PASSWORD")
+        let built = EmailICloud.account(username: "user@icloud.com")
+        #expect(built.name == "icloud")
+        #expect(built.host == "imap.mail.me.com")
+        #expect(built.port == 993)
+        #expect(built.username == "user@icloud.com")
+        #expect(built.passwordEnvVar == "EMAIL_ICLOUD_PASSWORD")
+        #expect(EmailICloud.matches(built) == true)
+        let other = EmailAccount(name: "personal", type: "imap", host: "mail.yourdomain.com", port: 993, username: "you@yourdomain.com")
+        #expect(EmailICloud.matches(other) == false)
+    }
+
+    @Test
+    func `ICloud account maps to expected password variable`() {
+        let account = EmailICloud.account(username: "user@icloud.com")
+        #expect(account.passwordEnvVar == "EMAIL_ICLOUD_PASSWORD")
+        #expect(EmailCredentialResolver.passwordEnvVar(for: account) == "EMAIL_ICLOUD_PASSWORD")
+    }
+
+    @Test
+    func `Search tool returns envelope for icloud account`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let gateway = StubEmailGateway(hits: hits)
+        let config = testICloudEmailConfig()
+        let tool = EmailSearchTool(emailConfig: config, gateway: gateway)
+        try await withICloudTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"icloud","query":"quarterly","limit":10}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Quarterly report"))
+            #expect(output.content.contains("\"count\""))
+            #expect(!output.content.contains("test-icloud-secret"))
+        }
+    }
+
+    @Test
+    func `Read tool returns body for icloud account without secrets`() async throws {
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
+        let config = testICloudEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
+        try await withICloudTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"ICLOUD","id":"7"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Just saying hi."))
+            #expect(!output.content.contains("test-icloud-secret"))
+        }
+    }
+
+    @Test
+    func `Attachment index validation rejects negative positions`() {
+        do {
+            try EmailIMAPValidation.validateAttachmentIndex(-1)
+            Issue.record("Expected invalid index")
+        } catch {
+            #expect(error.localizedDescription.contains("Invalid attachment index"))
+        }
+    }
+
+    @Test
+    func `Attachment tool stages bytes under sandbox staging area only`() async throws {
+        let bytes = Data("hello world".utf8)
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "report.pdf",
+            contentType: "application/pdf",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let config = testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let sandbox = SandboxConfig(stagingPath: staging.path, autoApproveAfter: 5)
+        let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, sandboxConfig: sandbox)
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("report.pdf"))
+            #expect(output.content.contains("application/pdf") || output.content.contains("application\\/pdf"))
+            struct Staged: Decodable { let path: String?; let skipped: Bool }
+            let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
+            #expect(staged.skipped == false)
+            let path = try #require(staged.path)
+            #expect(path.hasPrefix(staging.path))
+            #expect(path.contains("attachments"))
+            let onDisk = try Data(contentsOf: URL(fileURLWithPath: path))
+            #expect(onDisk == bytes)
+            #expect(!output.content.contains("test-secret"))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment tool sanitizes traversal filenames inside staging`() async throws {
+        let bytes = Data("evil".utf8)
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "../../evil.txt",
+            contentType: "text/plain",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let config = testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: config,
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            struct Staged: Decodable { let path: String? }
+            let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
+            let path = try #require(staged.path)
+            #expect(path.hasPrefix(staging.path))
+            #expect(!path.contains(".."))
+            #expect(URL(fileURLWithPath: path).lastPathComponent.contains("evil.txt"))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment tool skips oversized parts with a note`() async throws {
+        let oversize = EmailAttachmentTool.maxAttachmentBytes + 1
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "big.bin",
+            contentType: "application/octet-stream",
+            sizeBytes: oversize,
+            data: Data(repeating: 0, count: 8)
+        ))
+        let config = testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: config,
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            struct Skipped: Decodable { let path: String?; let skipped: Bool; let note: String? }
+            let decoded = try JSONDecoder().decode(Skipped.self, from: Data(output.content.utf8))
+            #expect(decoded.skipped == true)
+            #expect(decoded.path == nil)
+            #expect((decoded.note ?? "").contains("10 MB"))
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment tool dry run fetches without writing`() async throws {
+        let bytes = Data("hello world".utf8)
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "report.pdf",
+            contentType: "application/pdf",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let config = testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: config,
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID(), dryRun: true)
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Dry run"))
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment tool rejects negative index and bad id`() async throws {
+        let bytes = Data("hello world".utf8)
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "report.pdf",
+            contentType: "application/pdf",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let config = testEmailConfig()
+        let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway)
+        let negative = try await tool.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":-1}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(negative.isError == true)
+        #expect(negative.content.contains("Invalid attachment index"))
+        let badID = try await tool.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"1;DROP","index":0}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(badID.isError == true)
+        #expect(badID.content.contains("Invalid message id"))
+    }
+
+    @Test
+    func `Attachment tool rejects unknown account without secrets`() async throws {
+        let config = testEmailConfig()
+        let tool = EmailAttachmentTool(emailConfig: config, gateway: StubEmailGateway())
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"missing","id":"1","index":0}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("missing"))
+        #expect(!output.content.contains("test-secret"))
+    }
+
+    @Test
+    func `Attachment tool requires approval without a handler`() async {
+        let bytes = Data("hello world".utf8)
+        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "report.pdf",
+            contentType: "application/pdf",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let config = testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let bus = ToolBus(permissionGate: PermissionGate())
+        for tool in EmailTools.makeTools(
+            emailConfig: config,
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        ) {
+            await bus.register(tool: tool)
+        }
+        await withTestPassword {
+            let input = ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#)
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == true)
+            #expect(result.content.contains("requires approval"))
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Staged destination stays under the staging area`() throws {
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)").path
+        let destination = try EmailAttachmentTool.stagedDestination(
+            stagingPath: staging,
+            account: "personal",
+            messageID: "42",
+            index: 0,
+            filename: "report.pdf"
+        )
+        #expect(destination.path.hasPrefix(URL(fileURLWithPath: staging).standardized.path + "/"))
+        #expect(destination.lastPathComponent.contains("report.pdf"))
+        #expect(EmailAttachmentTool.sanitizedFilename("../../evil.txt", fallback: "attachment-0") == "evil.txt")
+        #expect(EmailAttachmentTool.sanitizedFilename("   ", fallback: "attachment-0") == "attachment-0")
+        #expect(EmailAttachmentTool.oversizeNote(sizeBytes: 1).contains("10 MB"))
     }
 }
