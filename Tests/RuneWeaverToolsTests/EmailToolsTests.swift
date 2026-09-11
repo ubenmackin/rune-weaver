@@ -365,4 +365,58 @@ struct EmailToolsTests {
         #expect(source.contains("[0-9][0-9:,]*"))
         #expect(source.contains("Invalid message id"))
     }
+
+    @Test
+    func `Bridge script stays read-only with peek fetches`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("(BODY.PEEK[])"))
+        #expect(!source.contains("\"(RFC822)\""))
+        #expect(source.contains("readonly=True"))
+    }
+
+    @Test
+    func `Bridge script times out connects and prefers UTF-8 search`() {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("timeout=30"))
+        #expect(source.contains("CHARSET"))
+        #expect(source.contains("UTF-8"))
+    }
+
+    @Test
+    func `Volcrypt account maps to expected password variable`() {
+        let account = EmailAccount(name: "volcrypt", type: "imap", host: "mail.volcrypt.com", port: 993, username: "you@volcrypt.com")
+        #expect(account.passwordEnvVar == "EMAIL_VOLCRYPT_PASSWORD")
+        #expect(EmailCredentialResolver.passwordEnvVar(for: account) == "EMAIL_VOLCRYPT_PASSWORD")
+    }
+
+    @Test
+    func `Search tool resolves account name case-insensitively`() async throws {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let gateway = StubEmailGateway(hits: hits)
+        let config = testEmailConfig()
+        let tool = EmailSearchTool(emailConfig: config, gateway: gateway)
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"Personal","query":"quarterly","limit":10}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Quarterly report"))
+        }
+    }
+
+    @Test
+    func `Read tool resolves account name case-insensitively`() async throws {
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
+        let config = testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
+        try await withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"PERSONAL","id":"7"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Just saying hi."))
+        }
+    }
 }

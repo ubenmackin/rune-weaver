@@ -119,7 +119,7 @@ public struct LLMConfig: Sendable, Codable, Equatable {
     /// Creates an LLM config.
     public init(
         defaultProvider: String = "mlx",
-        fallbackProvider: String? = "openrouter",
+        fallbackProvider: String? = nil,
         providers: [String: ProviderConfig] = [:]
     ) {
         self.defaultProvider = defaultProvider

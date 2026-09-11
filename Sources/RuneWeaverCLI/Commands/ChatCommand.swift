@@ -230,7 +230,14 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 /// tools are `trusted` per the owner memory-write trust ruling, so both
 /// families run without approval prompts; their results feed back into
 /// the next LLM round so the assistant summarizes them in conversation.
-/// Every user turn also runs automatic recall (bounded keyword `recall`
+/// Email is verified live against Volcrypt IMAP (`mail.volcrypt.com:993`,
+/// account `volcrypt` via `EMAIL_VOLCRYPT_PASSWORD` in the environment or
+/// Keychain service `com.runeweaver.secrets`): reads only, no send path,
+/// secrets never printed or logged, attachments listed with download
+/// deferred to phase two. Configured email accounts print at startup
+/// (name plus `username@host:port`, never secrets) so the model and the
+/// user know which nickname to use. Every user turn also runs automatic
+/// recall (bounded keyword `recall`
 /// with nil embeddings): top matches inject as source-labeled,
 /// token-bounded system context, skipped when nothing scores above
 /// threshold. Assistant tokens stream back with a typewriter effect,
@@ -346,6 +353,15 @@ struct ChatCommand: AsyncParsableCommand {
             print(TerminalStyle.dim("No plugin tools registered; continuing without tool calls."))
         } else {
             print(TerminalStyle.dim("Tools: \(startupTools.joined(separator: ", "))."))
+        }
+        // Verified-live email accounts print here so the user knows which
+        // nickname to name in prompts (e.g. "on volcrypt"). Only
+        // non-sensitive fields print; passwords never appear.
+        let startupEmailAccounts = loaded.config.email.accounts.sorted(by: { $0.name < $1.name })
+        if !startupEmailAccounts.isEmpty {
+            let summary = startupEmailAccounts.map { "\($0.name) (\($0.username)@\($0.host):\($0.port))" }
+                .joined(separator: ", ")
+            print(TerminalStyle.dim("Email accounts: \(summary)."))
         }
 
         print(TerminalStyle.dim("Connected to \(active.name) (\(active.modelInfo.name)). Session \(sessionID.uuidString)."))
@@ -588,6 +604,7 @@ private func handleSlashCommand(
         return .quit
     case "/help":
         print(TerminalStyle.dim("Commands: /help, /clear, /session, /remember <fact>, /exit"))
+        print(TerminalStyle.dim("Email is read-only via chat: ask to find or summarize (e.g. find emails about quarterly report on volcrypt)."))
         return .keepGoing
     case "/clear":
         await conversations.clear(sessionID: sessionID)
