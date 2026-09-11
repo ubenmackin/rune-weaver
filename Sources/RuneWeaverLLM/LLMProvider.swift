@@ -321,6 +321,72 @@ func openAIChatRequestBody(
     }
 }
 
+/// Parses one persisted assistant placeholder line into a structured call.
+///
+/// The orchestrator stores tool-only assistant turns via
+/// `ToolInput/placeholderContent(for:)` as one line per call:
+/// `Calling <name> <single-line arguments> [<callID>]`. Replaying those
+/// lines as Responses `function_call` items restores the `call_id`
+/// correlation with the following `function_call_output` items. Real
+/// provider call identifiers (for example `call_01a…` hex suffixes)
+/// contain only non-space, non-bracket characters and round-trip here.
+/// - Parameter line: Single line to inspect (leading and trailing
+///   whitespace is ignored).
+/// - Returns: Structured call, or nil when the line is not a placeholder.
+func parseResponsesPlaceholderLine(_ line: String) -> ToolCall? {
+    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("Calling ") else { return nil }
+    guard trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "[") else { return nil }
+    guard trimmed.distance(from: trimmed.startIndex, to: bracketStart) > "Calling ".count else { return nil }
+    let beforeBracket = trimmed[trimmed.index(before: bracketStart)]
+    guard beforeBracket == " " || beforeBracket == "\t" else { return nil }
+    let afterBracket = trimmed.index(after: bracketStart)
+    let endIndex = trimmed.index(before: trimmed.endIndex)
+    guard afterBracket <= endIndex else { return nil }
+    let callID = String(trimmed[afterBracket ..< endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !callID.isEmpty, !callID.contains(" "), !callID.contains("\t"), !callID.contains("["), !callID.contains("]") else { return nil }
+    let remainderStart = trimmed.index(trimmed.startIndex, offsetBy: "Calling ".count)
+    let remainderEnd = trimmed.index(before: bracketStart)
+    guard remainderStart < remainderEnd else { return nil }
+    let remainder = String(trimmed[remainderStart ..< remainderEnd]).trimmingCharacters(in: .whitespaces)
+    guard !remainder.isEmpty else { return nil }
+    if let firstSpace = remainder.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+        let name = String(remainder[..<firstSpace])
+        let args = String(remainder[remainder.index(after: firstSpace)...]).trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty, !name.contains(" "), !name.contains("\t") else { return nil }
+        return ToolCall(id: callID, name: name, argumentsJSON: args.isEmpty ? "{}" : args)
+    }
+    guard !remainder.contains(" "), !remainder.contains("\t") else { return nil }
+    return ToolCall(id: callID, name: remainder, argumentsJSON: "{}")
+}
+
+/// Splits an assistant message into structured calls plus leftover text.
+///
+/// Pure tool turns (every non-empty line parses) yield only calls.
+/// Plain assistant text yields no calls and the original content as
+/// leftover. Mixed content (leading text plus placeholder lines in the
+/// same persisted turn) yields both so no history is dropped and the
+/// next Responses body keeps every `call_id` correlated.
+/// - Parameter content: Assistant message content.
+/// - Returns: Calls in line order plus non-placeholder leftover text.
+func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], leftover: String) {
+    let normalized = content
+        .replacingOccurrences(of: "\r\n", with: "\n")
+        .replacingOccurrences(of: "\r", with: "\n")
+    var calls: [ToolCall] = []
+    var leftoverLines: [String] = []
+    for rawLine in normalized.components(separatedBy: "\n") {
+        let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !line.isEmpty else { continue }
+        if let call = parseResponsesPlaceholderLine(line) {
+            calls.append(call)
+        } else {
+            leftoverLines.append(rawLine)
+        }
+    }
+    return (calls, leftoverLines.joined(separator: "\n"))
+}
+
 /// Builds a JSON request body for `/responses`.
 /// - Parameters:
 ///   - model: Model identifier.
@@ -339,18 +405,47 @@ func openAIResponsesRequestBody(
     let systemMessages = messages.filter { $0.role == .system }
     let conversationMessages = messages.filter { $0.role != .system }
     let ordered = systemMessages + conversationMessages
-    var wireInput: [[String: Any]] = ordered.map { message in
+    var wireInput: [[String: Any]] = []
+    wireInput.reserveCapacity(ordered.count * 2)
+    for message in ordered {
         if message.role == .tool {
-            return [
+            wireInput.append([
                 "type": "function_call_output",
                 "call_id": message.toolCallID ?? "",
                 "output": message.content
-            ]
+            ])
+            continue
         }
-        return [
+        if message.role == .assistant {
+            let split = splitResponsesAssistantContent(message.content)
+            if !split.calls.isEmpty {
+                for call in split.calls {
+                    wireInput.append([
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": call.argumentsJSON
+                    ])
+                }
+                let leftover = split.leftover.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !leftover.isEmpty {
+                    wireInput.append([
+                        "role": "assistant",
+                        "content": [["type": "output_text", "text": leftover]]
+                    ])
+                }
+                continue
+            }
+            wireInput.append([
+                "role": "assistant",
+                "content": [["type": "output_text", "text": message.content]]
+            ])
+            continue
+        }
+        wireInput.append([
             "role": OpenAIWireRole.string(for: message.role),
             "content": [["type": "input_text", "text": message.content]]
-        ]
+        ])
     }
     if wireInput.isEmpty {
         wireInput = [["role": "user", "content": [["type": "input_text", "text": ""]]]]
