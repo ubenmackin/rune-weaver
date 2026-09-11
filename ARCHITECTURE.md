@@ -178,11 +178,11 @@ Three tiers of memory, each backed by different storage:
 | Tier | What | Storage | Lifecycle |
 |------|------|---------|-----------|
 | **Working Memory** | Current conversation context | In-memory + SQLite sessions (Core Engine) | Session-scoped, oldest turns fold into a rolling summary when over budget |
-| **Episodic Memory** | Past conversation turns as raw per-turn rows | SQLite + FTS5 | Permanent, mirrored every turn via `mirrorTurn` for resume; `summarizeSessions`/`compactSessions` exist but are not wired into chat |
+| **Episodic Memory** | Past conversation turns as cleaned per-turn rows | SQLite + FTS5 | Permanent, mirrored clean every turn via `mirrorTurn` for resume; `summarizeSessions`/`compactSessions` exist but are not wired into chat |
 | **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed; vectors deferred pending an embeddings backend |
 
 **Memory Flow**:
-1. User says something → goes into Working Memory and is mirrored raw per-turn into Episodic Memory via `mirrorTurn` for session resume
+1. User says something → goes into Working Memory and is mirrored clean into Episodic Memory via `mirrorTurn` for session resume: user/final text verbatim plus one compact `"Used <tool>: <outcome>"` record per meaningful tool execution, with interim narration, `Calling ... [...]` placeholder lines, call identifiers, and call-argument JSON skipped
 2. Context fills → oldest working turns fold into the rolling session summary, keeping recent turns intact
 3. Deterministic remember capture → `remember` / `remember that` / `/remember` parsed by `rememberFactText` and stored via `storeProfileFact` (`storeRememberedFact`), acknowledged without touching the LLM path
 4. Key facts persist → stored in Semantic Memory as keyword-only rows (no embeddings yet), mirrored into the JSON profile
@@ -411,11 +411,13 @@ fallback_provider = "openrouter"
 enabled = true
 model = "gemma-4-9b"
 server_url = "http://localhost:8080"  # MLX server
+# context_length = 8192  # optional override; omit for the backend default (MLX 8192, llama.cpp 4096, OpenAI-compatible 128000)
 
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
 base_url = "https://openrouter.ai/api/v1"
+# context_length = 1000000  # e.g. 1000000 for 1M-context endpoints
 
 [llm.providers.local]
 enabled = false

@@ -15,17 +15,20 @@ fallback_provider = "openrouter"
 enabled = true
 model = "gemma-4-9b"
 server_url = "http://localhost:8080"  # MLX server
+# context_length = 8192  # Context window in tokens (MLX backend default 8192)
 
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
 base_url = "https://openrouter.ai/api/v1"
 # api_style = "chat-completions"  # chat-completions (default) | responses
+# context_length = 128000  # Context window in tokens (e.g. 1000000 for 1M-context endpoints)
 
 [llm.providers.local]
 enabled = false
 provider_type = "llamacpp"
 server_url = "http://localhost:8081"
+# context_length = 4096  # Context window in tokens (llama.cpp backend default 4096)
 
 [memory]
 vector_db_path = "~/.runeweaver/memory/vectors"

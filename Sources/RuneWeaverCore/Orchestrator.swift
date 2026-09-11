@@ -65,16 +65,23 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     public let sessionID: UUID
     /// Tool invocations performed while answering.
     public let toolActions: [ToolAction]
+    /// Session-billed tokens accumulated across every LLM round in this
+    /// turn (each round's `totalTokens`, summed). Nil when no round
+    /// reported usage, mirroring the CLI `runChunkedTurn`/`runTextTurn`
+    /// session total for the API path.
+    public let totalTokens: Int?
 
     /// Creates a response.
     /// - Parameters:
     ///   - text: Final assistant text.
     ///   - sessionID: Owning session.
     ///   - toolActions: Tool invocations performed.
-    public init(text: String, sessionID: UUID, toolActions: [ToolAction] = []) {
+    ///   - totalTokens: Billed tokens accumulated across LLM rounds, if any.
+    public init(text: String, sessionID: UUID, toolActions: [ToolAction] = [], totalTokens: Int? = nil) {
         self.text = text
         self.sessionID = sessionID
         self.toolActions = toolActions
+        self.totalTokens = totalTokens
     }
 }
 
@@ -108,9 +115,10 @@ public typealias OrchestratorToolResolver = @Sendable ([Message], [any Tool]) as
 ///
 /// Centralizes the decisions both entry points must make identically so the
 /// CLI delegates here instead of reimplementing the orchestration loop:
-/// assistant-note content for tool-only turns, whether a tool result is
-/// worth mirroring or assistant text is worth storing, when the tool-round
-/// budget is exceeded, and how input sources are normalized.
+/// assistant-note content for tool-only turns, whether assistant text is
+/// worth storing, compact episodic tool records stripped of call mechanics,
+/// when the tool-round budget is exceeded, and how input sources are
+/// normalized.
 public enum OrchestratorToolLoop {
     /// Returns the assistant content to persist for a tool round.
     ///
@@ -135,17 +143,6 @@ public enum OrchestratorToolLoop {
         return text + "\n" + ToolInput.placeholderContent(for: calls)
     }
 
-    /// Whether a tool result is worth mirroring to episodic memory.
-    ///
-    /// Empty results skip only the episodic mirror so keyword search stays
-    /// free of empty turns. Working history always keeps every result so
-    /// the next LLM turn has feedback and never repeats the call.
-    /// - Parameter content: Tool result content.
-    /// - Returns: True when the content is non-blank.
-    public static func shouldStoreToolResult(_ content: String) -> Bool {
-        !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
     /// Whether final assistant text is worth storing and returning.
     /// - Parameter text: Final assistant text.
     /// - Returns: True when the text is non-blank.
@@ -160,6 +157,25 @@ public enum OrchestratorToolLoop {
     /// - Returns: True when `rounds` exceeds `max`.
     public static func isLimitExceeded(rounds: Int, max: Int) -> Bool {
         rounds > max
+    }
+
+    /// Builds the compact episodic record for one tool execution.
+    ///
+    /// Single shared episodic policy so the orchestrator and the CLI chat
+    /// loop persist identical clean content: working memory keeps the full
+    /// assistant placeholder plus correlated tool messages for LLM replay,
+    /// while episodic memory keeps only user text verbatim, final assistant
+    /// text verbatim, and one compact `"Used <tool>: <outcome>"` record per
+    /// meaningful tool execution with no placeholder lines, call
+    /// identifiers, or call-argument JSON. Blank outcomes yield nil so
+    /// empty results skip the episodic mirror while staying in working
+    /// history for LLM feedback.
+    /// - Parameters:
+    ///   - toolName: Name of the tool that ran.
+    ///   - result: Result returned by the bus.
+    /// - Returns: Compact episodic record, or nil when not meaningful.
+    public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
+        MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
     }
 
     /// Normalizes an input source label, defaulting blanks to `"chat"`.
@@ -180,11 +196,13 @@ public enum OrchestratorToolLoop {
 /// calls the LLM, executes any requested tools via the ``ToolBus``
 /// (feeding each ``ToolResult`` back for the next LLM turn), and
 /// returns the final text while storing every turn in the
-/// ``ConversationManager`` and mirroring it raw into episodic memory
-/// via an optional ``MemoryEngine`` (failure-isolated, per the Memory
-/// Flow step 1: every turn to episodic). The CLI chat loop delegates
-/// its per-round decisions to ``OrchestratorToolLoop`` so both entry
-/// points share one loop policy.
+/// ``ConversationManager`` and mirroring clean turns into episodic memory
+/// via an optional ``MemoryEngine`` failure-isolated: user text and final
+/// assistant text verbatim, interim assistant notes skipped, and each
+/// meaningful tool execution as one compact `"Used <tool>: <outcome>"`
+/// record with no placeholder lines, call identifiers, or call-argument
+/// JSON. The CLI chat loop delegates its per-round decisions to
+/// ``OrchestratorToolLoop`` so both entry points share one loop policy.
 public actor Orchestrator {
     /// Session and history owner.
     private let conversations: ConversationManager
@@ -255,9 +273,12 @@ public actor Orchestrator {
     ///    when the synthesis turn still requests tools, throws
     ///    ``OrchestratorError/toolLoopExceeded(iterations:)``.
     ///    Every assistant note and tool result is appended to working
-    ///    history so the next LLM turn has feedback; non-empty tool
-    ///    results are mirrored to episodic memory failure-isolated while
-    ///    empty results skip only the episodic mirror so keyword search
+    ///    history so the next LLM turn has feedback; episodic memory
+    ///    stays clean failure-isolated by skipping interim assistant
+    ///    notes and mirroring each meaningful tool execution as one
+    ///    compact `"Used <tool>: <outcome>"` record with no placeholder
+    ///    lines, call identifiers, or call-argument JSON, while empty
+    ///    results skip only the episodic mirror so keyword search
     ///    stays free of empty turns.
     /// 5. Stores the final assistant turn and returns it. Empty final
     ///    text (empty LLM stream) is not stored or mirrored. Mid-stream
@@ -300,9 +321,14 @@ public actor Orchestrator {
         var toolActions: [ToolAction] = []
         var finalText = ""
         var toolRounds = 0
+        var billedTokens: Int?
 
         while true {
-            finalText = try await collectText(messages: workingMessages, tools: tools)
+            let collected = try await collectText(messages: workingMessages, tools: tools)
+            if let billed = collected.billedTokens {
+                billedTokens = (billedTokens ?? 0) + billed
+            }
+            finalText = collected.text
             let calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
             if calls.isEmpty {
                 break
@@ -317,12 +343,10 @@ public actor Orchestrator {
                 content: OrchestratorToolLoop.assistantNoteContent(text: finalText, calls: calls)
             )
             await conversations.append(assistantNote, to: sessionID)
-            await memoryEngine?.mirrorTurn(
-                content: assistantNote.content,
-                sessionID: sessionID,
-                role: .assistant,
-                failurePolicy: .silent
-            )
+            // Working memory keeps the full placeholder so the next Responses
+            // body can replay every `function_call` with its matching output.
+            // Episodic memory skips interim assistant notes entirely so
+            // narration and placeholder call mechanics never reach the store.
             for call in calls {
                 let result = await toolBus.execute(toolCall: call, context: context)
                 toolActions.append(ToolAction(
@@ -332,12 +356,11 @@ public actor Orchestrator {
                     result: result
                 ))
                 await conversations.append(result.asMessage(), to: sessionID)
-                if OrchestratorToolLoop.shouldStoreToolResult(result.content) {
+                if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
                     await memoryEngine?.mirrorTurn(
-                        content: result.content,
+                        content: record,
                         sessionID: sessionID,
                         role: .tool,
-                        toolCallID: result.toolCallID,
                         failurePolicy: .silent
                     )
                 }
@@ -358,7 +381,7 @@ public actor Orchestrator {
                 failurePolicy: .silent
             )
         }
-        return OrchestratorResponse(text: finalText, sessionID: sessionID, toolActions: toolActions)
+        return OrchestratorResponse(text: finalText, sessionID: sessionID, toolActions: toolActions, totalTokens: billedTokens)
     }
 
     // MARK: - Private helpers
@@ -393,14 +416,18 @@ public actor Orchestrator {
     ///
     /// Mid-stream failures surface as `OrchestratorError.llmFailed` even
     /// when partial text was already yielded, so callers never mistake a
-    /// truncated turn for a successful one.
+    /// truncated turn for a successful one. Billed usage reported on the
+    /// terminal `LLMResponse` chunk is returned alongside the text so the
+    /// API path surfaces the same session-cumulative usage the CLI
+    /// `runChunkedTurn`/`runTextTurn` paths render.
     /// - Parameters:
     ///   - messages: Conversation history.
     ///   - tools: Tools the model may call.
-    /// - Returns: Concatenated response text.
+    /// - Returns: Concatenated response text plus billed tokens, if reported.
     /// - Throws: `OrchestratorError.llmFailed` when the stream reports an error.
-    private func collectText(messages: [Message], tools: [any Tool]) async throws -> String {
+    private func collectText(messages: [Message], tools: [any Tool]) async throws -> (text: String, billedTokens: Int?) {
         var text = ""
+        var billed: Int?
         let stream = llm.chat(messages: messages, tools: tools)
         for await chunk in stream {
             if let message = chunk.errorMessage {
@@ -408,10 +435,11 @@ public actor Orchestrator {
             }
             text += chunk.delta
             if chunk.isFinished {
+                billed = chunk.totalTokens
                 break
             }
         }
-        return text
+        return (text, billed)
     }
 
     /// Resolves tool calls for the latest assistant turn.

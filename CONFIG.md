@@ -40,6 +40,7 @@ Each provider entry supports the same keys. Only set what that backend needs.
 | `api_key_env` | string \| unset | unset | Environment variable (and Keychain key) holding the API key. Resolved via `SecretsManager`; never put the key itself in TOML. |
 | `provider_type` | string \| unset | unset | Backend type for generic local entries (e.g. `"llamacpp"`). |
 | `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family; use `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models requiring Anthropic-style messages input are unsupported. |
+| `context_length` | integer \| unset | `unset (backend default)` | Context window, per-provider override (e.g. `1000000` for 1M endpoints), must be positive. Omit to use the backend default (MLX `8192`, llama.cpp `4096`, OpenAI-compatible `128000`). |
 
 Shipped defaults (`RuneWeaverConfig.default`):
 
@@ -48,11 +49,13 @@ Shipped defaults (`RuneWeaverConfig.default`):
 enabled = true
 model = "gemma-4-9b"
 server_url = "http://localhost:8080"
+# context_length = 8192  # optional override; omit for the backend default (MLX 8192, llama.cpp 4096, OpenAI-compatible 128000)
 
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
 base_url = "https://openrouter.ai/api/v1"
+# context_length = 1000000  # e.g. 1000000 for 1M-context endpoints
 
 [llm.providers.local]
 enabled = false

@@ -116,17 +116,19 @@ public actor LLMRouter {
     ) async -> ChunkedDrainResult {
         var yieldedText = false
         var failureMessage: String?
+        var lastUsage: Int?
         chunkLoop: for await chunk in provider.chatChunks(messages: messages, tools: tools) {
             if Task.isCancelled {
                 break
             }
             switch chunk {
             case let .textDelta(text):
-                yieldedText = true
+                yieldedText = yieldedText || !text.isEmpty
                 continuation.yield(LLMResponse(delta: text))
             case .toolCall:
                 continue
-            case .done:
+            case let .done(meta):
+                lastUsage = meta.usage?.totalTokens
                 break chunkLoop
             case let .error(message):
                 failureMessage = message.isEmpty ? "unknown error" : message
@@ -144,7 +146,7 @@ public actor LLMRouter {
             return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: false)
         }
         if !Task.isCancelled {
-            continuation.yield(LLMResponse(delta: "", isFinished: true))
+            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: lastUsage))
             return ChunkedDrainResult(didFinish: true, lastError: nil, shouldContinue: false)
         }
         return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)

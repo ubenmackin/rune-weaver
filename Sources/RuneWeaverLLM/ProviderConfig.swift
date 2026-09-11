@@ -186,6 +186,10 @@ public enum LLMProviderFactory: Sendable {
     /// to the entry name: `"mlx"` selects ``MLXProvider``, `"llamacpp"`
     /// selects ``LlamaCppProvider``, and anything else selects
     /// ``OpenAICompatibleProvider``. Returns nil for disabled entries.
+    /// A nil `contextLength` (absent `context_length` key) resolves to
+    /// the backend's own default (MLX 8192, llama.cpp 4096,
+    /// OpenAI-compatible 128000) so local windows are never overstated;
+    /// an explicit value always wins.
     /// - Parameters:
     ///   - entryName: Key under `[llm.providers.*]`.
     ///   - config: Decoded provider entry.
@@ -202,18 +206,21 @@ public enum LLMProviderFactory: Sendable {
         case "mlx":
             return MLXProvider(
                 serverURL: config.serverURL ?? MLXProvider.defaultServerURL,
-                model: config.model ?? MLXProvider.defaultModel
+                model: config.model ?? MLXProvider.defaultModel,
+                contextLength: config.contextLength ?? MLXProvider.defaultContextLength
             )
         case "llamacpp", "llama-cpp", "llama_cpp", "local":
             return LlamaCppProvider(
                 serverURL: config.serverURL ?? LlamaCppProvider.defaultServerURL,
-                model: config.model ?? LlamaCppProvider.defaultModel
+                model: config.model ?? LlamaCppProvider.defaultModel,
+                contextLength: config.contextLength ?? LlamaCppProvider.defaultContextLength
             )
         default:
             return OpenAICompatibleProvider(
                 baseURL: config.baseURL ?? config.serverURL ?? OpenAICompatibleProvider.defaultBaseURL,
                 apiKey: apiKey,
                 model: config.model ?? OpenAICompatibleProvider.defaultModel,
+                contextLength: config.contextLength ?? OpenAICompatibleProvider.defaultContextLength,
                 providerID: entryName,
                 apiStyle: config.apiStyle
             )

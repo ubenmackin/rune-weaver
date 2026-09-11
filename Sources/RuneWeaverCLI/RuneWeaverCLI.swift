@@ -295,20 +295,6 @@ enum CLIShared {
     }
 }
 
-/// Collapses whitespace and truncates text for single-line inline display.
-///
-/// Thin CLI alias over the single shared `ToolInput.inline(_:limit:)` helper
-/// in `RuneWeaverCore` so chat display and persisted placeholders compact
-/// identically. Tool arguments use 160, tool results use 300; callers pass
-/// the limit explicitly so budgets never diverge through a default.
-/// - Parameters:
-///   - text: Text to compact.
-///   - limit: Maximum characters before truncation.
-/// - Returns: Single-line text, suffixed with `…` when truncated.
-func cliInline(_ text: String, limit: Int) -> String {
-    ToolInput.inline(text, limit: limit)
-}
-
 /// Prints a message to standard error.
 /// - Parameter text: Message to print.
 func cliPrintError(_ text: String) {

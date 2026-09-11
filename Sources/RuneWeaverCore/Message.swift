@@ -3,8 +3,9 @@ import Foundation
 /// A single turn in a conversation history.
 ///
 /// Messages are the unit of context passed to an ``LLMProvider``.
-/// They persist in working memory for the session and are mirrored raw
-/// into episodic memory every turn for session resume.
+/// They persist in working memory for the session and are mirrored clean
+/// into episodic memory every turn for session resume (user/final text
+/// verbatim plus compact tool records, narration/placeholders skipped).
 public struct Message: Sendable, Codable, Equatable, Identifiable {
     /// Prefix marking the rolling summary of truncated turns.
     ///

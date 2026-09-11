@@ -100,4 +100,42 @@ public extension ToolInput {
         guard singleLine.count > limit else { return singleLine }
         return String(singleLine.prefix(limit)) + "…"
     }
+
+    /// Parses one persisted assistant placeholder line into a structured input.
+    ///
+    /// Single shared placeholder parser for episodic plumbing stripping
+    /// (`MemoryEngine`) and Responses replay (`RuneWeaverLLM`): each call
+    /// renders via `placeholderContent(for:)` as
+    /// `Calling <name> <single-line arguments> [<callID>]`. Ordinary prose
+    /// starting with "Calling " (e.g. "Calling the bank tomorrow") never
+    /// parses because the full bracketed call-identifier shape is required.
+    /// - Parameter line: Single line to inspect (leading and trailing
+    ///   whitespace is ignored).
+    /// - Returns: Structured input, or nil when the line is not a placeholder.
+    static func parsePlaceholderLine(_ line: String) -> ToolInput? {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("Calling ") else { return nil }
+        guard trimmed.hasSuffix("]"), let bracketStart = trimmed.lastIndex(of: "[") else { return nil }
+        guard trimmed.distance(from: trimmed.startIndex, to: bracketStart) > "Calling ".count else { return nil }
+        let beforeBracket = trimmed[trimmed.index(before: bracketStart)]
+        guard beforeBracket == " " || beforeBracket == "\t" else { return nil }
+        let afterBracket = trimmed.index(after: bracketStart)
+        let endIndex = trimmed.index(before: trimmed.endIndex)
+        guard afterBracket <= endIndex else { return nil }
+        let callID = String(trimmed[afterBracket ..< endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !callID.isEmpty, !callID.contains(" "), !callID.contains("\t"), !callID.contains("["), !callID.contains("]") else { return nil }
+        let remainderStart = trimmed.index(trimmed.startIndex, offsetBy: "Calling ".count)
+        let remainderEnd = trimmed.index(before: bracketStart)
+        guard remainderStart < remainderEnd else { return nil }
+        let remainder = String(trimmed[remainderStart ..< remainderEnd]).trimmingCharacters(in: .whitespaces)
+        guard !remainder.isEmpty else { return nil }
+        if let firstSpace = remainder.firstIndex(where: { $0 == " " || $0 == "\t" }) {
+            let name = String(remainder[..<firstSpace])
+            let args = String(remainder[remainder.index(after: firstSpace)...]).trimmingCharacters(in: .whitespaces)
+            guard !name.isEmpty, !name.contains(" "), !name.contains("\t") else { return nil }
+            return ToolInput(toolName: name, argumentsJSON: args.isEmpty ? "{}" : args, callID: callID)
+        }
+        guard !remainder.contains(" "), !remainder.contains("\t") else { return nil }
+        return ToolInput(toolName: remainder, argumentsJSON: "{}", callID: callID)
+    }
 }
