@@ -36,6 +36,10 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     public let providerID: String
     /// Whether this endpoint serves embeddings.
     public let embeddingsEnabled: Bool
+    /// Request style selecting the wire endpoint and SSE shape.
+    public let apiStyle: APIStyle
+    /// Chat session identifier sent as `x-opencode-session`, when set.
+    public var sessionID: String?
 
     /// Stable provider identifier used by the router and config keys.
     public var name: String {
@@ -61,13 +65,17 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     ///   - contextLength: Context window. Defaults to 128k tokens.
     ///   - providerID: Router identifier. Defaults to `"openrouter"`.
     ///   - embeddingsEnabled: Whether to advertise embeddings support.
+    ///   - apiStyle: Request style. Defaults to Chat Completions.
+    ///   - sessionID: Chat session identifier sent as `x-opencode-session`. Defaults to nil (header omitted).
     public init(
         baseURL: String = OpenAICompatibleProvider.defaultBaseURL,
         apiKey: String? = nil,
         model: String = OpenAICompatibleProvider.defaultModel,
         contextLength: Int = OpenAICompatibleProvider.defaultContextLength,
         providerID: String = "openrouter",
-        embeddingsEnabled: Bool = true
+        embeddingsEnabled: Bool = true,
+        apiStyle: APIStyle = .chatCompletions,
+        sessionID: String? = nil
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -75,11 +83,13 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
         self.contextLength = contextLength
         self.providerID = providerID
         self.embeddingsEnabled = embeddingsEnabled
+        self.apiStyle = apiStyle
+        self.sessionID = sessionID
     }
 
     /// Shared HTTP client for this provider.
     var client: OpenAICompatibleHTTPClient {
-        OpenAICompatibleHTTPClient(baseURL: baseURL, apiKey: apiKey, model: model)
+        OpenAICompatibleHTTPClient(baseURL: baseURL, apiKey: apiKey, model: model, apiStyle: apiStyle, sessionID: sessionID)
     }
 
     /// Whether the endpoint answers `GET <base>/models` right now.

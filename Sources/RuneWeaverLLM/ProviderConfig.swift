@@ -92,6 +92,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
     public var providerID: String
     /// Whether to advertise embeddings support.
     public var embeddingsEnabled: Bool
+    /// Request style selecting the wire endpoint and SSE shape.
+    public var apiStyle: APIStyle = .chatCompletions
 
     /// Creates generic endpoint options.
     /// - Parameters:
@@ -101,13 +103,15 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
     ///   - contextLength: Context window. Defaults to 128k tokens.
     ///   - providerID: Router identifier. Defaults to `"openrouter"`.
     ///   - embeddingsEnabled: Whether embeddings are supported.
+    ///   - apiStyle: Request style. Defaults to Chat Completions.
     public init(
         baseURL: String = OpenAICompatibleProvider.defaultBaseURL,
         apiKey: String? = nil,
         model: String = OpenAICompatibleProvider.defaultModel,
         contextLength: Int = OpenAICompatibleProvider.defaultContextLength,
         providerID: String = "openrouter",
-        embeddingsEnabled: Bool = true
+        embeddingsEnabled: Bool = true,
+        apiStyle: APIStyle = .chatCompletions
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -115,6 +119,7 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
         self.contextLength = contextLength
         self.providerID = providerID
         self.embeddingsEnabled = embeddingsEnabled
+        self.apiStyle = apiStyle
     }
 
     /// Builds the provider.
@@ -126,7 +131,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
             model: model,
             contextLength: contextLength,
             providerID: providerID,
-            embeddingsEnabled: embeddingsEnabled
+            embeddingsEnabled: embeddingsEnabled,
+            apiStyle: apiStyle
         )
     }
 }
@@ -208,7 +214,8 @@ public enum LLMProviderFactory: Sendable {
                 baseURL: config.baseURL ?? config.serverURL ?? OpenAICompatibleProvider.defaultBaseURL,
                 apiKey: apiKey,
                 model: config.model ?? OpenAICompatibleProvider.defaultModel,
-                providerID: entryName
+                providerID: entryName,
+                apiStyle: config.apiStyle
             )
         }
     }

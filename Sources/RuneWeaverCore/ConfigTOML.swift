@@ -287,7 +287,7 @@ extension RuneWeaverConfig {
     init(decoding root: TOMLNode) throws {
         var config = RuneWeaverConfig.default
         Self.decodeEngine(root, into: &config)
-        Self.decodeLLM(root, into: &config)
+        try Self.decodeLLM(root, into: &config)
         Self.decodeMemory(root, into: &config)
         Self.decodeVoice(root, into: &config)
         Self.decodeSandbox(root, into: &config)
@@ -306,7 +306,7 @@ extension RuneWeaverConfig {
         }
     }
 
-    private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) {
+    private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let llm = root.tables["llm"] else { return }
         if let defaultProvider = llm.string("default_provider") {
             config.llm.defaultProvider = defaultProvider
@@ -315,28 +315,53 @@ extension RuneWeaverConfig {
             config.llm.fallbackProvider = llm.string("fallback_provider")
         }
         guard let providers = llm.tables["providers"] else { return }
-        let decoded = decodeProviders(providers)
+        let decoded = try decodeProviders(providers)
         if !decoded.isEmpty {
             config.llm.providers = decoded
         }
     }
 
-    private static func decodeProviders(_ providers: TOMLNode) -> [String: ProviderConfig] {
+    private static func decodeProviders(_ providers: TOMLNode) throws -> [String: ProviderConfig] {
         var decoded: [String: ProviderConfig] = [:]
         for (name, node) in providers.tables {
-            decoded[name] = decodeProvider(node)
+            decoded[name] = try decodeProvider(node, name: name)
         }
         return decoded
     }
 
-    private static func decodeProvider(_ node: TOMLNode) -> ProviderConfig {
-        ProviderConfig(
+    /// Decodes one `[llm.providers.<name>]` entry.
+    /// - Parameters:
+    ///   - node: Parsed provider table.
+    ///   - name: Provider entry name (for error field paths).
+    /// - Returns: Decoded provider config.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when
+    ///   `api_style` names an unknown style.
+    private static func decodeProvider(_ node: TOMLNode, name: String) throws -> ProviderConfig {
+        let apiStyle: APIStyle
+        if let raw = node.string("api_style") {
+            guard let style = APIStyle(rawValue: raw) else {
+                throw ConfigError.validationError(
+                    field: "llm.providers.\(name).api_style",
+                    message: "must be one of \(APIStyle.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(raw)')"
+                )
+            }
+            apiStyle = style
+        } else if node.values["api_style"] != nil {
+            throw ConfigError.validationError(
+                field: "llm.providers.\(name).api_style",
+                message: "must be one of \(APIStyle.allCases.map(\.rawValue).joined(separator: ", "))"
+            )
+        } else {
+            apiStyle = .chatCompletions
+        }
+        return ProviderConfig(
             enabled: node.bool("enabled") ?? true,
             model: node.string("model"),
             serverURL: node.string("server_url"),
             baseURL: node.string("base_url"),
             apiKeyEnv: node.string("api_key_env"),
-            providerType: node.string("provider_type")
+            providerType: node.string("provider_type"),
+            apiStyle: apiStyle
         )
     }
 

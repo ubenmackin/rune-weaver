@@ -68,6 +68,7 @@ struct ConfigShowCommand: AsyncParsableCommand {
             if let providerType = entry.providerType {
                 print("provider_type = \(providerType)")
             }
+            print("api_style = \(entry.apiStyle.rawValue)")
         }
         print("")
         print("[memory]")
@@ -247,13 +248,14 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
-                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, llm.providers.<name>.(enabled|model|server_url|base_url|api_key_env|provider_type)."
+                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, "
+                + "llm.providers.<name>.(enabled|model|server_url|base_url|api_key_env|provider_type|api_style)."
         )
     }
     let section = "llm.providers.\(parts[2])"
     guard let field = try providerFieldAssignment(section: section, field: parts[3], key: key, value: value) else {
         throw ValidationError(
-            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, base_url, api_key_env, provider_type."
+            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, base_url, api_key_env, provider_type, api_style."
         )
     }
     return field
@@ -262,19 +264,26 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
 private func providerFieldAssignment(section: String, field: String, key: String, value: String) throws -> TOMLAssignment? {
     switch field {
     case "enabled":
-        try TOMLAssignment(section: section, key: "enabled", rendered: tomlBool(value, key: key))
+        return try TOMLAssignment(section: section, key: "enabled", rendered: tomlBool(value, key: key))
     case "model":
-        TOMLAssignment(section: section, key: "model", rendered: tomlQuoted(value))
+        return TOMLAssignment(section: section, key: "model", rendered: tomlQuoted(value))
     case "server_url":
-        TOMLAssignment(section: section, key: "server_url", rendered: tomlQuoted(value))
+        return TOMLAssignment(section: section, key: "server_url", rendered: tomlQuoted(value))
     case "base_url":
-        TOMLAssignment(section: section, key: "base_url", rendered: tomlQuoted(value))
+        return TOMLAssignment(section: section, key: "base_url", rendered: tomlQuoted(value))
     case "api_key_env":
-        TOMLAssignment(section: section, key: "api_key_env", rendered: tomlQuoted(value))
+        return TOMLAssignment(section: section, key: "api_key_env", rendered: tomlQuoted(value))
     case "provider_type":
-        TOMLAssignment(section: section, key: "provider_type", rendered: tomlQuoted(value))
+        return TOMLAssignment(section: section, key: "provider_type", rendered: tomlQuoted(value))
+    case "api_style":
+        guard let style = APIStyle(rawValue: value) else {
+            throw ValidationError(
+                "'\(key)' must be one of \(APIStyle.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(value)')."
+            )
+        }
+        return TOMLAssignment(section: section, key: "api_style", rendered: tomlQuoted(style.rawValue))
     default:
-        nil
+        return nil
     }
 }
 
@@ -397,8 +406,15 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
         entry.apiKeyEnv = value
     case "provider_type":
         entry.providerType = value
+    case "api_style":
+        guard let style = APIStyle(rawValue: value) else {
+            throw ValidationError(
+                "'\(key)' must be one of \(APIStyle.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(value)')."
+            )
+        }
+        entry.apiStyle = style
     default:
-        throw ValidationError("Unknown provider field '\(parts[3])'.")
+        throw ValidationError("Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, base_url, api_key_env, provider_type, api_style.")
     }
     config.llm.providers[parts[2]] = entry
 }
@@ -528,6 +544,7 @@ private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
         if let providerType = entry.providerType {
             lines.append("provider_type = \(tomlQuoted(providerType))")
         }
+        lines.append("api_style = \(tomlQuoted(entry.apiStyle.rawValue))")
         lines.append("")
     }
     lines += [

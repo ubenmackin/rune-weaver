@@ -100,7 +100,7 @@ struct ChatCommand: AsyncParsableCommand {
             print(TerminalStyle.error("No LLM providers are enabled. Check [llm.providers.*] in \(loaded.url.path)."))
             throw ExitCode(1)
         }
-        guard let active = CLIProviderBuilder.selectProvider(
+        guard let selected = CLIProviderBuilder.selectProvider(
             named: provider,
             from: providers,
             config: loaded.config.llm
@@ -111,6 +111,13 @@ struct ChatCommand: AsyncParsableCommand {
         }
 
         let sessionID = try resolveSessionID(session)
+        var active = selected
+        // Tag cloud requests with the chat session when the backend supports it.
+        // Local providers never send the session header, so they are left untouched.
+        if var sessioned = active as? OpenAICompatibleProvider {
+            sessioned.sessionID = sessionID.uuidString
+            active = sessioned
+        }
         let conversations = ConversationManager()
         await conversations.ensureSession(id: sessionID)
         let permissionGate = PermissionGate()

@@ -48,6 +48,17 @@ public struct EngineConfig: Sendable, Codable, Equatable {
     }
 }
 
+/// OpenAI-compatible request style for a provider entry.
+///
+/// Chat Completions posts to `/chat/completions`; Responses posts to
+/// `/responses`. Most providers use Chat Completions.
+public enum APIStyle: String, Sendable, Codable, CaseIterable {
+    /// Chat Completions API (`POST /chat/completions`). Default.
+    case chatCompletions = "chat-completions"
+    /// Responses API (`POST /responses`).
+    case responses
+}
+
 /// One `[llm.providers.<name>]` entry.
 public struct ProviderConfig: Sendable, Codable, Equatable {
     /// Whether the router may select this provider.
@@ -63,6 +74,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var apiKeyEnv: String?
     /// Provider backend type (e.g. `llamacpp`) for generic local entries.
     public var providerType: String?
+    /// Request style for OpenAI-compatible endpoints.
+    public var apiStyle: APIStyle
 
     /// Creates a provider config.
     public init(
@@ -71,7 +84,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         serverURL: String? = nil,
         baseURL: String? = nil,
         apiKeyEnv: String? = nil,
-        providerType: String? = nil
+        providerType: String? = nil,
+        apiStyle: APIStyle = .chatCompletions
     ) {
         self.enabled = enabled
         self.model = model
@@ -79,6 +93,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.baseURL = baseURL
         self.apiKeyEnv = apiKeyEnv
         self.providerType = providerType
+        self.apiStyle = apiStyle
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -88,6 +103,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case baseURL = "base_url"
         case apiKeyEnv = "api_key_env"
         case providerType = "provider_type"
+        case apiStyle = "api_style"
     }
 }
 
