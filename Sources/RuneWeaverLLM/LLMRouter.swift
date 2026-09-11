@@ -8,6 +8,19 @@ import RuneWeaverCore
 /// OpenAI-compatible, Anthropic, custom) conform to
 /// ``LLMProvider`` and register here in priority order.
 public actor LLMRouter {
+    /// Outcome of draining one chunk-streaming provider.
+    ///
+    /// Replaces a three-member tuple so `drainChunkedProvider` stays within
+    /// the `large_tuple` lint budget while preserving error propagation.
+    private struct ChunkedDrainResult: Sendable {
+        /// Whether the turn finished and the stream should terminate.
+        let didFinish: Bool
+        /// Last failure message, if any.
+        let lastError: String?
+        /// Whether the caller should try the next provider.
+        let shouldContinue: Bool
+    }
+
     /// Providers in priority order.
     public let providers: [any LLMProvider]
 
@@ -22,10 +35,12 @@ public actor LLMRouter {
     /// Providers are tried in priority order: unreachable providers
     /// (failing `isAvailable()`) are skipped, and a provider whose
     /// chunk stream reports `.error` before yielding any text falls
-    /// through to the next provider. Once a provider has streamed
-    /// text, its turn is kept and the stream terminates normally. An
-    /// empty provider list (or no healthy provider) terminates the
-    /// stream immediately so `for await` consumers never hang.
+    /// through to the next provider. A mid-stream `.error` after text
+    /// was already yielded terminates with an `isError` response so
+    /// callers never mistake a truncated turn for success. When every
+    /// provider fails before yielding text, the stream terminates with
+    /// the last failure. An empty provider list terminates the stream
+    /// immediately so `for await` consumers never hang.
     /// - Parameters:
     ///   - messages: Conversation history.
     ///   - tools: Tools the model may call.
@@ -34,6 +49,8 @@ public actor LLMRouter {
         let providers = self.providers
         return AsyncStream { continuation in
             let task = Task {
+                var lastError: String?
+                var didFinish = false
                 for provider in providers {
                     if Task.isCancelled {
                         break
@@ -41,49 +58,138 @@ public actor LLMRouter {
                     guard await provider.isAvailable() else { continue }
                     if let chunked = provider as? any ChunkStreamingProvider {
                         let definitions = chunked.toolDefinitions(for: tools)
-                        var yieldedText = false
-                        var failed = false
-                        chunkLoop: for await chunk in chunked.chatChunks(messages: messages, tools: definitions) {
-                            if Task.isCancelled {
-                                break
-                            }
-                            switch chunk {
-                            case let .textDelta(text):
-                                yieldedText = true
-                                continuation.yield(LLMResponse(delta: text))
-                            case .toolCall:
-                                continue
-                            case .done:
-                                break chunkLoop
-                            case .error:
-                                failed = true
-                                break chunkLoop
-                            }
+                        let step = await Self.drainChunkedProvider(
+                            chunked,
+                            messages: messages,
+                            tools: definitions,
+                            continuation: continuation
+                        )
+                        if let message = step.lastError {
+                            lastError = message
                         }
-                        if failed, !yieldedText {
+                        if step.shouldContinue {
                             continue
                         }
-                        if !Task.isCancelled {
-                            continuation.yield(LLMResponse(delta: "", isFinished: true))
-                        }
-                        break
-                    } else {
-                        for await part in provider.chat(messages: messages, tools: tools) {
-                            if Task.isCancelled {
-                                break
-                            }
-                            continuation.yield(part)
-                            if part.isFinished {
-                                break
-                            }
-                        }
+                        didFinish = step.didFinish
                         break
                     }
+                    let step = await Self.drainStandardProvider(
+                        provider,
+                        messages: messages,
+                        tools: tools,
+                        continuation: continuation
+                    )
+                    if let message = step.lastError {
+                        lastError = message
+                    }
+                    didFinish = step.didFinish
+                    break
+                }
+                if !didFinish, let lastError, !Task.isCancelled {
+                    continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: lastError))
                 }
                 continuation.finish()
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
+    }
+
+    /// Drains one chunk-streaming provider, preserving mid-stream error propagation.
+    ///
+    /// Yields text deltas verbatim and ignores tool calls. A `.error`
+    /// before any text returns `shouldContinue` so the caller falls
+    /// through to the next provider; a `.error` after text was yielded
+    /// emits an `isError` response so callers never mistake a truncated
+    /// turn for success. Empty error messages become `"unknown error"`.
+    /// - Parameters:
+    ///   - provider: Chunk-streaming provider to drain.
+    ///   - messages: Conversation history.
+    ///   - tools: Tool definitions the model may call.
+    ///   - continuation: Stream receiving text and terminal chunks.
+    /// - Returns: Outcome describing whether the turn finished, the last
+    ///   failure, and whether the caller should try the next provider.
+    private static func drainChunkedProvider(
+        _ provider: any ChunkStreamingProvider,
+        messages: [Message],
+        tools: [ToolDefinition],
+        continuation: AsyncStream<LLMResponse>.Continuation
+    ) async -> ChunkedDrainResult {
+        var yieldedText = false
+        var failureMessage: String?
+        chunkLoop: for await chunk in provider.chatChunks(messages: messages, tools: tools) {
+            if Task.isCancelled {
+                break
+            }
+            switch chunk {
+            case let .textDelta(text):
+                yieldedText = true
+                continuation.yield(LLMResponse(delta: text))
+            case .toolCall:
+                continue
+            case .done:
+                break chunkLoop
+            case let .error(message):
+                failureMessage = message.isEmpty ? "unknown error" : message
+                break chunkLoop
+            }
+        }
+        if let failureMessage {
+            if !yieldedText {
+                return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: true)
+            }
+            if !Task.isCancelled {
+                continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: failureMessage))
+                return ChunkedDrainResult(didFinish: true, lastError: failureMessage, shouldContinue: false)
+            }
+            return ChunkedDrainResult(didFinish: false, lastError: failureMessage, shouldContinue: false)
+        }
+        if !Task.isCancelled {
+            continuation.yield(LLMResponse(delta: "", isFinished: true))
+            return ChunkedDrainResult(didFinish: true, lastError: nil, shouldContinue: false)
+        }
+        return ChunkedDrainResult(didFinish: false, lastError: nil, shouldContinue: false)
+    }
+
+    /// Drains one text-streaming provider, preserving error propagation.
+    ///
+    /// Yields each `LLMResponse` verbatim including `isError` parts so
+    /// failures cannot leak into history as success. The stream always
+    /// terminates after the first available provider; only cancellation
+    /// leaves `didFinish` false without a failure.
+    /// - Parameters:
+    ///   - provider: Text-streaming provider to drain.
+    ///   - messages: Conversation history.
+    ///   - tools: Tools the model may call.
+    ///   - continuation: Stream receiving response parts.
+    /// - Returns: Whether the turn finished and the last failure, if any.
+    private static func drainStandardProvider(
+        _ provider: any LLMProvider,
+        messages: [Message],
+        tools: [any Tool],
+        continuation: AsyncStream<LLMResponse>.Continuation
+    ) async -> (didFinish: Bool, lastError: String?) {
+        var failureMessage: String?
+        for await part in provider.chat(messages: messages, tools: tools) {
+            if Task.isCancelled {
+                break
+            }
+            if part.isError {
+                failureMessage = part.errorMessage ?? "unknown error"
+                continuation.yield(part)
+                break
+            }
+            continuation.yield(part)
+            if part.isFinished {
+                break
+            }
+        }
+        if let failureMessage {
+            return (true, failureMessage)
+        }
+        if Task.isCancelled {
+            return (false, nil)
+        }
+        return (true, nil)
     }
 
     /// Embeds texts via the first healthy provider, falling through on failure.

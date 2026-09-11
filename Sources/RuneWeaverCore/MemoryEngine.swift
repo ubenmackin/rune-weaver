@@ -1202,6 +1202,170 @@ public extension MemoryEngine {
             return false
         }
     }
+
+    /// Maximum memories injected as system context on one chat turn.
+    ///
+    /// Top-N bound for the keyword `recall` fan-out so every turn issues
+    /// one bounded per-tier read; context size never grows with store size.
+    static let automaticRecallLimit = 5
+
+    /// Minimum score for an injected recall hit.
+    ///
+    /// Recall merges episodic rank scores (`1/(index+1)`) with normalized
+    /// keyword scores (overlap scaled to `[0, 1]`, profile further scaled
+    /// by confidence). Hits below this threshold are treated as noise and
+    /// the turn runs with no injected context.
+    static let automaticRecallThreshold = 0.1
+
+    /// Maximum characters for the injected recall block, header included.
+    ///
+    /// Bounds the source-labeled system message (roughly 500 tokens at
+    /// four characters per token) so long-term context never crowds out
+    /// the live conversation; over-budget blocks truncate with an ellipsis.
+    static let automaticRecallMaxChars = 2000
+
+    /// Header labeling injected recall as system context.
+    static let automaticRecallHeader =
+        "Relevant memories (use for context; do not mention unless relevant):"
+
+    /// Builds source-labeled recall context, token-bounded with truncation.
+    ///
+    /// Keeps hits scoring at or above `threshold`, renders each as
+    /// `[source] content` on its own line under the shared header, and
+    /// truncates the whole block to `maxChars` with an ellipsis when over
+    /// budget. Returns nil when no hit clears the threshold so callers
+    /// skip injection entirely.
+    /// - Parameters:
+    ///   - results: Ranked recall hits, best first.
+    ///   - threshold: Minimum score to keep. Defaults to
+    ///     `automaticRecallThreshold`.
+    ///   - maxChars: Maximum characters including the header. Defaults to
+    ///     `automaticRecallMaxChars`. Non-positive limits return nil.
+    /// - Returns: System context text, or nil when nothing is relevant.
+    static func automaticRecallContext(
+        for results: [MemoryResult],
+        threshold: Double = automaticRecallThreshold,
+        maxChars: Int = automaticRecallMaxChars
+    ) -> String? {
+        guard maxChars > 0 else { return nil }
+        let relevant = results.filter { $0.score >= threshold }
+        guard !relevant.isEmpty else { return nil }
+        let lines = relevant.map { result -> String in
+            let singleLine = result.content
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\t", with: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let compact = singleLine.count > 500 ? String(singleLine.prefix(500)) + "…" : singleLine
+            return "[\(result.source.rawValue)] \(compact)"
+        }
+        let block = ([automaticRecallHeader] + lines).joined(separator: "\n")
+        guard block.count > maxChars else { return block }
+        if maxChars == 1 {
+            return "…"
+        }
+        return String(block.prefix(maxChars - 1)) + "…"
+    }
+
+    /// Wraps recall hits as an injectable system message.
+    ///
+    /// Thin wrapper over `automaticRecallContext(for:threshold:maxChars:)`
+    /// so chat loops inject one `system` message without duplicating the
+    /// threshold and truncation policy.
+    /// - Parameters:
+    ///   - results: Ranked recall hits, best first.
+    ///   - threshold: Minimum score to keep. Defaults to
+    ///     `automaticRecallThreshold`.
+    ///   - maxChars: Maximum characters including the header. Defaults to
+    ///     `automaticRecallMaxChars`.
+    /// - Returns: System message to inject, or nil when nothing is relevant.
+    static func automaticRecallMessage(
+        for results: [MemoryResult],
+        threshold: Double = automaticRecallThreshold,
+        maxChars: Int = automaticRecallMaxChars
+    ) -> Message? {
+        guard let text = automaticRecallContext(for: results, threshold: threshold, maxChars: maxChars) else {
+            return nil
+        }
+        return Message(role: .system, content: text)
+    }
+}
+
+// MARK: - MemoryEngine Automatic Recall
+
+public extension MemoryEngine {
+    /// Drops the just-mirrored self-echo from recall hits.
+    ///
+    /// Single shared filter for the orchestrator and the CLI chat loop so
+    /// both entry points agree on what counts as an echo: an episodic hit
+    /// from this session whose content matches the query
+    /// case-insensitively after trimming. Semantic and profile hits, and
+    /// episodic hits from other sessions, always survive.
+    /// - Parameters:
+    ///   - results: Ranked recall hits, best first.
+    ///   - query: Current user message used as the recall query.
+    ///   - sessionID: Current session identifier for echo filtering.
+    /// - Returns: Hits with the self-echo removed.
+    static func filteredRecallResults(
+        _ results: [MemoryResult],
+        query: String,
+        sessionID: UUID
+    ) -> [MemoryResult] {
+        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return results.filter { result in
+            guard result.source == .episodic else { return true }
+            guard result.metadata["session_id"] == sessionID.uuidString else { return true }
+            return result.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != trimmedQuery
+        }
+    }
+
+    /// Inserts injected recall into LLM history after leading system messages.
+    ///
+    /// Single shared splice for the orchestrator and the CLI chat loop:
+    /// the recall `system` message goes right after any leading `system`
+    /// rows (developer prompt, rolling summary), ahead of the live
+    /// conversation. Ephemeral only; the recall message is never appended
+    /// to working memory.
+    /// - Parameters:
+    ///   - history: Base LLM history including prompt and summary.
+    ///   - recall: Recall system message, if any.
+    /// - Returns: History with recall spliced in, or unchanged when nil.
+    static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
+        guard let recall else { return history }
+        var spliced = history
+        var index = 0
+        while index < spliced.count, spliced[index].role == .system {
+            index += 1
+        }
+        spliced.insert(recall, at: index)
+        return spliced
+    }
+
+    /// Resolves automatic recall for one user turn, failure-isolated.
+    ///
+    /// Single `MemoryEngine`-owned helper for the orchestrator and the CLI
+    /// chat loop: runs one bounded keyword `recall` (nil embeddings),
+    /// drops the just-mirrored self-echo via `filteredRecallResults`, and
+    /// wraps the survivors via `automaticRecallMessage`. Recall failures,
+    /// empty queries, and below-threshold hits yield nil so the turn
+    /// proceeds with no injected context.
+    /// - Parameters:
+    ///   - query: Current user message used as the recall query.
+    ///   - sessionID: Current session identifier for self-echo filtering.
+    /// - Returns: System message to inject, or nil when nothing is relevant.
+    func recallMessage(for query: String, sessionID: UUID) async -> Message? {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        do {
+            let results = try await recall(
+                query: query,
+                embedding: nil,
+                limit: Self.automaticRecallLimit
+            )
+            let filtered = Self.filteredRecallResults(results, query: query, sessionID: sessionID)
+            return Self.automaticRecallMessage(for: filtered)
+        } catch {
+            return nil
+        }
+    }
 }
 
 // MARK: - Episode Message Conversion

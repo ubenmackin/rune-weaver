@@ -74,7 +74,7 @@ api_style = "responses"  # muse-spark family; omit or use "chat-completions" for
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | LanceDB vector store path for semantic memory. Must not be empty. |
+| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON keyword store path for semantic memory (LanceDB-compatible shape); vector embeddings deferred pending an embeddings backend. Must not be empty. |
 | `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite path for episodic memory (conversation history). Must not be empty. |
 | `embedding_model` | string | `"all-MiniLM-L6-v2"` | Embedding model identifier. Must not be empty. |
 

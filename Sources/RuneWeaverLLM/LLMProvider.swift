@@ -181,10 +181,10 @@ public extension ChunkStreamingProvider {
     /// Text deltas yield ``LLMResponse`` deltas verbatim. Tool calls
     /// have no text representation and are skipped here; consume
     /// ``chatChunks(messages:tools:)`` to observe them. Transport
-    /// `.error` chunks terminate the stream empty (they are never
-    /// surfaced as assistant text) so failures cannot leak into
-    /// conversation history; the stream always terminates with an
-    /// `isFinished` chunk.
+    /// `.error` chunks terminate the stream with an `isError` response
+    /// (they are never surfaced as assistant text) so failures cannot
+    /// leak into conversation history; the stream always terminates with
+    /// an `isFinished` chunk carrying `errorMessage` on failure.
     /// - Parameters:
     ///   - messages: Conversation history.
     ///   - tools: Tools the model may call.
@@ -203,8 +203,9 @@ public extension ChunkStreamingProvider {
                     case .done:
                         continuation.yield(LLMResponse(delta: "", isFinished: true))
                         break chunkLoop
-                    case .error:
-                        continuation.yield(LLMResponse(delta: "", isFinished: true))
+                    case let .error(message):
+                        let detail = message.isEmpty ? "unknown error" : message
+                        continuation.yield(LLMResponse(delta: "", isFinished: true, errorMessage: detail))
                         break chunkLoop
                     }
                 }

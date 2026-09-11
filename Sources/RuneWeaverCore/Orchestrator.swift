@@ -85,6 +85,10 @@ public enum OrchestratorError: Error, Sendable, Equatable {
     /// The tool loop still requested tool calls after `maxToolIterations`
     /// tool rounds plus the final synthesis turn.
     case toolLoopExceeded(iterations: Int)
+    /// The LLM stream reported a mid-stream failure, even when partial
+    /// text was already yielded. Surfaced instead of finishing the turn
+    /// as a silent success.
+    case llmFailed(String)
 }
 
 /// Resolves model-requested tool calls for the current context.
@@ -226,7 +230,13 @@ public actor Orchestrator {
     ///    `/remember ...`) by storing the profile fact via the memory
     ///    engine and returning an acknowledgement without calling the LLM,
     ///    so non-CLI callers share the CLI remember behavior.
-    /// 3. Loads context and calls the LLM.
+    /// 3. Loads context, injects automatic recall, and calls the LLM.
+    ///    Every turn runs one bounded keyword recall via
+    ///    `MemoryEngine.recallMessage(for:sessionID:)` whose top matches
+    ///    inject as source-labeled, token-bounded system context via
+    ///    `MemoryEngine.automaticRecallContext`, spliced with
+    ///    `MemoryEngine.historyWithRecall` after leading system messages
+    ///    and never stored.
     /// 4. Executes requested tools via the bus, appends each result,
     ///    and re-invokes the LLM until the turn is final. Up to
     ///    `maxToolIterations` tool rounds run, followed by one final
@@ -239,7 +249,9 @@ public actor Orchestrator {
     ///    empty results skip only the episodic mirror so keyword search
     ///    stays free of empty turns.
     /// 5. Stores the final assistant turn and returns it. Empty final
-    ///    text (empty LLM stream or failure) is not stored or mirrored.
+    ///    text (empty LLM stream) is not stored or mirrored. Mid-stream
+    ///    LLM failures throw ``OrchestratorError/llmFailed(_:)`` instead
+    ///    of returning truncated text as a silent success.
     /// - Parameter input: User text plus session routing.
     /// - Returns: Final text, session, and tool actions taken.
     public func process(input: UserInput) async throws -> OrchestratorResponse {
@@ -264,14 +276,22 @@ public actor Orchestrator {
             return OrchestratorResponse(text: acknowledgement, sessionID: sessionID, toolActions: [])
         }
 
-        var workingMessages = await conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt)
+        let recall: Message? = if let memoryEngine {
+            await memoryEngine.recallMessage(for: text, sessionID: sessionID)
+        } else {
+            nil
+        }
+        var workingMessages = await MemoryEngine.historyWithRecall(
+            conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt),
+            recall: recall
+        )
         let tools = await toolBus.availableTools()
         var toolActions: [ToolAction] = []
         var finalText = ""
         var toolRounds = 0
 
         while true {
-            finalText = await collectText(messages: workingMessages, tools: tools)
+            finalText = try await collectText(messages: workingMessages, tools: tools)
             let calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
             if calls.isEmpty {
                 break
@@ -311,7 +331,10 @@ public actor Orchestrator {
                     )
                 }
             }
-            workingMessages = await conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt)
+            workingMessages = await MemoryEngine.historyWithRecall(
+                conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt),
+                recall: recall
+            )
             finalText = ""
         }
 
@@ -356,14 +379,22 @@ public actor Orchestrator {
     }
 
     /// Collects a full text turn from the streaming chat API.
+    ///
+    /// Mid-stream failures surface as `OrchestratorError.llmFailed` even
+    /// when partial text was already yielded, so callers never mistake a
+    /// truncated turn for a successful one.
     /// - Parameters:
     ///   - messages: Conversation history.
     ///   - tools: Tools the model may call.
     /// - Returns: Concatenated response text.
-    private func collectText(messages: [Message], tools: [any Tool]) async -> String {
+    /// - Throws: `OrchestratorError.llmFailed` when the stream reports an error.
+    private func collectText(messages: [Message], tools: [any Tool]) async throws -> String {
         var text = ""
         let stream = llm.chat(messages: messages, tools: tools)
         for await chunk in stream {
+            if let message = chunk.errorMessage {
+                throw OrchestratorError.llmFailed(message.isEmpty ? "unknown error" : message)
+            }
             text += chunk.delta
             if chunk.isFinished {
                 break

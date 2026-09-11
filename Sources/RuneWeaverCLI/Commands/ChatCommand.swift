@@ -223,8 +223,18 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 ///
 /// Loads `config.toml`, selects an LLM provider (with `--provider`
 /// overriding `llm.default_provider`), and enters a read-eval-print loop.
-/// Assistant tokens stream back with a typewriter effect, requested tool
-/// calls are shown inline (yellow) with their results, and
+/// Email plugins (`email.search`, `email.read`) and memory plugins
+/// (`remember_fact`, `recall_memories`) register at startup via
+/// `CLIShared.makeToolBus(pluginTools())` and are sent to the model as
+/// `ToolDefinition`s every turn. Email tools are `readOnly` and memory
+/// tools are `trusted` per the owner memory-write trust ruling, so both
+/// families run without approval prompts; their results feed back into
+/// the next LLM round so the assistant summarizes them in conversation.
+/// Every user turn also runs automatic recall (bounded keyword `recall`
+/// with nil embeddings): top matches inject as source-labeled,
+/// token-bounded system context, skipped when nothing scores above
+/// threshold. Assistant tokens stream back with a typewriter effect,
+/// requested tool calls are shown inline (yellow) with their results, and
 /// `requiresApproval` tools prompt for confirmation before running.
 /// Ctrl+C, EOF, `/exit`, and `/quit` all shut the session down gracefully.
 struct ChatCommand: AsyncParsableCommand {
@@ -309,8 +319,13 @@ struct ChatCommand: AsyncParsableCommand {
                 cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
             }
         }
+        // Email tools are `readOnly` and memory tools are `trusted` per
+        // the owner memory-write trust ruling, so both bypass the approval
+        // handler by design (see `ToolBus.execute`): the handler below only
+        // fires for `requiresApproval` tools, so find-and-summarize and
+        // remember/recall run prompt-free with memory writes audit-logged.
         let permissionGate = PermissionGate()
-        let toolBus = await CLIShared.makeToolBus(permissionGate: permissionGate)
+        let toolBus = await CLIShared.makeToolBus(emailConfig: loaded.config.email, memoryEngine: memoryEngine, permissionGate: permissionGate)
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
             print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
@@ -326,14 +341,24 @@ struct ChatCommand: AsyncParsableCommand {
             }
             return true
         }
+        let startupTools = await toolBus.toolNames().sorted()
+        if startupTools.isEmpty {
+            print(TerminalStyle.dim("No plugin tools registered; continuing without tool calls."))
+        } else {
+            print(TerminalStyle.dim("Tools: \(startupTools.joined(separator: ", "))."))
+        }
 
         print(TerminalStyle.dim("Connected to \(active.name) (\(active.modelInfo.name)). Session \(sessionID.uuidString)."))
         print(TerminalStyle.dim("Type /help for commands, /exit to quit. Ctrl+C shuts down gracefully."))
+        // Default system prompt is composed from the live registry so the
+        // model sees every registered tool; an explicit --system-prompt
+        // still overrides it verbatim via SystemPromptComposer.resolve.
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: toolBus)
         let context = ChatTurnContext(
             conversations: conversations,
             toolBus: toolBus,
             sessionID: sessionID,
-            systemPrompt: systemPrompt,
+            systemPrompt: effectiveSystemPrompt,
             maxToolIterations: max(1, maxToolIterations),
             memoryEngine: memoryEngine
         )
@@ -441,7 +466,8 @@ private func runChatREPL(
         )
         await runAssistantTurn(
             provider: provider,
-            context: context
+            context: context,
+            query: input
         )
     }
     print(TerminalStyle.dim("Chat session closed. Session \(context.sessionID.uuidString) ended."))
@@ -582,22 +608,30 @@ private func handleSlashCommand(
 }
 
 /// Runs one assistant turn, dispatching to the chunk or text path.
+///
+/// Resolves automatic recall once per user turn so chunked and text
+/// backends share one stable injection; tool rounds reuse the same
+/// recall message without re-querying.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
+///   - query: Current user message used as the recall query.
 private func runAssistantTurn(
     provider: any LLMProvider,
-    context: ChatTurnContext
+    context: ChatTurnContext,
+    query: String
 ) async {
     if let chunked = provider as? any ChunkStreamingProvider {
         await runChunkedTurn(
             provider: chunked,
-            context: context
+            context: context,
+            query: query
         )
     } else {
         await runTextTurn(
             provider: provider,
-            context: context
+            context: context,
+            query: query
         )
     }
 }
@@ -606,11 +640,15 @@ private func runAssistantTurn(
 ///
 /// Text deltas print as they arrive (typewriter effect); model-requested
 /// tool calls print in yellow, execute via the bus, and show their results
-/// inline before the next LLM round. Up to `maxToolIterations` tool rounds
-/// run, followed by one final synthesis turn so the last tool results are
-/// always answered; when the synthesis turn still requests tools the loop
-/// stops with an exceeded notice without executing the extra calls. The
-/// assistant turn is always recorded, using the shared
+/// inline before the next LLM round. Automatic recall runs once per user
+/// turn (bounded keyword `recall` with nil embeddings, source-labeled and
+/// token-bounded) and the same injected system context is reused across
+/// tool rounds without re-querying; below-threshold turns send no recall.
+/// Up to `maxToolIterations` tool rounds run, followed by one final
+/// synthesis turn so the last tool results are always answered; when the
+/// synthesis turn still requests tools the loop stops with an exceeded
+/// notice without executing the extra calls. The assistant turn is always
+/// recorded, using the shared
 /// `OrchestratorToolLoop.assistantNoteContent(text:calls:)` policy
 /// (truncated arguments, name, and call identifier) when the model sends
 /// tool calls without text, so tool results keep their parent. Empty tool
@@ -620,18 +658,22 @@ private func runAssistantTurn(
 /// - Parameters:
 ///   - provider: Chunk-streaming LLM backend.
 ///   - context: Shared REPL dependencies for this session.
+///   - query: Current user message used as the recall query.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
-    context: ChatTurnContext
+    context: ChatTurnContext,
+    query: String
 ) async {
     let tools = await context.toolBus.availableTools()
     let definitions = tools.map { ToolDefinition($0) }
+    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
     var toolRounds = 0
     while true {
-        let history = await context.conversations.workingHistory(
+        let baseHistory = await context.conversations.workingHistory(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
+        let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         var text = ""
         var calls: [ToolCall] = []
@@ -718,26 +760,36 @@ private func runChunkedTurn(
 /// path cannot resolve or execute tools via the shared resolver. When tools
 /// are registered an explicit warning is emitted that tools are disabled in
 /// the text path; use a `ChunkStreamingProvider` backend for full tool
-/// support. Storage decisions delegate to the shared
+/// support. Automatic recall injects the same source-labeled system context
+/// as the chunked path. Storage decisions delegate to the shared
 /// `OrchestratorToolLoop` policy like every other loop.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
+///   - query: Current user message used as the recall query.
 private func runTextTurn(
     provider: any LLMProvider,
-    context: ChatTurnContext
+    context: ChatTurnContext,
+    query: String
 ) async {
     let tools = await context.toolBus.availableTools()
     if !tools.isEmpty {
         print(TerminalStyle.dim("Tools are disabled in the text-only path (\(tools.count) available); continuing without tool calls."))
     }
-    let history = await context.conversations.workingHistory(
+    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
+    let baseHistory = await context.conversations.workingHistory(
         for: context.sessionID,
         systemPrompt: context.systemPrompt
     )
+    let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
     print(TerminalStyle.assistant("weaver> "), terminator: "")
     var text = ""
+    var streamError: String?
     for await part in provider.chat(messages: history, tools: tools) {
+        if let message = part.errorMessage {
+            streamError = message.isEmpty ? "unknown error" : message
+            break
+        }
         if !part.delta.isEmpty {
             text += part.delta
             print(part.delta, terminator: "")
@@ -748,6 +800,10 @@ private func runTextTurn(
         }
     }
     print("")
+    if let streamError {
+        print(TerminalStyle.error("Request failed: \(streamError)"))
+        return
+    }
     guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
     await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
     await context.memoryEngine.mirrorTurn(
