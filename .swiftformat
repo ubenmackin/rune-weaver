@@ -1,0 +1,20 @@
+# Tells SwiftFormat which compiler features are available
+--swiftversion 6.4
+
+# Tells SwiftFormat to format using strict Swift 6 language rules
+--languagemode 6
+
+# Line length to match SwiftLint
+--maxwidth 180
+
+# Trailing commas: set to never to align with SwiftLint rules
+--commas never
+
+# Disable Allman brace formatting
+--allman false
+
+# WHY excluded: generated sprite grids are machine-written, so linting them churns output and desyncs file counts.
+--exclude DerivedData,.derivedData,Build,build,.build,Project/Resources/SpriteData/HeroAvatarSprites+PixelBases.swift,Project/Resources/SpriteData/HeroAvatarSprites+PixelGear.swift,Project/Resources/SpriteData/MascotSpriteGrids.swift
+
+# Disable redundantSelf rule to keep explicit self required by Swift 6 closure capture semantics
+--disable redundantSelf

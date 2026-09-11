@@ -1,0 +1,67 @@
+# ~/.runeweaver/config.toml
+# Copy to ~/.runeweaver/config.toml and adjust. Secrets live in the
+# macOS Keychain (service: com.runeweaver.secrets) or environment
+# variables, never in this file.
+
+[engine]
+name = "Rune Weaver"
+log_level = "info"  # trace | debug | info | notice | warning | error | critical
+
+[llm]
+default_provider = "mlx"
+fallback_provider = "openrouter"
+
+[llm.providers.mlx]
+enabled = true
+model = "gemma-4-9b"
+server_url = "http://localhost:8080"  # MLX server
+
+[llm.providers.openrouter]
+enabled = true
+api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
+base_url = "https://openrouter.ai/api/v1"
+
+[llm.providers.local]
+enabled = false
+provider_type = "llamacpp"
+server_url = "http://localhost:8081"
+
+[memory]
+vector_db_path = "~/.runeweaver/memory/vectors"
+episodes_db_path = "~/.runeweaver/memory/episodes.db"
+embedding_model = "all-MiniLM-L6-v2"
+
+[voice]
+stt_provider = "whisper"
+whisper_model = "base"
+tts_provider = "system"  # macOS say command
+
+[sandbox]
+staging_path = "~/.runeweaver/sandbox"
+auto_approve_after = 5  # Auto-approve after 5 successful executions
+
+[email]
+[[email.accounts]]
+name = "icloud"
+type = "imap"
+host = "imap.mail.me.com"
+port = 993
+username = "user@icloud.com"
+# password stored in Keychain
+
+[[email.accounts]]
+name = "personal"
+type = "imap"
+host = "mail.yourdomain.com"
+port = 993
+username = "you@yourdomain.com"
+# password stored in Keychain
+
+[home]
+[[home.homekit]]
+enabled = true
+
+[[home.home_assistant]]
+enabled = true
+url = "http://homeassistant.local:8123"
+token_env = "HA_TOKEN"  # Reads from env or Keychain
