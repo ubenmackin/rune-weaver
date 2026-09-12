@@ -98,6 +98,10 @@ public actor ConversationManager {
     /// after it and deleted sessions cannot resurrect from a reordered
     /// write.
     private static let persistenceQueue = DispatchQueue(label: "com.runeweaver.conversationmanager.persistence", qos: .utility)
+    /// Maximum sessions tracked concurrently in memory before evicting oldest.
+    public static let maxSessions: Int = 500
+    /// Maximum character length kept in the rolling summary before oldest text is truncated.
+    public static let maxSummaryLength: Int = 2000
     /// Maximum messages retained per session before truncation.
     public let maxMessages: Int
     /// Filesystem path of the episodes database, if configured.
@@ -155,6 +159,11 @@ public actor ConversationManager {
     public func ensureSession(id: UUID) -> ConversationSession {
         if let existing = sessions[id] {
             return existing
+        }
+        if sessions.count >= Self.maxSessions {
+            if let oldest = sessions.values.min(by: { $0.updatedAt < $1.updatedAt }) {
+                sessions.removeValue(forKey: oldest.id)
+            }
         }
         let session = ConversationSession(id: id)
         sessions[id] = session
@@ -343,10 +352,15 @@ public actor ConversationManager {
         }
         guard !evicted.isEmpty else { return }
         let chunk = summarizer(evicted)
-        if let existing = summary, !existing.isEmpty {
-            summary = existing + "\n" + chunk
+        let combinedSummary = if let existing = summary, !existing.isEmpty {
+            existing + "\n" + chunk
         } else {
-            summary = chunk
+            chunk
+        }
+        summary = if combinedSummary.count > Self.maxSummaryLength {
+            "…" + String(combinedSummary.suffix(Self.maxSummaryLength))
+        } else {
+            combinedSummary
         }
         messages = kept
     }

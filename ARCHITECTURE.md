@@ -18,7 +18,7 @@ The name comes from JRPG lore: a Rune Weaver is a mage who inscribes and channel
 
 ## TECH STACK
 
-LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/integration libraries require it)
+LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/integration libraries require it), TypeScript + React + Vite (web dashboard static bundle served by the engine)
 
 ### Why Swift First
 - Native macOS/iOS integration (Apple Mail, HomeKit, Keychain, AppKit/SwiftUI)
@@ -41,11 +41,11 @@ LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/
 │                                                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐    │
 │  │  iOS Client  │  │  macOS Client│  │   Web Dashboard    │    │
-│  │   (SwiftUI)  │  │   (SwiftUI)  │  │   (React/Vue)      │    │
+│  │   (SwiftUI)  │  │   (SwiftUI)  │  │   (React + Vite)   │    │
 │  │              │  │              │  │                    │    │
 │  │ Push-to-talk │  │ Menu bar app │  │  Chat interface    │    │
-│  │ TTS playback │  │ TTS playback │  │  Config / settings │    │
-│  │ Notifications│  │ Voice toggle │  │  Memory browser    │    │
+│  │ TTS playback │  │ TTS playback │  │  Approvals inbox   │    │
+│  │ Notifications│  │ Voice toggle │  │  Memory / Schedules│    │
 │  └──────┬───────┘  └──────┬───────┘  └────────┬───────────┘    │
 │         │                 │                     │                │
 │         └─────────────────┼─────────────────────┘                │
@@ -112,6 +112,17 @@ LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### Engine-to-Service Shift
+
+The core engine is shifting from a CLI-only tool to a local service that other UIs drive through one HTTP surface.
+
+- **Vapor API layer**: A Vapor service fronts the core engine and exposes chat, health, tools, memory, approvals, runs, and scheduler operations as JSON routes. The dashboard and future clients call the engine through this layer; the CLI remains direct-core for v1 (`chat` and `scheduler run` link `RuneWeaverCore` directly via `CLIShared.makeToolBus` and `Orchestrator` instead of going through HTTP, so terminal use works with no service running). The service itself launches from the CLI binary via `rune-weaver serve`, which builds a `ServerContext` with `ServerContext.make(...)`, registers the shared plugin tools, configures a Vapor `Application` with `configureRuneWeaver(_:context:)`, and runs it.
+- **Static dashboard bundle**: The web dashboard ships as a static bundle served by the engine itself. It chats, browses memory, inspects run history, manages schedules, and surfaces the approvals inbox in a browser with no separate frontend host process.
+- **Same trust boundary**: Every service-triggered write still flows through the permission gate with graduated trust, sandbox staging, and the local audit trail. The service layer adds transport; it does not bypass approvals.
+- **Localhost-only, no-auth v1**: The v1 service binds loopback (`127.0.0.1`) only with no auth, relying on local-process access for protection.
+- **Auth-before-exposure rule**: Authentication must land before the service binds a non-loopback interface or leaves the machine. No VPN, tunnel, or port-forward exposure without auth.
+- **Known v1 limitation — split-brain single-flight**: Scheduler single-flight is per-process only. `SchedulerRunLock` guards concurrent `POST /scheduler/jobs/:id/run` calls inside the service process and `SchedulerEngine.running` guards overlapping fires inside the CLI `scheduler run` foreground loop, but the two live in separate processes with no shared state, so the same job name can still run concurrently via API plus CLI in v1. A cross-process lock (file lock under `~/.runeweaver/` or SQLite) is deferred; do not run manual API runs and the CLI foreground loop for the same job at the same time.
+
 ---
 
 ## COMPONENT DETAILS
@@ -138,12 +149,15 @@ Protocol: LLMProvider
   └── var modelInfo: ModelInfo
 
 Implementations:
-  ├── MLXProvider        // Local models via MLX (Apple Silicon)
-  ├── LlamaCppProvider   // Local models via llama.cpp server
-  ├── VLLMProvider       // Local models via vLLM server
-  ├── OpenAIProvider     // Cloud: OpenAI, OpenRouter, etc.
-  ├── AnthropicProvider  // Cloud: Claude
-  └── CustomProvider     // Any OpenAI-compatible endpoint
+  ├── MLXProvider               // Local models via MLX (Apple Silicon)
+  ├── LlamaCppProvider          // Local models via llama.cpp server
+  └── OpenAICompatibleProvider  // Cloud (OpenAI, OpenRouter) and any custom OpenAI-compatible endpoint
+
+Routing and configuration:
+  ├── LLMRouter            // Priority-ordered providers with fallback on failure
+  ├── ProviderConfig       // One [llm.providers.<name>] entry (RuneWeaverCore)
+  ├── ProviderKind         // Backend selector: mlx / llamacpp / openai-compatible
+  └── LLMProviderFactory   // Builds providers from ProviderConfig plus resolved API keys
 ```
 
 The LLM Router maintains a priority-ordered list of providers and falls through on failure. Users configure providers via the dashboard or config file.
@@ -178,7 +192,7 @@ Three tiers of memory, each backed by different storage:
 | Tier | What | Storage | Lifecycle |
 |------|------|---------|-----------|
 | **Working Memory** | Current conversation context | In-memory + SQLite sessions (Core Engine) | Session-scoped, oldest turns fold into a rolling summary when over budget |
-| **Episodic Memory** | Past conversation turns as cleaned per-turn rows | SQLite + FTS5 | Permanent, mirrored clean every turn via `mirrorTurn` for resume; `summarizeSessions`/`compactSessions` exist but are not wired into chat |
+| **Episodic Memory** | Past conversation turns as cleaned per-turn rows | SQLite + FTS5 | Permanent, mirrored clean every turn via `mirrorTurn` for resume; auto-compacts sessions older than 30 days when records exceed `maxEpisodicCount` (10,000) |
 | **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed; vectors deferred pending an embeddings backend |
 
 **Memory Flow**:
@@ -188,7 +202,7 @@ Three tiers of memory, each backed by different storage:
 4. Key facts persist → stored in Semantic Memory as keyword-only rows (no embeddings yet), mirrored into the JSON profile
 5. On future queries → `recall` merges episodic, semantic, and profile hits via keyword overlap (vector similarity deferred until a local embeddings backend exists)
 
-Summarization helpers `summarizeSessions` (non-destructive per-session summaries) and `compactSessions` (replace old rows with a summary episode) exist on the episode store but are not called from chat paths.
+Summarization helper `summarizeSessions` (non-destructive per-session summaries) exists on the episode store; `compactSessions` (replace old rows with a summary episode) is called automatically by `MemoryEngine` when episodic storage exceeds `maxEpisodicCount` (10,000 records) to prune sessions older than 30 days.
 
 **Embeddings**: Vector-backed semantic memory is deferred pending a local embeddings backend. Until then facts persist as keyword-only rows scored by token overlap. When available, embeddings are generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
 
@@ -229,7 +243,7 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 
 - **Cron-like**: User-defined schedules for recurring tasks (e.g., "summarize my emails every morning at 8 AM")
 - **Event-driven**: React to triggers (new email arrived, calendar event upcoming, webhook received)
-- Built on `SwiftServiceLifecycle` for clean startup/shutdown
+- **Foreground loop plus per-process single-flight**: The CLI `scheduler run` foreground loop (`while true` plus `Task.sleep` at `--interval` cadence) is the sole auto-fire runner; the service exposes CRUD plus a manual `POST .../run` entry point and never auto-fires. Overlapping fires skip with a log line instead of stacking: `SchedulerEngine.running` guards the CLI loop and `SchedulerRunLock` guards concurrent manual runs inside the service process. Known v1 limitation: the two locks share no cross-process state, so the same job name can still run concurrently via API plus CLI (see the Engine-to-Service Shift).
 
 ### 8. Voice Pipeline
 
@@ -254,13 +268,13 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - Approval notifications
 - System audio integration
 
-**Web Dashboard (React/Vue)**:
+**Web Dashboard (static bundle served by the engine)**:
 - Full chat interface
-- Configuration / settings
 - Memory browser (search what the agent remembers)
-- Tool/plugin management
 - Scheduler management
-- Runs locally at `http://localhost:8080`
+- Run history inspector
+- Approvals inbox (approve-with-duration or deny gated writes)
+- Served by the Vapor API layer on loopback only; no separate frontend host process
 
 ---
 
@@ -484,15 +498,24 @@ token_env = "HA_TOKEN"
 - **Apple Silicon required** for MLX provider. Intel Macs can use llama.cpp/vLLM/cloud only.
 - **WireGuard VPN** required for phone-to-Mac Studio communication. No public internet exposure.
 - **Single-user design** (v1): No multi-user auth. The agent serves one person.
+- **Localhost-only, no-auth v1**: The Vapor API layer and static dashboard bundle bind loopback (`127.0.0.1`) only with no auth in v1; local-process access is the protection boundary.
+- **Auth-before-exposure**: Authentication must land before the service binds a non-loopback interface or is exposed beyond the machine (VPN, tunnel, or port forward).
 - **Local-first**: No data leaves the machine unless the user explicitly configures a cloud LLM provider.
 - **macOS Sequoia or later** for full framework access.
+
+### Code Commenting Guidelines
+
+- **New-File Headers**: Every new source and test file must begin with a descriptive top-of-file header comment documenting the component's purpose, scope, and architectural role.
+- **Intent Over Mechanics**: Inline and doc comments must explain the rationale, invariants, non-obvious logic, or edge cases rather than restating what the code does mechanically.
+- **No Planning-Artifact References**: Code comments must never reference task IDs, session IDs, PR numbers, plan identifiers, or other transient planning artifacts.
 
 ---
 
 ## OPEN QUESTIONS
 
 1. **iOS app distribution**: TestFlight for personal use? Or sideload via AltStore?
-2. **Web dashboard framework**: React vs Vue vs Swift-based (Vapor + Leaf)?
-3. **Python bridge approach**: PythonKit vs subprocess IPC vs embedding CPython?
-4. **Update mechanism**: How do plugin updates and core updates propagate?
-5. **Offline capability**: What should the agent do when the Mac Studio is unreachable?
+2. **Python bridge approach**: PythonKit vs subprocess IPC vs embedding CPython?
+3. **Update mechanism**: How do plugin updates and core updates propagate?
+4. **Offline capability**: What should the agent do when the Mac Studio is unreachable?
+
+Decided: web dashboard framework is React + TypeScript + Vite, shipped as a static bundle served by the engine (`Web/*` built to `Web/dist` via `DashboardBundle`).

@@ -84,6 +84,30 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("[sandbox]")
         print("staging_path = \(config.sandbox.stagingPath)")
         print("auto_approve_after = \(config.sandbox.autoApproveAfter)")
+        print("")
+        print("[scheduler] (\(config.scheduler.jobs.count) jobs)")
+        if config.scheduler.jobs.isEmpty {
+            print(TerminalStyle.dim("# Add [[scheduler.jobs]] entries; see Config/config.toml.example"))
+        }
+        for job in config.scheduler.jobs {
+            print("")
+            print("[[scheduler.jobs]]")
+            print("name = \(job.name)")
+            if let schedule = job.schedule {
+                print("schedule = \(schedule)")
+            }
+            print("prompt = \(job.prompt)")
+            print("enabled = \(job.enabled)")
+            if let poll = job.poll {
+                print("poll_account = \(poll.account)")
+                print("poll_query = \(poll.query)")
+                if let mailbox = poll.mailbox {
+                    print("poll_mailbox = \(mailbox)")
+                }
+                print("poll_interval_seconds = \(poll.pollIntervalSeconds)")
+                print("poll_limit = \(poll.limit)")
+            }
+        }
     }
 }
 

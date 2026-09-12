@@ -1143,6 +1143,9 @@ enum EpisodeStoreIO {
             }.map(\.episode)
         }
 
+        /// Maximum JSON episode files retained or decoded simultaneously.
+        static let maxJSONFiles = 2000
+
         /// Reads every stored episode with its file creation date.
         ///
         /// The creation date preserves insertion order for
@@ -1161,9 +1164,19 @@ enum EpisodeStoreIO {
                 )
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .secondsSince1970
+                let jsonFiles = files.filter { $0.pathExtension == "json" }
+                let candidateFiles = if jsonFiles.count > maxJSONFiles {
+                    jsonFiles.sorted {
+                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        return creationDate1 > creationDate2
+                    }.prefix(maxJSONFiles).reversed()
+                } else {
+                    jsonFiles
+                }
                 var entries: [(episode: Episode, created: Date?)] = []
-                entries.reserveCapacity(files.count)
-                for file in files where file.pathExtension == "json" {
+                entries.reserveCapacity(candidateFiles.count)
+                for file in candidateFiles {
                     let episode = try decoder.decode(Episode.self, from: Data(contentsOf: file))
                     let created = (try? file.resourceValues(forKeys: [.creationDateKey]))?.creationDate
                     entries.append((episode: episode, created: created))
@@ -1195,6 +1208,21 @@ enum EpisodeStoreIO {
                 for episode in episodes {
                     let data = try encoder.encode(episode)
                     try data.write(to: directoryURL.appendingPathComponent("\(episode.id.uuidString).json"), options: .atomic)
+                }
+                let allFiles = (try? FileManager.default.contentsOfDirectory(
+                    at: directoryURL,
+                    includingPropertiesForKeys: [.creationDateKey]
+                ))?.filter { $0.pathExtension == "json" } ?? []
+                if allFiles.count > maxJSONFiles {
+                    let sorted = allFiles.sorted {
+                        let creationDate1 = (try? $0.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        let creationDate2 = (try? $1.resourceValues(forKeys: [.creationDateKey]))?.creationDate ?? .distantPast
+                        return creationDate1 < creationDate2
+                    }
+                    let excess = sorted.prefix(allFiles.count - maxJSONFiles)
+                    for file in excess {
+                        try? FileManager.default.removeItem(at: file)
+                    }
                 }
             } catch let error as EpisodeStoreError {
                 throw error

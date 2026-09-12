@@ -40,3 +40,21 @@ Installed plugins live under `~/.runeweaver/plugins/`:
 ├── home/
 └── ...
 ```
+
+## Build, test, and lint
+
+Use the `Makefile` at the repo root as the canonical way to build,
+test, and lint (Swift engine plus web dashboard). The dashboard build
+requires Node.js 20+ with npm at build time only.
+
+```bash
+make build        # Swift engine + dashboard bundle (Web/dist)
+make test         # Swift tests + dashboard tests (vitest)
+make lint         # Swift style gates + dashboard typecheck
+make run ARGS="status"  # launch the engine
+```
+
+Target reference: `build`, `build-web`, `build-swift`, `test`,
+`test-web`, `test-swift`, `lint`, `lint-web`, `lint-swift`, `run`,
+`clean`, `all`. See the root `README.md` and `Web/README.md` for the
+full table.

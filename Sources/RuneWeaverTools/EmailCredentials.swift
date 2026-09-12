@@ -49,12 +49,18 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
     }
 }
 
-extension ResolvedEmailCredentials: CustomStringConvertible {
+extension ResolvedEmailCredentials: CustomStringConvertible, CustomDebugStringConvertible {
     /// Redacted summary echoing only host, port, and username.
     ///
     /// Never includes the password so logging this value is safe.
     public var description: String {
         "Email(\(accountName): \(username)@\(host):\(port))"
+    }
+
+    /// Redacted debug summary mirroring description so LLDB po, debugPrint,
+    /// and String(reflecting:) never leak the plaintext password.
+    public var debugDescription: String {
+        description
     }
 }
 

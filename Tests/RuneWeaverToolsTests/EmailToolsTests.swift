@@ -1099,4 +1099,21 @@ struct EmailToolsTests {
         #expect(source.contains("op == \"attachment\""))
         try ToolsTestSupport.assertBridgeSourceParses(source)
     }
+
+    @Test
+    func `Resolved credentials redact password under description and debugDescription`() {
+        let creds = ResolvedEmailCredentials(
+            accountName: "work",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "super-secret-password-123"
+        )
+        let desc = String(describing: creds)
+        let debugDesc = String(reflecting: creds)
+        #expect(!desc.contains("super-secret-password-123"))
+        #expect(!debugDesc.contains("super-secret-password-123"))
+        #expect(desc == "Email(work: user@example.com@imap.example.com:993)")
+        #expect(debugDesc == "Email(work: user@example.com@imap.example.com:993)")
+    }
 }

@@ -2,10 +2,15 @@ import ArgumentParser
 
 /// `rune-weaver` terminal interface.
 ///
-/// The MVP interaction layer is the terminal CLI — terminal-only by
-/// design. There is no web frontend in this MVP. Subcommands:
-/// `chat` (interactive REPL), `config` (show/set values), `memory`
-/// (search semantic memory, show known facts), and `status` (system
+/// The CLI links `RuneWeaverCore` directly for v1 (`chat` and
+/// `scheduler run` build their own `ToolBus` and `Orchestrator` via
+/// `CLIShared`, so terminal use works with no service running) and
+/// launches the shared engine service via `serve` for the web
+/// dashboard, iOS, and macOS clients (see the Engine-to-Service Shift in
+/// ARCHITECTURE.md). Subcommands: `chat` (interactive REPL), `config`
+/// (show/set values), `memory` (search semantic memory, show known facts),
+/// `scheduler` (list jobs, run the foreground loop), `serve` (start the
+/// engine API service on loopback), and `status` (system
 /// status: LLM providers, memory stats, active tools).
 @main
 struct RuneWeaverCommand: AsyncParsableCommand {
@@ -18,6 +23,8 @@ struct RuneWeaverCommand: AsyncParsableCommand {
             ChatCommand.self,
             ConfigCommand.self,
             MemoryCommand.self,
+            SchedulerCommand.self,
+            ServeCommand.self,
             StatusCommand.self
         ]
     )

@@ -5,10 +5,14 @@ import RuneWeaverTools
 
 /// Shared terminal styling, config loading, and provider wiring.
 ///
-/// The `rune-weaver` CLI is the MVP interaction layer (terminal-only by
-/// design — there is no web frontend). Every subcommand builds on these
-/// helpers so config resolution, secrets handling, and output styling
-/// stay consistent across `chat`, `config`, `memory`, and `status`.
+/// The `rune-weaver` CLI links `RuneWeaverCore` directly for v1 (`chat`
+/// and `scheduler run` build their own `ToolBus` and `Orchestrator` here
+/// so terminal use works with no service running) and launches the shared
+/// engine service via `serve` for the web dashboard, iOS, and macOS
+/// clients (see the Engine-to-Service Shift in ARCHITECTURE.md). Every
+/// subcommand builds on these helpers so config resolution, secrets
+/// handling, and output styling stay consistent across `chat`, `config`,
+/// `memory`, `scheduler`, `serve`, and `status`.
 enum TerminalStyle {
     /// Whether ANSI colors may be emitted. Honors `NO_COLOR`.
     static var isColorEnabled: Bool {

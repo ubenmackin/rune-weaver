@@ -14,7 +14,7 @@ fallback_provider = "openrouter"
 [llm.providers.mlx]
 enabled = true
 model = "gemma-4-9b"
-server_url = "http://localhost:8080"  # MLX server
+server_url = "http://localhost:8080"  # MLX server (engine API binds 127.0.0.1:8082 to avoid colliding here; llama.cpp uses 8081)
 # context_length = 8192  # Context window in tokens (MLX backend default 8192)
 
 [llm.providers.openrouter]
@@ -69,3 +69,29 @@ enabled = true
 enabled = true
 url = "http://homeassistant.local:8123"
 token_env = "HA_TOKEN"  # Reads from env or Keychain
+
+[scheduler]
+# Cron fires use five-field expressions (minute hour day month weekday)
+# or @hourly / @daily / @weekly / @monthly / @yearly. Poll entries watch
+# one [email.accounts] entry for unseen arrivals. A job fires on either
+# trigger when both are set. Headless turns run under the stable job
+# session with source "scheduler", log to the run log, and post a macOS
+# notification; gated writes file pending approvals instead of prompting.
+# Known v1 limitation: single-flight is per-process only (CLI foreground
+# loop vs. engine API manual runs share no lock), so the same job name can
+# still run concurrently via API plus CLI — do not run both for one job.
+
+[[scheduler.jobs]]
+name = "morning digest"
+schedule = "0 8 * * *"
+prompt = "Summarize overnight mail and today's calendar"
+enabled = true
+
+# [[scheduler.jobs]]
+# name = "invoice watcher"
+# prompt = "Summarize new invoices and file pending approvals for review"
+# enabled = true
+# poll_account = "personal"
+# poll_query = "invoice"
+# # poll_mailbox = "INBOX"  # omitted means every selectable mailbox
+# poll_interval_seconds = 300

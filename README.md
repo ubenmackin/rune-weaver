@@ -18,15 +18,17 @@ The name comes from JRPG lore: a Rune Weaver is a mage who inscribes and channel
 
 ## Quick Start
 
-Prerequisites: macOS 14+ (Sequoia or later for full framework access), Apple Silicon recommended for MLX, Swift 6.0 toolchain, Xcode 16+.
+Prerequisites: macOS 14+ (Sequoia or later for full framework access), Apple Silicon recommended for MLX, Swift 6.0 toolchain, Xcode 16+, plus Node.js 20+ with npm (build time only, to compile the Web dashboard in `Web/` to static files in `Web/dist/`).
+
+The `Makefile` is the canonical entrypoint for build, test, and lint for both the Swift engine and the web dashboard. Use `make` targets below instead of invoking `swift` or `npm` directly.
 
 ```bash
 # 1. Clone
 git clone https://github.com/<you>/rune-weaver.git
 cd rune-weaver
 
-# 2. Build
-swift build
+# 2. Build (Swift engine + dashboard bundle)
+make build
 
 # 3. Configure
 mkdir -p ~/.runeweaver
@@ -35,13 +37,43 @@ cp Config/config.toml.example ~/.runeweaver/config.toml
 # e.g. export OPENROUTER_API_KEY="..."  (or store in Keychain via SecretsManager)
 
 # 4. Run
-swift run rune-weaver status          # check providers, memory, tools
-swift run rune-weaver chat            # interactive REPL
-swift run rune-weaver config show     # inspect resolved config
-swift run rune-weaver memory search "project"  # search semantic memory
+make run ARGS="status"          # check providers, memory, tools
+make run ARGS="chat"            # interactive REPL
+make run ARGS="config show"     # inspect resolved config
+make run ARGS='memory search "project"'  # search semantic memory
+make run ARGS="serve"           # start the engine API service (REST, WebSocket, dashboard) on 127.0.0.1:8082
 ```
 
-The CLI (`rune-weaver`) is the MVP interaction layer: `chat`, `config`, `memory`, and `status`. There is no web frontend in this MVP.
+The CLI (`rune-weaver`, launched via `make run ARGS="<args>"`) is the MVP interaction layer: `chat`, `config`, `memory`, `scheduler`, `serve`, and `status`. `serve` builds a `ServerContext` via `ServerContext.make(...)`, configures a Vapor `Application` with `configureRuneWeaver(_:context:)`, and runs it on loopback. There is no separate frontend host process — the engine serves the dashboard bundle built by `make build-web` on loopback.
+
+## Build, Test, and Lint (Makefile)
+
+Use the `Makefile` at the repo root for every build, test, and lint flow. It covers both the Swift engine and the web dashboard. Direct `swift` / `npm` invocations below are replaced by these targets (raw `swift test --filter ...` still works for single-suite runs; `npm run dev` / `npm run preview` remain for dashboard-only development — see `Web/README.md`).
+
+| Target | What it does |
+|--------|--------------|
+| `make all` | `build` + `test` + `lint` (default goal) |
+| `make build` | `build-web` + `build-swift` (engine plus dashboard bundle) |
+| `make build-web` | `npm ci && npm run build` in `Web/` (requires Node.js 20+; emits `Web/dist/`) |
+| `make build-swift` | `swift build` (Swift engine) |
+| `make test` | `test-web` + `test-swift` |
+| `make test-web` | Dashboard tests (`npm ci && npm test` in `Web/`, vitest) |
+| `make test-swift` | `swift test` (full Swift suite, smoke gate included) |
+| `make lint` | `lint-web` + `lint-swift` |
+| `make lint-web` | Dashboard typecheck (`npm ci && npm run typecheck` in `Web/`) |
+| `make lint-swift` | `swiftformat --lint .` plus `swiftlint lint` |
+| `make run ARGS="<args>"` | Launch the engine (`swift run rune-weaver <args>`), e.g. `make run ARGS="chat"` |
+| `make clean` | Remove build outputs (`.build`, `Web/dist`) |
+
+Examples:
+
+```bash
+make build        # everything needed to run locally
+make test         # Swift + dashboard tests
+make lint         # Swift style gates + dashboard typecheck
+make run ARGS="scheduler list"
+make clean
+```
 
 ## Email in chat (find and summarize)
 
@@ -81,12 +113,12 @@ The variable name is `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (here `EMAIL_VOL
 3. Confirm the tools and account are registered:
 
 ```bash
-swift run rune-weaver status
+make run ARGS="status"
 # Tools: active: email.attachment, email.read, email.search
 ```
 
 ```bash
-swift run rune-weaver chat
+make run ARGS="chat"
 # Tools: email.attachment, email.read, email.search.
 # Email accounts: volcrypt (you@volcrypt.com@mail.volcrypt.com:993).
 ```
@@ -96,7 +128,7 @@ Account names match case-insensitively, so `volcrypt`, `Volcrypt`, and `VOLCRYPT
 4. Start chat and ask to find and summarize:
 
 ```bash
-swift run rune-weaver chat
+make run ARGS="chat"
 ```
 
 ```text
@@ -142,12 +174,12 @@ The variable name follows the same convention as every account, `EMAIL_<UPPERCAS
 4. Confirm the tools and account are registered:
 
 ```bash
-swift run rune-weaver status
+make run ARGS="status"
 # Tools: active: email.attachment, email.read, email.search
 ```
 
 ```bash
-swift run rune-weaver chat
+make run ARGS="chat"
 # Tools: email.attachment, email.read, email.search.
 # Email accounts: icloud (user@icloud.com@imap.mail.me.com:993).
 ```
@@ -157,7 +189,7 @@ Account names match case-insensitively, so `icloud`, `Icloud`, and `ICLOUD` all 
 5. Start chat and ask to find and summarize:
 
 ```bash
-swift run rune-weaver chat
+make run ARGS="chat"
 ```
 
 ```text
@@ -171,10 +203,10 @@ The verified iCloud flow is the same search-then-read: `email.search` across eve
 
 Reads open each selectable mailbox read-only and fetch with `(BODY.PEEK[])` so flags never change; TLS is always verified with a 30-second connect timeout; search uses `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback; queries and mailbox names reject CR/LF and ids allowlist to UID syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject IMAP commands. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
 
-Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing:
+Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing (`make test-swift` runs the full Swift suite; `swift test --filter RuneWeaverToolsTests` runs just this suite):
 
 ```bash
-swift test --filter RuneWeaverToolsTests
+make test-swift  # full Swift suite; or: swift test --filter RuneWeaverToolsTests for just this suite
 ```
 
 Verified live against both Volcrypt and iCloud mailboxes read-only. Attachments list with filename, MIME type, and byte size; use `email.attachment` with the same `mailbox` to download into the sandbox staging area (10 MB cap, approval required).
@@ -193,7 +225,7 @@ Every chat turn runs automatic recall before the LLM call, so the assistant reme
 1. In session A, remember one fact and note the session id:
 
 ```bash
-swift run rune-weaver chat --session 11111111-1111-1111-1111-111111111111
+make run ARGS="chat --session 11111111-1111-1111-1111-111111111111"
 ```
 
 ```text
@@ -205,7 +237,7 @@ you> /exit
 2. In a fresh session B, ask without mentioning the fact. The answer should use the injected `[profile]` context with no `recall_memories` tool call:
 
 ```bash
-swift run rune-weaver chat
+make run ARGS="chat"
 ```
 
 ```text
@@ -216,15 +248,15 @@ weaver> Your dog is named Biscuit.
 3. Confirm the stored state with reads only (no secrets are printed):
 
 ```bash
-swift run rune-weaver memory search "dog Biscuit"
-swift run rune-weaver memory facts
+make run ARGS='memory search "dog Biscuit"'
+make run ARGS="memory facts"
 ```
 
 A missing recall block means nothing scored above threshold; a wrong answer means the fact never stored (check the `Remembered:` acknowledgement in session A first).
 
 ## Smoke gate (pre-merge)
 
-Run this before merging — it exercises a whole model turn end to end (system prompt, orchestrator, tool bus, conversation history, episodic/semantic memory, and session trailer usage) with a scripted model and a stub mail gateway, so no inference, network, credentials, or Keychain are involved. It is part of the default run: plain `swift test` includes it with no flags or secrets.
+Run this before merging — it exercises a whole model turn end to end (system prompt, orchestrator, tool bus, conversation history, episodic/semantic memory, and session trailer usage) with a scripted model and a stub mail gateway, so no inference, network, credentials, or Keychain are involved. It is part of the default run: `make test-swift` (or plain `swift test`) includes it with no flags or secrets.
 
 What it covers (`Tests/RuneWeaverToolsTests/SmokeHarnessTests.swift`):
 
@@ -237,11 +269,58 @@ What it covers (`Tests/RuneWeaverToolsTests/SmokeHarnessTests.swift`):
 How to run:
 
 ```bash
-swift test                            # full suite, smoke included — no flags or secrets needed
-swift test --filter SmokeHarnessTests # just the smoke gate
+make test-swift                            # full Swift suite, smoke included — no flags or secrets needed
+make test                                  # Swift + dashboard tests
+# swift test --filter SmokeHarnessTests    # just the smoke gate (direct Swift, bypasses Makefile)
 ```
 
 Hermetic by design, so CI and local runs behave identically: tests needing persistence use a fresh temporary directory for episodes, vectors, profile, and sandbox via the shared `ToolsTestSupport.makeIsolatedMemoryEngine()` helper (the wildcard search test is in-memory with a stub gateway and needs no files); `HOME` is never mutated; scripted provider and tool batches record an issue and return a graceful fallback on over-consumption so extra rounds fail without aborting the suite; and email execution installs stub passwords (`EMAIL_PERSONAL_PASSWORD`, `EMAIL_ICLOUD_PASSWORD`) via scoped helpers under a shared process-wide lock with the prior value saved/restored afterwards, so credential lookup never reaches the Keychain and parallel suites cannot race.
+
+## Scheduler (cron and email-arrival jobs)
+
+The scheduler runs prompts headless on time and mail triggers. Cron uses five-field expressions (`minute hour day month weekday`, e.g. `0 8 * * *` for daily at 08:00) plus `@hourly`, `@daily`, `@weekly`, `@monthly`, and `@yearly` shortcuts; `CronSchedule.nextFire(after:)` computes the next fire so a foreground loop polling every interval never misses a fire between checks. Poll rules watch one `[email.accounts]` entry for unseen arrivals (`email.search` newest-first, first observation baselines with no fire, later polls fire only for new ids).
+
+Configure jobs in `~/.runeweaver/config.toml` (see `Config/config.toml.example`):
+
+```toml
+[[scheduler.jobs]]
+name = "morning digest"
+schedule = "0 8 * * *"
+prompt = "Summarize overnight mail and today's calendar"
+enabled = true
+
+[[scheduler.jobs]]
+name = "invoice watcher"
+prompt = "Summarize new invoices and file pending approvals for review"
+enabled = true
+poll_account = "personal"
+poll_query = "invoice"
+# poll_mailbox = "INBOX"  # omitted means every selectable mailbox
+poll_interval_seconds = 300
+```
+
+Run in the foreground (single-flight, skip-with-log):
+
+```bash
+make run ARGS="scheduler list"              # show configured jobs
+make run ARGS="scheduler run --once"        # fire due jobs once and exit
+make run ARGS="scheduler run"               # loop every 60s until Ctrl+C
+make run ARGS="scheduler run --interval 30" # custom cadence
+```
+
+Each fire runs headless through the orchestrator under the stable job session (`source "scheduler"`) so episodic memory keeps one session per job; fires append to the run log and post a macOS notification (`osascript` display notification, best-effort). Overlapping fires for the same job skip with a log line (`Scheduler skipped 'name': already running`) instead of stacking; disabled jobs never fire. Reads run by default (`readOnly`/`trusted` execute directly) while `requiresApproval` tools file pending approvals into the headless queue and deny the in-flight call, so the turn completes and the request waits in the approvals inbox.
+
+The engine API exposes the same surface for dashboards: `GET/POST /scheduler/jobs`, `GET/PUT/DELETE /scheduler/jobs/:id`, `POST /scheduler/jobs/:id/run` (single-flight with `409` plus a `skipped` run-log entry when already running, stable job-session history, run-log append, macOS notification), `GET /runs`, and `GET /approvals` plus `POST /approvals/:id/decide` for the pending queue.
+
+```bash
+make test-swift  # full Swift suite; or per-suite via direct Swift:
+# swift test --filter SchedulerStoreTests   # job CRUD plus cron/poll validation
+# swift test --filter CronParsingTests      # parsing
+# swift test --filter CronNextFireTests     # next-fire calculator
+# swift test --filter SchedulerFiringTests  # firing plus single-flight locking
+# swift test --filter HeadlessApprovalTests # read-only default plus approval filing
+# swift test --filter SchedulerConfigTests  # [[scheduler.jobs]] tables
+```
 
 ## Architecture Overview
 
@@ -270,12 +349,14 @@ For the deep dive — component details, security model, integrations, MVP phase
 ## Project Layout
 
 ```text
-Sources/RuneWeaverCore/    # Config, Tool protocol, memory, permissions, secrets
+Makefile                 # Canonical build/test/lint entrypoint (see Build, Test, and Lint above)
+Sources/RuneWeaverCore/    # Config, Tool protocol, memory, permissions, secrets, scheduler, approvals
 Sources/RuneWeaverLLM/     # MLX, llama.cpp, OpenAI-compatible providers + router
 Sources/RuneWeaverTools/   # Built-in tool plugins
 Sources/RuneWeaverVoice/   # Whisper STT + TTS pipeline
 Sources/RuneWeaverClient/  # Client networking
-Sources/RuneWeaverCLI/     # `rune-weaver` terminal (chat, config, memory, status)
+Sources/RuneWeaverCLI/     # `rune-weaver` terminal (chat, config, memory, scheduler, serve, status)
+Web/                       # Dashboard source (build with `make build-web`, test with `make test-web`)
 Config/config.toml.example # Copy to ~/.runeweaver/config.toml
 Plugins/                   # Plugin docs and examples
 Tests/                     # Per-target test suites
@@ -285,7 +366,7 @@ Tests/                     # Per-target test suites
 
 1. Fork the repo and create a feature branch (`git checkout -b feat/my-rune`).
 2. Follow the existing style: Swift actors for shared mutable state, protocol-oriented design (`Tool`, `LLMProvider`), and doc comments on all public types.
-3. Add or update tests under `Tests/<Target>Tests/` for your change.
+3. Add or update tests under `Tests/<Target>Tests/` for your change, then verify with `make test` and `make lint` (or `make test-swift` / `make test-web` and `make lint-swift` / `make lint-web` for one side only).
 4. Keep secrets out of code and config — use `SecretsManager` (Keychain service `com.runeweaver.secrets`) and `*_env` config keys.
 5. New tools belong in `Sources/RuneWeaverTools/` or `Plugins/` — never in `RuneWeaverCore`. See [PLUGIN_DEV.md](PLUGIN_DEV.md).
 6. Open a pull request describing what changed and how you tested it.

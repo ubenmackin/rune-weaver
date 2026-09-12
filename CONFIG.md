@@ -128,6 +128,22 @@ Both `[home.homekit]` and `[[home.homekit]]` spellings load; same for `home_assi
 | `url` | string \| unset | unset | Home Assistant base URL (e.g. `http://homeassistant.local:8123`). Must be absolute when set. |
 | `token_env` | string \| unset | unset | Env var (and Keychain key) holding the long-lived access token. |
 
+### `[scheduler]` — `[[scheduler.jobs]]`
+
+Repeat the `[[scheduler.jobs]]` table once per job. A job needs a `name`, a `prompt`, and at least one trigger: a cron `schedule` or a `poll_account` email-arrival rule. A job with both fires on either trigger. Disabled jobs are kept but never fire.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | (required) | Job name (e.g. `"morning digest"`). Must not be empty. |
+| `prompt` | string | (required) | Prompt executed when the job fires. Must not be empty. |
+| `enabled` | bool | `true` | Whether the job fires. |
+| `schedule` | string \| unset | unset | Cron expression (`minute hour day month weekday`, e.g. `"0 8 * * *"` for daily at 08:00) or `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly`. Must parse when set. |
+| `poll_account` | string \| unset | unset | Account nickname from `[[email.accounts]]` to watch for arrivals. Must not be empty when set. |
+| `poll_query` | string \| unset | `""` | Free-text query for `email.search` (blank means most-recent). |
+| `poll_mailbox` | string \| unset | unset | Mailbox to search (omitted means every selectable mailbox). |
+| `poll_interval_seconds` | integer \| unset | `300` | Seconds between poll checks. Must be positive when set. |
+| `poll_limit` | integer \| unset | `10` | Maximum hits per poll, clamped `1...50`. |
+
 ## Provider Setup Guides
 
 ### MLX (local, Apple Silicon)
