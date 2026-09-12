@@ -3,103 +3,6 @@ import Foundation
 @testable import RuneWeaverTools
 import Testing
 
-/// Stub gateway returning canned results without touching the network.
-private struct StubEmailGateway: EmailIMAPGateway, Sendable {
-    /// Hits returned by `search`.
-    var hits: [EmailSearchHit] = []
-    /// Message returned by `fetch`.
-    var message: EmailFullMessage?
-    /// Bytes returned by `attachment`.
-    var attachment: EmailAttachmentData?
-    /// Error thrown instead of returning, when set.
-    var failure: String?
-
-    func search(credentials _: ResolvedEmailCredentials, query _: String, limit: Int) async throws -> [EmailSearchHit] {
-        if let failure {
-            throw EmailIMAPError.bridgeFailed(failure)
-        }
-        return Array(hits.prefix(limit))
-    }
-
-    func fetch(credentials _: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
-        if let failure {
-            throw EmailIMAPError.bridgeFailed(failure)
-        }
-        guard let message else {
-            throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
-        }
-        return message
-    }
-
-    func attachment(
-        credentials _: ResolvedEmailCredentials,
-        messageID: String,
-        attachmentIndex: Int
-    ) async throws -> EmailAttachmentData {
-        if let failure {
-            throw EmailIMAPError.bridgeFailed(failure)
-        }
-        guard let attachment else {
-            throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
-        }
-        return attachment
-    }
-}
-
-/// Box capturing the normalized query seen by the gateway without touching the network.
-private final class QueryCapture: @unchecked Sendable {
-    /// Guard for the captured query.
-    private let lock = NSLock()
-    /// Last query passed to `search`, if any.
-    private var stored: String?
-    /// Records the query.
-    func set(_ value: String) {
-        lock.lock()
-        defer { lock.unlock() }
-        stored = value
-    }
-
-    /// Returns the last recorded query.
-    var value: String? {
-        lock.lock()
-        defer { lock.unlock() }
-        return stored
-    }
-}
-
-/// Capturing gateway recording the normalized search query for ALL-mapping tests.
-private struct CapturingEmailGateway: EmailIMAPGateway, Sendable {
-    /// Hits returned by `search`, already newest first.
-    var hits: [EmailSearchHit] = []
-    /// Box receiving the query passed to `search`.
-    let capture: QueryCapture
-
-    func search(credentials _: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit] {
-        capture.set(query)
-        return Array(hits.prefix(limit))
-    }
-
-    func fetch(credentials _: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
-        throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
-    }
-
-    func attachment(
-        credentials _: ResolvedEmailCredentials,
-        messageID: String,
-        attachmentIndex: Int
-    ) async throws -> EmailAttachmentData {
-        throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
-    }
-}
-
-/// Search bridge stdout fixture with two hits.
-private let searchFixture = """
-{"ok": true, "messages": [
-  {"id": "42", "subject": "Quarterly report", "from": "boss@example.com", "date": "Mon, 01 Sep 2025 09:00:00 +0000", "snippet": "Please review the quarterly numbers"},
-  {"id": "41", "subject": "Lunch?", "from": "friend@example.com", "date": "Sun, 31 Aug 2025 12:00:00 +0000", "snippet": "Want to grab lunch tomorrow"}
-]}
-"""
-
 /// Fetch bridge stdout fixture with one listed attachment including byte size.
 private let fetchFixtureWithAttachment = """
 {"ok": true, "message": {
@@ -155,40 +58,23 @@ private let fetchFixturePlain = """
 }}
 """
 
-/// Test email config with one self-hosted account.
-private func testEmailConfig() -> EmailConfig {
-    EmailConfig(accounts: [
-        EmailAccount(name: "personal", type: "imap", host: "mail.yourdomain.com", port: 993, username: "you@yourdomain.com")
-    ])
-}
-
-/// Sets the stub account password in the environment for credential resolution.
-private func withTestPassword(_ body: () async throws -> Void) async rethrows {
-    setenv("EMAIL_PERSONAL_PASSWORD", "test-secret", 1)
-    defer { unsetenv("EMAIL_PERSONAL_PASSWORD") }
-    try await body()
-}
-
 /// Test email config with the iCloud account over `imap.mail.me.com:993`.
 private func testICloudEmailConfig(username: String = "user@icloud.com") -> EmailConfig {
     EmailConfig(accounts: [EmailICloud.account(username: username)])
 }
 
-/// Sets the iCloud account password in the environment for credential resolution.
-private func withICloudTestPassword(_ body: () async throws -> Void) async rethrows {
-    setenv("EMAIL_ICLOUD_PASSWORD", "test-icloud-secret", 1)
-    defer { unsetenv("EMAIL_ICLOUD_PASSWORD") }
-    try await body()
-}
-
-// Serialized: `withTestPassword` mutates the process environment via
-// `setenv`/`unsetenv`, which is process-global and races when tests run
-// in parallel. Serial execution keeps credential setup deterministic.
+/// Serialized plus `testCredentialEnvLock`: `ToolsTestSupport.withTestPassword` and
+/// `ToolsTestSupport.withICloudTestPassword` (see `ToolsTestSupport.swift`) mutate the process
+/// environment via `setenv`, which is process-global and POSIX-unsafe under
+/// concurrency. `.serialized` only serializes within this suite, so the
+/// shared lock provides cross-suite exclusion with `Smoke Harness`, and each
+/// helper saves/restores the prior value instead of blind `unsetenv`.
+/// `HOME` is never mutated.
 @Suite("Email Tools", .serialized)
 struct EmailToolsTests {
     @Test
     func `Search bridge payload decodes hits`() throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
         #expect(hits.count == 2)
         #expect(hits[0].id == "42")
         #expect(hits[0].subject == "Quarterly report")
@@ -297,8 +183,8 @@ struct EmailToolsTests {
 
     @Test
     func `Email tools expose search read and gated attachment`() {
-        let config = testEmailConfig()
-        let tools = EmailTools.makeTools(emailConfig: config, gateway: StubEmailGateway())
+        let config = ToolsTestSupport.testEmailConfig()
+        let tools = EmailTools.makeTools(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         #expect(tools.count == 3)
         #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment"]))
         let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
@@ -309,16 +195,16 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool returns envelope through ToolBus`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let gateway = StubEmailGateway(hits: hits)
-        let config = testEmailConfig()
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let gateway = ToolsTestSupport.StubEmailGateway(hits: hits)
+        let config = ToolsTestSupport.testEmailConfig()
         let bus = ToolBus()
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
         let names = await bus.toolNames()
         #expect(names.sorted() == ["email.attachment", "email.read", "email.search"])
-        await withTestPassword {
+        await ToolsTestSupport.withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":10}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == false)
@@ -329,16 +215,16 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool passes through permission gate without approval prompts`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let gateway = StubEmailGateway(hits: hits)
-        let config = testEmailConfig()
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let gateway = ToolsTestSupport.StubEmailGateway(hits: hits)
+        let config = ToolsTestSupport.testEmailConfig()
         // Chat configuration: gate attached, no approval handler. Read-only
         // email tools must still succeed without prompting.
         let bus = ToolBus(permissionGate: PermissionGate())
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await withTestPassword {
+        await ToolsTestSupport.withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":5}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == false)
@@ -349,10 +235,10 @@ struct EmailToolsTests {
     @Test
     func `Read tool returns headers body and attachment metadata`() async throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureWithAttachment.utf8))
-        let gateway = StubEmailGateway(message: message)
-        let config = testEmailConfig()
+        let gateway = ToolsTestSupport.StubEmailGateway(message: message)
+        let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailReadTool(emailConfig: config, gateway: gateway)
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42"}"#),
                 context: ToolContext(conversationID: UUID())
@@ -379,10 +265,10 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool maps empty query to most-recent`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let capture = QueryCapture()
-        let tool = EmailSearchTool(emailConfig: testEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
-        try await withTestPassword {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let capture = ToolsTestSupport.QueryCapture()
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: ToolsTestSupport.StubEmailGateway(hits: hits, capture: capture))
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"  "}"#),
                 context: ToolContext(conversationID: UUID())
@@ -395,10 +281,10 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool maps wildcard star to most-recent`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let capture = QueryCapture()
-        let tool = EmailSearchTool(emailConfig: testEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
-        try await withTestPassword {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let capture = ToolsTestSupport.QueryCapture()
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: ToolsTestSupport.StubEmailGateway(hits: hits, capture: capture))
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":1}"#),
                 context: ToolContext(conversationID: UUID())
@@ -418,10 +304,10 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool respects limit returning newest first`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let config = testEmailConfig()
-        let tool = EmailSearchTool(emailConfig: config, gateway: StubEmailGateway(hits: hits))
-        try await withTestPassword {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailSearchTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(hits: hits))
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":1}"#),
                 context: ToolContext(conversationID: UUID())
@@ -443,10 +329,10 @@ struct EmailToolsTests {
 
     @Test
     func `Wildcard icloud search returns most-recent with headers`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let capture = QueryCapture()
-        let tool = EmailSearchTool(emailConfig: testICloudEmailConfig(), gateway: CapturingEmailGateway(hits: hits, capture: capture))
-        try await withICloudTestPassword {
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let capture = ToolsTestSupport.QueryCapture()
+        let tool = EmailSearchTool(emailConfig: testICloudEmailConfig(), gateway: ToolsTestSupport.StubEmailGateway(hits: hits, capture: capture))
+        try await ToolsTestSupport.withICloudTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"icloud","query":"*","limit":1}"#),
                 context: ToolContext(conversationID: UUID())
@@ -472,8 +358,8 @@ struct EmailToolsTests {
 
     @Test
     func `Read tool rejects unknown account without secrets`() async throws {
-        let config = testEmailConfig()
-        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway())
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let output = try await tool.execute(
             input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"missing","id":"1"}"#),
             context: ToolContext(conversationID: UUID())
@@ -485,20 +371,20 @@ struct EmailToolsTests {
 
     @Test
     func `Malformed arguments fail cleanly`() async throws {
-        let config = testEmailConfig()
-        let search = EmailSearchTool(emailConfig: config, gateway: StubEmailGateway())
+        let config = ToolsTestSupport.testEmailConfig()
+        let search = EmailSearchTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let badSearch = try await search.execute(
             input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(badSearch.isError == true)
-        let read = EmailReadTool(emailConfig: config, gateway: StubEmailGateway())
+        let read = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let badRead = try await read.execute(
             input: ToolInput(toolName: "email.read", argumentsJSON: "not-json"),
             context: ToolContext(conversationID: UUID())
         )
         #expect(badRead.isError == true)
-        let attachment = EmailAttachmentTool(emailConfig: config, gateway: StubEmailGateway())
+        let attachment = EmailAttachmentTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let badAttachment = try await attachment.execute(
             input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42"}"#),
             context: ToolContext(conversationID: UUID())
@@ -508,8 +394,8 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool rejects CR LF query`() async throws {
-        let config = testEmailConfig()
-        let tool = EmailSearchTool(emailConfig: config, gateway: StubEmailGateway())
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailSearchTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let payloads = [
             #"{"account":"personal","query":"hello\r\nworld"}"#,
             #"{"account":"personal","query":"hello\nworld"}"#,
@@ -534,9 +420,9 @@ struct EmailToolsTests {
 
     @Test
     func `Read tool rejects non-UID message id`() async throws {
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
-        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
+        let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
         let badIDs = [
             "1) UID FETCH 1:* (RFC822)",
             "1\r\nFETCH 2 (RFC822)",
@@ -579,9 +465,9 @@ struct EmailToolsTests {
     @Test
     func `Read tool accepts valid UID`() async throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
-        let config = testEmailConfig()
-        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
-        try await withTestPassword {
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
+        try await ToolsTestSupport.withTestPassword {
             for valid in ["7", "1,2", "1:10"] {
                 let output = try await tool.execute(
                     input: ToolInput(toolName: "email.read", argumentsJSON: "{\"account\":\"personal\",\"id\":\"\(valid)\"}"),
@@ -648,11 +534,11 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool resolves account name case-insensitively`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let gateway = StubEmailGateway(hits: hits)
-        let config = testEmailConfig()
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let gateway = ToolsTestSupport.StubEmailGateway(hits: hits)
+        let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailSearchTool(emailConfig: config, gateway: gateway)
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"Personal","query":"quarterly","limit":10}"#),
                 context: ToolContext(conversationID: UUID())
@@ -665,9 +551,9 @@ struct EmailToolsTests {
     @Test
     func `Read tool resolves account name case-insensitively`() async throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
-        let config = testEmailConfig()
-        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
-        try await withTestPassword {
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"PERSONAL","id":"7"}"#),
                 context: ToolContext(conversationID: UUID())
@@ -703,11 +589,11 @@ struct EmailToolsTests {
 
     @Test
     func `Search tool returns envelope for icloud account`() async throws {
-        let hits = try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
-        let gateway = StubEmailGateway(hits: hits)
+        let hits = try EmailBridgeParsing.parseSearchPayload(Data(ToolsTestSupport.searchFixture.utf8))
+        let gateway = ToolsTestSupport.StubEmailGateway(hits: hits)
         let config = testICloudEmailConfig()
         let tool = EmailSearchTool(emailConfig: config, gateway: gateway)
-        try await withICloudTestPassword {
+        try await ToolsTestSupport.withICloudTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"icloud","query":"quarterly","limit":10}"#),
                 context: ToolContext(conversationID: UUID())
@@ -723,8 +609,8 @@ struct EmailToolsTests {
     func `Read tool returns body for icloud account without secrets`() async throws {
         let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
         let config = testICloudEmailConfig()
-        let tool = EmailReadTool(emailConfig: config, gateway: StubEmailGateway(message: message))
-        try await withICloudTestPassword {
+        let tool = EmailReadTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway(message: message))
+        try await ToolsTestSupport.withICloudTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"ICLOUD","id":"7"}"#),
                 context: ToolContext(conversationID: UUID())
@@ -748,18 +634,18 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool stages bytes under sandbox staging area only`() async throws {
         let bytes = Data("hello world".utf8)
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "report.pdf",
             contentType: "application/pdf",
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let sandbox = SandboxConfig(stagingPath: staging.path, autoApproveAfter: 5)
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, sandboxConfig: sandbox)
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
                 context: ToolContext(conversationID: UUID())
@@ -783,13 +669,13 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool sanitizes traversal filenames inside staging`() async throws {
         let bytes = Data("evil".utf8)
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "../../evil.txt",
             contentType: "text/plain",
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
@@ -797,7 +683,7 @@ struct EmailToolsTests {
             gateway: gateway,
             sandboxConfig: SandboxConfig(stagingPath: staging.path)
         )
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
                 context: ToolContext(conversationID: UUID())
@@ -816,13 +702,13 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool skips oversized parts with a note`() async throws {
         let oversize = EmailAttachmentTool.maxAttachmentBytes + 1
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "big.bin",
             contentType: "application/octet-stream",
             sizeBytes: oversize,
             data: Data(repeating: 0, count: 8)
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
@@ -830,7 +716,7 @@ struct EmailToolsTests {
             gateway: gateway,
             sandboxConfig: SandboxConfig(stagingPath: staging.path)
         )
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
                 context: ToolContext(conversationID: UUID())
@@ -849,13 +735,13 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool dry run fetches without writing`() async throws {
         let bytes = Data("hello world".utf8)
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "report.pdf",
             contentType: "application/pdf",
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
@@ -863,7 +749,7 @@ struct EmailToolsTests {
             gateway: gateway,
             sandboxConfig: SandboxConfig(stagingPath: staging.path)
         )
-        try await withTestPassword {
+        try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
                 context: ToolContext(conversationID: UUID(), dryRun: true)
@@ -878,13 +764,13 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool rejects negative index and bad id`() async throws {
         let bytes = Data("hello world".utf8)
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "report.pdf",
             contentType: "application/pdf",
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway)
         let negative = try await tool.execute(
             input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":-1}"#),
@@ -902,8 +788,8 @@ struct EmailToolsTests {
 
     @Test
     func `Attachment tool rejects unknown account without secrets`() async throws {
-        let config = testEmailConfig()
-        let tool = EmailAttachmentTool(emailConfig: config, gateway: StubEmailGateway())
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailAttachmentTool(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
         let output = try await tool.execute(
             input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"missing","id":"1","index":0}"#),
             context: ToolContext(conversationID: UUID())
@@ -916,13 +802,13 @@ struct EmailToolsTests {
     @Test
     func `Attachment tool requires approval without a handler`() async {
         let bytes = Data("hello world".utf8)
-        let gateway = StubEmailGateway(attachment: EmailAttachmentData(
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "report.pdf",
             contentType: "application/pdf",
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let config = testEmailConfig()
+        let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let bus = ToolBus(permissionGate: PermissionGate())
@@ -933,7 +819,7 @@ struct EmailToolsTests {
         ) {
             await bus.register(tool: tool)
         }
-        await withTestPassword {
+        await ToolsTestSupport.withTestPassword {
             let input = ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == true)

@@ -81,7 +81,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneWeaverToolsTests",
-            dependencies: ["RuneWeaverCore", "RuneWeaverTools"]
+            dependencies: ["RuneWeaverCore", "RuneWeaverTools", "RuneWeaverLLM"]
         ),
         .testTarget(
             name: "RuneWeaverVoiceTests",
