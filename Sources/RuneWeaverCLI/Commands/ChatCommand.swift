@@ -662,7 +662,12 @@ private func runAssistantTurn(
 /// Up to `maxToolIterations` tool rounds run, followed by one final
 /// synthesis turn so the last tool results are always answered; when the
 /// synthesis turn still requests tools the loop stops with an exceeded
-/// notice without executing the extra calls. Working memory always keeps
+/// notice without executing the extra calls. When a turn yields text but
+/// zero structured calls, narrated `Calling ... [...]` placeholder lines
+/// fall back to read-only executions with fresh call identifiers via the
+/// shared `OrchestratorToolLoop.narratedToolCalls(from:tools:)` policy
+/// while invalid argument JSON and approval-gated tools stay unexecuted.
+/// Working memory always keeps
 /// the full assistant note via the shared
 /// `OrchestratorToolLoop.assistantNoteContent(text:calls:)` policy
 /// (truncated arguments, name, and call identifier) so tool results keep
@@ -733,6 +738,147 @@ private func runChunkedTurn(
             window: provider.modelInfo.contextLength
         )))
         if calls.isEmpty {
+            let narrated = OrchestratorToolLoop.narratedToolCalls(from: text, tools: tools)
+            if narrated.isEmpty {
+                guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
+                await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
+                await context.memoryEngine.mirrorTurn(
+                    content: text,
+                    sessionID: context.sessionID,
+                    role: .assistant,
+                    failurePolicy: .report,
+                    onFailure: chatMirrorFailureHandler
+                )
+                return
+            }
+            toolRounds += 1
+            if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
+                print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
+                return
+            }
+            let narratedContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: narrated)
+            await context.conversations.append(Message(role: .assistant, content: narratedContent), to: context.sessionID)
+            await executeChunkedInputs(narrated, context: context)
+            continue
+        }
+        toolRounds += 1
+        if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
+            print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
+            return
+        }
+        let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
+        let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
+        await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
+        await executeChunkedInputs(inputs, context: context)
+    }
+}
+
+/// Executes chunked tool inputs, printing results and mirroring episodic records.
+///
+/// Working memory keeps the full placeholder so the next Responses body
+/// can replay every `function_call` with its matching output. Episodic
+/// memory skips interim assistant notes entirely so narration and
+/// placeholder call mechanics never reach the store.
+/// - Parameters:
+///   - inputs: Tool inputs to execute.
+///   - context: Shared REPL dependencies for this session.
+private func executeChunkedInputs(_ inputs: [ToolInput], context: ChatTurnContext) async {
+    for input in inputs {
+        print(TerminalStyle.tool("◈ calling \(input.toolName) \(ToolInput.inline(input.argumentsJSON, limit: 160))"))
+        let result = await context.toolBus.execute(
+            toolCall: input,
+            context: ToolContext(conversationID: context.sessionID)
+        )
+        let marker = result.isError ? "✕" : "→"
+        print(TerminalStyle.dim("  \(marker) \(ToolInput.inline(result.content, limit: 300))"))
+        await context.conversations.append(result.asMessage(), to: context.sessionID)
+        if let record = OrchestratorToolLoop.episodicToolRecord(toolName: input.toolName, result: result) {
+            await context.memoryEngine.mirrorTurn(
+                content: record,
+                sessionID: context.sessionID,
+                role: .tool,
+                failurePolicy: .report,
+                onFailure: chatMirrorFailureHandler
+            )
+        }
+    }
+}
+
+/// Runs one assistant turn via the text-only stream with the shared narrated tool loop.
+///
+/// The text-only `LLMProvider.chat` stream carries no structured tool calls,
+/// so each turn falls back to the shared
+/// `OrchestratorToolLoop.narratedToolCalls(from:tools:)` policy exactly like
+/// `runChunkedTurn` and `Orchestrator.resolveToolCalls`: narrated
+/// `Calling ... [...]` lines become read-only executions with fresh call
+/// identifiers while invalid argument JSON and approval-gated tools stay
+/// unexecuted. Up to `maxToolIterations` tool rounds run with the same
+/// `isLimitExceeded` budget, the same `assistantNoteContent` working-memory
+/// placeholder, and the same `episodicToolRecord` episodic mirroring as the
+/// chunked path, followed by continued synthesis rounds so tool results are
+/// answered. Automatic recall injects the same source-labeled system context
+/// as the chunked path. Billed usage
+/// reported on the terminal `LLMResponse` chunk accumulates into the same
+/// session total and renders the same session-billed usage line as the
+/// chunked path; the trailer always prints with the provider model name,
+/// leaving the session total unchanged when the backend reports no usage.
+/// - Parameters:
+///   - provider: Active LLM backend.
+///   - context: Shared REPL dependencies for this session.
+///   - query: Current user message used as the recall query.
+private func runTextTurn(
+    provider: any LLMProvider,
+    context: ChatTurnContext,
+    query: String
+) async {
+    let tools = await context.toolBus.availableTools()
+    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
+    var toolRounds = 0
+    while true {
+        let baseHistory = await context.conversations.workingHistory(
+            for: context.sessionID,
+            systemPrompt: context.systemPrompt
+        )
+        let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
+        print(TerminalStyle.assistant("weaver> "), terminator: "")
+        var text = ""
+        var streamError: String?
+        var billedTokens: Int?
+        for await part in provider.chat(messages: history, tools: tools) {
+            if let message = part.errorMessage {
+                streamError = message.isEmpty ? "unknown error" : message
+                // Record the failure but keep draining the stream so the
+                // provider continuation is released and any trailing usage
+                // or error chunks are observed instead of leaking.
+                continue
+            }
+            if !part.delta.isEmpty {
+                text += part.delta
+                print(part.delta, terminator: "")
+                fflush(stdout)
+            }
+            if part.isFinished {
+                // Record billed usage and keep draining until the stream
+                // finishes instead of breaking early, so later usage or
+                // error chunks are not missed and the continuation closes.
+                if let total = part.totalTokens {
+                    billedTokens = total
+                }
+            }
+        }
+        print("")
+        if let streamError {
+            print(TerminalStyle.error("Request failed: \(streamError)"))
+            return
+        }
+        print(TerminalStyle.dim(ChatSessionTrailer.line(
+            modelName: provider.modelInfo.name,
+            sessionTokens: context.sessionTokens,
+            turnTotalTokens: billedTokens,
+            window: provider.modelInfo.contextLength
+        )))
+        let narrated = OrchestratorToolLoop.narratedToolCalls(from: text, tools: tools)
+        if narrated.isEmpty {
             guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
             await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
             await context.memoryEngine.mirrorTurn(
@@ -749,111 +895,8 @@ private func runChunkedTurn(
             print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
             return
         }
-        let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
-        let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
-        await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
-        // Working memory keeps the full placeholder so the next Responses body
-        // can replay every `function_call` with its matching output. Episodic
-        // memory skips interim assistant notes entirely so narration and
-        // placeholder call mechanics never reach the store.
-        for call in calls {
-            print(TerminalStyle.tool("◈ calling \(call.name) \(ToolInput.inline(call.argumentsJSON, limit: 160))"))
-            let result = await context.toolBus.execute(
-                toolCall: ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id),
-                context: ToolContext(conversationID: context.sessionID)
-            )
-            let marker = result.isError ? "✕" : "→"
-            print(TerminalStyle.dim("  \(marker) \(ToolInput.inline(result.content, limit: 300))"))
-            await context.conversations.append(result.asMessage(), to: context.sessionID)
-            if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.name, result: result) {
-                await context.memoryEngine.mirrorTurn(
-                    content: record,
-                    sessionID: context.sessionID,
-                    role: .tool,
-                    failurePolicy: .report,
-                    onFailure: chatMirrorFailureHandler
-                )
-            }
-        }
+        let narratedContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: narrated)
+        await context.conversations.append(Message(role: .assistant, content: narratedContent), to: context.sessionID)
+        await executeChunkedInputs(narrated, context: context)
     }
-}
-
-/// Runs one assistant turn via the text-only stream (no tool visibility).
-///
-/// The text-only `LLMProvider.chat` stream carries no tool calls, so this
-/// path cannot resolve or execute tools via the shared resolver. When tools
-/// are registered an explicit warning is emitted that tools are disabled in
-/// the text path; use a `ChunkStreamingProvider` backend for full tool
-/// support. Automatic recall injects the same source-labeled system context
-/// as the chunked path. Storage decisions delegate to the shared
-/// `OrchestratorToolLoop` policy like every other loop. Billed usage
-/// reported on the terminal `LLMResponse` chunk accumulates into the same
-/// session total and renders the same session-billed usage line as the
-/// chunked path; the trailer always prints with the provider model name,
-/// leaving the session total unchanged when the backend reports no usage.
-/// - Parameters:
-///   - provider: Active LLM backend.
-///   - context: Shared REPL dependencies for this session.
-///   - query: Current user message used as the recall query.
-private func runTextTurn(
-    provider: any LLMProvider,
-    context: ChatTurnContext,
-    query: String
-) async {
-    let tools = await context.toolBus.availableTools()
-    if !tools.isEmpty {
-        print(TerminalStyle.dim("Tools are disabled in the text-only path (\(tools.count) available); continuing without tool calls."))
-    }
-    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
-    let baseHistory = await context.conversations.workingHistory(
-        for: context.sessionID,
-        systemPrompt: context.systemPrompt
-    )
-    let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
-    print(TerminalStyle.assistant("weaver> "), terminator: "")
-    var text = ""
-    var streamError: String?
-    var billedTokens: Int?
-    for await part in provider.chat(messages: history, tools: tools) {
-        if let message = part.errorMessage {
-            streamError = message.isEmpty ? "unknown error" : message
-            // Record the failure but keep draining the stream so the
-            // provider continuation is released and any trailing usage
-            // or error chunks are observed instead of leaking.
-            continue
-        }
-        if !part.delta.isEmpty {
-            text += part.delta
-            print(part.delta, terminator: "")
-            fflush(stdout)
-        }
-        if part.isFinished {
-            // Record billed usage and keep draining until the stream
-            // finishes instead of breaking early, so later usage or
-            // error chunks are not missed and the continuation closes.
-            if let total = part.totalTokens {
-                billedTokens = total
-            }
-        }
-    }
-    print("")
-    if let streamError {
-        print(TerminalStyle.error("Request failed: \(streamError)"))
-        return
-    }
-    print(TerminalStyle.dim(ChatSessionTrailer.line(
-        modelName: provider.modelInfo.name,
-        sessionTokens: context.sessionTokens,
-        turnTotalTokens: billedTokens,
-        window: provider.modelInfo.contextLength
-    )))
-    guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
-    await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
-    await context.memoryEngine.mirrorTurn(
-        content: text,
-        sessionID: context.sessionID,
-        role: .assistant,
-        failurePolicy: .report,
-        onFailure: chatMirrorFailureHandler
-    )
 }

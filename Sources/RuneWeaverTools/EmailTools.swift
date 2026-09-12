@@ -5,10 +5,14 @@ import RuneWeaverCore
 ///
 /// Searches subject, sender, and body through the `python3 imaplib`
 /// bridge and returns headers plus a short text snippet per hit.
-/// An empty, whitespace-only, or lone `"*"` query lists the most-recent
-/// messages via `SEARCH ALL` (newest first, capped by `limit`) instead of
-/// sending a literal `TEXT "*"` that matches nothing on iCloud.
-/// Always `readOnly`: it opens the mailbox read-only with
+/// By default fans out across every selectable mailbox (via `IMAP LIST`,
+/// excluding `Noselect`/`NonExistent` flags), merges hits newest-first
+/// labeled with their mailbox, and caps at `limit`; pass `mailbox` to
+/// narrow to one folder. An empty, whitespace-only, or lone `"*"`
+/// query lists the most-recent messages via `SEARCH ALL` (newest first,
+/// capped by `limit`) instead of sending a literal `TEXT "*"` that
+/// matches nothing on iCloud.
+/// Always `readOnly`: it opens each mailbox read-only with
 /// `(BODY.PEEK[])` fetches and never mutates flags or messages.
 /// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`)
 /// and iCloud IMAP (`imap.mail.me.com:993` with an app-specific
@@ -18,18 +22,22 @@ public struct EmailSearchTool: Tool, Sendable {
     public let name = "email.search"
     /// When the LLM should use this tool.
     public let description =
-        "Searches an IMAP mailbox (subject, sender, and body). "
+        "Searches IMAP mailboxes (subject, sender, and body) across every selectable folder by default. "
             + "Use when the user asks to find or summarize email. "
             + "Use query \"*\" or empty for the most-recent messages. "
-            + "Returns matching message ids, headers, and snippets."
-    /// Function-calling contract for `account`, `query`, and `limit`.
+            + "Pass mailbox to narrow to one folder; each hit labels its mailbox for email.read. "
+            + "Returns matching message ids, headers, snippets, and mailboxes."
+    /// Function-calling contract for `account`, `query`, `limit`, and `mailbox`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
                 + #"from [email.accounts] (e.g. volcrypt, icloud)"},"query":{"type":"string","description":"Free-text query "#
                 + #"matched against subject, sender, and body; \"*\" or empty "#
                 + #"lists most-recent messages"},"limit":{"type":"integer","description":"Maximum hits "#
-                + #"(1-50, default 10)","minimum":1,"maximum":50}},"required":["account","query"],"additionalProperties":false}"#
+                + #"(1-50, default 10)","minimum":1,"maximum":50},"mailbox":{"type":"string","description":"Optional folder "#
+                + #"to search (e.g. INBOX, Sent); omitted or blank searches every selectable mailbox"},"#
+                + #""folder":{"type":"string","description":"Alias for mailbox"}}"#
+                + #","required":["account","query"],"additionalProperties":false}"#
         )
     /// Always allowed: search never changes mailbox state.
     public let permissionLevel = PermissionLevel.readOnly
@@ -50,7 +58,7 @@ public struct EmailSearchTool: Tool, Sendable {
 
     /// Runs the search, resolving credentials at execution time.
     /// - Parameters:
-    ///   - input: Invocation with `account`, `query`, and optional `limit`.
+    ///   - input: Invocation with `account`, `query`, optional `limit`, and optional `mailbox`.
     ///   - context: Ambient execution context.
     /// - Returns: JSON envelope with hits, or a failure without secrets.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
@@ -90,6 +98,16 @@ public struct EmailSearchTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
+        // Fail fast on mailbox injection before touching accounts or
+        // credentials so invalid input reports "Invalid mailbox" even when
+        // the password is missing.
+        if let requestedMailbox = args.trimmedMailbox {
+            do {
+                try EmailIMAPValidation.validateMailbox(requestedMailbox)
+            } catch {
+                return .failure(error.localizedDescription, callID: input.callID)
+            }
+        }
         let accountName = args.trimmedAccount
         let query = args.trimmedQuery
         guard !accountName.isEmpty else {
@@ -119,12 +137,128 @@ public struct EmailSearchTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
-            let hits = try await gateway.search(credentials: credentials, query: effectiveQuery, limit: args.limit)
-            let content = try EmailBridgeParsing.encodeSearchEnvelope(account: account.name, query: effectiveQuery, messages: hits)
-            return .success(content, callID: input.callID)
+            if let requested = args.trimmedMailbox {
+                return try await singleMailboxOutput(
+                    account: account,
+                    credentials: credentials,
+                    requested: requested,
+                    effectiveQuery: effectiveQuery,
+                    limit: args.limit,
+                    callID: input.callID
+                )
+            }
+            return try await fanOutOutput(
+                account: account,
+                credentials: credentials,
+                effectiveQuery: effectiveQuery,
+                limit: args.limit,
+                callID: input.callID
+            )
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
+    }
+}
+
+extension EmailSearchTool {
+    /// Searches one explicit mailbox with a clear unknown-folder error.
+    /// - Parameters:
+    ///   - account: Matched account for the envelope.
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - requested: Trimmed requested mailbox.
+    ///   - effectiveQuery: Normalized query (`""` means `SEARCH ALL`).
+    ///   - limit: Maximum hits.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope, or an unknown-mailbox failure.
+    private func singleMailboxOutput(
+        account: EmailAccount,
+        credentials: ResolvedEmailCredentials,
+        requested: String,
+        effectiveQuery: String,
+        limit: Int,
+        callID: String
+    ) async throws -> ToolOutput {
+        let listed = try await gateway.listMailboxes(credentials: credentials)
+        let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+        let canonical: String
+        do {
+            canonical = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requested, available: available)
+        } catch {
+            return .failure(error.localizedDescription, callID: callID)
+        }
+        let hits = try await gateway.search(credentials: credentials, mailbox: canonical, query: effectiveQuery, limit: limit)
+        let labeled = hits.map {
+            EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: canonical)
+        }
+        let capped = Array(labeled.prefix(limit))
+        let content = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: account.name,
+            query: effectiveQuery,
+            messages: capped,
+            mailbox: canonical,
+            mailboxes: [canonical]
+        )
+        return .success(content, callID: callID)
+    }
+
+    /// Fans out across every selectable mailbox, merging newest-first.
+    ///
+    /// Per-mailbox failures are skipped so one unreadable folder never
+    /// hides the rest; when every folder fails the last error surfaces.
+    /// The envelope lists only the folders actually searched (succeeded
+    /// boxes), never folders that failed. Folder names are never
+    /// assumed: an empty `LIST` result throws a no-selectable-mailboxes
+    /// failure instead of synthesizing `INBOX`.
+    /// - Parameters:
+    ///   - account: Matched account for the envelope.
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - effectiveQuery: Normalized query (`""` means `SEARCH ALL`).
+    ///   - limit: Maximum hits.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with merged hits.
+    private func fanOutOutput(
+        account: EmailAccount,
+        credentials: ResolvedEmailCredentials,
+        effectiveQuery: String,
+        limit: Int,
+        callID: String
+    ) async throws -> ToolOutput {
+        let listed = try await gateway.listMailboxes(credentials: credentials)
+        let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+        guard !available.isEmpty else {
+            throw EmailBridgeParsing.unknownMailboxError(requested: "*", available: available)
+        }
+        var groups: [[EmailSearchHit]] = []
+        var succeeded: [String] = []
+        var lastError: Error?
+        for box in available {
+            do {
+                let hits = try await gateway.search(credentials: credentials, mailbox: box, query: effectiveQuery, limit: limit)
+                let labeled = hits.map {
+                    EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: box)
+                }
+                groups.append(labeled)
+                succeeded.append(box)
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                lastError = error
+                continue
+            }
+        }
+        if groups.isEmpty, let lastError {
+            throw lastError
+        }
+        let merged = EmailSearchMerge.mergedNewestFirst(groups, limit: limit)
+        let content = try EmailBridgeParsing.encodeSearchEnvelope(
+            account: account.name,
+            query: effectiveQuery,
+            messages: merged,
+            mailbox: nil,
+            mailboxes: succeeded
+        )
+        return .success(content, callID: callID)
     }
 }
 
@@ -133,6 +267,8 @@ public struct EmailSearchTool: Tool, Sendable {
 /// Returns headers plus the decoded text body. Attachment bytes are
 /// never returned: parts are listed by filename, MIME type, and byte
 /// size with a note pointing at `email.attachment` for downloads.
+/// Pass the `mailbox` labeled on the `email.search` hit to reopen
+/// messages outside `INBOX`; omitted or blank means `INBOX`.
 /// Always `readOnly`. Verified live against Volcrypt IMAP
 /// (`mail.volcrypt.com:993`) and iCloud IMAP
 /// (`imap.mail.me.com:993` with an app-specific password via
@@ -144,15 +280,18 @@ public struct EmailReadTool: Tool, Sendable {
     public let description =
         "Reads one email by id from an IMAP mailbox. "
             + "Use when the user asks to open or summarize a specific message. "
+            + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
             + "Returns headers plus the text body; attachments are listed with filename, MIME type, and byte size (use email.attachment to download)."
-    /// Function-calling contract for `account` and `id` (plus accepted aliases).
+    /// Function-calling contract for `account` and `id` (plus accepted aliases) and optional `mailbox`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
                 + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message id "#
                 + #"from email.search"},"messageId":{"type":"string","description":"Alias "#
                 + #"for id"},"message_id":{"type":"string","description":"Alias for id"},"#
-                + #""uid":{"type":"string","description":"Alias for id"}},"required":["account"],"anyOf":[{"required":["id"]},"#
+                + #""uid":{"type":"string","description":"Alias for id"},"mailbox":{"type":"string","description":"Mailbox "#
+                + #"from the email.search hit (e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias "#
+                + #"for mailbox"}},"required":["account"],"anyOf":[{"required":["id"]},"#
                 + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}],"additionalProperties":false}"#
         )
     /// Always allowed: reading never changes mailbox state.
@@ -174,7 +313,7 @@ public struct EmailReadTool: Tool, Sendable {
 
     /// Reads one message, resolving credentials at execution time.
     /// - Parameters:
-    ///   - input: Invocation with `account` and `id` (plus `messageId` aliases).
+    ///   - input: Invocation with `account` and `id` (plus `messageId` aliases) and optional `mailbox`.
     ///   - context: Ambient execution context.
     /// - Returns: JSON envelope with headers and body, or a failure without secrets.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
@@ -201,6 +340,13 @@ public struct EmailReadTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
+        if let requestedMailbox = args.trimmedMailbox {
+            do {
+                try EmailIMAPValidation.validateMailbox(requestedMailbox)
+            } catch {
+                return .failure(error.localizedDescription, callID: input.callID)
+            }
+        }
         let accountName = args.trimmedAccount
         let messageID = args.trimmedMessageID
         guard !accountName.isEmpty else {
@@ -225,8 +371,22 @@ public struct EmailReadTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
-            let message = try await gateway.fetch(credentials: credentials, messageID: messageID)
-            let content = try EmailBridgeParsing.encodeReadEnvelope(account: account.name, message: message)
+            // Reuse the found mailbox so fan-out hits stay openable. Every mailbox — explicit
+            // or the legacy-default `INBOX` for omitted or blank — is validated against the
+            // selectable list via `resolveMailboxAgainstList` with a clear unknown-folder error;
+            // folder names are never assumed so an empty `LIST` result returns a
+            // no-selectable-mailboxes failure instead of synthesizing `INBOX`.
+            let requestedOrDefault = args.trimmedMailbox ?? "INBOX"
+            let listed = try await gateway.listMailboxes(credentials: credentials)
+            let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+            let effectiveMailbox: String
+            do {
+                effectiveMailbox = try EmailBridgeParsing.resolveMailboxAgainstList(requested: requestedOrDefault, available: available)
+            } catch {
+                return .failure(error.localizedDescription, callID: input.callID)
+            }
+            let message = try await gateway.fetch(credentials: credentials, mailbox: effectiveMailbox, messageID: messageID)
+            let content = try EmailBridgeParsing.encodeReadEnvelope(account: account.name, message: message, mailbox: effectiveMailbox)
             return .success(content, callID: input.callID)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
@@ -240,8 +400,10 @@ public struct EmailReadTool: Tool, Sendable {
 /// staging area only (never to the real filesystem) and returns the
 /// staged path with filename, MIME type, and byte size. Parts over the
 /// size cap are skipped without writing, returning a note instead.
+/// Pass the `mailbox` labeled on the `email.search` hit to fetch from
+/// folders outside `INBOX`; omitted or blank means `INBOX`.
 /// Declared `requiresApproval` so the graduated-trust gate prompts
-/// before any download. Reads only: it opens the mailbox read-only
+/// before any download. Reads only: it opens each mailbox read-only
 /// with `(BODY.PEEK[])` fetches and never sends mail. Secrets are
 /// resolved at execution time and never logged.
 public struct EmailAttachmentTool: Tool, Sendable {
@@ -251,8 +413,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
     public let description =
         "Downloads one email attachment by index into the sandbox staging area. "
             + "Use when the user asks to save or open an attachment listed by email.read. "
+            + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
             + "Writes only under the sandbox staging area; parts over the size cap are skipped with a note."
-    /// Function-calling contract for `account`, `id`, and `index` (plus accepted aliases).
+    /// Function-calling contract for `account`, `id`, `index`, and `mailbox` (plus accepted aliases).
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -262,7 +425,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 + #"for id"},"index":{"type":"integer","description":"Zero-based attachment "#
                 + #"position from email.read","minimum":0},"attachmentIndex":{"type":"integer","description":"Alias "#
                 + #"for index","minimum":0},"attachment_index":{"type":"integer","description":"Alias for "#
-                + #"index","minimum":0}},"required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
+                + #"index","minimum":0},"mailbox":{"type":"string","description":"Mailbox from the email.search hit "#
+                + #"(e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias for mailbox"}}"#
+                + #","required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
                 + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},"#
                 + #"{"anyOf":[{"required":["index"]},{"required":["attachmentIndex"]},"#
                 + #"{"required":["attachment_index"]}]} ],"additionalProperties":false}"#
@@ -299,7 +464,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
 
     /// Downloads one attachment part into the sandbox staging area.
     /// - Parameters:
-    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), and `index` aliases.
+    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, and optional `mailbox`.
     ///   - context: Ambient execution context. `dryRun` fetches but never writes.
     /// - Returns: JSON envelope with the staged path or a skip note, or a failure without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -307,22 +472,31 @@ public struct EmailAttachmentTool: Tool, Sendable {
             let args = try decodedArgs(from: input)
             let target = try validatedTarget(from: args)
             let account = try resolvedAccount(named: target.accountName)
-            let fetched = try await fetchedAttachment(
-                for: account,
+            let credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
+            let effectiveMailbox = try await resolvedMailbox(credentials: credentials, requested: target.mailbox)
+            let effectiveTarget = AttachmentTarget(
+                accountName: target.accountName,
                 messageID: target.messageID,
-                index: target.attachmentIndex
+                attachmentIndex: target.attachmentIndex,
+                mailbox: effectiveMailbox
+            )
+            let fetched = try await fetchedAttachment(
+                credentials: credentials,
+                mailbox: effectiveMailbox,
+                messageID: effectiveTarget.messageID,
+                index: effectiveTarget.attachmentIndex
             )
             if fetched.sizeBytes > Self.maxAttachmentBytes || fetched.data.count > Self.maxAttachmentBytes {
-                return oversizedEnvelope(target: target, accountName: account.name, fetched: fetched, callID: input.callID)
+                return oversizedEnvelope(target: effectiveTarget, accountName: account.name, fetched: fetched, callID: input.callID)
             }
             let destination = try stagedDestinationURL(
-                target: target,
+                target: effectiveTarget,
                 accountName: account.name,
                 filename: fetched.filename
             )
             if context.dryRun {
                 return dryRunEnvelope(
-                    target: target,
+                    target: effectiveTarget,
                     accountName: account.name,
                     fetched: fetched,
                     destination: destination,
@@ -330,7 +504,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 )
             }
             return storedEnvelope(
-                target: target,
+                target: effectiveTarget,
                 accountName: account.name,
                 fetched: fetched,
                 destination: destination,
@@ -455,6 +629,7 @@ private struct AttachmentTarget {
     let accountName: String
     let messageID: String
     let attachmentIndex: Int
+    let mailbox: String
 }
 
 extension EmailAttachmentTool {
@@ -473,10 +648,18 @@ extension EmailAttachmentTool {
         }
         try EmailIMAPValidation.validateMessageID(args.messageID)
         try EmailIMAPValidation.validateAttachmentIndex(args.attachmentIndex)
+        if let requestedMailbox = args.trimmedMailbox {
+            try EmailIMAPValidation.validateMailbox(requestedMailbox)
+        }
         return args
     }
 
     /// Trims and re-validates decoded attachment routing.
+    ///
+    /// Omitted or blank mailboxes fall back to the legacy-default `INBOX`
+    /// string here but are validated against `LIST` downstream in `resolvedMailbox`
+    /// via `resolveMailboxAgainstList` like explicit values; folder names are never
+    /// assumed.
     /// - Parameter args: Decoded attachment arguments.
     /// - Returns: Trimmed routing.
     /// - Throws: Failure message when routing is empty or invalid.
@@ -484,6 +667,7 @@ extension EmailAttachmentTool {
         let accountName = args.trimmedAccount
         let messageID = args.trimmedMessageID
         let attachmentIndex = args.attachmentIndex
+        let mailbox = args.trimmedMailbox ?? "INBOX"
         guard !accountName.isEmpty else {
             throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'account' must not be empty.")
         }
@@ -492,7 +676,8 @@ extension EmailAttachmentTool {
         }
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
-        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex)
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex, mailbox: mailbox)
     }
 
     /// Resolves the configured account by exact then case-insensitive name.
@@ -506,20 +691,42 @@ extension EmailAttachmentTool {
         throw EmailIMAPError.unknownAccount(name: accountName, available: emailConfig.accounts.map(\.name))
     }
 
-    /// Resolves credentials and fetches attachment bytes through the gateway.
+    /// Resolves the requested mailbox against the selectable list.
+    ///
+    /// Reuses the found mailbox so fan-out hits stay openable with a clear
+    /// unknown-folder error; folder names are never assumed so an empty
+    /// `LIST` result throws a no-selectable-mailboxes failure instead of
+    /// synthesizing `INBOX`. Every value — explicit or the legacy-default `INBOX`
+    /// for omitted or blank — is validated via `LIST` plus `resolveMailboxAgainstList`
+    /// (exact-first with a case-insensitive fallback) so `INBOX` and `inbox`
+    /// behave identically.
     /// - Parameters:
-    ///   - account: Matched account for credential resolution.
+    ///   - credentials: Already-resolved credentials for the `LIST` lookup.
+    ///   - requested: Trimmed requested mailbox (`INBOX` for the legacy default).
+    /// - Returns: Canonical mailbox name.
+    /// - Throws: Unknown-mailbox failure when the folder is not selectable.
+    private func resolvedMailbox(credentials: ResolvedEmailCredentials, requested: String) async throws -> String {
+        let listed = try await gateway.listMailboxes(credentials: credentials)
+        let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
+        return try EmailBridgeParsing.resolveMailboxAgainstList(requested: requested, available: available)
+    }
+
+    /// Fetches attachment bytes through the gateway with shared credentials.
+    /// - Parameters:
+    ///   - credentials: Already-resolved credentials shared with mailbox resolution.
+    ///   - mailbox: Canonical mailbox holding the message.
     ///   - messageID: Trimmed message identifier.
     ///   - index: Zero-based attachment position.
     /// - Returns: Downloaded bytes.
     private func fetchedAttachment(
-        for account: EmailAccount,
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
         messageID: String,
         index: Int
     ) async throws -> EmailAttachmentData {
-        let credentials = try await EmailCredentialResolver.resolvedCredentials(for: account)
-        return try await gateway.attachment(
+        try await gateway.attachment(
             credentials: credentials,
+            mailbox: mailbox,
             messageID: messageID,
             attachmentIndex: index
         )
@@ -562,7 +769,8 @@ extension EmailAttachmentTool {
             sizeBytes: fetched.sizeBytes,
             path: nil,
             skipped: true,
-            note: note
+            note: note,
+            mailbox: target.mailbox
         )
         return successEnvelope(envelope, callID: callID)
     }
@@ -615,7 +823,8 @@ extension EmailAttachmentTool {
             sizeBytes: fetched.sizeBytes,
             path: nil,
             skipped: true,
-            note: "Dry run: would save to \(destination.path) without downloading."
+            note: "Dry run: would save to \(destination.path) without downloading.",
+            mailbox: target.mailbox
         )
         return successEnvelope(envelope, callID: callID)
     }
@@ -653,7 +862,8 @@ extension EmailAttachmentTool {
             sizeBytes: fetched.sizeBytes,
             path: destination.path,
             skipped: false,
-            note: nil
+            note: nil,
+            mailbox: target.mailbox
         )
         return successEnvelope(envelope, callID: callID)
     }

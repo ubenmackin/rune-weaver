@@ -846,4 +846,247 @@ struct EmailToolsTests {
         #expect(EmailAttachmentTool.sanitizedFilename("   ", fallback: "attachment-0") == "attachment-0")
         #expect(EmailAttachmentTool.oversizeNote(sizeBytes: 1).contains("10 MB"))
     }
+
+    @Test
+    func `Search fans out across selectable mailboxes merging newest-first labeled with mailbox`() async throws {
+        let inboxHit = EmailSearchHit(
+            id: "42",
+            subject: "Quarterly report",
+            from: "boss@example.com",
+            date: "Mon, 01 Sep 2025 09:00:00 +0000",
+            snippet: "Please review the quarterly numbers",
+            mailbox: "INBOX"
+        )
+        let archiveHit = EmailSearchHit(
+            id: "7",
+            subject: "Archive note",
+            from: "archive@example.com",
+            date: "Tue, 02 Sep 2025 09:00:00 +0000",
+            snippet: "Older archive body",
+            mailbox: "Archive"
+        )
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            hitsByMailbox: ["INBOX": [inboxHit], "Archive": [archiveHit]]
+        )
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":2}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.count == 2)
+            #expect(envelope.messages.count == 2)
+            // Newest-first across folders: the newer Archive hit sorts before the INBOX hit.
+            #expect(envelope.messages[0].mailbox == "Archive")
+            #expect(envelope.messages[0].id == "7")
+            #expect(envelope.messages[1].mailbox == "INBOX")
+            #expect(envelope.messages[1].id == "42")
+            #expect(envelope.mailbox == nil)
+            #expect(envelope.mailboxes == ["INBOX", "Archive"])
+            let capped = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","limit":1}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            let single = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(capped.content.utf8))
+            #expect(single.count == 1)
+            #expect(single.messages[0].mailbox == "Archive")
+        }
+    }
+
+    @Test
+    func `Search with explicit mailbox narrows to one folder`() async throws {
+        let inboxHit = EmailSearchHit(
+            id: "42",
+            subject: "Quarterly report",
+            from: "boss@example.com",
+            date: "Mon, 01 Sep 2025 09:00:00 +0000",
+            snippet: "Please review the quarterly numbers",
+            mailbox: "INBOX"
+        )
+        let archiveHit = EmailSearchHit(
+            id: "7",
+            subject: "Archive note",
+            from: "archive@example.com",
+            date: "Tue, 02 Sep 2025 09:00:00 +0000",
+            snippet: "Archive body",
+            mailbox: "Archive"
+        )
+        let mailboxCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            hitsByMailbox: ["INBOX": [inboxHit], "Archive": [archiveHit]],
+            mailboxCapture: mailboxCapture
+        )
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","mailbox":"Archive"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(mailboxCapture.value == "Archive")
+            let envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.mailbox == "Archive")
+            #expect(envelope.mailboxes == ["Archive"])
+            #expect(envelope.messages.count == 1)
+            #expect(envelope.messages[0].mailbox == "Archive")
+            #expect(envelope.messages[0].id == "7")
+        }
+    }
+
+    @Test
+    func `Search with unknown mailbox reports available folders`() async throws {
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            hitsByMailbox: ["INBOX": [], "Archive": []]
+        )
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"*","mailbox":"Missing"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == true)
+            #expect(output.content.contains("Unknown mailbox"))
+            #expect(output.content.contains("Missing"))
+            #expect(output.content.contains("INBOX"))
+            #expect(output.content.contains("Archive"))
+            #expect(!output.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `List excludes non-selectable flags`() throws {
+        let selectable = EmailBridgeParsing.selectableMailboxes(from: [
+            (flags: "\\HasNoChildren", mailbox: "INBOX"),
+            (flags: "\\Noselect \\HasChildren", mailbox: "[Gmail]"),
+            (flags: "\\NonExistent", mailbox: "Ghost"),
+            (flags: "\\noselect", mailbox: "Lower"),
+            (flags: "", mailbox: "Archive")
+        ])
+        #expect(selectable == ["INBOX", "Archive"])
+        let payload = Data(#"{"ok": true, "mailboxes": ["INBOX", "Archive"]}"#.utf8)
+        #expect(try EmailBridgeParsing.parseListPayload(payload) == ["INBOX", "Archive"])
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("is_selectable") || source.contains("noselect"))
+        #expect(source.lowercased().contains("noselect"))
+        #expect(source.lowercased().contains("nonexistent"))
+        #expect(source.contains("\"list\"") || source.contains("'list'") || source.contains("op == \"list\""))
+    }
+
+    @Test
+    func `Read reuses the found mailbox so fan-out hits stay openable`() async throws {
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureWithAttachment.utf8))
+        let mailboxCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            message: message,
+            listedMailboxes: ["INBOX", "Archive"],
+            mailboxCapture: mailboxCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let tool = EmailReadTool(emailConfig: config, gateway: gateway)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42","mailbox":"Archive"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(mailboxCapture.value == "Archive")
+            struct ReadEnvelope: Decodable { let mailbox: String }
+            let envelope = try JSONDecoder().decode(ReadEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.mailbox == "Archive")
+            #expect(output.content.contains("Quarterly report"))
+        }
+    }
+
+    @Test
+    func `Read with unknown mailbox reports available folders`() async throws {
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixturePlain.utf8))
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            message: message,
+            listedMailboxes: ["INBOX", "Archive"]
+        )
+        let tool = EmailReadTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway)
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"7","mailbox":"Missing"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == true)
+            #expect(output.content.contains("Unknown mailbox"))
+            #expect(output.content.contains("INBOX"))
+        }
+    }
+
+    @Test
+    func `Attachment reuses the found mailbox`() async throws {
+        let bytes = Data("hello world".utf8)
+        let mailboxCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            attachment: EmailAttachmentData(
+                filename: "report.pdf",
+                contentType: "application/pdf",
+                sizeBytes: bytes.count,
+                data: bytes
+            ),
+            listedMailboxes: ["INBOX", "Archive"],
+            mailboxCapture: mailboxCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: config,
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"mailbox":"Archive"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(mailboxCapture.value == "Archive")
+            struct Staged: Decodable { let mailbox: String; let path: String? }
+            let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
+            #expect(staged.mailbox == "Archive")
+            #expect((staged.path ?? "").hasPrefix(staging.path))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Mailbox validation rejects CR LF`() throws {
+        do {
+            try EmailIMAPValidation.validateMailbox("INBOX\r\nSELECT")
+            Issue.record("Expected invalid mailbox")
+        } catch {
+            #expect(error.localizedDescription.contains("Invalid mailbox"))
+        }
+        do {
+            try EmailIMAPValidation.validateMailbox("   ")
+            Issue.record("Expected invalid mailbox")
+        } catch {
+            #expect(error.localizedDescription.contains("Invalid mailbox"))
+        }
+        try EmailIMAPValidation.validateMailbox("INBOX")
+        try EmailIMAPValidation.validateMailbox("Archive")
+    }
+
+    @Test
+    func `Search args decode optional mailbox and folder alias`() throws {
+        let omitted = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"personal","query":"hi"}"#.utf8))
+        #expect(omitted.mailbox == nil)
+        #expect(omitted.trimmedMailbox == nil)
+        let direct = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"personal","query":"hi","mailbox":"Archive"}"#.utf8))
+        #expect(direct.mailbox == "Archive")
+        #expect(direct.trimmedMailbox == "Archive")
+        let alias = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"personal","query":"hi","folder":"Sent"}"#.utf8))
+        #expect(alias.trimmedMailbox == "Sent")
+        let blank = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"personal","query":"hi","mailbox":"   "}"#.utf8))
+        #expect(blank.trimmedMailbox == nil)
+    }
 }
