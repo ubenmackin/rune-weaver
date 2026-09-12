@@ -3,52 +3,6 @@ import Foundation
 @testable import RuneWeaverTools
 import Testing
 
-/// Builds an isolated engine on a fresh temporary directory.
-///
-/// Each test gets its own episodes database, vector directory, and
-/// profile file so fixture writes never leak between tests.
-/// - Returns: Engine plus the base directory owning its files.
-private func makeIsolatedEngine() -> (engine: MemoryEngine, base: URL) {
-    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-    try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-    let engine = MemoryEngine(
-        episodesDBPath: base.appendingPathComponent("episodes.db").path,
-        vectorDBPath: base.appendingPathComponent("vectors").path,
-        profilePath: base.appendingPathComponent("profile.json").path
-    )
-    return (engine, base)
-}
-
-/// Removes a temporary engine directory best-effort.
-/// - Parameter base: Directory created by `makeIsolatedEngine()`.
-private func cleanupEngineBase(_ base: URL) {
-    try? FileManager.default.removeItem(at: base)
-}
-
-/// Locked box capturing audit events across concurrency domains.
-private final class AuditCapture: @unchecked Sendable {
-    /// Guarded events.
-    private var events: [MemoryAuditEvent] = []
-    /// Guards `events`.
-    private let lock = NSLock()
-
-    /// Records an event.
-    /// - Parameter event: Audit event to keep.
-    func record(_ event: MemoryAuditEvent) {
-        lock.lock()
-        defer { lock.unlock() }
-        events.append(event)
-    }
-
-    /// Returns captured events.
-    /// - Returns: Events in capture order.
-    func captured() -> [MemoryAuditEvent] {
-        lock.lock()
-        defer { lock.unlock() }
-        return events
-    }
-}
-
 @Suite("Memory Tools")
 struct MemoryToolsTests {
     @Test
@@ -76,9 +30,9 @@ struct MemoryToolsTests {
     }
 
     @Test
-    func `Memory tools are trusted and registered in order`() {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
+    func `Memory tools are trusted and registered in order`() throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let tools = MemoryTools.makeTools(engine: engine)
         #expect(tools.count == 2)
         for tool in tools {
@@ -90,9 +44,9 @@ struct MemoryToolsTests {
 
     @Test
     func `Remember tool persists profile fact plus vector row`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
-        let capture = AuditCapture()
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
         let tool = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let output = try await tool.execute(
             input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses","category":"preference"}"#),
@@ -113,8 +67,8 @@ struct MemoryToolsTests {
 
     @Test
     func `Remember tool defaults source to tool when category omitted`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let tool = RememberFactTool(engine: engine, audit: { _ in })
         let output = try await tool.execute(
             input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"My gate code is 1234"}"#),
@@ -127,8 +81,8 @@ struct MemoryToolsTests {
 
     @Test
     func `Recall tool searches episodic plus profile facts`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         try await engine.storeEpisodic(
             content: "Sailed past the lighthouse at dawn with the harbor pilot",
             sessionID: UUID()
@@ -150,10 +104,10 @@ struct MemoryToolsTests {
     }
 
     @Test
-    func `Store recall round-trips through ToolBus`() async {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
-        let capture = AuditCapture()
+    func `Store recall round-trips through ToolBus`() async throws {
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
         let bus = ToolBus()
         for tool in MemoryTools.makeTools(engine: engine, audit: { capture.record($0) }) {
             await bus.register(tool: tool)
@@ -176,8 +130,8 @@ struct MemoryToolsTests {
 
     @Test
     func `Memory tools run with a gate and denying handler without prompts`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         // Chat configuration: gate attached, denying handler. Trusted
         // memory tools must still succeed without prompting.
         let bus = ToolBus(permissionGate: PermissionGate())
@@ -201,9 +155,9 @@ struct MemoryToolsTests {
 
     @Test
     func `Dry run neither stores nor audits`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
-        let capture = AuditCapture()
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
         let tool = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let output = try await tool.execute(
             input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
@@ -219,9 +173,9 @@ struct MemoryToolsTests {
 
     @Test
     func `Malformed arguments fail cleanly`() async throws {
-        let (engine, base) = makeIsolatedEngine()
-        defer { cleanupEngineBase(base) }
-        let capture = AuditCapture()
+        let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
+        defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
+        let capture = ToolsTestSupport.AuditCapture()
         let remember = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let badShape = try await remember.execute(
             input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"category":"preference"}"#),

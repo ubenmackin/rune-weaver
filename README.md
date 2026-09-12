@@ -222,6 +222,27 @@ swift run rune-weaver memory facts
 
 A missing recall block means nothing scored above threshold; a wrong answer means the fact never stored (check the `Remembered:` acknowledgement in session A first).
 
+## Smoke gate (pre-merge)
+
+Run this before merging — it exercises a whole model turn end to end (system prompt, orchestrator, tool bus, conversation history, episodic/semantic memory, and session trailer usage) with a scripted model and a stub mail gateway, so no inference, network, credentials, or Keychain are involved. It is part of the default run: plain `swift test` includes it with no flags or secrets.
+
+What it covers (`Tests/RuneWeaverToolsTests/SmokeHarnessTests.swift`):
+
+- Plain turn: streams two text deltas, reports billed tokens, formats the `(model · used/window, %)` trailer via the production `SessionTokenDisplay.label` helper, and mirrors the user/assistant rows into conversation history and episodic memory.
+- Search-then-answer loop: runs `email.search` through the bus, checks the result mentions the canned quarterly report, accumulates session usage across both model turns, and verifies episodic mirroring keeps one compact `Used email.search: ...` record while dropping narration, call ids, and argument JSON.
+- Remember-then-recall across two sessions: stores a fact via `remember_fact`, confirms it lands in the profile plus one memory audit event, then reads it back in a fresh session via `recall_memories` and direct `recall`.
+- Registry check: the expected tools (`email.search`, `email.read`, `email.attachment`, `remember_fact`, `recall_memories`) register (subset check, so adding a tool does not break the gate), their JSON Schemas parse as `type: object` via production `RuneWeaverLLM.encodeToolParameters` (`ToolDefinition` mapping), and real chat (`/chat/completions`) plus responses (`/responses`) request bodies encode with the full `tools` envelope with the expected names subset-checked on the wire.
+- Wildcard search: empty, blank, and `*` queries normalize to `""` (ALL) with newest-first ordering (`limit:1` returns `[42]`, `limit:2` returns `[42, 41]`).
+
+How to run:
+
+```bash
+swift test                            # full suite, smoke included — no flags or secrets needed
+swift test --filter SmokeHarnessTests # just the smoke gate
+```
+
+Hermetic by design, so CI and local runs behave identically: tests needing persistence use a fresh temporary directory for episodes, vectors, profile, and sandbox via the shared `ToolsTestSupport.makeIsolatedMemoryEngine()` helper (the wildcard search test is in-memory with a stub gateway and needs no files); `HOME` is never mutated; scripted provider and tool batches record an issue and return a graceful fallback on over-consumption so extra rounds fail without aborting the suite; and email execution installs stub passwords (`EMAIL_PERSONAL_PASSWORD`, `EMAIL_ICLOUD_PASSWORD`) via scoped helpers under a shared process-wide lock with the prior value saved/restored afterwards, so credential lookup never reaches the Keychain and parallel suites cannot race.
+
 ## Architecture Overview
 
 ```
