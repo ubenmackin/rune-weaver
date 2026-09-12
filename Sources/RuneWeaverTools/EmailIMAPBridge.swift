@@ -48,7 +48,7 @@ public enum EmailIMAPValidation: Sendable {
     /// - Parameter query: Free-text query to check.
     /// - Throws: `EmailIMAPError.bridgeFailed` when CR/LF is present.
     public static func validateSearchQuery(_ query: String) throws {
-        if query.contains("\r") || query.contains("\n") {
+        if query.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
             throw EmailIMAPError.bridgeFailed("Invalid search query: query must not contain CR or LF")
         }
     }
@@ -150,6 +150,23 @@ public enum EmailIMAPValidation: Sendable {
             throw EmailIMAPError.bridgeFailed("Invalid attachment index")
         }
     }
+
+    /// Validates a mailbox name, rejecting CR/LF injection and blank names.
+    /// - Parameter mailbox: Trimmed candidate mailbox name.
+    /// - Throws: `EmailIMAPError.bridgeFailed` when the name is empty or holds CR/LF.
+    public static func validateMailbox(_ mailbox: String) throws {
+        // Check the raw value before trimming so leading/trailing CR/LF
+        // cannot hide behind `trimmingCharacters`, and compare at the
+        // scalar level so an embedded CRLF pair (one `Character`) still
+        // matches even though `contains("\r")` would miss it.
+        if mailbox.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
+            throw EmailIMAPError.bridgeFailed("Invalid mailbox: mailbox must not contain CR or LF")
+        }
+        let trimmed = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid mailbox: mailbox must not be empty")
+        }
+    }
 }
 
 /// Read-only IMAP gateway used by the email tools.
@@ -158,7 +175,9 @@ public enum EmailIMAPValidation: Sendable {
 /// tests inject a stub. Both paths stay read-only: the mailbox is
 /// opened with `readonly=True` and only `(BODY.PEEK[])` fetches are
 /// used so `\Seen` is never set even when the server ignores the
-/// read-only open.
+/// read-only open. `listMailboxes` plus the `mailbox` overloads fan
+/// search out across every selectable folder; the legacy `INBOX`
+/// overloads remain for single-folder callers.
 public protocol EmailIMAPGateway: Sendable {
     /// Searches subject, sender, and body for `query`.
     /// - Parameters:
@@ -186,6 +205,105 @@ public protocol EmailIMAPGateway: Sendable {
         messageID: String,
         attachmentIndex: Int
     ) async throws -> EmailAttachmentData
+
+    /// Lists selectable mailboxes via `IMAP LIST`, excluding non-selectable flags.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: Selectable mailbox names in server order.
+    func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String]
+
+    /// Searches one mailbox for `query`.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - query: Free-text query (`"*"`/empty means most-recent via `ALL`).
+    ///   - limit: Maximum hits (already clamped to `1...50`).
+    /// - Returns: Hits newest-first labeled with `mailbox`.
+    func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit]
+
+    /// Fetches one message from one mailbox.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - messageID: IMAP UID of the message.
+    /// - Returns: Headers plus text body with attachment metadata.
+    func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
+
+    /// Fetches one attachment part from one mailbox.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - messageID: IMAP UID of the message.
+    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
+    /// - Returns: Attachment bytes with filename, MIME type, and size.
+    func attachment(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData
+}
+
+/// Backwards-compatible defaults so legacy stubs keep compiling.
+///
+/// Stubs that only implement the `INBOX` overloads fan out as a single
+/// `INBOX` folder: `listMailboxes` reports `["INBOX"]` and the
+/// `mailbox` overloads delegate when the mailbox is `INBOX`
+/// (case-insensitive) and otherwise report an unknown mailbox without
+/// secrets.
+public extension EmailIMAPGateway {
+    /// Defaults to a single `INBOX` folder for legacy stubs.
+    /// - Parameter credentials: Ignored resolved credentials.
+    /// - Returns: `["INBOX"]`.
+    func listMailboxes(credentials _: ResolvedEmailCredentials) async throws -> [String] {
+        ["INBOX"]
+    }
+
+    /// Delegates `INBOX` searches to the legacy overload.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Requested mailbox.
+    ///   - query: Free-text query.
+    ///   - limit: Maximum hits.
+    /// - Returns: Hits newest-first labeled with `mailbox`.
+    func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+        guard mailbox.lowercased() == "inbox" else {
+            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
+        }
+        let hits = try await search(credentials: credentials, query: query, limit: limit)
+        return hits.map { EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: "INBOX") }
+    }
+
+    /// Delegates `INBOX` fetches to the legacy overload.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Requested mailbox.
+    ///   - messageID: IMAP UID of the message.
+    /// - Returns: Headers plus text body.
+    func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage {
+        guard mailbox.lowercased() == "inbox" else {
+            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
+        }
+        return try await fetch(credentials: credentials, messageID: messageID)
+    }
+
+    /// Delegates `INBOX` attachment fetches to the legacy overload.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Requested mailbox.
+    ///   - messageID: IMAP UID of the message.
+    ///   - attachmentIndex: Zero-based attachment position.
+    /// - Returns: Attachment bytes.
+    func attachment(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData {
+        guard mailbox.lowercased() == "inbox" else {
+            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
+        }
+        return try await attachment(credentials: credentials, messageID: messageID, attachmentIndex: attachmentIndex)
+    }
 }
 
 /// Bridge request document sent to the Python helper over stdin.
@@ -194,7 +312,7 @@ public protocol EmailIMAPGateway: Sendable {
 /// in-memory document and the subprocess pipe — it is never logged
 /// and never echoed in errors.
 struct EmailIMAPBridgeRequest: Encodable {
-    /// Operation: `"search"` or `"fetch"`.
+    /// Operation: `"search"`, `"fetch"`, `"attachment"`, or `"list"`.
     let op: String // swiftlint:disable:this identifier_name
     /// IMAP hostname.
     let host: String
@@ -204,7 +322,7 @@ struct EmailIMAPBridgeRequest: Encodable {
     let username: String
     /// Runtime-resolved password. Never logged.
     let password: String
-    /// Mailbox to open read-only. Always `INBOX` for phase one.
+    /// Mailbox to open read-only (`INBOX` by default; ignored for `list`).
     let mailbox: String
     /// Free-text query (search only).
     let query: String?
@@ -220,15 +338,16 @@ struct EmailIMAPBridgeRequest: Encodable {
     ///   - credentials: Resolved connection fields plus password.
     ///   - query: Free-text query.
     ///   - limit: Maximum hits.
-    /// - Returns: Search request for `INBOX`.
-    static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) -> Self {
+    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
+    /// - Returns: Search request for one mailbox.
+    static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX") -> Self {
         Self(
             op: "search",
             host: credentials.host,
             port: credentials.port,
             username: credentials.username,
             password: credentials.password,
-            mailbox: "INBOX",
+            mailbox: mailbox,
             query: query,
             limit: limit,
             messageID: nil,
@@ -240,15 +359,16 @@ struct EmailIMAPBridgeRequest: Encodable {
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - messageID: Message UID.
-    /// - Returns: Fetch request for `INBOX`.
-    static func fetch(credentials: ResolvedEmailCredentials, messageID: String) -> Self {
+    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
+    /// - Returns: Fetch request for one mailbox.
+    static func fetch(credentials: ResolvedEmailCredentials, messageID: String, mailbox: String = "INBOX") -> Self {
         Self(
             op: "fetch",
             host: credentials.host,
             port: credentials.port,
             username: credentials.username,
             password: credentials.password,
-            mailbox: "INBOX",
+            mailbox: mailbox,
             query: nil,
             limit: nil,
             messageID: messageID,
@@ -261,11 +381,13 @@ struct EmailIMAPBridgeRequest: Encodable {
     ///   - credentials: Resolved connection fields plus password.
     ///   - messageID: Message UID.
     ///   - attachmentIndex: Zero-based attachment position.
-    /// - Returns: Attachment request for `INBOX`.
+    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
+    /// - Returns: Attachment request for one mailbox.
     static func attachment(
         credentials: ResolvedEmailCredentials,
         messageID: String,
-        attachmentIndex: Int
+        attachmentIndex: Int,
+        mailbox: String = "INBOX"
     ) -> Self {
         Self(
             op: "attachment",
@@ -273,11 +395,29 @@ struct EmailIMAPBridgeRequest: Encodable {
             port: credentials.port,
             username: credentials.username,
             password: credentials.password,
-            mailbox: "INBOX",
+            mailbox: mailbox,
             query: nil,
             limit: nil,
             messageID: messageID,
             attachmentIndex: attachmentIndex
+        )
+    }
+
+    /// Creates a mailbox-listing request.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: `list` request reporting selectable mailboxes.
+    static func list(credentials: ResolvedEmailCredentials) -> Self {
+        Self(
+            op: "list",
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password,
+            mailbox: "INBOX",
+            query: nil,
+            limit: nil,
+            messageID: nil,
+            attachmentIndex: nil
         )
     }
 }
@@ -292,10 +432,12 @@ struct EmailIMAPBridgeRequest: Encodable {
 /// `ssl.create_default_context()` (fail closed; private-CA homelab
 /// hosts pin via `ctx.load_verify_locations()` instead of disabling
 /// verification) with a 30-second connect timeout. Search rejects
-/// CR/LF in the query and fetch allowlists message ids to UID syntax
-/// (`^[0-9][0-9:,]*$`) so crafted input cannot inject additional IMAP
-/// commands, and attachment validates the part index as a
-/// non-negative integer. Search uses `OR SUBJECT/FROM/BODY` (via
+/// CR/LF in the query and mailbox, fetch allowlists message ids to UID
+/// syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject additional
+/// IMAP commands, and attachment validates the part index as a
+/// non-negative integer. The `list` op reports selectable mailboxes via
+/// `IMAP LIST`, excluding `Noselect`/`NonExistent` flags so namespace
+/// placeholders never enter the fan-out. Search uses `OR SUBJECT/FROM/BODY` (via
 /// `CHARSET UTF-8` with a plain fallback for servers without `UTF-8`
 /// search) so one query covers subject, sender, and body. An empty,
 /// whitespace-only, or lone `"*"` query maps to `SEARCH ALL` and returns
@@ -312,7 +454,13 @@ struct EmailIMAPBridgeRequest: Encodable {
 /// `EMAIL_ICLOUD_PASSWORD`), verified live read-only.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
-    static let source = #"""
+    static let source = EmailIMAPBridgeScriptHead.text + EmailIMAPBridgeScriptTail.text
+}
+
+/// First half of the embedded `python3 imaplib` helper (imports through connect).
+private enum EmailIMAPBridgeScriptHead {
+    /// First half of the Python source.
+    static let text = #"""
     import sys, json, imaplib, email, re, ssl, base64
     from email import policy
     from email.header import decode_header
@@ -421,6 +569,38 @@ enum EmailIMAPBridgeScript {
             return single[:limit]
         return single
 
+    def parse_list_entry(line):
+        if isinstance(line, bytes):
+            try:
+                text = line.decode("utf-8", errors="replace")
+            except Exception:
+                text = str(line)
+        else:
+            text = str(line)
+        flags = ""
+        m = re.search(r"\(([^)]*)\)", text)
+        if m:
+            flags = m.group(1) or ""
+            rest = text[m.end():].strip()
+        else:
+            rest = text.strip()
+        name = ""
+        if rest.endswith('"'):
+            quoted = re.findall(r'"([^"]*)"', rest)
+            if quoted:
+                name = quoted[-1]
+            else:
+                name = rest.strip().strip('"')
+        else:
+            parts = rest.split()
+            if parts:
+                name = parts[-1].strip().strip('"')
+        return (flags, name.strip())
+
+    def is_selectable(flags):
+        lowered = (flags or "").lower()
+        return ("noselect" not in lowered) and ("nonexistent" not in lowered)
+
     def fail(message):
         sys.stdout.write(json.dumps({"ok": False, "error": message}))
         sys.stdout.flush()
@@ -437,6 +617,10 @@ enum EmailIMAPBridgeScript {
             if "\r" in early_query or "\n" in early_query:
                 fail("Invalid search query")
                 return
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
+                return
         elif op == "fetch":
             early_mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
             if not early_mid:
@@ -444,6 +628,10 @@ enum EmailIMAPBridgeScript {
                 return
             if not re.fullmatch(r"[0-9][0-9:,]*", early_mid):
                 fail("Invalid message id")
+                return
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
                 return
         elif op == "attachment":
             early_mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
@@ -457,6 +645,12 @@ enum EmailIMAPBridgeScript {
             if early_idx is None or early_idx < 0:
                 fail("Invalid attachment index")
                 return
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
+                return
+        elif op == "list":
+            pass
         host = req.get("host") or ""
         try:
             port = int(req.get("port") or 993)
@@ -477,11 +671,44 @@ enum EmailIMAPBridgeScript {
         except Exception as exc:
             fail("Could not connect to %s@%s:%s: %s" % (username, host, port, exc))
             return
+    """#
+}
+
+/// Second half of the embedded `python3 imaplib` helper (login through `main()`).
+private enum EmailIMAPBridgeScriptTail {
+    /// Second half of the Python source.
+    static let text = #"""
         try:
             try:
                 conn.login(username, password)
             except Exception as exc:
                 fail("IMAP login failed for %s@%s:%s: %s" % (username, host, port, exc))
+                return
+            if op == "list":
+                try:
+                    ltyp, ldata = conn.list()
+                except Exception as exc:
+                    fail("IMAP list failed: %s" % exc)
+                    return
+                if ltyp != "OK":
+                    fail("IMAP list failed")
+                    return
+                boxes = []
+                for line in (ldata or []):
+                    if line is None:
+                        continue
+                    flags, name = parse_list_entry(line)
+                    if not name:
+                        continue
+                    if not is_selectable(flags):
+                        continue
+                    boxes.append(name)
+                sys.stdout.write(json.dumps({"ok": True, "mailboxes": boxes}))
+                sys.stdout.flush()
+                return
+            mailbox_check = str(mailbox or "INBOX")
+            if "\r" in mailbox_check or "\n" in mailbox_check:
+                fail("Invalid mailbox")
                 return
             try:
                 typ, _ = conn.select(mailbox, readonly=True)
@@ -495,6 +722,9 @@ enum EmailIMAPBridgeScript {
                 raw_query = req.get("query") or ""
                 if "\r" in raw_query or "\n" in raw_query:
                     fail("Invalid search query")
+                    return
+                if "\r" in mailbox or "\n" in mailbox:
+                    fail("Invalid mailbox")
                     return
                 query = raw_query.strip()
                 try:
@@ -546,6 +776,7 @@ enum EmailIMAPBridgeScript {
                             "from": decode_value(msg["From"]),
                             "date": str(msg["Date"] or ""),
                             "snippet": snippet_of(text),
+                            "mailbox": mailbox,
                         })
                     sys.stdout.write(json.dumps({"ok": True, "messages": messages}))
                     sys.stdout.flush()
@@ -699,15 +930,53 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     ///   - limit: Maximum hits.
     /// - Returns: Hits, newest first.
     public func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit] {
+        try await search(credentials: credentials, mailbox: "INBOX", query: query, limit: limit)
+    }
+
+    /// Searches one mailbox via the Python helper.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - query: Free-text query (`"*"`/empty lists most-recent via `ALL`).
+    ///   - limit: Maximum hits.
+    /// - Returns: Hits newest-first labeled with `mailbox`.
+    public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
         try EmailIMAPValidation.validateSearchQuery(query)
+        try EmailIMAPValidation.validateMailbox(mailbox)
         // Normalize wildcard/empty to ALL here as well so direct gateway
         // callers get most-recent messages even before the Python `ALL`
         // branch runs. Read-only, verified TLS, and caps are unchanged.
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query.trimmingCharacters(in: .whitespacesAndNewlines)
-        let request = EmailIMAPBridgeRequest.search(credentials: credentials, query: effectiveQuery, limit: limit)
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = EmailIMAPBridgeRequest.search(credentials: credentials, query: effectiveQuery, limit: limit, mailbox: trimmedMailbox)
         let data = try await run(request: request)
         do {
-            return try EmailBridgeParsing.parseSearchPayload(data)
+            let hits = try EmailBridgeParsing.parseSearchPayload(data)
+            return hits.map {
+                EmailSearchHit(
+                    id: $0.id,
+                    subject: $0.subject,
+                    from: $0.from,
+                    date: $0.date,
+                    snippet: $0.snippet,
+                    mailbox: trimmedMailbox
+                )
+            }
+        } catch let error as EmailIMAPError {
+            throw error
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+    }
+
+    /// Lists selectable mailboxes via the Python helper.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: Selectable mailbox names in server order.
+    public func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+        let request = EmailIMAPBridgeRequest.list(credentials: credentials)
+        let data = try await run(request: request)
+        do {
+            return try EmailBridgeParsing.parseListPayload(data)
         } catch let error as EmailIMAPError {
             throw error
         } catch {
@@ -721,8 +990,20 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     ///   - messageID: Message UID.
     /// - Returns: Headers plus text body with attachment metadata.
     public func fetch(credentials: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
+        try await fetch(credentials: credentials, mailbox: "INBOX", messageID: messageID)
+    }
+
+    /// Fetches one message from one mailbox via the Python helper.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - messageID: Message UID.
+    /// - Returns: Headers plus text body with attachment metadata.
+    public func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage {
         try EmailIMAPValidation.validateMessageID(messageID)
-        let request = EmailIMAPBridgeRequest.fetch(credentials: credentials, messageID: messageID)
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = EmailIMAPBridgeRequest.fetch(credentials: credentials, messageID: messageID, mailbox: trimmedMailbox)
         let data = try await run(request: request)
         do {
             return try EmailBridgeParsing.parseFetchPayload(data)
@@ -744,12 +1025,31 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         messageID: String,
         attachmentIndex: Int
     ) async throws -> EmailAttachmentData {
+        try await attachment(credentials: credentials, mailbox: "INBOX", messageID: messageID, attachmentIndex: attachmentIndex)
+    }
+
+    /// Fetches one attachment part from one mailbox via the Python helper.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to open read-only.
+    ///   - messageID: Message UID.
+    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
+    /// - Returns: Attachment bytes with filename, MIME type, and size.
+    public func attachment(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        attachmentIndex: Int
+    ) async throws -> EmailAttachmentData {
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         let request = EmailIMAPBridgeRequest.attachment(
             credentials: credentials,
             messageID: messageID,
-            attachmentIndex: attachmentIndex
+            attachmentIndex: attachmentIndex,
+            mailbox: trimmedMailbox
         )
         let data = try await run(request: request)
         do {

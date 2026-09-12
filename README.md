@@ -47,9 +47,9 @@ The CLI (`rune-weaver`) is the MVP interaction layer: `chat`, `config`, `memory`
 
 Chat starts with the IMAP tools registered and visible to the model (self-hosted plus iCloud):
 
-- `email.search` — find messages by free text (subject, sender, body); returns ids, headers, and snippets.
-- `email.read` — open one message by id; returns headers plus the text body. Attachments are listed with filename, MIME type, and byte size; use `email.attachment` to download.
-- `email.attachment` — download one attachment by index into the sandbox staging area only (`sandbox/attachments/`, 10 MB cap, `requiresApproval`).
+- `email.search` — find messages by free text (subject, sender, body) across every selectable mailbox by default; returns ids, headers, snippets, and the mailbox per hit. Pass `mailbox` to narrow to one folder.
+- `email.read` — open one message by id; pass the `mailbox` from the search hit (omitted means `INBOX`). Returns headers plus the text body. Attachments are listed with filename, MIME type, and byte size; use `email.attachment` to download.
+- `email.attachment` — download one attachment by index into the sandbox staging area only (`sandbox/attachments/`, 10 MB cap, `requiresApproval`); pass the `mailbox` from the search hit (omitted means `INBOX`).
 
 Search and read are `readOnly`, so they run with no approval prompts; `email.attachment` is `requiresApproval` and prompts before staging. The assistant calls them during a turn, reads the results, and summarizes in conversation. Verified live against Volcrypt IMAP and iCloud IMAP (`imap.mail.me.com:993`) read-only; there is no send path.
 
@@ -106,7 +106,7 @@ you> Summarize message 42 from volcrypt
 weaver> ◈ calling email.read ...
 ```
 
-The verified flow is search then read: `email.search` lists matching ids, headers, and 200-character snippets (plain text preferred, HTML stripped to text), then `email.read` returns headers plus the text body for one id. The model summarizes the returned headers and snippets/bodies inline.
+The verified flow is search then read: `email.search` fans out across every selectable mailbox (via `IMAP LIST`, excluding non-selectable folders), merges hits newest-first labeled with their mailbox up to `limit`, then `email.read` reopens one id with the same `mailbox` and returns headers plus the text body for one id. The model summarizes the returned headers and snippets/bodies inline. Pass `mailbox` (e.g. `INBOX`, `Sent`, `Archive`) to narrow `email.search` to one folder; unknown folders report the available list.
 
 #### iCloud (app-specific password)
 
@@ -167,9 +167,9 @@ you> Summarize message 42 from icloud
 weaver> ◈ calling email.read ...
 ```
 
-The verified iCloud flow is the same search-then-read: `email.search` against `INBOX` followed by `email.read` for one id, summarized inline by the model.
+The verified iCloud flow is the same search-then-read: `email.search` across every selectable mailbox followed by `email.read` for one id plus its `mailbox`, summarized inline by the model.
 
-Reads open `INBOX` read-only and fetch with `(BODY.PEEK[])` so flags never change; TLS is always verified with a 30-second connect timeout; search uses `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback; queries reject CR/LF and ids allowlist to UID syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject IMAP commands. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
+Reads open each selectable mailbox read-only and fetch with `(BODY.PEEK[])` so flags never change; TLS is always verified with a 30-second connect timeout; search uses `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback; queries and mailbox names reject CR/LF and ids allowlist to UID syntax (`^[0-9][0-9:,]*$`) so crafted input cannot inject IMAP commands. Secrets are never printed, logged, or sent to the model — failures only echo the account name, host, port, username, and expected variable name.
 
 Without credentials the tools report a missing-password hint instead of connecting; the offline fixture suite still covers search/read parsing:
 
@@ -177,7 +177,7 @@ Without credentials the tools report a missing-password hint instead of connecti
 swift test --filter RuneWeaverToolsTests
 ```
 
-Verified live against both Volcrypt and iCloud mailboxes read-only. Attachments list with filename, MIME type, and byte size; use `email.attachment` to download into the sandbox staging area (10 MB cap, approval required).
+Verified live against both Volcrypt and iCloud mailboxes read-only. Attachments list with filename, MIME type, and byte size; use `email.attachment` with the same `mailbox` to download into the sandbox staging area (10 MB cap, approval required).
 
 ## Memory in chat (automatic recall)
 

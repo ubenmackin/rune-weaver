@@ -188,6 +188,63 @@ public enum OrchestratorToolLoop {
         let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "chat" : trimmed
     }
+
+    /// Converts narrated placeholder lines into read-only tool calls.
+    ///
+    /// When a turn yields assistant text but zero structured tool calls,
+    /// each `Calling <name> <arguments> [<callID>]` line is parsed with
+    /// the shared `ToolInput/parsePlaceholderLine(_:)` parser and kept
+    /// only when the named tool is registered, its permission level is
+    /// `readOnly`, and its arguments are a valid JSON object. Matches
+    /// receive fresh call identifiers so narrated identifiers never
+    /// correlate with executed results. Unknown tools, invalid argument
+    /// JSON, and approval-gated tools yield no calls and stay unexecuted.
+    /// - Parameters:
+    ///   - text: Latest assistant text possibly containing placeholders.
+    ///   - tools: Available tools the model may call.
+    /// - Returns: Executable read-only calls in line order, or empty when
+    ///   no narrated line qualifies.
+    public static func narratedToolCalls(from text: String, tools: [any Tool]) -> [ToolInput] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        let byName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        var calls: [ToolInput] = []
+        for rawLine in normalized.components(separatedBy: "\n") {
+            guard let parsed = ToolInput.parsePlaceholderLine(rawLine) else { continue }
+            guard let tool = byName[parsed.toolName] else { continue }
+            guard tool.permissionLevel == .readOnly else { continue }
+            guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
+            calls.append(ToolInput(
+                toolName: parsed.toolName,
+                argumentsJSON: parsed.argumentsJSON,
+                callID: UUID().uuidString
+            ))
+        }
+        return calls
+    }
+
+    /// Whether raw narration arguments are a JSON object.
+    ///
+    /// Guards the narration fallback so hallucinated argument text never
+    /// executes: only strings decoding to a JSON object qualify, while
+    /// truncated placeholders, bare words, arrays, and malformed JSON
+    /// are rejected.
+    /// - Parameter argumentsJSON: Raw arguments text from a placeholder line.
+    /// - Returns: True when the text decodes to a JSON object.
+    private static func isNarrationArgumentsJSON(_ argumentsJSON: String) -> Bool {
+        let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard let data = trimmed.data(using: .utf8) else { return false }
+        do {
+            let value = try JSONSerialization.jsonObject(with: data, options: [])
+            return value is [String: Any]
+        } catch {
+            return false
+        }
+    }
 }
 
 /// Core orchestration loop: input, context, LLM, tools, response.
@@ -267,7 +324,11 @@ public actor Orchestrator {
     ///    `MemoryEngine.historyWithRecall` after leading system messages
     ///    and never stored.
     /// 4. Executes requested tools via the bus, appends each result,
-    ///    and re-invokes the LLM until the turn is final. Up to
+    ///    and re-invokes the LLM until the turn is final. When a turn
+    ///    yields text but zero structured calls, narrated `Calling ...`
+    ///    placeholder lines fall back to read-only executions with fresh
+    ///    call identifiers while invalid argument JSON and approval-gated
+    ///    tools stay unexecuted. Up to
     ///    `maxToolIterations` tool rounds run, followed by one final
     ///    synthesis turn so the last tool results are always answered;
     ///    when the synthesis turn still requests tools, throws
@@ -447,7 +508,12 @@ public actor Orchestrator {
     /// Appends the just-collected assistant text unless history already
     /// ends with that exact turn, so resolvers always see the latest
     /// text. Blank assistant text is skipped so resolvers never observe
-    /// an empty trailing turn.
+    /// an empty trailing turn. When the resolver yields zero structured
+    /// calls, narrated `Calling ... [...]` placeholder lines fall back
+    /// to read-only executions via
+    /// `OrchestratorToolLoop/narratedToolCalls(from:tools:)` so text-only
+    /// turns describing a read still run it; invalid argument JSON,
+    /// unknown tools, and approval-gated tools stay unexecuted.
     /// - Parameters:
     ///   - messages: Working history.
     ///   - assistantText: Latest assistant text (for resolvers that
@@ -455,7 +521,9 @@ public actor Orchestrator {
     ///   - tools: Available tools.
     /// - Returns: Calls to execute, or empty when final.
     private func resolveToolCalls(messages: [Message], assistantText: String, tools: [any Tool]) async throws -> [ToolInput] {
-        guard let toolResolver else { return [] }
+        guard let toolResolver else {
+            return OrchestratorToolLoop.narratedToolCalls(from: assistantText, tools: tools)
+        }
         var context = messages
         if !assistantText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             if let last = context.last {
@@ -466,6 +534,10 @@ public actor Orchestrator {
                 context.append(Message(role: .assistant, content: assistantText))
             }
         }
-        return try await toolResolver(context, tools)
+        let calls = try await toolResolver(context, tools)
+        if !calls.isEmpty {
+            return calls
+        }
+        return OrchestratorToolLoop.narratedToolCalls(from: assistantText, tools: tools)
     }
 }

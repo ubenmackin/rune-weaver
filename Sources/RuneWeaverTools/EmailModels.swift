@@ -1,5 +1,32 @@
 import Foundation
 
+/// Shared mailbox-name normalization for email args and envelopes.
+///
+/// Centralizes trimming and the legacy `INBOX` default so arg structs
+/// and envelope payloads stay consistent without triplicated logic.
+public enum EmailMailboxNormalization: Sendable {
+    /// Trims an optional mailbox, returning nil when omitted or blank.
+    /// - Parameter value: Raw mailbox value, if any.
+    /// - Returns: Trimmed mailbox, or nil when omitted or blank.
+    public static func trimmed(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Normalizes a mailbox to a non-empty canonical value.
+    ///
+    /// Trims surrounding whitespace and falls back to the legacy
+    /// `INBOX` default when the value is nil, empty, or blank so
+    /// legacy payloads without a mailbox keep decoding.
+    /// - Parameter value: Raw mailbox value, if any.
+    /// - Returns: Trimmed mailbox, or `INBOX` when blank.
+    public static func normalizedMailbox(_ value: String?) -> String {
+        guard let trimmed = trimmed(value), !trimmed.isEmpty else { return "INBOX" }
+        return trimmed
+    }
+}
+
 /// Search arguments for the `email.search` tool.
 ///
 /// Decodes the raw `ToolInput.argumentsJSON` document. `limit` is
@@ -7,6 +34,8 @@ import Foundation
 /// bridge never fetches an unbounded mailbox slice. An empty,
 /// whitespace-only, or lone `"*"` query lists the most-recent messages
 /// via `SEARCH ALL` (newest first) instead of a literal text match.
+/// `mailbox` is optional: omitted or blank searches every selectable
+/// mailbox and merges hits newest-first; a value narrows to one folder.
 public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -14,6 +43,8 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public let query: String
     /// Maximum hits to return, clamped to `1...50`.
     public let limit: Int
+    /// Optional mailbox narrowing the search to one folder (nil means every selectable mailbox).
+    public let mailbox: String?
 
     /// Default hit count when the caller omits `limit`.
     public static let defaultLimit = 10
@@ -25,16 +56,20 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     ///   - account: Account nickname.
     ///   - query: Free-text query.
     ///   - limit: Maximum hits. Clamped to `1...50`.
-    public init(account: String, query: String, limit: Int = defaultLimit) {
+    ///   - mailbox: Optional mailbox narrowing to one folder.
+    public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil) {
         self.account = account
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
+        self.mailbox = mailbox
     }
 
     private enum CodingKeys: String, CodingKey {
         case account
         case query
         case limit
+        case mailbox
+        case folder
     }
 
     /// Decodes arguments, trimming whitespace and clamping `limit`.
@@ -44,7 +79,9 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         let account = try container.decode(String.self, forKey: .account)
         let query = try container.decode(String.self, forKey: .query)
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        self.init(account: account, query: query, limit: rawLimit)
+        let mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+            ?? container.decodeIfPresent(String.self, forKey: .folder)
+        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox)
     }
 
     /// Trimmed account nickname.
@@ -56,26 +93,38 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public var trimmedQuery: String {
         query.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// Trimmed mailbox narrowing, or nil when omitted or blank (meaning every selectable mailbox).
+    public var trimmedMailbox: String? {
+        EmailMailboxNormalization.trimmed(mailbox)
+    }
 }
 
 /// Read arguments for the `email.read` tool.
 ///
 /// Accepts the message identifier under `id` (canonical) plus the
 /// `messageId`, `message_id`, and `uid` aliases so model-generated
-/// calls keep working when the field name drifts.
+/// calls keep working when the field name drifts. Accepts an optional
+/// `mailbox` (plus the `folder` alias) reusing the mailbox labeled on
+/// `email.search` hits so messages outside `INBOX` stay openable;
+/// omitted or blank means `INBOX`.
 public struct EmailReadArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
     /// IMAP UID (falling back to sequence number) of the message.
     public let messageID: String
+    /// Optional mailbox holding the message (nil means `INBOX`).
+    public let mailbox: String?
 
     /// Memberwise initializer.
     /// - Parameters:
     ///   - account: Account nickname.
     ///   - messageID: IMAP UID of the message.
-    public init(account: String, messageID: String) {
+    ///   - mailbox: Optional mailbox holding the message.
+    public init(account: String, messageID: String, mailbox: String? = nil) {
         self.account = account
         self.messageID = messageID
+        self.mailbox = mailbox
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -84,6 +133,8 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
         case messageId
         case messageID = "message_id"
         case uid
+        case mailbox
+        case folder
     }
 
     /// Decodes arguments, accepting every documented id alias.
@@ -108,6 +159,8 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
                 )
             )
         }
+        mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+            ?? container.decodeIfPresent(String.self, forKey: .folder)
     }
 
     /// Trimmed account nickname.
@@ -119,12 +172,19 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
     public var trimmedMessageID: String {
         messageID.trimmingCharacters(in: .whitespacesAndNewlines)
     }
+
+    /// Trimmed mailbox holding the message, or nil when omitted or blank (meaning `INBOX`).
+    public var trimmedMailbox: String? {
+        EmailMailboxNormalization.trimmed(mailbox)
+    }
 }
 
 /// One `email.search` hit: headers plus a short text snippet.
 ///
 /// The snippet is the leading plain-text body collapsed to a single
 /// line (at most 200 characters). It never contains attachment bytes.
+/// `mailbox` labels the folder holding the message so `email.read`
+/// and `email.attachment` can reopen it by passing the same mailbox.
 public struct EmailSearchHit: Sendable, Equatable, Codable {
     /// IMAP UID of the message (sequence fallback when the server omits UIDs).
     public let id: String
@@ -136,6 +196,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     public let date: String
     /// Leading body text, single-line, at most 200 characters.
     public let snippet: String
+    /// Mailbox holding the message (e.g. `INBOX`).
+    public let mailbox: String
 
     /// Creates a search hit.
     /// - Parameters:
@@ -144,12 +206,48 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     ///   - from: Decoded sender.
     ///   - date: Raw date header.
     ///   - snippet: Leading body text.
-    public init(id: String, subject: String, from: String, date: String, snippet: String) {
+    ///   - mailbox: Mailbox holding the message. Defaults to `INBOX` for legacy payloads.
+    public init(id: String, subject: String, from: String, date: String, snippet: String, mailbox: String = "INBOX") {
         self.id = id
         self.subject = subject
         self.from = from
         self.date = date
         self.snippet = snippet
+        self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case subject
+        case from
+        case date
+        case snippet
+        case mailbox
+    }
+
+    /// Decodes a hit, defaulting legacy payloads without `mailbox` to `INBOX`.
+    /// - Parameter decoder: Decoder for the hit document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        subject = try container.decode(String.self, forKey: .subject)
+        from = try container.decode(String.self, forKey: .from)
+        date = try container.decode(String.self, forKey: .date)
+        snippet = try container.decode(String.self, forKey: .snippet)
+        let rawMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        mailbox = EmailMailboxNormalization.normalizedMailbox(rawMailbox)
+    }
+
+    /// Encodes a hit including its mailbox label.
+    /// - Parameter encoder: Encoder for the hit document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(from, forKey: .from)
+        try container.encode(date, forKey: .date)
+        try container.encode(snippet, forKey: .snippet)
+        try container.encode(mailbox, forKey: .mailbox)
     }
 }
 
@@ -263,6 +361,9 @@ public struct EmailFullMessage: Sendable, Equatable, Codable {
 ///
 /// Encoded as the `ToolOutput.content` JSON document so the model
 /// receives the account, query, hit count, and hits together.
+/// `mailbox` echoes the requested narrowing (nil means every selectable
+/// mailbox); `mailboxes` lists the folders actually searched; each hit
+/// carries its own `mailbox` so `email.read` can reopen it.
 public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     /// Account nickname that was searched.
     public let account: String
@@ -272,17 +373,25 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     public let count: Int
     /// Hits, newest first.
     public let messages: [EmailSearchHit]
+    /// Requested mailbox narrowing (nil means every selectable mailbox).
+    public let mailbox: String?
+    /// Folders actually searched, in search order.
+    public let mailboxes: [String]?
 
     /// Creates a search envelope.
     /// - Parameters:
     ///   - account: Account nickname.
     ///   - query: Query that was run.
     ///   - messages: Hits, newest first.
-    public init(account: String, query: String, messages: [EmailSearchHit]) {
+    ///   - mailbox: Requested mailbox narrowing. Defaults to nil (every selectable mailbox).
+    ///   - mailboxes: Folders actually searched. Defaults to nil for legacy callers.
+    public init(account: String, query: String, messages: [EmailSearchHit], mailbox: String? = nil, mailboxes: [String]? = nil) {
         self.account = account
         self.query = query
         self.messages = messages
         self.count = messages.count
+        self.mailbox = mailbox
+        self.mailboxes = mailboxes
     }
 }
 
@@ -290,7 +399,8 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
 ///
 /// Encoded as the `ToolOutput.content` JSON document so the model
 /// receives headers, the text body, and the attachment listing note
-/// together.
+/// together. `mailbox` echoes the folder the message was read from so
+/// `email.attachment` can reuse it.
 public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the message was read from.
     public let account: String
@@ -313,12 +423,30 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     public let attachmentsDeferred: Bool
     /// Human-readable listing note (nil when nothing is listed).
     public let attachmentsNote: String?
+    /// Mailbox the message was read from.
+    public let mailbox: String
+
+    private enum CodingKeys: String, CodingKey {
+        case account
+        case id
+        case subject
+        case from
+        // swiftlint:disable:next identifier_name
+        case to
+        case date
+        case body
+        case attachments
+        case attachmentsDeferred
+        case attachmentsNote
+        case mailbox
+    }
 
     /// Creates a read envelope from a decoded message.
     /// - Parameters:
     ///   - account: Account nickname.
     ///   - message: Decoded message.
-    public init(account: String, message: EmailFullMessage) {
+    ///   - mailbox: Mailbox the message was read from. Defaults to `INBOX` for legacy callers.
+    public init(account: String, message: EmailFullMessage, mailbox: String = "INBOX") {
         self.account = account
         self.id = message.id
         self.subject = message.subject
@@ -329,6 +457,42 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
         self.attachments = message.attachments
         self.attachmentsDeferred = message.attachmentsDeferred
         self.attachmentsNote = message.attachmentsNote
+        self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
+    }
+
+    /// Decodes a read envelope, defaulting legacy payloads without `mailbox` to `INBOX`.
+    /// - Parameter decoder: Decoder for the envelope document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        account = try container.decode(String.self, forKey: .account)
+        id = try container.decode(String.self, forKey: .id)
+        subject = try container.decode(String.self, forKey: .subject)
+        from = try container.decode(String.self, forKey: .from)
+        to = try container.decode(String.self, forKey: .to)
+        date = try container.decode(String.self, forKey: .date)
+        body = try container.decode(String.self, forKey: .body)
+        attachments = try container.decode([EmailAttachmentInfo].self, forKey: .attachments)
+        attachmentsDeferred = try container.decode(Bool.self, forKey: .attachmentsDeferred)
+        attachmentsNote = try container.decodeIfPresent(String.self, forKey: .attachmentsNote)
+        let rawMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        mailbox = EmailMailboxNormalization.normalizedMailbox(rawMailbox)
+    }
+
+    /// Encodes a read envelope including its mailbox.
+    /// - Parameter encoder: Encoder for the envelope document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(account, forKey: .account)
+        try container.encode(id, forKey: .id)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(from, forKey: .from)
+        try container.encode(to, forKey: .to)
+        try container.encode(date, forKey: .date)
+        try container.encode(body, forKey: .body)
+        try container.encode(attachments, forKey: .attachments)
+        try container.encode(attachmentsDeferred, forKey: .attachmentsDeferred)
+        try container.encodeIfPresent(attachmentsNote, forKey: .attachmentsNote)
+        try container.encode(mailbox, forKey: .mailbox)
     }
 }
 
@@ -339,7 +503,9 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
 /// calls keep working when the field name drifts. Accepts the part
 /// position under `index` (canonical) plus `attachmentIndex` and
 /// `attachment_index` so callers can name the field either way. The
-/// index is zero-based into the `email.read` attachment list.
+/// index is zero-based into the `email.read` attachment list. Accepts
+/// an optional `mailbox` (plus the `folder` alias) reusing the mailbox
+/// labeled on `email.search` hits; omitted or blank means `INBOX`.
 public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -347,16 +513,20 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let messageID: String
     /// Zero-based position in the `email.read` attachment list.
     public let attachmentIndex: Int
+    /// Optional mailbox holding the message (nil means `INBOX`).
+    public let mailbox: String?
 
     /// Memberwise initializer.
     /// - Parameters:
     ///   - account: Account nickname.
     ///   - messageID: IMAP UID of the message.
     ///   - attachmentIndex: Zero-based attachment position.
-    public init(account: String, messageID: String, attachmentIndex: Int) {
+    ///   - mailbox: Optional mailbox holding the message.
+    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil) {
         self.account = account
         self.messageID = messageID
         self.attachmentIndex = attachmentIndex
+        self.mailbox = mailbox
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -368,6 +538,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         case index
         case attachmentIndex
         case attachmentIndexSnake = "attachment_index"
+        case mailbox
+        case folder
     }
 
     /// Decodes arguments, accepting every documented id and index alias.
@@ -407,6 +579,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
                 )
             )
         }
+        mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+            ?? container.decodeIfPresent(String.self, forKey: .folder)
     }
 
     /// Trimmed account nickname.
@@ -417,6 +591,11 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Trimmed message identifier.
     public var trimmedMessageID: String {
         messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Trimmed mailbox holding the message, or nil when omitted or blank (meaning `INBOX`).
+    public var trimmedMailbox: String? {
+        EmailMailboxNormalization.trimmed(mailbox)
     }
 }
 
@@ -455,7 +634,9 @@ public struct EmailAttachmentData: Sendable, Equatable {
 /// receives the staged sandbox path (or the skip note) together with
 /// the attachment metadata. `path` is nil when the download was
 /// skipped; `skipped` with a `note` explains oversized and dry-run
-/// outcomes without writing outside the staging area.
+/// outcomes without writing outside the staging area. `mailbox`
+/// echoes the folder the bytes were fetched from so follow-up reads
+/// stay in the same folder.
 public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the attachment was fetched from.
     public let account: String
@@ -475,6 +656,21 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     public let skipped: Bool
     /// Human-readable note for skipped downloads (nil when saved).
     public let note: String?
+    /// Mailbox the attachment was fetched from.
+    public let mailbox: String
+
+    private enum CodingKeys: String, CodingKey {
+        case account
+        case id
+        case index
+        case filename
+        case contentType
+        case sizeBytes
+        case path
+        case skipped
+        case note
+        case mailbox
+    }
 
     /// Creates an attachment envelope.
     /// - Parameters:
@@ -487,6 +683,7 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     ///   - path: Sandbox staging path, or nil when skipped.
     ///   - skipped: Whether the download was skipped.
     ///   - note: Human-readable skip note, if any.
+    ///   - mailbox: Mailbox the attachment was fetched from. Defaults to `INBOX` for legacy callers.
     public init(
         account: String,
         id: String,
@@ -496,7 +693,8 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         sizeBytes: Int,
         path: String? = nil,
         skipped: Bool = false,
-        note: String? = nil
+        note: String? = nil,
+        mailbox: String = "INBOX"
     ) {
         self.account = account
         self.id = id
@@ -507,6 +705,40 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         self.path = path
         self.skipped = skipped
         self.note = note
+        self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
+    }
+
+    /// Decodes an attachment envelope, defaulting legacy payloads without `mailbox` to `INBOX`.
+    /// - Parameter decoder: Decoder for the envelope document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        account = try container.decode(String.self, forKey: .account)
+        id = try container.decode(String.self, forKey: .id)
+        index = try container.decode(Int.self, forKey: .index)
+        filename = try container.decode(String.self, forKey: .filename)
+        contentType = try container.decode(String.self, forKey: .contentType)
+        sizeBytes = try container.decode(Int.self, forKey: .sizeBytes)
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        skipped = try container.decode(Bool.self, forKey: .skipped)
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+        let rawMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        mailbox = EmailMailboxNormalization.normalizedMailbox(rawMailbox)
+    }
+
+    /// Encodes an attachment envelope including its mailbox.
+    /// - Parameter encoder: Encoder for the envelope document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(account, forKey: .account)
+        try container.encode(id, forKey: .id)
+        try container.encode(index, forKey: .index)
+        try container.encode(filename, forKey: .filename)
+        try container.encode(contentType, forKey: .contentType)
+        try container.encode(sizeBytes, forKey: .sizeBytes)
+        try container.encodeIfPresent(path, forKey: .path)
+        try container.encode(skipped, forKey: .skipped)
+        try container.encodeIfPresent(note, forKey: .note)
+        try container.encode(mailbox, forKey: .mailbox)
     }
 }
 
@@ -564,6 +796,17 @@ public enum EmailBridgeParsing {
         let attachment: BridgeAttachmentPayload?
     }
 
+    /// Bridge `list` response shape.
+    struct ListResponse: Decodable {
+        // Whether the operation succeeded.
+        // swiftlint:disable:next identifier_name
+        let ok: Bool
+        /// Error detail when `ok` is false.
+        let error: String?
+        /// Selectable mailboxes when `ok` is true.
+        let mailboxes: [String]?
+    }
+
     /// Decodes a bridge `search` stdout payload.
     /// - Parameter data: Raw stdout bytes from the bridge.
     /// - Returns: Hits, newest first.
@@ -596,10 +839,12 @@ public enum EmailBridgeParsing {
     ///   - account: Account nickname.
     ///   - query: Query that was run.
     ///   - messages: Hits, newest first.
+    ///   - mailbox: Requested mailbox narrowing. Defaults to nil (every selectable mailbox).
+    ///   - mailboxes: Folders actually searched. Defaults to nil for legacy callers.
     /// - Returns: JSON document for `ToolOutput.content`.
     /// - Throws: Encoding errors.
-    public static func encodeSearchEnvelope(account: String, query: String, messages: [EmailSearchHit]) throws -> String {
-        let envelope = EmailSearchEnvelope(account: account, query: query, messages: messages)
+    public static func encodeSearchEnvelope(account: String, query: String, messages: [EmailSearchHit], mailbox: String? = nil, mailboxes: [String]? = nil) throws -> String {
+        let envelope = EmailSearchEnvelope(account: account, query: query, messages: messages, mailbox: mailbox, mailboxes: mailboxes)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)
@@ -610,10 +855,11 @@ public enum EmailBridgeParsing {
     /// - Parameters:
     ///   - account: Account nickname.
     ///   - message: Decoded message.
+    ///   - mailbox: Mailbox the message was read from. Defaults to `INBOX` for legacy callers.
     /// - Returns: JSON document for `ToolOutput.content`.
     /// - Throws: Encoding errors.
-    public static func encodeReadEnvelope(account: String, message: EmailFullMessage) throws -> String {
-        let envelope = EmailReadEnvelope(account: account, message: message)
+    public static func encodeReadEnvelope(account: String, message: EmailFullMessage, mailbox: String = "INBOX") throws -> String {
+        let envelope = EmailReadEnvelope(account: account, message: message, mailbox: mailbox)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)
@@ -684,5 +930,196 @@ public enum EmailBridgeParsing {
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
         let data = try encoder.encode(envelope)
         return String(bytes: data, encoding: .utf8) ?? ""
+    }
+
+    /// Decodes a bridge `list` stdout payload.
+    /// - Parameter data: Raw stdout bytes from the bridge.
+    /// - Returns: Selectable mailbox names in server order.
+    /// - Throws: Decoding errors or bridge-reported failures.
+    public static func parseListPayload(_ data: Data) throws -> [String] {
+        let response = try JSONDecoder().decode(ListResponse.self, from: data)
+        if !response.ok {
+            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP list failed")
+        }
+        return response.mailboxes ?? []
+    }
+
+    /// Filters a raw `LIST` mailbox list to selectable folders.
+    ///
+    /// Mirrors the bridge exclusion (`is_selectable` in Python): entries whose flags contain
+    /// `noselect` or `nonexistent` as case-insensitive substrings are dropped so
+    /// namespace placeholders never enter the fan-out. Matching is
+    /// case-insensitive substring matching, mirroring the Python bridge.
+    /// - Parameter entries: Raw `(flags, mailbox)` pairs from the bridge or fixtures.
+    /// - Returns: Selectable mailbox names in the given order.
+    public static func selectableMailboxes(from entries: [(flags: String, mailbox: String)]) -> [String] {
+        entries.compactMap { entry in
+            let lowered = entry.flags.lowercased()
+            if lowered.contains("noselect") || lowered.contains("nonexistent") {
+                return nil
+            }
+            let trimmed = entry.mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    /// Resolves a requested mailbox against the selectable list.
+    ///
+    /// Exact matches win first so case-sensitive servers keep `Archive`
+    /// and `archive` distinct; a case-insensitive fallback keeps `inbox`
+    /// usable for `INBOX` per RFC 3501. Never logs or echoes secrets.
+    /// - Parameters:
+    ///   - requested: Trimmed requested mailbox.
+    ///   - available: Selectable mailboxes in server order.
+    /// - Returns: Canonical mailbox name, or nil when unknown.
+    public static func resolveMailbox(_ requested: String, among available: [String]) -> String? {
+        if available.contains(requested) {
+            return requested
+        }
+        let lowered = requested.lowercased()
+        return available.first { $0.lowercased() == lowered }
+    }
+
+    /// Resolves a requested mailbox against an already-listed selectable list.
+    ///
+    /// Centralizes `LIST` validation so every tool shares one path: folder names are never
+    /// assumed, an empty list throws a no-selectable-mailboxes failure, and matching is
+    /// exact-first with a case-insensitive fallback (see `resolveMailbox`). The legacy-default
+    /// `INBOX` for omitted or blank mailboxes is also routed through this helper with
+    /// `requested: "INBOX"` so defaults validate like explicit values.
+    /// - Parameters:
+    ///   - requested: Trimmed requested mailbox (`"INBOX"` for the legacy default).
+    ///   - available: Selectable mailboxes in server order.
+    /// - Returns: Canonical mailbox name.
+    /// - Throws: Unknown-mailbox failure when the list is empty or has no match.
+    public static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
+        guard !available.isEmpty else {
+            throw unknownMailboxError(requested: requested, available: available)
+        }
+        guard let canonical = resolveMailbox(requested, among: available) else {
+            throw unknownMailboxError(requested: requested, available: available)
+        }
+        return canonical
+    }
+
+    /// Builds the unknown-mailbox failure without secrets.
+    /// - Parameters:
+    ///   - requested: Unknown requested mailbox.
+    ///   - available: Selectable mailboxes in server order.
+    /// - Returns: Human-readable failure naming the available folders.
+    public static func unknownMailboxError(requested: String, available: [String]) -> EmailIMAPError {
+        if available.isEmpty {
+            return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (no selectable mailboxes found)")
+        }
+        return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (available: \(available.sorted().joined(separator: ", ")))")
+    }
+}
+
+/// Merges per-mailbox search hits newest-first.
+///
+/// Each mailbox already returns hits newest-first by UID order; across
+/// mailboxes UIDs are not comparable, so the merge sorts by the parsed
+/// `Date` header descending (RFC 2822 plus ISO-8601 fallbacks) and
+/// truncates to `limit`. Hits with unparseable or empty dates keep
+/// their relative order after dated hits so the merge never drops
+/// results. Mailbox labels are preserved for `email.read` reuse.
+public enum EmailSearchMerge: Sendable {
+    /// Lock-guarded cache of `Date` header formatters, built once.
+    ///
+    /// `DateFormatter` and `ISO8601DateFormatter` are not `Sendable` and
+    /// are not thread-safe, so the cached instances live in this
+    /// `@unchecked Sendable` box and every parse runs while holding the
+    /// lock (which uses `defer` for unlock), keeping the shared
+    /// `static let` data-race free under Swift 6 concurrency.
+    private final class DateParserCache: @unchecked Sendable {
+        /// Guards `formatters` and `isoFormatter`.
+        private let lock = NSLock()
+        /// Cached formatters for `Date` headers, built once.
+        private let formatters: [DateFormatter]
+        /// Cached ISO-8601 fallback formatter, built once.
+        private let isoFormatter: ISO8601DateFormatter
+
+        /// Builds the cached formatters once.
+        init() {
+            let formats = [
+                "EEE, dd MMM yyyy HH:mm:ss Z",
+                "EEE, d MMM yyyy HH:mm:ss Z",
+                "EEE, dd MMM yyyy HH:mm:ss zzz",
+                "dd MMM yyyy HH:mm:ss Z",
+                "yyyy-MM-dd'T'HH:mm:ssZ",
+                "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+                "yyyy-MM-dd HH:mm:ss Z"
+            ]
+            formatters = formats.map { format in
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.dateFormat = format
+                return formatter
+            }
+            isoFormatter = ISO8601DateFormatter()
+        }
+
+        /// Parses an already-trimmed date string under the lock.
+        /// - Parameter trimmed: Non-empty trimmed `Date` header value.
+        /// - Returns: Parsed date, or nil when no formatter matches.
+        func date(from trimmed: String) -> Date? {
+            lock.lock()
+            defer { lock.unlock() }
+            for formatter in formatters {
+                if let date = formatter.date(from: trimmed) {
+                    return date
+                }
+            }
+            return isoFormatter.date(from: trimmed)
+        }
+    }
+
+    /// Shared formatter cache, built once.
+    ///
+    /// Immutable box; all parsing runs inside the box lock so no
+    /// `nonisolated(unsafe)` mutable state is needed.
+    private static let parserCache = DateParserCache()
+
+    /// Shared RFC 2822 formatter for `Date` headers.
+    private static func rfc2822Dates(_ string: String) -> Date? {
+        let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return parserCache.date(from: trimmed)
+    }
+
+    /// Parses a hit date for sorting.
+    /// - Parameter hit: Hit whose `date` header is parsed.
+    /// - Returns: Parsed date, or nil when absent or unparseable.
+    public static func date(of hit: EmailSearchHit) -> Date? {
+        rfc2822Dates(hit.date)
+    }
+
+    /// Merges per-mailbox hits newest-first, capped by `limit`.
+    /// - Parameters:
+    ///   - groups: Per-mailbox hits in search order (each newest-first).
+    ///   - limit: Maximum hits to keep. Clamped to at least 1.
+    /// - Returns: Merged hits newest-first, mailbox labels preserved.
+    public static func mergedNewestFirst(_ groups: [[EmailSearchHit]], limit: Int) -> [EmailSearchHit] {
+        let capped = max(1, limit)
+        let indexed = groups.flatMap(\.self).enumerated().map { (index: $0.offset, hit: $0.element) }
+        let dated = indexed.map { entry in
+            (hit: entry.hit, index: entry.index, date: rfc2822Dates(entry.hit.date))
+        }
+        let sorted = dated.sorted { lhs, rhs in
+            switch (lhs.date, rhs.date) {
+            case let (left?, right?):
+                if left != right {
+                    return left > right
+                }
+                return lhs.index < rhs.index
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            case (nil, nil):
+                return lhs.index < rhs.index
+            }
+        }
+        return Array(sorted.prefix(capped).map(\.hit))
     }
 }

@@ -118,7 +118,11 @@ enum ToolsTestSupport {
     /// Search returns the canned hits newest-first capped by `limit` while
     /// recording the normalized query into the optional capture box so
     /// wildcard mapping stays observable. Fetch and attachment return
-    /// canned payloads or a bridge failure.
+    /// canned payloads or a bridge failure. Mailbox fan-out is stubbed via
+    /// `listedMailboxes` plus `hitsByMailbox`: `listMailboxes` reports the
+    /// canned folders and per-mailbox `search` returns that folder's hits
+    /// labeled with the folder, so fan-out merge stays observable without
+    /// a live server.
     struct StubEmailGateway: EmailIMAPGateway, Sendable {
         /// Hits returned by `search`, already newest-first.
         let hits: [EmailSearchHit]
@@ -130,6 +134,12 @@ enum ToolsTestSupport {
         let failure: String?
         /// Box receiving the normalized query passed to `search`.
         let capture: QueryCapture?
+        /// Selectable mailboxes reported by `listMailboxes` (nil means `["INBOX"]`).
+        let listedMailboxes: [String]?
+        /// Per-mailbox hits for fan-out (nil means every folder returns `hits`).
+        let hitsByMailbox: [String: [EmailSearchHit]]?
+        /// Box receiving the mailbox passed to per-mailbox `search`, when set.
+        let mailboxCapture: QueryCapture?
 
         /// Creates a stub gateway.
         /// - Parameters:
@@ -138,18 +148,27 @@ enum ToolsTestSupport {
         ///   - attachment: Canned attachment bytes.
         ///   - failure: Bridge failure to throw, when set.
         ///   - capture: Query capture box.
+        ///   - listedMailboxes: Selectable mailboxes for `listMailboxes`.
+        ///   - hitsByMailbox: Per-mailbox hits for fan-out.
+        ///   - mailboxCapture: Mailbox capture box.
         init(
             hits: [EmailSearchHit] = [],
             message: EmailFullMessage? = nil,
             attachment: EmailAttachmentData? = nil,
             failure: String? = nil,
-            capture: QueryCapture? = nil
+            capture: QueryCapture? = nil,
+            listedMailboxes: [String]? = nil,
+            hitsByMailbox: [String: [EmailSearchHit]]? = nil,
+            mailboxCapture: QueryCapture? = nil
         ) {
             self.hits = hits
             self.message = message
             self.attachment = attachment
             self.failure = failure
             self.capture = capture
+            self.listedMailboxes = listedMailboxes
+            self.hitsByMailbox = hitsByMailbox
+            self.mailboxCapture = mailboxCapture
         }
 
         /// Returns canned hits capped by `limit`.
@@ -195,6 +214,82 @@ enum ToolsTestSupport {
             if let failure {
                 throw EmailIMAPError.bridgeFailed(failure)
             }
+            guard let attachment else {
+                throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
+            }
+            return attachment
+        }
+
+        /// Returns canned selectable mailboxes.
+        /// - Parameter credentials: Ignored resolved credentials.
+        /// - Returns: Canned folders in server order.
+        func listMailboxes(credentials _: ResolvedEmailCredentials) async throws -> [String] {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            return listedMailboxes ?? ["INBOX"]
+        }
+
+        /// Returns canned per-mailbox hits labeled with the folder.
+        /// - Parameters:
+        ///   - credentials: Ignored resolved credentials.
+        ///   - mailbox: Requested mailbox recorded into the mailbox capture box.
+        ///   - query: Normalized query recorded into the capture box.
+        ///   - limit: Maximum hits to return.
+        /// - Returns: That folder's hits newest-first labeled with `mailbox`.
+        func search(credentials _: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            capture?.set(query)
+            mailboxCapture?.set(mailbox)
+            if let hitsByMailbox, let canned = hitsByMailbox[mailbox] {
+                return Array(canned.prefix(limit)).map {
+                    EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: mailbox)
+                }
+            }
+            if hitsByMailbox != nil {
+                return []
+            }
+            return Array(hits.prefix(limit)).map {
+                EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: mailbox)
+            }
+        }
+
+        /// Returns the canned message for one mailbox.
+        /// - Parameters:
+        ///   - credentials: Ignored resolved credentials.
+        ///   - mailbox: Requested mailbox recorded into the mailbox capture box.
+        ///   - messageID: Requested message identifier.
+        /// - Returns: Canned message.
+        func fetch(credentials _: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            mailboxCapture?.set(mailbox)
+            guard let message else {
+                throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
+            }
+            return message
+        }
+
+        /// Returns canned attachment bytes for one mailbox.
+        /// - Parameters:
+        ///   - credentials: Ignored resolved credentials.
+        ///   - mailbox: Requested mailbox recorded into the mailbox capture box.
+        ///   - messageID: Requested message identifier.
+        ///   - attachmentIndex: Requested part position.
+        /// - Returns: Canned attachment bytes.
+        func attachment(
+            credentials _: ResolvedEmailCredentials,
+            mailbox: String,
+            messageID: String,
+            attachmentIndex: Int
+        ) async throws -> EmailAttachmentData {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            mailboxCapture?.set(mailbox)
             guard let attachment else {
                 throw EmailIMAPError.bridgeFailed("Attachment \(attachmentIndex) for message \(messageID) not found")
             }
