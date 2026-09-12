@@ -1089,4 +1089,14 @@ struct EmailToolsTests {
         let blank = try JSONDecoder().decode(EmailSearchArgs.self, from: Data(#"{"account":"personal","query":"hi","mailbox":"   "}"#.utf8))
         #expect(blank.trimmedMailbox == nil)
     }
+
+    @Test
+    func `Assembled bridge source parses as Python without executing`() throws {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("op == \"list\""))
+        #expect(source.contains("op == \"search\""))
+        #expect(source.contains("op == \"fetch\""))
+        #expect(source.contains("op == \"attachment\""))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
 }

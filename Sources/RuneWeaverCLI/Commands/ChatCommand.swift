@@ -5,11 +5,17 @@ import RuneWeaverLLM
 
 /// Cooperative SIGINT state for the chat REPL.
 ///
-/// Tripped by the `SIGINT` dispatch source and polled by the REPL loop.
-/// State lives in the shared `CLILockedValue` box so every access runs
-/// inside `withLock`, keeping it data-race free under Swift 6
-/// concurrency without manual lock handling.
-private final class ChatInterruptState: Sendable {
+/// Tripped by the `SIGINT` dispatch source and polled by the REPL loop,
+/// the streaming drain, and the tool-execution path. State lives in the
+/// shared `CLILockedValue` box so every access runs inside `withLock`,
+/// keeping it data-race free under Swift 6 concurrency without manual
+/// lock handling. A tripped flag during an assistant turn means cancel
+/// the turn and return to the prompt; a tripped flag at the prompt means
+/// exit. Turn cancellation consumes the flag via `reset()` or
+/// `consume()` so the next prompt starts clean.
+/// - Note: Internal (not `private`) so `ChatInterruptTests` can exercise
+///   the flag via `@testable` import; all mutation stays inside `withLock`.
+final class ChatInterruptState: Sendable {
     /// Lock-guarded delivery flag.
     private let flag = CLILockedValue(false)
 
@@ -21,6 +27,63 @@ private final class ChatInterruptState: Sendable {
     /// Whether SIGINT has been delivered.
     var isTripped: Bool {
         flag.withLock { $0 }
+    }
+
+    /// Clears a delivered SIGINT so the next prompt starts clean.
+    ///
+    /// Called after a cancelled turn returns to the prompt; a later
+    /// SIGINT at the prompt still trips the flag again and exits.
+    func reset() {
+        flag.withLock { $0 = false }
+    }
+
+    /// Atomically checks and clears a delivered SIGINT.
+    /// - Returns: True when SIGINT had been delivered.
+    func consume() -> Bool {
+        flag.withLock { value in
+            let wasTripped = value
+            value = false
+            return wasTripped
+        }
+    }
+}
+
+/// Outcome of one assistant turn.
+///
+/// Returned by the interrupt-aware turn helpers so the REPL can tell a
+/// completed turn (stay in the loop) from a SIGINT-cancelled turn
+/// (reset the flag and return to the prompt).
+enum ChatTurnOutcome: Sendable, Equatable {
+    /// The turn finished and persisted normally.
+    case completed
+    /// SIGINT tripped mid-turn; partial output was discarded.
+    case cancelled
+}
+
+/// Cooperative cancellation policy for assistant turns.
+///
+/// Single predicate behind every interrupt check so streaming, tool
+/// execution, and prompt handling agree: a tripped flag aborts the
+/// in-flight LLM stream, aborts the tool loop before the next execution,
+/// and exits the REPL when observed at the prompt.
+/// Turn cancellation is consumed via `consumeTurnCancellation(_:)` (or
+/// `reset()`) so the next prompt starts clean while a second SIGINT at
+/// the prompt still exits.
+/// - Note: Internal (not `private`) so `ChatInterruptTests` can exercise
+///   the policy via `@testable` import.
+enum ChatTurnInterrupt {
+    /// Whether the shared SIGINT flag has been delivered.
+    /// - Parameter interrupt: Shared SIGINT flag.
+    /// - Returns: True when SIGINT was delivered.
+    static func isCancelled(_ interrupt: ChatInterruptState) -> Bool {
+        interrupt.isTripped
+    }
+
+    /// Consumes a turn cancellation so the next prompt starts clean.
+    /// - Parameter interrupt: Shared SIGINT flag.
+    /// - Returns: True when a cancellation was consumed.
+    static func consumeTurnCancellation(_ interrupt: ChatInterruptState) -> Bool {
+        interrupt.consume()
     }
 }
 
@@ -180,7 +243,9 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 /// Prompts use line editing on a TTY (left/right in-place edits, up/down
 /// through prior prompts persisted in `~/.runeweaver/history/chat_history`
 /// outside episodic memory).
-/// Ctrl+C, EOF, `/exit`, and `/quit` all shut the session down gracefully.
+/// Ctrl+C during an assistant turn cancels the turn immediately and returns
+/// to the prompt; Ctrl+C at the prompt, EOF, `/exit`, and `/quit` all shut
+/// the session down gracefully.
 struct ChatCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -352,6 +417,7 @@ struct ChatCommand: AsyncParsableCommand {
 /// Bundles the REPL collaborators so turn helpers stay within the
 /// parameter budget while keeping call sites readable. The session token
 /// total accumulates `totalTokens` across turns for the usage display.
+/// - Note: File-private; only the REPL helpers in this file construct it.
 private struct ChatTurnContext: Sendable {
     /// Session and history owner.
     let conversations: ConversationManager
@@ -400,7 +466,7 @@ enum ChatSessionTrailer {
     }
 }
 
-/// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT.
+/// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT at the prompt.
 ///
 /// SIGINT is observed via the shared `ChatSignalManager` (block-based
 /// dispatch source, no C handler globals) tripping a lock-boxed flag
@@ -412,7 +478,12 @@ enum ChatSessionTrailer {
 /// editing when attached to a TTY (left/right in-place edits, up/down
 /// history) with history persisted across sessions in
 /// `~/.runeweaver/history/chat_history`, outside episodic memory; piped
-/// input falls back to plain `readLine`.
+/// input falls back to plain `readLine`. SIGINT during an assistant turn
+/// cancels the turn immediately (the in-flight stream is abandoned, the
+/// tool loop stops, and the partial turn is discarded) and returns to
+/// the prompt within the same interaction; SIGINT at the prompt exits.
+/// The cancelled turn consumes its flag via `reset()` so a second SIGINT
+/// at the prompt still exits via `ChatTurnInterrupt.isCancelled`.
 /// - Parameters:
 ///   - provider: Active LLM backend serving completions.
 ///   - context: Shared REPL dependencies for this session.
@@ -430,11 +501,11 @@ private func runChatREPL(
     await history.loadAsync()
     ChatLineEditing.preload(history.entries)
 
-    while !interrupt.isTripped {
+    while !ChatTurnInterrupt.isCancelled(interrupt) {
         guard let line = await ChatLineEditing.readLine(prompt: TerminalStyle.user("you> ")) else {
             break
         }
-        if interrupt.isTripped {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
             break
         }
         let input = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -478,11 +549,20 @@ private func runChatREPL(
             failurePolicy: .report,
             onFailure: chatMirrorFailureHandler
         )
-        await runAssistantTurn(
+        let outcome = await runAssistantTurn(
             provider: provider,
             context: context,
-            query: input
+            query: input,
+            interrupt: interrupt
         )
+        if outcome == .cancelled {
+            // The turn already discarded its partial working-memory writes
+            // and printed its cancellation notice. Consume the flag so the
+            // loop returns to the prompt within the same interaction; a
+            // second SIGINT at the prompt still exits.
+            interrupt.reset()
+            continue
+        }
     }
     print(TerminalStyle.dim("Chat session closed. Session \(context.sessionID.uuidString) ended."))
 }
@@ -626,29 +706,219 @@ private func handleSlashCommand(
 ///
 /// Resolves automatic recall once per user turn so chunked and text
 /// backends share one stable injection; tool rounds reuse the same
-/// recall message without re-querying.
+/// recall message without re-querying. Forwards the shared interrupt
+/// flag so both paths cancel identically and report `.cancelled` for
+/// the REPL to consume.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
 ///   - query: Current user message used as the recall query.
+///   - interrupt: Shared SIGINT flag polled during streaming and tools.
+/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
 private func runAssistantTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,
-    query: String
-) async {
+    query: String,
+    interrupt: ChatInterruptState
+) async -> ChatTurnOutcome {
     if let chunked = provider as? any ChunkStreamingProvider {
         await runChunkedTurn(
             provider: chunked,
             context: context,
-            query: query
+            query: query,
+            interrupt: interrupt
         )
     } else {
         await runTextTurn(
             provider: provider,
             context: context,
-            query: query
+            query: query,
+            interrupt: interrupt
         )
     }
+}
+
+// MARK: - Chunked turn helpers
+
+/// Pre-turn snapshot plus tool-round budget for one chunked turn.
+///
+/// Bundles the working-memory snapshot used for SIGINT rollback with the
+/// round counter so turn helpers stay within the parameter budget.
+private struct ChunkedTurnProgress: Sendable {
+    /// Working-memory snapshot restored on cancellation.
+    let snapshot: [Message]
+    /// Tool rounds run so far.
+    var rounds: Int
+}
+
+/// Accumulated chunk-stream result for one LLM round.
+///
+/// Collects text, structured calls, usage, serving model, and terminal
+/// error so the drain loop stays out of the turn driver.
+private struct ChunkedTurnDraft: Sendable {
+    /// Accumulated assistant text.
+    var text: String
+    /// Structured tool calls in stream order.
+    var calls: [ToolCall]
+    /// Billed usage when the backend reported it.
+    var usage: TokenUsage?
+    /// Serving model name when the stream reported it.
+    var servedModel: String
+    /// Terminal stream error, if any.
+    var streamError: String?
+}
+
+/// Drains one chunk stream into a draft.
+///
+/// Polls the shared interrupt each chunk; a tripped flag breaks the drain
+/// so the caller discards the partial draft without persisting it.
+/// - Parameters:
+///   - provider: Chunk-streaming LLM backend.
+///   - definitions: Tool definitions sent to the model.
+///   - history: Conversation history for this round.
+///   - interrupt: Shared SIGINT flag polled per chunk.
+/// - Returns: Accumulated text, calls, usage, model, and error.
+private func drainChunkedStream(
+    provider: any ChunkStreamingProvider,
+    definitions: [ToolDefinition],
+    history: [Message],
+    interrupt: ChatInterruptState
+) async -> ChunkedTurnDraft {
+    var text = ""
+    var calls: [ToolCall] = []
+    var streamError: String?
+    var usage: TokenUsage?
+    var servedModel = ""
+    for await chunk in provider.chatChunks(messages: history, tools: definitions) {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            break
+        }
+        switch chunk {
+        case let .textDelta(delta):
+            text += delta
+            print(delta, terminator: "")
+            fflush(stdout)
+        case let .toolCall(call):
+            calls.append(call)
+        case let .done(meta):
+            usage = meta.usage
+            if !meta.model.isEmpty {
+                servedModel = meta.model
+            }
+        case let .error(message):
+            streamError = message
+        }
+    }
+    return ChunkedTurnDraft(text: text, calls: calls, usage: usage, servedModel: servedModel, streamError: streamError)
+}
+
+/// Rolls working memory back and reports cancellation.
+///
+/// Restores the pre-turn snapshot so partial notes and tool messages are
+/// discarded with no episodic mirror of the partial turn. Callers snapshot
+/// `sessionTokens` before the trailer and restore it when this returns
+/// `.cancelled` so the session total never advances on a cancelled turn.
+/// - Parameters:
+///   - context: Shared REPL dependencies for this session.
+///   - snapshot: Pre-turn working-memory snapshot.
+///   - withLeadingNewline: Whether to print a blank line first.
+/// - Returns: `.cancelled` for the REPL to consume.
+private func cancelChunkedTurn(
+    context: ChatTurnContext,
+    snapshot: [Message],
+    withLeadingNewline: Bool
+) async -> ChatTurnOutcome {
+    await context.conversations.setHistory(snapshot, for: context.sessionID)
+    if withLeadingNewline {
+        print("")
+    }
+    print(TerminalStyle.dim("Cancelled."))
+    return .cancelled
+}
+
+/// Handles a chunked round with no structured calls via the narrated fallback.
+///
+/// Stores final text directly when no narrated placeholder qualifies;
+/// otherwise runs one read-only tool round under the shared budget.
+/// - Parameters:
+///   - text: Latest assistant text.
+///   - tools: Available tools for narration parsing.
+///   - context: Shared REPL dependencies for this session.
+///   - interrupt: Shared SIGINT flag polled around execution.
+///   - progress: Snapshot plus round counter, advanced on tool execution.
+/// - Returns: Outcome to return, or nil to continue the tool loop.
+private func handleChunkedNarratedTurn(
+    text: String,
+    tools: [any Tool],
+    context: ChatTurnContext,
+    interrupt: ChatInterruptState,
+    progress: inout ChunkedTurnProgress
+) async -> ChatTurnOutcome? {
+    let narrated = OrchestratorToolLoop.narratedToolCalls(from: text, tools: tools)
+    if narrated.isEmpty {
+        guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return .completed }
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+        }
+        await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
+        await context.memoryEngine.mirrorTurn(
+            content: text,
+            sessionID: context.sessionID,
+            role: .assistant,
+            failurePolicy: .report,
+            onFailure: chatMirrorFailureHandler
+        )
+        return .completed
+    }
+    progress.rounds += 1
+    if OrchestratorToolLoop.isLimitExceeded(rounds: progress.rounds, max: context.maxToolIterations) {
+        print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
+        return .completed
+    }
+    if ChatTurnInterrupt.isCancelled(interrupt) {
+        return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+    }
+    let narratedContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: narrated)
+    await context.conversations.append(Message(role: .assistant, content: narratedContent), to: context.sessionID)
+    let toolsCancelled = await executeChunkedInputs(narrated, context: context, interrupt: interrupt)
+    if toolsCancelled {
+        return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+    }
+    return nil
+}
+
+/// Handles a chunked round with structured calls under the shared budget.
+///
+/// - Parameters:
+///   - text: Latest assistant text.
+///   - calls: Structured tool calls in stream order.
+///   - context: Shared REPL dependencies for this session.
+///   - interrupt: Shared SIGINT flag polled around execution.
+///   - progress: Snapshot plus round counter, advanced on tool execution.
+/// - Returns: Outcome to return, or nil to continue the tool loop.
+private func handleChunkedStructuredTurn(
+    text: String,
+    calls: [ToolCall],
+    context: ChatTurnContext,
+    interrupt: ChatInterruptState,
+    progress: inout ChunkedTurnProgress
+) async -> ChatTurnOutcome? {
+    progress.rounds += 1
+    if OrchestratorToolLoop.isLimitExceeded(rounds: progress.rounds, max: context.maxToolIterations) {
+        print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
+        return .completed
+    }
+    if ChatTurnInterrupt.isCancelled(interrupt) {
+        return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+    }
+    let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
+    let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
+    await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
+    let toolsCancelled = await executeChunkedInputs(inputs, context: context, interrupt: interrupt)
+    if toolsCancelled {
+        return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+    }
+    return nil
 }
 
 /// Runs one assistant turn via chunk streaming with tool-call visibility.
@@ -682,99 +952,114 @@ private func runAssistantTurn(
 /// after-every-turn intent) using the serving model name when the stream
 /// reports it (falling back to the provider model name) and the
 /// session-cumulative total, advancing the counter only when the round
-/// reported usage.
+/// reported usage. SIGINT cancellation polls `interrupt` before each LLM
+/// round, inside the chunk drain, before the trailer, and around every
+/// tool execution: a
+/// tripped flag abandons the in-flight stream (breaking the `for await`
+/// releases the provider continuation and cancels the underlying request),
+/// stops the tool loop without waiting for remaining tools or retries,
+/// rolls working memory back to the pre-turn snapshot so the partial
+/// assistant note and any tool messages from this turn are discarded with
+/// no episodic mirror of the partial text and no trailer advance, and
+/// returns `.cancelled` for the REPL to consume.
 /// - Parameters:
 ///   - provider: Chunk-streaming LLM backend.
 ///   - context: Shared REPL dependencies for this session.
 ///   - query: Current user message used as the recall query.
+///   - interrupt: Shared SIGINT flag polled during streaming and tools.
+/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
     context: ChatTurnContext,
-    query: String
-) async {
+    query: String,
+    interrupt: ChatInterruptState
+) async -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
     let definitions = tools.map { ToolDefinition($0) }
     let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
-    var toolRounds = 0
+    let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
+    var progress = ChunkedTurnProgress(snapshot: historySnapshot, rounds: 0)
     while true {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: true)
+        }
         let baseHistory = await context.conversations.workingHistory(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
         let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
-        var text = ""
-        var calls: [ToolCall] = []
-        var streamError: String?
-        var usage: TokenUsage?
-        var servedModel = ""
-        for await chunk in provider.chatChunks(messages: history, tools: definitions) {
-            switch chunk {
-            case let .textDelta(delta):
-                text += delta
-                print(delta, terminator: "")
-                fflush(stdout)
-            case let .toolCall(call):
-                calls.append(call)
-            case let .done(meta):
-                usage = meta.usage
-                if !meta.model.isEmpty {
-                    servedModel = meta.model
-                }
-            case let .error(message):
-                streamError = message
-            }
+        let draft = await drainChunkedStream(
+            provider: provider,
+            definitions: definitions,
+            history: history,
+            interrupt: interrupt
+        )
+        // Abort the in-flight request immediately: breaking the `for await`
+        // releases the provider continuation and cancels the underlying
+        // request, and the partial text and calls below are discarded
+        // without persisting, mirroring, or advancing the session total.
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: true)
         }
         print("")
-        if let streamError {
+        if let streamError = draft.streamError {
             print(TerminalStyle.error("Request failed: \(streamError)"))
-            return
+            return .completed
         }
-        let trailerModel = servedModel.isEmpty ? provider.modelInfo.name : servedModel
+        // Poll before the trailer so a turn cancelled while the stream
+        // drained never prints or advances the session total. The snapshot
+        // below still guards the race between this poll and the trailer.
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+        }
+        let trailerModel = draft.servedModel.isEmpty ? provider.modelInfo.name : draft.servedModel
+        // Snapshot before the trailer advances the session total so a late
+        // cancellation after the trailer can roll the counter back and keep
+        // the documented "no trailer advance" contract.
+        let tokensBeforeTrailer = context.sessionTokens.withLock { $0 }
         print(TerminalStyle.dim(ChatSessionTrailer.line(
             modelName: trailerModel,
             sessionTokens: context.sessionTokens,
-            turnTotalTokens: usage?.totalTokens,
+            turnTotalTokens: draft.usage?.totalTokens,
             window: provider.modelInfo.contextLength
         )))
-        if calls.isEmpty {
-            let narrated = OrchestratorToolLoop.narratedToolCalls(from: text, tools: tools)
-            if narrated.isEmpty {
-                guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
-                await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
-                await context.memoryEngine.mirrorTurn(
-                    content: text,
-                    sessionID: context.sessionID,
-                    role: .assistant,
-                    failurePolicy: .report,
-                    onFailure: chatMirrorFailureHandler
-                )
-                return
+        if draft.calls.isEmpty {
+            if let outcome = await handleChunkedNarratedTurn(
+                text: draft.text,
+                tools: tools,
+                context: context,
+                interrupt: interrupt,
+                progress: &progress
+            ) {
+                if outcome == .cancelled {
+                    context.sessionTokens.withLock { $0 = tokensBeforeTrailer }
+                }
+                return outcome
             }
-            toolRounds += 1
-            if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
-                print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
-                return
-            }
-            let narratedContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: narrated)
-            await context.conversations.append(Message(role: .assistant, content: narratedContent), to: context.sessionID)
-            await executeChunkedInputs(narrated, context: context)
             continue
         }
-        toolRounds += 1
-        if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
-            print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
-            return
+        if let outcome = await handleChunkedStructuredTurn(
+            text: draft.text,
+            calls: draft.calls,
+            context: context,
+            interrupt: interrupt,
+            progress: &progress
+        ) {
+            if outcome == .cancelled {
+                context.sessionTokens.withLock { $0 = tokensBeforeTrailer }
+            }
+            return outcome
         }
-        let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
-        let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
-        await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
-        await executeChunkedInputs(inputs, context: context)
     }
 }
 
 /// Executes chunked tool inputs, printing results and mirroring episodic records.
 ///
+/// Checks the shared interrupt flag before each execution and after each
+/// in-flight execution: a tripped flag stops the loop immediately without
+/// persisting that tool's result, so the caller can discard the partial
+/// turn and return to the prompt instead of waiting for remaining tools.
 /// Working memory keeps the full placeholder so the next Responses body
 /// can replay every `function_call` with its matching output. Episodic
 /// memory skips interim assistant notes entirely so narration and
@@ -782,13 +1067,25 @@ private func runChunkedTurn(
 /// - Parameters:
 ///   - inputs: Tool inputs to execute.
 ///   - context: Shared REPL dependencies for this session.
-private func executeChunkedInputs(_ inputs: [ToolInput], context: ChatTurnContext) async {
+///   - interrupt: Shared SIGINT flag polled before and after each tool.
+/// - Returns: True when SIGINT tripped and remaining tools were skipped.
+private func executeChunkedInputs(
+    _ inputs: [ToolInput],
+    context: ChatTurnContext,
+    interrupt: ChatInterruptState
+) async -> Bool {
     for input in inputs {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return true
+        }
         print(TerminalStyle.tool("◈ calling \(input.toolName) \(ToolInput.inline(input.argumentsJSON, limit: 160))"))
         let result = await context.toolBus.execute(
             toolCall: input,
             context: ToolContext(conversationID: context.sessionID)
         )
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return true
+        }
         let marker = result.isError ? "✕" : "→"
         print(TerminalStyle.dim("  \(marker) \(ToolInput.inline(result.content, limit: 300))"))
         await context.conversations.append(result.asMessage(), to: context.sessionID)
@@ -802,6 +1099,70 @@ private func executeChunkedInputs(_ inputs: [ToolInput], context: ChatTurnContex
             )
         }
     }
+    return false
+}
+
+/// Accumulated text-only stream result for one LLM round.
+///
+/// Collects text, terminal error, and billed usage so the drain loop stays
+/// out of the turn driver.
+/// - Note: File-private; only the text turn helpers in this file construct it.
+private struct TextTurnDraft: Sendable {
+    /// Accumulated assistant text.
+    var text: String
+    /// Terminal stream error, if any.
+    var streamError: String?
+    /// Billed usage when the backend reported it.
+    var billedTokens: Int?
+}
+
+/// Drains one text-only stream into a draft.
+///
+/// Polls the shared interrupt each chunk; a tripped flag breaks the drain
+/// so the caller discards the partial draft without persisting it. Text
+/// deltas print as they arrive and the terminal billed total is recorded
+/// without breaking early so trailing usage and error chunks are observed.
+/// - Parameters:
+///   - provider: Active LLM backend.
+///   - history: Conversation history for this round.
+///   - tools: Tools the model may call.
+///   - interrupt: Shared SIGINT flag polled per chunk.
+/// - Returns: Accumulated text, error, and billed tokens.
+private func drainTextStream(
+    provider: any LLMProvider,
+    history: [Message],
+    tools: [any Tool],
+    interrupt: ChatInterruptState
+) async -> TextTurnDraft {
+    var text = ""
+    var streamError: String?
+    var billedTokens: Int?
+    for await part in provider.chat(messages: history, tools: tools) {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            break
+        }
+        if let message = part.errorMessage {
+            streamError = message.isEmpty ? "unknown error" : message
+            // Record the failure but keep draining the stream so the
+            // provider continuation is released and any trailing usage
+            // or error chunks are observed instead of leaking.
+            continue
+        }
+        if !part.delta.isEmpty {
+            text += part.delta
+            print(part.delta, terminator: "")
+            fflush(stdout)
+        }
+        if part.isFinished {
+            // Record billed usage and keep draining until the stream
+            // finishes instead of breaking early, so later usage or
+            // error chunks are not missed and the continuation closes.
+            if let total = part.totalTokens {
+                billedTokens = total
+            }
+        }
+    }
+    return TextTurnDraft(text: text, streamError: streamError, billedTokens: billedTokens)
 }
 
 /// Runs one assistant turn via the text-only stream with the shared narrated tool loop.
@@ -822,55 +1183,73 @@ private func executeChunkedInputs(_ inputs: [ToolInput], context: ChatTurnContex
 /// session total and renders the same session-billed usage line as the
 /// chunked path; the trailer always prints with the provider model name,
 /// leaving the session total unchanged when the backend reports no usage.
+/// SIGINT cancellation mirrors `runChunkedTurn`: the flag is polled before
+/// each round, after the stream drains, before the trailer, and around
+/// every tool execution;
+/// a tripped flag abandons the in-flight stream, discards the partial
+/// turn without persisting or mirroring it, and returns `.cancelled`
+/// without waiting for further rounds or retries.
 /// - Parameters:
 ///   - provider: Active LLM backend.
 ///   - context: Shared REPL dependencies for this session.
 ///   - query: Current user message used as the recall query.
+///   - interrupt: Shared SIGINT flag polled during streaming and tools.
+/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
 private func runTextTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,
-    query: String
-) async {
+    query: String,
+    interrupt: ChatInterruptState
+) async -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
     let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
+    let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var toolRounds = 0
     while true {
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+            print("")
+            print(TerminalStyle.dim("Cancelled."))
+            return .cancelled
+        }
         let baseHistory = await context.conversations.workingHistory(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
         let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
-        var text = ""
-        var streamError: String?
-        var billedTokens: Int?
-        for await part in provider.chat(messages: history, tools: tools) {
-            if let message = part.errorMessage {
-                streamError = message.isEmpty ? "unknown error" : message
-                // Record the failure but keep draining the stream so the
-                // provider continuation is released and any trailing usage
-                // or error chunks are observed instead of leaking.
-                continue
-            }
-            if !part.delta.isEmpty {
-                text += part.delta
-                print(part.delta, terminator: "")
-                fflush(stdout)
-            }
-            if part.isFinished {
-                // Record billed usage and keep draining until the stream
-                // finishes instead of breaking early, so later usage or
-                // error chunks are not missed and the continuation closes.
-                if let total = part.totalTokens {
-                    billedTokens = total
-                }
-            }
+        let draft = await drainTextStream(
+            provider: provider,
+            history: history,
+            tools: tools,
+            interrupt: interrupt
+        )
+        let text = draft.text
+        let streamError = draft.streamError
+        let billedTokens = draft.billedTokens
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+            print("")
+            print(TerminalStyle.dim("Cancelled."))
+            return .cancelled
         }
         print("")
         if let streamError {
             print(TerminalStyle.error("Request failed: \(streamError)"))
-            return
+            return .completed
         }
+        // Poll before the trailer so a turn cancelled while the stream
+        // drained never prints or advances the session total. The snapshot
+        // below still guards the race between this poll and the trailer.
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+            print(TerminalStyle.dim("Cancelled."))
+            return .cancelled
+        }
+        // Snapshot before the trailer advances the session total so a late
+        // cancellation after the trailer can roll the counter back and keep
+        // the documented "no trailer advance" contract.
+        let tokensBeforeTrailer = context.sessionTokens.withLock { $0 }
         print(TerminalStyle.dim(ChatSessionTrailer.line(
             modelName: provider.modelInfo.name,
             sessionTokens: context.sessionTokens,
@@ -879,7 +1258,13 @@ private func runTextTurn(
         )))
         let narrated = OrchestratorToolLoop.narratedToolCalls(from: text, tools: tools)
         if narrated.isEmpty {
-            guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return }
+            guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return .completed }
+            if ChatTurnInterrupt.isCancelled(interrupt) {
+                context.sessionTokens.withLock { $0 = tokensBeforeTrailer }
+                await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+                print(TerminalStyle.dim("Cancelled."))
+                return .cancelled
+            }
             await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
             await context.memoryEngine.mirrorTurn(
                 content: text,
@@ -888,15 +1273,27 @@ private func runTextTurn(
                 failurePolicy: .report,
                 onFailure: chatMirrorFailureHandler
             )
-            return
+            return .completed
         }
         toolRounds += 1
         if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: context.maxToolIterations) {
             print(TerminalStyle.error("Tool loop exceeded \(context.maxToolIterations) rounds; stopping."))
-            return
+            return .completed
+        }
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            context.sessionTokens.withLock { $0 = tokensBeforeTrailer }
+            await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+            print(TerminalStyle.dim("Cancelled."))
+            return .cancelled
         }
         let narratedContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: narrated)
         await context.conversations.append(Message(role: .assistant, content: narratedContent), to: context.sessionID)
-        await executeChunkedInputs(narrated, context: context)
+        let toolsCancelled = await executeChunkedInputs(narrated, context: context, interrupt: interrupt)
+        if toolsCancelled {
+            context.sessionTokens.withLock { $0 = tokensBeforeTrailer }
+            await context.conversations.setHistory(historySnapshot, for: context.sessionID)
+            print(TerminalStyle.dim("Cancelled."))
+            return .cancelled
+        }
     }
 }
