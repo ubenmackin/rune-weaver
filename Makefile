@@ -1,0 +1,75 @@
+# Rune Weaver — unified build entrypoint for the Swift engine and web dashboard.
+#
+# Toolchain:
+#   - Swift 6.0 on macOS 14+ builds, tests, lints, and runs the engine.
+#   - Node.js 20+ with npm is required only at build time to compile the
+#     React + TypeScript + Vite dashboard in Web/ to static files in Web/dist.
+#     There is no runtime Node server; the engine serves Web/dist on loopback.
+#
+# Common flows:
+#   make setup            # clean install dependencies for Web and Swift
+#   make build            # Swift engine + dashboard bundle (Web/dist)
+#   make test             # Swift tests + dashboard tests (vitest)
+#   make lint             # Swift style gates + dashboard typecheck
+#   make audit            # security audit for Web dashboard
+#   make run ARGS="chat"  # launch the engine (extra args pass through)
+#   make all              # build + test + lint (default)
+#   make clean            # remove build outputs
+
+.DEFAULT_GOAL := all
+
+.PHONY: all setup setup-web setup-swift build build-web build-swift test test-web test-swift lint lint-web lint-swift audit audit-web run clean
+
+all: build test lint
+
+setup: setup-web setup-swift
+
+setup-web:
+	cd Web && (if [ -f package-lock.json ]; then npm ci; else npm install; fi)
+
+setup-swift:
+	swift package resolve
+	@which swiftformat >/dev/null 2>&1 || echo "swiftformat not found: install with 'brew install swiftformat' (required for 'make lint-swift')"
+	@which swiftlint >/dev/null 2>&1 || echo "swiftlint not found: install with 'brew install swiftlint' (required for 'make lint-swift')"
+
+build: build-web build-swift
+
+build-web:
+	@test -d Web/node_modules || $(MAKE) setup-web
+	cd Web && npm run build
+
+build-swift:
+	swift build
+
+test: test-web test-swift
+
+test-web:
+	@test -d Web/node_modules || $(MAKE) setup-web
+	cd Web && npm test
+
+test-swift:
+	swift test
+
+lint: lint-web lint-swift
+
+# Web has no eslint config; the TypeScript compiler check is the lint gate.
+lint-web:
+	@test -d Web/node_modules || $(MAKE) setup-web
+	cd Web && npm run typecheck
+
+lint-swift:
+	swiftformat --lint .
+	swiftlint lint
+
+audit: audit-web
+
+audit-web:
+	@test -d Web/node_modules || $(MAKE) setup-web
+	cd Web && npm audit --audit-level=high
+
+run:
+	swift run rune-weaver $(ARGS)
+
+clean:
+	rm -rf .build Web/dist
+

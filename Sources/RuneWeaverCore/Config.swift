@@ -406,6 +406,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var email: EmailConfig
     /// Home automation.
     public var home: HomeConfig
+    /// Scheduled jobs (cron and email-arrival triggers).
+    public var scheduler: SchedulerConfig
 
     /// Creates a root config from section configs.
     public init(
@@ -415,7 +417,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         voice: VoiceConfig = VoiceConfig(),
         sandbox: SandboxConfig = SandboxConfig(),
         email: EmailConfig = EmailConfig(),
-        home: HomeConfig = HomeConfig()
+        home: HomeConfig = HomeConfig(),
+        scheduler: SchedulerConfig = SchedulerConfig()
     ) {
         self.engine = engine
         self.llm = llm
@@ -424,6 +427,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.sandbox = sandbox
         self.email = email
         self.home = home
+        self.scheduler = scheduler
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -516,6 +520,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try validateSandboxSection()
         try validateEmailSection()
         try validateHomeSection()
+        try validateSchedulerSection()
     }
 
     private func validateEngineSection() throws {
@@ -682,6 +687,41 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
                 )
             }
         }
+    }
+
+    private func validateSchedulerSection() throws {
+        do {
+            try scheduler.validate()
+        } catch let error as SchedulerConfigError {
+            throw Self.mapSchedulerConfigError(error)
+        }
+    }
+
+    private static func mapSchedulerConfigError(_ error: SchedulerConfigError) -> ConfigError {
+        // Single-sourced via `SchedulerConfigError/displayDetail` and
+        // `fieldSuffix` so config and store messages/fields cannot drift.
+        if error.jobName == nil {
+            return ConfigError.validationError(
+                field: "scheduler.jobs.name", message: error.displayDetail
+            )
+        }
+        if case .duplicateName = error {
+            return ConfigError.validationError(
+                field: "scheduler.jobs.name", message: error.displayDetail
+            )
+        }
+        guard let job = error.jobName else {
+            return ConfigError.validationError(
+                field: "scheduler.jobs.name", message: error.displayDetail
+            )
+        }
+        let prefix = "scheduler.jobs[\(normalizedSchedulerJobName(job))]"
+        if let suffix = error.fieldSuffix {
+            return ConfigError.validationError(
+                field: "\(prefix).\(suffix)", message: error.displayDetail
+            )
+        }
+        return ConfigError.validationError(field: prefix, message: error.displayDetail)
     }
 
     private static func validateURLField(_ value: String, field: String) throws {

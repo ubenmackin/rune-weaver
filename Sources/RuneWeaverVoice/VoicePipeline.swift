@@ -104,20 +104,26 @@ public actor VoicePipeline {
 
     /// Synthesizes text to audio via the macOS `say` command.
     ///
-    /// Renders `text` to a temporary AIFF file with `say -o` and
-    /// returns the file bytes. Empty input yields empty audio without
+    /// Writes `text` to a temporary file and invokes `say -f <file>`
+    /// so that the content is never interpolated into a shell argument
+    /// list.  Renders to a temporary AIFF file with `say -o` and
+    /// returns the file bytes.  Empty input yields empty audio without
     /// invoking the synthesizer.
     /// - Parameter text: Text to speak.
     /// - Returns: Raw audio bytes (AIFF container).
     public func synthesize(text: String) async throws -> [UInt8] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
+        let inputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-tts-input-\(UUID().uuidString).txt")
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-tts-\(UUID().uuidString).aiff")
+        defer { try? FileManager.default.removeItem(at: inputURL) }
         defer { try? FileManager.default.removeItem(at: outputURL) }
+        try trimmed.write(to: inputURL, atomically: true, encoding: .utf8)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        process.arguments = ["-o", outputURL.path, trimmed]
+        process.arguments = ["-o", outputURL.path, "-f", inputURL.path]
         do {
             try process.run()
         } catch {

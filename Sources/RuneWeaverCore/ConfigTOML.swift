@@ -345,6 +345,7 @@ extension RuneWeaverConfig {
         try Self.decodeSandbox(root, into: &config)
         try Self.decodeEmail(root, into: &config)
         try Self.decodeHome(root, into: &config)
+        try Self.decodeScheduler(root, into: &config)
         self = config
     }
 
@@ -504,6 +505,63 @@ extension RuneWeaverConfig {
                 tokenEnv: node.strictString("token_env", field: "home.home_assistant.token_env")
             )
         }
+    }
+
+    private static func decodeScheduler(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let scheduler = root.tables["scheduler"] else { return }
+        let jobNodes = scheduler.arrays["jobs"] ?? []
+        guard !jobNodes.isEmpty else { return }
+        config.scheduler.jobs = try jobNodes.map(decodeSchedulerJob)
+    }
+
+    private static func decodeSchedulerJob(_ node: TOMLNode) throws -> SchedulerJobConfig {
+        guard let name = try node.strictString("name", field: "scheduler.jobs.name") else {
+            throw ConfigError.missingRequired(field: "scheduler.jobs.name")
+        }
+        guard let prompt = try node.strictString("prompt", field: "scheduler.jobs[\(name)].prompt") else {
+            throw ConfigError.missingRequired(field: "scheduler.jobs[\(name)].prompt")
+        }
+        let schedule = try node.strictString("schedule", field: "scheduler.jobs[\(name)].schedule")
+        let enabled = try node.strictBool("enabled", field: "scheduler.jobs[\(name)].enabled") ?? true
+        let pollAccount = try node.strictString("poll_account", field: "scheduler.jobs[\(name)].poll_account")
+        let poll: EmailPollRule?
+        if let account = pollAccount {
+            let query = try node.strictString("poll_query", field: "scheduler.jobs[\(name)].poll_query") ?? ""
+            let mailbox = try node.strictString("poll_mailbox", field: "scheduler.jobs[\(name)].poll_mailbox")
+            let interval = try node.strictInt(
+                "poll_interval_seconds",
+                field: "scheduler.jobs[\(name)].poll_interval_seconds"
+            ) ?? EmailPollRule.defaultPollIntervalSeconds
+            let limit = try node.strictInt("poll_limit", field: "scheduler.jobs[\(name)].poll_limit") ?? EmailPollRule.defaultLimit
+            poll = EmailPollRule(
+                account: account,
+                query: query,
+                mailbox: mailbox,
+                pollIntervalSeconds: interval,
+                limit: limit
+            )
+        } else {
+            // Atomic poll rule: stray poll fields without an account are
+            // rejected (matching REST `SchedulerStore.validated()`) instead
+            // of silently dropping them on cron-only jobs.
+            if node.has("poll_query") {
+                throw ConfigError.validationError(field: "scheduler.jobs[\(name)].poll_query", message: "poll_query requires poll_account")
+            }
+            if node.has("poll_mailbox") {
+                throw ConfigError.validationError(field: "scheduler.jobs[\(name)].poll_mailbox", message: "poll_mailbox requires poll_account")
+            }
+            if node.has("poll_interval_seconds") {
+                throw ConfigError.validationError(
+                    field: "scheduler.jobs[\(name)].poll_interval_seconds",
+                    message: "poll_interval_seconds requires poll_account"
+                )
+            }
+            if node.has("poll_limit") {
+                throw ConfigError.validationError(field: "scheduler.jobs[\(name)].poll_limit", message: "poll_limit requires poll_account")
+            }
+            poll = nil
+        }
+        return SchedulerJobConfig(name: name, prompt: prompt, enabled: enabled, schedule: schedule, poll: poll)
     }
 }
 

@@ -175,6 +175,8 @@ public actor MemoryEngine {
     /// never materializes huge rows; consistent with the tighter
     /// preference caps applied during extraction.
     public static let maxContentLength = 10000
+    /// Maximum episodic records retained before auto-compacting old sessions.
+    public static let maxEpisodicCount = 10000
 
     /// Creates an engine from live stores.
     /// - Parameters:
@@ -255,6 +257,9 @@ public actor MemoryEngine {
                 content: content,
                 metadata: metadata ?? [:]
             )
+            if let total = try? await episodeStore.count(), total > Self.maxEpisodicCount {
+                _ = try? await episodeStore.compactSessions(olderThan: Date().addingTimeInterval(-30 * 86400))
+            }
             return MemoryResult(
                 content: episode.content,
                 score: 1.0,
@@ -264,6 +269,15 @@ public actor MemoryEngine {
         } catch {
             throw MemoryEngineError.episodicFailed(error.localizedDescription)
         }
+    }
+
+    /// Compacts episodic sessions older than the specified date.
+    /// - Parameters:
+    ///   - olderThan: Date cutoff for compaction.
+    /// - Returns: Compacted episode summaries.
+    @discardableResult
+    public func compactEpisodic(olderThan: Date) async throws -> [EpisodeSummary] {
+        try await episodeStore.compactSessions(olderThan: olderThan)
     }
 
     /// Searches episodic memory by keyword.

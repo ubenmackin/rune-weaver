@@ -1,0 +1,181 @@
+/* Rune Weaver Dashboard — global stylesheet.
+ *
+ * Single shared stylesheet for the dashboard static bundle: layout shell,
+ * tab bar, panels, chat messages, and form controls. Served same-origin by
+ * the engine as part of the static bundle with no separate frontend host.
+ */
+
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "SF Pro Text", sans-serif;
+}
+
+body {
+  margin: 0;
+  background: #101014;
+  color: #f2f2f5;
+}
+
+a {
+  color: inherit;
+}
+
+.app-shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px 64px;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.app-header h1 {
+  font-size: 22px;
+  margin: 0;
+}
+
+.health-badge {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.tab-bar button {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid #3a3a44;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.tab-bar button[aria-selected="true"] {
+  background: #f2f2f5;
+  color: #101014;
+  border-color: #f2f2f5;
+}
+
+.panel {
+  border: 1px solid #2c2c35;
+  border-radius: 12px;
+  padding: 16px;
+  background: #17171d;
+}
+
+.panel h2 {
+  margin-top: 0;
+  font-size: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid #3a3a44;
+  background: #0f0f13;
+  color: inherit;
+}
+
+button.primary {
+  padding: 10px 16px;
+  border-radius: 8px;
+  border: 0;
+  background: #6e6ef5;
+  color: white;
+  cursor: pointer;
+}
+
+button.ghost {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #3a3a44;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+button.danger {
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid #7a2e2e;
+  background: transparent;
+  color: #ff9d9d;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.message {
+  padding: 10px 12px;
+  border-radius: 10px;
+  white-space: pre-wrap;
+}
+
+.message.user {
+  background: #2a2a38;
+  align-self: flex-end;
+}
+
+.message.assistant {
+  background: #20202a;
+  align-self: flex-start;
+}
+
+.error {
+  color: #ff9d9d;
+}
+
+.muted {
+  opacity: 0.7;
+  font-size: 13px;
+}
+
+.card {
+  border: 1px solid #2c2c35;
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 8px;
+}
+
+.card pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 12px;
+  opacity: 0.9;
+}
