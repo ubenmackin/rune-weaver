@@ -467,4 +467,131 @@ struct SmokeHarnessTests {
             #expect(both.messages.map(\.id) == ["42", "41"])
         }
     }
+
+    @Test
+    func `Production bridge source parses and stub gateway covers every op`() async throws {
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("op == \"list\""))
+        #expect(source.contains("op == \"search\""))
+        #expect(source.contains("op == \"fetch\""))
+        #expect(source.contains("op == \"attachment\""))
+        #expect(source.contains("attachmentIndex"))
+        #expect(source.contains("messageID"))
+        #expect(source.contains("is_selectable"))
+        #expect(source.contains("(BODY.PEEK[])"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+        let credentials = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.yourdomain.com",
+            port: 993,
+            username: "you@yourdomain.com",
+            password: "test-secret"
+        )
+        func bridgeDocument(_ request: EmailIMAPBridgeRequest) throws -> [String: Any] {
+            let data = try JSONEncoder().encode(request)
+            let object = try JSONSerialization.jsonObject(with: data)
+            guard let document = object as? [String: Any] else {
+                Issue.record("Bridge request did not encode as an object")
+                return [:]
+            }
+            return document
+        }
+        let listDocument = try bridgeDocument(.list(credentials: credentials))
+        #expect(listDocument["op"] as? String == "list")
+        #expect(listDocument["host"] as? String == "mail.yourdomain.com")
+        let searchDocument = try bridgeDocument(.search(credentials: credentials, query: "quarterly", limit: 10, mailbox: "INBOX"))
+        #expect(searchDocument["op"] as? String == "search")
+        #expect(searchDocument["query"] as? String == "quarterly")
+        #expect(searchDocument["limit"] as? Int == 10)
+        #expect(searchDocument["mailbox"] as? String == "INBOX")
+        let fetchDocument = try bridgeDocument(.fetch(credentials: credentials, messageID: "42", mailbox: "INBOX"))
+        #expect(fetchDocument["op"] as? String == "fetch")
+        #expect(fetchDocument["messageID"] as? String == "42")
+        #expect(fetchDocument["mailbox"] as? String == "INBOX")
+        let attachmentDocument = try bridgeDocument(.attachment(credentials: credentials, messageID: "42", attachmentIndex: 0, mailbox: "INBOX"))
+        #expect(attachmentDocument["op"] as? String == "attachment")
+        #expect(attachmentDocument["messageID"] as? String == "42")
+        #expect(attachmentDocument["attachmentIndex"] as? Int == 0)
+        #expect(attachmentDocument["mailbox"] as? String == "INBOX")
+        try await ToolsTestSupport.withTestPassword {
+            let hits = try ToolsTestSupport.sharedSearchHits()
+            let bytes = Data("hello world".utf8)
+            let message = EmailFullMessage(
+                id: "42",
+                subject: "Quarterly report",
+                from: "boss@example.com",
+                to: "you@yourdomain.com",
+                date: "Mon, 01 Sep 2025 09:00:00 +0000",
+                body: "Please review the quarterly numbers attached.",
+                attachments: [EmailAttachmentInfo(filename: "report.pdf", contentType: "application/pdf", sizeBytes: bytes.count)]
+            )
+            let downloadable = EmailAttachmentData(
+                filename: "report.pdf",
+                contentType: "application/pdf",
+                sizeBytes: bytes.count,
+                data: bytes
+            )
+            let gateway = ToolsTestSupport.StubEmailGateway(
+                hits: hits,
+                message: message,
+                attachment: downloadable,
+                listedMailboxes: ["INBOX"]
+            )
+            let stubCredentials = ResolvedEmailCredentials(
+                accountName: "personal",
+                host: "mail.yourdomain.com",
+                port: 993,
+                username: "you@yourdomain.com",
+                password: "test-secret"
+            )
+            let mailboxes = try await gateway.listMailboxes(credentials: stubCredentials)
+            #expect(mailboxes == ["INBOX"])
+            let searched = try await gateway.search(credentials: stubCredentials, mailbox: "INBOX", query: "quarterly", limit: 10)
+            #expect(searched.count == 2)
+            #expect(searched[0].id == "42")
+            #expect(searched[0].mailbox == "INBOX")
+            let fetched = try await gateway.fetch(credentials: stubCredentials, mailbox: "INBOX", messageID: "42")
+            #expect(fetched.id == "42")
+            #expect(fetched.attachments.count == 1)
+            #expect(fetched.attachments[0].filename == "report.pdf")
+            let downloaded = try await gateway.attachment(credentials: stubCredentials, mailbox: "INBOX", messageID: "42", attachmentIndex: 0)
+            #expect(downloaded.filename == "report.pdf")
+            #expect(downloaded.data == bytes)
+            let config = ToolsTestSupport.testEmailConfig()
+            let searchTool = EmailSearchTool(emailConfig: config, gateway: gateway)
+            let searchOutput = try await searchTool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":10}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(searchOutput.isError == false)
+            #expect(searchOutput.content.contains("Quarterly report"))
+            let readTool = EmailReadTool(emailConfig: config, gateway: gateway)
+            let readOutput = try await readTool.execute(
+                input: ToolInput(toolName: "email.read", argumentsJSON: #"{"account":"personal","id":"42"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(readOutput.isError == false)
+            #expect(readOutput.content.contains("quarterly numbers"))
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("runeweaver-smoke-\(UUID().uuidString)")
+            let attachmentTool = EmailAttachmentTool(
+                emailConfig: config,
+                gateway: gateway,
+                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            )
+            let stagedOutput = try await attachmentTool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(stagedOutput.isError == false)
+            struct StagedAttachment: Decodable { let path: String?; let skipped: Bool }
+            let staged = try JSONDecoder().decode(StagedAttachment.self, from: Data(stagedOutput.content.utf8))
+            #expect(staged.skipped == false)
+            let path = try #require(staged.path)
+            #expect(path.hasPrefix(staging.path))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == bytes)
+            #expect(!stagedOutput.content.contains("test-secret"))
+            try? FileManager.default.removeItem(at: staging)
+        }
+    }
 }

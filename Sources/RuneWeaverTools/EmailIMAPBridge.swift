@@ -454,7 +454,7 @@ struct EmailIMAPBridgeRequest: Encodable {
 /// `EMAIL_ICLOUD_PASSWORD`), verified live read-only.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
-    static let source = EmailIMAPBridgeScriptHead.text + EmailIMAPBridgeScriptTail.text
+    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptTail.text
 }
 
 /// First half of the embedded `python3 imaplib` helper (imports through connect).

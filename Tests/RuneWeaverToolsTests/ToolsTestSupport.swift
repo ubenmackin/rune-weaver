@@ -41,6 +41,66 @@ enum ToolsTestSupport {
         try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))
     }
 
+    /// Failure thrown when the assembled bridge source fails Python parsing.
+    ///
+    /// Carries the parser child's stderr (or a timeout notice) so the
+    /// failing test reports the syntax detail without re-reading pipes.
+    struct BridgeParseError: Error, LocalizedError, Sendable {
+        /// Human-readable parse failure including stderr.
+        let message: String
+
+        /// Returns `message` for test failure display.
+        var errorDescription: String? {
+            message
+        }
+    }
+
+    /// Asserts the assembled bridge source parses as Python without executing it.
+    ///
+    /// Runs `python3 -c "import ast, sys; ast.parse(sys.stdin.read())"` with
+    /// `source` on stdin so syntax regressions fail fast without importing
+    /// or executing the bridge. The stdin handle is closed with `try` (not
+    /// `try?`) so a close failure propagates instead of leaving the child
+    /// blocked on EOF, and the child is terminated when it outlives
+    /// `timeoutSeconds` so a stuck parser cannot hang the suite.
+    /// - Parameters:
+    ///   - source: Assembled bridge source to parse.
+    ///   - timeoutSeconds: Maximum seconds to wait for the parser child.
+    /// - Throws: When the child cannot run, times out, or reports a syntax error with stderr.
+    static func assertBridgeSourceParses(_ source: String, timeoutSeconds: TimeInterval = 10) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-c", "import ast, sys; ast.parse(sys.stdin.read())"]
+        let inputPipe = Pipe()
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardInput = inputPipe
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        defer {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        try inputPipe.fileHandleForWriting.write(contentsOf: Data(source.utf8))
+        try inputPipe.fileHandleForWriting.close()
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        if process.isRunning {
+            process.terminate()
+            throw BridgeParseError(message: "Bridge source Python parse timed out after \(timeoutSeconds)s")
+        }
+        let stderrData = errorPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        if process.terminationStatus != 0 {
+            let detail = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            throw BridgeParseError(message: "Bridge source failed Python parse: \(detail)")
+        }
+    }
+
     /// Builds an isolated memory engine on a fresh temporary directory.
     ///
     /// Single shared builder for tool suites so temporary-directory layout and
