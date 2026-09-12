@@ -256,15 +256,16 @@ public struct EmailAttachmentTool: Tool, Sendable {
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
-                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message id "#
-                + #"from email.search"},"messageId":{"type":"string","description":"Alias "#
-                + #"for id"},"message_id":{"type":"string","description":"Alias for id"},"#
-                + #""uid":{"type":"string","description":"Alias for id"},"index":{"type":"integer","description":"Zero-based attachment position "#
-                + #"from email.read","minimum":0},"attachmentIndex":{"type":"integer","description":"Alias for index","minimum":0},"#
-                + #""attachment_index":{"type":"integer","description":"Alias for index","#
-                + #"minimum":0}},"required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
-                + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},{"anyOf":[{"required":["index"]},"#
-                + #"{"required":["attachmentIndex"]},{"required":["attachment_index"]}]}],"additionalProperties":false}"#
+                + #"from [email.accounts] (e.g. volcrypt, icloud)"},"id":{"type":"string","description":"IMAP message "#
+                + #"id from email.search"},"messageId":{"type":"string","description":"Alias for "#
+                + #"id"},"message_id":{"type":"string","description":"Alias for id"},"uid":{"type":"string","description":"Alias "#
+                + #"for id"},"index":{"type":"integer","description":"Zero-based attachment "#
+                + #"position from email.read","minimum":0},"attachmentIndex":{"type":"integer","description":"Alias "#
+                + #"for index","minimum":0},"attachment_index":{"type":"integer","description":"Alias for "#
+                + #"index","minimum":0}},"required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
+                + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},"#
+                + #"{"anyOf":[{"required":["index"]},{"required":["attachmentIndex"]},"#
+                + #"{"required":["attachment_index"]}]} ],"additionalProperties":false}"#
         )
     /// Gated: downloads stage files and always prompt without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval
