@@ -112,6 +112,7 @@ iOSInjectionProject/
 
 # Scratch / build artifacts
 scratch/
+dist/
 
 # Sprite design-review snapshots
 .sprite-previews/

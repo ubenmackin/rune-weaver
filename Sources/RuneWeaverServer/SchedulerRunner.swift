@@ -1,9 +1,10 @@
-// Rune Weaver Server — Single-flight lock for manual job execution.
+// Rune Weaver Server — Single-flight lock for scheduler job execution.
 //
-// Guards concurrent manual job execution requests (`POST /scheduler/jobs/:id/run`)
-// within the API service. Prevents duplicate concurrent executions of the same
-// job by UUID or normalized name while keeping API execution distinct from the
-// standalone CLI scheduler foreground loop.
+// Guards concurrent job executions (`POST /scheduler/jobs/:id/run` plus the
+// in-process auto-fire worker) within the API service. Prevents duplicate
+// concurrent executions of the same job by UUID or normalized name, so a
+// manual run never overlaps an auto-fire tick for the same job in this
+// process.
 //
 // Service notifications travel exclusively through the WebSocket event hub
 // plus Web Notifications; the service never shells to `osascript`. Local
@@ -13,17 +14,16 @@
 import Foundation
 import RuneWeaverCore
 
-/// Single-flight lock for engine API manual job runs.
+/// Single-flight lock for scheduler job runs inside the service process.
 ///
-/// REST-only guard for concurrent `POST /scheduler/jobs/:id/run` calls
-/// inside this service process: the UUID and name slots block overlapping
-/// manual runs for the same job regardless of which identity the caller
-/// holds. This lock does NOT coordinate with the CLI foreground runner
-/// (`SchedulerEngine.running` in `scheduler run`); the two live in
-/// separate processes with no shared state, so the same job name can still
-/// run concurrently via API plus CLI. The service is CRUD plus manual-run
-/// only — cron and poll triggers never auto-fire here; the CLI foreground
-/// loop is the sole auto-fire runner. Prefer the `id:name:` overloads when
+/// Guards concurrent `POST /scheduler/jobs/:id/run` calls plus in-process
+/// auto-fire ticks (`ServerSchedulerWorker`) sharing one lock: the UUID and
+/// name slots block overlapping runs for the same job regardless of which
+/// identity the caller holds. This lock does NOT coordinate with the CLI
+/// foreground runner (`SchedulerEngine.running` in `scheduler run`); the two
+/// live in separate processes with no shared state, so the same job name can
+/// still double-fire via service auto-fire plus CLI. Run one auto-fire runner
+/// at a time. Prefer the `id:name:` overloads when
 /// both are known so either key blocks the other within the service.
 public actor SchedulerRunLock {
     /// Job identifiers with an in-flight run.
@@ -88,10 +88,11 @@ public actor SchedulerRunLock {
     /// Acquires both the UUID and name slots atomically.
     ///
     /// Either key blocks the other within this service process so
-    /// concurrent manual REST runs for the same job never overlap
-    /// regardless of which identity the caller holds. Does not block CLI
-    /// `scheduler run` fires for the same name (separate process, separate
-    /// lock).
+    /// concurrent REST runs and in-process auto-fire ticks for the same job
+    /// never overlap regardless of which identity the caller holds. Does not
+    /// block CLI `scheduler run` fires for the same name (separate process,
+    /// separate lock), so service auto-fire plus CLI can still double-fire —
+    /// run one auto-fire runner at a time.
     /// - Parameters:
     ///   - id: Job identifier.
     ///   - name: Job name.

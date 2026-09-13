@@ -216,8 +216,10 @@ public enum LLMProviderFactory: Sendable {
                 contextLength: config.contextLength ?? LlamaCppProvider.defaultContextLength
             )
         default:
+            // `baseURL` aliases `serverURL`, so read the canonical value
+            // directly instead of OR-ing the alias against itself.
             return OpenAICompatibleProvider(
-                baseURL: config.baseURL ?? config.serverURL ?? OpenAICompatibleProvider.defaultBaseURL,
+                baseURL: config.serverURL ?? OpenAICompatibleProvider.defaultBaseURL,
                 apiKey: apiKey,
                 model: config.model ?? OpenAICompatibleProvider.defaultModel,
                 contextLength: config.contextLength ?? OpenAICompatibleProvider.defaultContextLength,
@@ -239,5 +241,64 @@ public enum LLMProviderFactory: Sendable {
         llm.providers.compactMap { entryName, config in
             makeProvider(entryName: entryName, config: config, apiKey: apiKeysByEntry[entryName])
         }
+    }
+
+    /// Selects the active provider: explicit override first (matched
+    /// against the provider name, its local aliases, then the model
+    /// name), then `default_provider`, then `fallback_provider`, then
+    /// first enabled.
+    ///
+    /// The `local` config entry maps to the `llamacpp` backend
+    /// (`llamacpp`/`llama-cpp`/`llama_cpp`/`local` are aliases), so an
+    /// override of `local` and a default of `local` both resolve to a
+    /// `LlamaCppProvider` whose `name` is `"llamacpp"`. This is the
+    /// single shared selection path for the CLI and the menu-bar app.
+    /// - Parameters:
+    ///   - override: Explicit provider name, if any.
+    ///   - providers: Enabled providers.
+    ///   - config: Decoded `[llm]` config section.
+    /// - Returns: Selected provider, or nil when the override matches nothing.
+    public static func selectProvider(
+        named override: String?,
+        from providers: [any LLMProvider],
+        config: RuneWeaverCore.LLMConfig
+    ) -> (any LLMProvider)? {
+        if let override, !override.isEmpty {
+            let wanted = override.lowercased()
+            if let match = providers.first(where: { matchesProvider($0, wanted: wanted) }) {
+                return match
+            }
+            return providers.first(where: { $0.modelInfo.name.lowercased() == wanted })
+        }
+        if let match = providers.first(where: { matchesProvider($0, wanted: config.defaultProvider) }) {
+            return match
+        }
+        if let fallback = config.fallbackProvider,
+           let match = providers.first(where: { matchesProvider($0, wanted: fallback) })
+        {
+            return match
+        }
+        return providers.first
+    }
+
+    /// Whether a provider matches a configured name, including the
+    /// local-backend aliases (`llamacpp`, `llama-cpp`, `llama_cpp`,
+    /// `local` all match each other). Comparison is case-insensitive
+    /// and trims surrounding whitespace.
+    /// - Parameters:
+    ///   - provider: Candidate provider.
+    ///   - wanted: Configured or caller-supplied name.
+    /// - Returns: True when the names match directly or via alias.
+    public static func matchesProvider(_ provider: any LLMProvider, wanted: String) -> Bool {
+        let normalized = wanted.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !normalized.isEmpty else { return false }
+        if provider.name.lowercased() == normalized {
+            return true
+        }
+        let localAliases: Set = ["llamacpp", "llama-cpp", "llama_cpp", "local"]
+        if localAliases.contains(provider.name.lowercased()), localAliases.contains(normalized) {
+            return true
+        }
+        return false
     }
 }

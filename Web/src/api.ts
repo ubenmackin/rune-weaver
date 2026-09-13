@@ -31,6 +31,7 @@ export interface HealthResponse {
   engine: string;
   version: string;
   model?: string;
+  provider?: string;
   contextLength?: number;
 }
 
@@ -469,4 +470,75 @@ export function runJobNow(id: string): Promise<OrchestratorResponse> {
     `/scheduler/jobs/${encodeURIComponent(id)}/run`,
     { method: "POST", body: JSON.stringify({}) },
   );
+}
+
+export interface ProviderConfigData {
+  enabled: boolean;
+  model?: string;
+  server_url?: string;
+  serverURL?: string;
+  api_key_env?: string;
+  apiKeyEnv?: string;
+  provider_type?: string;
+  providerType?: string;
+  api_style?: string;
+  apiStyle?: string;
+  context_length?: number;
+  contextLength?: number;
+}
+
+export interface EmailAccountData {
+  name: string;
+  type: string;
+  host: string;
+  port: number;
+  username: string;
+}
+
+export interface SettingsResponse {
+  engineName: string;
+  logLevel: string;
+  defaultProvider: string;
+  fallbackProvider?: string;
+  providers: Record<string, ProviderConfigData>;
+  memoryVectorDBPath: string;
+  memoryEpisodesDBPath: string;
+  memoryEmbeddingModel: string;
+  voiceSTTProvider: string;
+  voiceWhisperModel: string;
+  voiceTTSProvider: string;
+  sandboxStagingPath: string;
+  sandboxAutoApproveAfter: number;
+  emailAccounts: EmailAccountData[];
+  configPath: string;
+}
+
+export interface UpdateSettingsInput {
+  engineName?: string;
+  logLevel?: string;
+  defaultProvider?: string;
+  fallbackProvider?: string;
+  providers?: Record<string, ProviderConfigData>;
+  memoryVectorDBPath?: string;
+  memoryEpisodesDBPath?: string;
+  memoryEmbeddingModel?: string;
+  voiceSTTProvider?: string;
+  voiceWhisperModel?: string;
+  voiceTTSProvider?: string;
+  sandboxStagingPath?: string;
+  sandboxAutoApproveAfter?: number;
+  emailAccounts?: EmailAccountData[];
+}
+
+export function getSettings(): Promise<SettingsResponse> {
+  return fetchJson<SettingsResponse>("/settings");
+}
+
+export function updateSettings(
+  input: UpdateSettingsInput,
+): Promise<SettingsResponse> {
+  return fetchJson<SettingsResponse>("/settings", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
 }

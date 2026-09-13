@@ -8,6 +8,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "rune-weaver", targets: ["RuneWeaverCLI"]),
+        .executable(name: "RuneWeaverApp", targets: ["RuneWeaverApp"]),
         .library(name: "RuneWeaverCore", targets: ["RuneWeaverCore"]),
         .library(name: "RuneWeaverLLM", targets: ["RuneWeaverLLM"]),
         .library(name: "RuneWeaverTools", targets: ["RuneWeaverTools"]),
@@ -77,6 +78,17 @@ let package = Package(
                 .product(name: "ServiceLifecycle", package: "swift-service-lifecycle"),
                 .product(name: "Logging", package: "swift-log"),
                 .product(name: "Bestline", package: "bestline-swift")
+            ]
+        ),
+        .executableTarget(
+            name: "RuneWeaverApp",
+            dependencies: [
+                "RuneWeaverCore",
+                "RuneWeaverLLM",
+                "RuneWeaverTools",
+                "RuneWeaverServer",
+                .product(name: "Vapor", package: "vapor"),
+                .product(name: "Logging", package: "swift-log")
             ]
         ),
         .testTarget(

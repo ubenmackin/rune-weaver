@@ -20,9 +20,14 @@ import Vapor
 /// `configureRuneWeaver(_:context:)`, and runs it so the REST routes,
 /// chat WebSocket, and static dashboard bundle serve on `127.0.0.1:8082`
 /// by default with no auth (single-user, local-machine trust). The
-/// service is CRUD plus manual-run only for the scheduler; cron and poll
-/// triggers never auto-fire here — the CLI `scheduler run` foreground
-/// loop is the sole auto-fire runner in a separate process.
+/// service auto-fires scheduler cron and poll triggers in-process via
+/// `ServerSchedulerWorker` (started/stopped by `ServerSchedulerLifecycle`)
+/// sharing the single-flight `SchedulerRunLock` with the manual
+/// `POST /scheduler/jobs/:id/run` route, so overlapping fires in this
+/// process skip instead of stacking. The CLI `scheduler run` foreground
+/// loop is a separate auto-fire runner in another process with no shared
+/// lock state, so running this service and the CLI loop together can
+/// double-fire the same job — run one auto-fire runner at a time.
 struct ServeCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(

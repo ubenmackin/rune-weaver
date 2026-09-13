@@ -8,11 +8,23 @@ import ChatView from "./components/ChatView";
 import MemoryBrowser from "./components/MemoryBrowser";
 import RunLogViewer from "./components/RunLogViewer";
 import SchedulerManager from "./components/SchedulerManager";
+import SettingsManager from "./components/SettingsManager";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
+const VALID_TABS: Tab[] = ["chat", "approvals", "memory", "runs", "schedules", "settings"];
+
+function getInitialTab(): Tab {
+  if (typeof window === "undefined") return "chat";
+  const hash = window.location.hash.replace("#", "").toLowerCase() as Tab;
+  if (VALID_TABS.includes(hash)) return hash;
+  const path = window.location.pathname.replace(/^\//, "").toLowerCase() as Tab;
+  if (VALID_TABS.includes(path)) return path;
+  return "chat";
+}
+
 export default function App() {
-  const [tab, setTab] = useState<Tab>("chat");
+  const [tab, setTab] = useState<Tab>(getInitialTab);
   const [health, setHealth] = useState<HealthResponse | null>(null);
 
   const {
@@ -23,6 +35,17 @@ export default function App() {
     approvalsBadge,
     clearApprovalsBadge,
   } = useWebNotifications();
+
+  useEffect(() => {
+    function handleHashChange() {
+      const current = window.location.hash.replace("#", "").toLowerCase() as Tab;
+      if (VALID_TABS.includes(current)) {
+        setTab(current);
+      }
+    }
+    window.addEventListener("hashchange", handleHashChange);
+    return () => window.removeEventListener("hashchange", handleHashChange);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -40,6 +63,7 @@ export default function App() {
 
   function handleSelectTab(selected: Tab) {
     setTab(selected);
+    window.location.hash = selected;
     if (selected === "runs") clearRunsBadge();
     if (selected === "approvals") clearApprovalsBadge();
   }
@@ -58,8 +82,8 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <main className={`app-main-content ${tab === "chat" ? "chat-tab-active" : ""}`}>
-        <div className={`app-container ${tab === "chat" ? "chat-full-width" : ""}`}>
+      <main className="app-main-content">
+        <div className="app-container">
           {/* Chat tab is kept mounted so ongoing conversation and session state are preserved across navigation */}
           <div
             className="tab-panel-wrapper"
@@ -73,6 +97,7 @@ export default function App() {
           {tab === "memory" ? <MemoryBrowser /> : null}
           {tab === "runs" ? <RunLogViewer /> : null}
           {tab === "schedules" ? <SchedulerManager /> : null}
+          {tab === "settings" ? <SettingsManager /> : null}
         </div>
       </main>
     </div>
