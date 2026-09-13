@@ -18,7 +18,7 @@
 
 .DEFAULT_GOAL := all
 
-.PHONY: all setup setup-web setup-swift build build-web build-swift test test-web test-swift lint lint-web lint-swift audit audit-web audit-swift run clean
+.PHONY: all setup setup-web setup-swift build build-web build-swift test test-web test-swift lint lint-web lint-swift audit audit-web audit-swift run app dmg clean
 
 all: build test lint
 
@@ -82,6 +82,12 @@ audit-swift:
 run:
 	swift run rune-weaver $(ARGS)
 
+app:
+	bash scripts/build_app.sh
+
+dmg:
+	bash scripts/build_dmg.sh
+
 clean:
-	rm -rf .build Web/dist
+	rm -rf .build Web/dist dist
 

@@ -41,11 +41,12 @@ public struct DashboardBundle: Sendable, Equatable {
     /// Resolves the bundle directory without failing when Node/npm never ran.
     ///
     /// Candidate order: the `RUNEWEAVER_DASHBOARD_DIR` environment
-    /// override first, then `<cwd>/Web/dist`, then the package-relative
-    /// `Web/dist` derived from this source file. The first candidate
-    /// containing `index.html` wins; when none qualifies the returned
-    /// bundle has a nil directory so callers serve the stub that reports
-    /// the missing build instead of failing silently.
+    /// override first, then the `Bundle.main` web resources for the packaged
+    /// app, then `<cwd>/Web/dist`, then the package-relative `Web/dist`
+    /// derived from this source file. The first candidate containing
+    /// `index.html` wins; when none qualifies the returned bundle has a nil
+    /// directory so callers serve the stub that reports the missing build
+    /// instead of failing silently.
     /// - Parameters:
     ///   - fileManager: Filesystem accessor. Defaults to shared.
     ///   - environment: Environment values. Defaults to the process
@@ -59,6 +60,9 @@ public struct DashboardBundle: Sendable, Equatable {
         var candidates: [URL] = []
         if let override = environment[environmentKey], !override.isEmpty {
             candidates.append(URL(fileURLWithPath: override, isDirectory: true))
+        }
+        if let bundleResources = Bundle.main.resourceURL {
+            candidates.append(bundleResources.appendingPathComponent("web", isDirectory: true))
         }
         candidates.append(URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
             .appendingPathComponent(relativeDistPath, isDirectory: true))

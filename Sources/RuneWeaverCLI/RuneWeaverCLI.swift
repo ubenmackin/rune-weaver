@@ -140,10 +140,9 @@ enum CLIProviderBuilder {
     /// name), then `default_provider`, then `fallback_provider`, then
     /// first enabled.
     ///
-    /// The `local` config entry maps to the `llamacpp` backend
-    /// (`llamacpp`/`llama-cpp`/`llama_cpp`/`local` are aliases), so
-    /// `--provider local` and `default_provider = "local"` both resolve
-    /// to a `LlamaCppProvider` whose `name` is `"llamacpp"`.
+    /// Shared selection lives in `LLMProviderFactory` so the CLI and the
+    /// menu-bar app resolve the same way; this wrapper keeps existing
+    /// call sites stable.
     /// - Parameters:
     ///   - override: Explicit `--provider` value, if any.
     ///   - providers: Enabled providers.
@@ -154,42 +153,21 @@ enum CLIProviderBuilder {
         from providers: [any LLMProvider],
         config: LLMConfig
     ) -> (any LLMProvider)? {
-        if let override, !override.isEmpty {
-            let wanted = override.lowercased()
-            if let match = providers.first(where: { matchesProvider($0, wanted: wanted) }) {
-                return match
-            }
-            return providers.first(where: { $0.modelInfo.name.lowercased() == wanted })
-        }
-        if let match = providers.first(where: { matchesProvider($0, wanted: config.defaultProvider) }) {
-            return match
-        }
-        if let fallback = config.fallbackProvider,
-           let match = providers.first(where: { matchesProvider($0, wanted: fallback) })
-        {
-            return match
-        }
-        return providers.first
+        LLMProviderFactory.selectProvider(named: override, from: providers, config: config)
     }
 
     /// Whether a provider matches a configured/CLI name, including the
     /// local-backend aliases (`llamacpp`, `llama-cpp`, `llama_cpp`,
     /// `local` all match each other). Comparison is case-insensitive.
+    ///
+    /// Shared matching lives in `LLMProviderFactory`; this wrapper keeps
+    /// existing call sites stable.
     /// - Parameters:
     ///   - provider: Candidate provider.
     ///   - wanted: Configured or CLI-supplied name.
     /// - Returns: True when the names match directly or via alias.
     static func matchesProvider(_ provider: any LLMProvider, wanted: String) -> Bool {
-        let normalized = wanted.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !normalized.isEmpty else { return false }
-        if provider.name.lowercased() == normalized {
-            return true
-        }
-        let localAliases: Set = ["llamacpp", "llama-cpp", "llama_cpp", "local"]
-        if localAliases.contains(provider.name.lowercased()), localAliases.contains(normalized) {
-            return true
-        }
-        return false
+        LLMProviderFactory.matchesProvider(provider, wanted: wanted)
     }
 }
 

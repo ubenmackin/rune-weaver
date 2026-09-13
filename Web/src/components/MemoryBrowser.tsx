@@ -10,6 +10,8 @@ import {
   type FactsResponse,
   type MemoryResult,
 } from "../api";
+import MarkdownText from "./MarkdownText";
+import { PlusIcon, RefreshIcon, SearchIcon, TrashIcon } from "./icons";
 
 function hashContent(content: string): string {
   // cyrb53 53-bit hash: substantially fewer collisions than 32-bit djb2
@@ -136,93 +138,168 @@ export default function MemoryBrowser() {
   }
 
   return (
-    <section className="panel" aria-label="Memory browser">
-      <h2>Memory</h2>
-      {error ? <p className="error">{error}</p> : null}
-      <h3>Search</h3>
-      <div className="row">
-        <input
-          type="text"
-          aria-label="Memory search"
-          placeholder="Search memories…"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") void search();
-          }}
-        />
-        <button
-          type="button"
-          className="primary"
-          disabled={busy || query.trim().length === 0}
-          onClick={() => void search()}
-        >
-          Search
-        </button>
-      </div>
-      <div>
-        {/* TEMPORARY: MemoryResult has no stable backend id yet. Keys use
-            stable bounded identity only (source + 53-bit content hash plus
-            a metadata fingerprint, with an occurrence suffix for
-            exact-duplicate collisions), never the positional index, full
-            content, or unstable score, so reorder/filter never remounts
-            identical rows. When the backend adds result.id, use
-            key={result.id}. */}
-        {results.map((result) => (
-          <div className="card" key={resultKey(result)}>
-            <div className="muted">
-              [{result.source}] {result.score.toFixed(2)}
-            </div>
-            <div>{result.content}</div>
-          </div>
-        ))}
-      </div>
-      <h3>Facts browser</h3>
-      <div className="row">
-        <input
-          type="text"
-          aria-label="New fact"
-          placeholder="Remember this…"
-          value={newFact}
-          onChange={(event) => setNewFact(event.target.value)}
-        />
-        <button
-          type="button"
-          className="ghost"
-          disabled={busy || newFact.trim().length === 0}
-          onClick={() => void addFact()}
-        >
-          Remember
-        </button>
-      </div>
-      <p className="muted">
-        {facts
-          ? `${facts.facts.length} facts · ${facts.semanticCount} semantic · ${facts.episodeCount} episodes`
-          : "Loading facts…"}
-      </p>
-      {facts?.facts.map((fact) => (
-        <div className="card" key={fact.id}>
-          <div>{fact.content}</div>
-          <div className="muted">{fact.source}</div>
+    <section className="panel memory-panel" aria-label="Memory browser">
+      <div className="panel-header-row">
+        <div>
+          <h2>Memory</h2>
+          <p className="muted text-sm">
+            Search episodic recall, semantic embeddings, and manage stored user facts.
+          </p>
+        </div>
+
+        <div className="row">
           <button
             type="button"
-            className="danger"
-            onClick={() => void removeFact(fact.id)}
+            className="ghost icon-text-btn"
+            onClick={() => {
+              void loadFacts();
+              if (query.trim()) void search();
+            }}
+            disabled={busy}
           >
-            Delete
+            <RefreshIcon size={14} className={busy ? "spin" : ""} />
+            <span>{busy ? "Refreshing…" : "Refresh"}</span>
           </button>
         </div>
-      ))}
-      {facts && facts.preferences.length > 0 ? (
-        <div>
-          <h4>Preferences</h4>
-          {facts.preferences.map((preference) => (
-            <div className="card" key={preference.key}>
-              <strong>{preference.key}</strong>: {preference.value}
+      </div>
+
+      {error ? <p className="error">{error}</p> : null}
+
+      <div className="memory-search-section">
+        <h3>Search</h3>
+        <div className="row">
+          <input
+            type="text"
+            aria-label="Memory search"
+            placeholder="Search memories…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void search();
+            }}
+          />
+          <button
+            type="button"
+            className="primary icon-text-btn"
+            disabled={busy || query.trim().length === 0}
+            onClick={() => void search()}
+          >
+            <SearchIcon size={14} />
+            <span>Search</span>
+          </button>
+        </div>
+      </div>
+
+      {results.length > 0 ? (
+        <div className="memory-results-container">
+          <h4>Search Results ({results.length})</h4>
+          <div className="memory-results-list">
+            {/* TEMPORARY: MemoryResult has no stable backend id yet. Keys use
+                stable bounded identity only (source + 53-bit content hash plus
+                a metadata fingerprint, with an occurrence suffix for
+                exact-duplicate collisions), never the positional index, full
+                content, or unstable score, so reorder/filter never remounts
+                identical rows. When the backend adds result.id, use
+                key={result.id}. */}
+            {results.map((result) => (
+              <div className="card memory-result-card" key={resultKey(result)}>
+                <div className="memory-card-header">
+                  <div className="memory-badges">
+                    <span className="badge memory-source-badge">{result.source}</span>
+                    <span className="badge memory-score-badge">
+                      Score: {result.score.toFixed(2)}
+                    </span>
+                  </div>
+                  {result.metadata && Object.keys(result.metadata).length > 0 ? (
+                    <span className="muted text-xs">
+                      {Object.entries(result.metadata)
+                        .map(([k, v]) => `${k}: ${v}`)
+                        .join(" · ")}
+                    </span>
+                  ) : null}
+                </div>
+                <div className="memory-card-content">
+                  <MarkdownText text={result.content} className="memory-markdown" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
+      <div className="memory-facts-section">
+        <h3>User Facts & Knowledge</h3>
+        <p className="muted text-sm">
+          Add persistent facts, background context, or personal preferences for the agent to remember.
+        </p>
+        <div className="row">
+          <input
+            type="text"
+            aria-label="New fact"
+            placeholder="Remember this…"
+            value={newFact}
+            onChange={(event) => setNewFact(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void addFact();
+            }}
+          />
+          <button
+            type="button"
+            className="ghost icon-text-btn"
+            disabled={busy || newFact.trim().length === 0}
+            onClick={() => void addFact()}
+          >
+            <PlusIcon size={14} />
+            <span>Remember</span>
+          </button>
+        </div>
+
+        <p className="muted text-sm memory-counts">
+          {facts
+            ? `${facts.facts.length} facts · ${facts.semanticCount} semantic · ${facts.episodeCount} episodes`
+            : "Loading facts…"}
+        </p>
+
+        <div className="facts-list">
+          {facts?.facts.map((fact) => (
+            <div className="card fact-item-card" key={fact.id}>
+              <div className="fact-item-main">
+                <MarkdownText text={fact.content} className="memory-markdown" />
+                <div className="fact-item-meta">
+                  <span className="badge memory-source-badge">{fact.source}</span>
+                  {fact.lastConfirmed ? (
+                    <span className="muted text-xs">
+                      {new Date(fact.lastConfirmed).toLocaleDateString()}
+                    </span>
+                  ) : null}
+                </div>
+              </div>
+              <button
+                type="button"
+                className="danger icon-text-btn"
+                aria-label={`Delete fact ${fact.id}`}
+                onClick={() => void removeFact(fact.id)}
+              >
+                <TrashIcon size={14} />
+                <span>Delete</span>
+              </button>
             </div>
           ))}
         </div>
-      ) : null}
+
+        {facts && facts.preferences.length > 0 ? (
+          <div className="memory-preferences-section">
+            <h4>Preferences</h4>
+            <div className="preferences-list">
+              {facts.preferences.map((preference) => (
+                <div className="card preference-card" key={preference.key}>
+                  <strong>{preference.key}</strong>: <span>{preference.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </section>
   );
 }

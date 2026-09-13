@@ -619,12 +619,16 @@ public final class ServerContext: Sendable {
     public let runs: RunLogStore
     /// Live sockets receiving approval broadcasts.
     public let hub: WSHub
-    /// Single-flight lock for manual job runs within this service process.
-    /// Guards concurrent `POST .../run` calls only; it does not coordinate
-    /// with the CLI foreground runner, which owns cron/poll auto-fire.
+    /// Single-flight lock for scheduler job runs within this service process.
+    /// Guards concurrent `POST .../run` calls plus in-process auto-fire ticks
+    /// sharing one lock; it does not coordinate with the CLI foreground runner,
+    /// so service auto-fire plus CLI can double-fire — run one auto-fire runner
+    /// at a time.
     public let runLock: SchedulerRunLock
     /// Active in-flight chat turn tasks for cancellation.
     public let activeTurns: ActiveTurnTracker
+    /// In-process background scheduler worker.
+    public let schedulerWorker: ServerSchedulerWorker
 
     /// Creates a server context.
     /// - Parameters:
@@ -638,8 +642,9 @@ public final class ServerContext: Sendable {
     ///   - scheduler: Job registry. Defaults to empty.
     ///   - runs: Run audit trail. Defaults to empty.
     ///   - hub: Live sockets. Defaults to empty.
-    ///   - runLock: Single-flight lock for manual runs. Defaults to empty.
+    ///   - runLock: Single-flight lock for service runs (manual plus auto-fire). Defaults to empty.
     ///   - activeTurns: Active chat turn tracker. Defaults to empty.
+    ///   - schedulerWorker: In-process scheduler worker. Defaults to nil (constructed from collaborators).
     public init(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -652,7 +657,8 @@ public final class ServerContext: Sendable {
         runs: RunLogStore = RunLogStore(),
         hub: WSHub = WSHub(),
         runLock: SchedulerRunLock = SchedulerRunLock(),
-        activeTurns: ActiveTurnTracker = ActiveTurnTracker()
+        activeTurns: ActiveTurnTracker = ActiveTurnTracker(),
+        schedulerWorker: ServerSchedulerWorker? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -666,6 +672,15 @@ public final class ServerContext: Sendable {
         self.hub = hub
         self.runLock = runLock
         self.activeTurns = activeTurns
+        self.schedulerWorker = schedulerWorker ?? ServerSchedulerWorker(
+            scheduler: scheduler,
+            runs: runs,
+            hub: hub,
+            runLock: runLock,
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: toolBus
+        )
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -685,6 +700,8 @@ public final class ServerContext: Sendable {
     ///   - schedulerConfig: Durable `config.toml [[scheduler.jobs]]` used
     ///     to seed the runtime scheduler registry. Defaults to empty.
     ///   - episodesDBPath: SQLite file path for durable run log and schedule persistence. Defaults to nil.
+    ///   - notifier: Optional notifier for completed scheduler jobs. Defaults to nil.
+    ///   - onApprovalRequested: Optional async callback invoked when a tool call requires approval. Defaults to nil.
     /// - Returns: Context with an approval-broadcasting bus.
     public static func make(
         config: ServerConfig = .default,
@@ -694,7 +711,9 @@ public final class ServerContext: Sendable {
         llm: any LLMProvider,
         systemPrompt: String? = nil,
         schedulerConfig: SchedulerConfig = .empty,
-        episodesDBPath: String? = nil
+        episodesDBPath: String? = nil,
+        notifier: (any SchedulerNotifier)? = nil,
+        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -712,6 +731,16 @@ public final class ServerContext: Sendable {
             systemPrompt: systemPrompt,
             memoryEngine: memoryEngine
         )
+        let schedulerWorker = ServerSchedulerWorker(
+            scheduler: scheduler,
+            runs: runs,
+            hub: hub,
+            runLock: runLock,
+            orchestrator: orchestrator,
+            conversations: conversations,
+            toolBus: bus,
+            notifier: notifier
+        )
         let context = ServerContext(
             config: config,
             conversations: conversations,
@@ -723,7 +752,8 @@ public final class ServerContext: Sendable {
             scheduler: scheduler,
             runs: runs,
             hub: hub,
-            runLock: runLock
+            runLock: runLock,
+            schedulerWorker: schedulerWorker
         )
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
@@ -733,6 +763,9 @@ public final class ServerContext: Sendable {
             // then broadcast and wait with a timeout.
             let request = await handlerApprovals.fileRequest(tool: tool, call: call)
             await handlerHub.broadcastApproval(request)
+            if let onApprovalRequested {
+                await onApprovalRequested(request)
+            }
             let decision = await handlerApprovals.waitForDecision(
                 id: request.id,
                 timeoutSeconds: ApprovalQueue.defaultDecisionTimeoutSeconds
@@ -773,6 +806,19 @@ struct WSHubShutdownLifecycle: LifecycleHandler {
     }
 }
 
+/// Lifecycle hook managing the background scheduler worker on application start and stop.
+struct ServerSchedulerLifecycle: LifecycleHandler {
+    let worker: ServerSchedulerWorker
+
+    func didBootAsync(_: Application) async throws {
+        await worker.start()
+    }
+
+    func shutdownAsync(_: Application) async {
+        await worker.stop()
+    }
+}
+
 /// Configures loopback binding plus every engine route.
 ///
 /// Binds `127.0.0.1:8082` by default with no auth (single-user,
@@ -793,6 +839,7 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
     app.http.server.configuration.port = context.config.port
     app.http.server.configuration.shutdownTimeout = .seconds(2)
     app.lifecycle.use(WSHubShutdownLifecycle(hub: context.hub))
+    app.lifecycle.use(ServerSchedulerLifecycle(worker: context.schedulerWorker))
     app.runeWeaver = context
     registerRuneWeaverRoutes(app)
 }
@@ -801,7 +848,8 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
 ///
 /// Single surface shared by all clients with no per-client forks:
 /// health, chat, tools, memory search and facts, approvals list and
-/// decide, scheduler job CRUD plus manual run, run logs, the chat
+/// decide, scheduler job CRUD plus manual run and in-process auto-fire, run
+/// logs, the chat
 /// WebSocket, and the static dashboard bundle on the same origin.
 /// - Parameter app: Application receiving the routes.
 public func registerRuneWeaverRoutes(_ app: Application) {
@@ -814,6 +862,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSchedulerCRUDRoutes(app)
     registerSchedulerRunRoute(app)
     registerRunRoutes(app)
+    registerSettingsRoutes(app)
     registerWebSocketRoute(app)
     registerDashboardRoutes(app)
 }
@@ -900,6 +949,7 @@ private func registerHealthRoute(_ app: Application) {
         return HealthResponse(
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
+            provider: modelInfo.provider,
             contextLength: modelInfo.contextLength
         )
     }
@@ -1221,14 +1271,16 @@ private func registerSchedulerCRUDRoutes(_ app: Application) {
 
 /// Registers the manual scheduler job run route.
 ///
-/// Manual-run only: the service exposes CRUD plus this single-flight
-/// `POST .../run` entry point. Cron and poll triggers never auto-fire in
-/// the service; the CLI `scheduler run` foreground loop is the sole
-/// auto-fire runner (separate process, separate `SchedulerEngine.running`
-/// lock). Concurrent manual runs for the same job inside this process are
-/// rejected with `409`. Run completion is broadcast via WebSocket to the
-/// dashboard and native Web Notifications, intentionally superseding Script
-/// Editor (`osascript`) dialogs.
+/// Manual entry point alongside in-process auto-fire: the service exposes CRUD
+/// plus this single-flight `POST .../run` entry point and auto-fires cron and
+/// poll triggers via `ServerSchedulerWorker` on the shared `SchedulerRunLock`.
+/// The CLI `scheduler run` foreground loop is a separate auto-fire runner in
+/// another process with its own `SchedulerEngine.running` lock and no shared
+/// state, so concurrent service plus CLI runners can double-fire the same job —
+/// run one auto-fire runner at a time. Concurrent runs for the same job inside
+/// this process are rejected with `409`. Run completion is broadcast via
+/// WebSocket to the dashboard and native Web Notifications, intentionally
+/// superseding Script Editor (`osascript`) dialogs.
 /// - Parameter app: Application receiving the route.
 private func registerSchedulerRunRoute(_ app: Application) {
     let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
@@ -1340,6 +1392,57 @@ private func registerRunRoutes(_ app: Application) {
             throw Abort(.notFound, reason: "Unknown run \(raw)")
         }
         return entry
+    }
+}
+
+/// Registers settings routes for reading and persisting configuration.
+///
+/// `GET /settings` answers with the non-secret `SettingsResponse` loaded
+/// from the default file (built-in defaults when absent) plus its
+/// `configPath`. A present-but-corrupt file surfaces as `400` with the
+/// `ConfigError` detail instead of silently falling back to defaults,
+/// so clients never mistake defaults for stored values. `PUT /settings` decodes `UpdateSettingsRequest`, applies
+/// it onto the loaded config (refusing to overwrite a corrupt file from
+/// defaults), validates, then saves atomically with a
+/// `.bak` backup; `ConfigError` surfaces as `400` and unexpected failures
+/// as `500`. Saving persists the file only — live providers, the
+/// orchestrator system prompt, and memory paths keep running values until
+/// restart, so clients must treat a successful save as restart-required.
+/// - Parameter app: Application receiving the routes.
+private func registerSettingsRoutes(_ app: Application) {
+    let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
+    settings.get { _ async throws -> SettingsResponse in
+        let url = RuneWeaverConfig.defaultConfigFileURL()
+        let config: RuneWeaverConfig
+        do {
+            config = try RuneWeaverConfig.loadDefault()
+        } catch let error as ConfigError {
+            throw Abort(.badRequest, reason: String(describing: error))
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        return SettingsResponse(config: config, configPath: url.path)
+    }
+    settings.put { req async throws -> SettingsResponse in
+        let body = try req.content.decode(UpdateSettingsRequest.self)
+        let url = RuneWeaverConfig.defaultConfigFileURL()
+        var config: RuneWeaverConfig
+        do {
+            config = try RuneWeaverConfig.loadDefault()
+        } catch let error as ConfigError {
+            throw Abort(.badRequest, reason: String(describing: error))
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        body.apply(to: &config)
+        do {
+            try config.save(to: url)
+        } catch let error as ConfigError {
+            throw Abort(.badRequest, reason: String(describing: error))
+        } catch {
+            throw Abort(.internalServerError, reason: error.localizedDescription)
+        }
+        return SettingsResponse(config: config, configPath: url.path)
     }
 }
 

@@ -43,6 +43,8 @@ public enum ServerPaths {
     public static let toolActions = "tool-actions"
     /// WebSocket endpoint for streamed chat plus live approval prompts.
     public static let websocket = "ws"
+    /// Settings group.
+    public static let settings = "settings"
     /// Engine API version served on `/health`.
     public static let apiVersion = "0.1.0"
 }
@@ -104,6 +106,8 @@ public struct HealthResponse: Content, Equatable {
     public let version: String
     /// Active serving model name.
     public let model: String?
+    /// Active serving provider name.
+    public let provider: String?
     /// Active context window limit.
     public let contextLength: Int?
 
@@ -113,18 +117,21 @@ public struct HealthResponse: Content, Equatable {
     ///   - engine: Engine display name. Defaults to `"Rune Weaver"`.
     ///   - version: API version. Defaults to `ServerPaths/apiVersion`.
     ///   - model: Active model name. Defaults to nil.
+    ///   - provider: Active provider name. Defaults to nil.
     ///   - contextLength: Active context limit. Defaults to nil.
     public init(
         status: String = "ok",
         engine: String = "Rune Weaver",
         version: String = ServerPaths.apiVersion,
         model: String? = nil,
+        provider: String? = nil,
         contextLength: Int? = nil
     ) {
         self.status = status
         self.engine = engine
         self.version = version
         self.model = model
+        self.provider = provider
         self.contextLength = contextLength
     }
 }
@@ -652,5 +659,155 @@ public struct CancelChatResponse: Content, Equatable {
     public init(sessionID: UUID, cancelled: Bool) {
         self.sessionID = sessionID
         self.cancelled = cancelled
+    }
+}
+
+/// Settings snapshot for `GET /settings` and `PUT /settings`.
+///
+/// Carries no secret values: providers expose only `apiKeyEnv` variable
+/// names and email accounts expose identity fields only, with passwords
+/// and keys resolved at runtime via `SecretsManager` so TOML and JSON
+/// never carry credentials.
+public struct SettingsResponse: Content, Equatable {
+    public let engineName: String
+    public let logLevel: String
+    public let defaultProvider: String
+    public let fallbackProvider: String?
+    public let providers: [String: ProviderConfig]
+    public let memoryVectorDBPath: String
+    public let memoryEpisodesDBPath: String
+    public let memoryEmbeddingModel: String
+    public let voiceSTTProvider: String
+    public let voiceWhisperModel: String
+    public let voiceTTSProvider: String
+    public let sandboxStagingPath: String
+    public let sandboxAutoApproveAfter: Int
+    public let emailAccounts: [EmailAccount]
+    public let configPath: String
+
+    public init(config: RuneWeaverConfig, configPath: String) {
+        self.engineName = config.engine.name
+        self.logLevel = config.engine.logLevel
+        self.defaultProvider = config.llm.defaultProvider
+        self.fallbackProvider = config.llm.fallbackProvider
+        self.providers = config.llm.providers
+        self.memoryVectorDBPath = config.memory.vectorDBPath
+        self.memoryEpisodesDBPath = config.memory.episodesDBPath
+        self.memoryEmbeddingModel = config.memory.embeddingModel
+        self.voiceSTTProvider = config.voice.sttProvider
+        self.voiceWhisperModel = config.voice.whisperModel
+        self.voiceTTSProvider = config.voice.ttsProvider
+        self.sandboxStagingPath = config.sandbox.stagingPath
+        self.sandboxAutoApproveAfter = config.sandbox.autoApproveAfter
+        self.emailAccounts = config.email.accounts
+        self.configPath = configPath
+    }
+}
+
+/// Request payload to update settings via `PUT /settings`.
+///
+/// Persisting requires a restart before live provider routing, the
+/// orchestrator system prompt, and memory paths pick the new values up;
+/// the route saves and validates the file but never hot-swaps running
+/// collaborators, so clients must surface restart-required guidance.
+public struct UpdateSettingsRequest: Content, Equatable {
+    public let engineName: String?
+    public let logLevel: String?
+    public let defaultProvider: String?
+    public let fallbackProvider: String?
+    public let providers: [String: ProviderConfig]?
+    public let memoryVectorDBPath: String?
+    public let memoryEpisodesDBPath: String?
+    public let memoryEmbeddingModel: String?
+    public let voiceSTTProvider: String?
+    public let voiceWhisperModel: String?
+    public let voiceTTSProvider: String?
+    public let sandboxStagingPath: String?
+    public let sandboxAutoApproveAfter: Int?
+    public let emailAccounts: [EmailAccount]?
+
+    public init(
+        engineName: String? = nil,
+        logLevel: String? = nil,
+        defaultProvider: String? = nil,
+        fallbackProvider: String? = nil,
+        providers: [String: ProviderConfig]? = nil,
+        memoryVectorDBPath: String? = nil,
+        memoryEpisodesDBPath: String? = nil,
+        memoryEmbeddingModel: String? = nil,
+        voiceSTTProvider: String? = nil,
+        voiceWhisperModel: String? = nil,
+        voiceTTSProvider: String? = nil,
+        sandboxStagingPath: String? = nil,
+        sandboxAutoApproveAfter: Int? = nil,
+        emailAccounts: [EmailAccount]? = nil
+    ) {
+        self.engineName = engineName
+        self.logLevel = logLevel
+        self.defaultProvider = defaultProvider
+        self.fallbackProvider = fallbackProvider
+        self.providers = providers
+        self.memoryVectorDBPath = memoryVectorDBPath
+        self.memoryEpisodesDBPath = memoryEpisodesDBPath
+        self.memoryEmbeddingModel = memoryEmbeddingModel
+        self.voiceSTTProvider = voiceSTTProvider
+        self.voiceWhisperModel = voiceWhisperModel
+        self.voiceTTSProvider = voiceTTSProvider
+        self.sandboxStagingPath = sandboxStagingPath
+        self.sandboxAutoApproveAfter = sandboxAutoApproveAfter
+        self.emailAccounts = emailAccounts
+    }
+
+    /// Applies this update onto a loaded config, preserving every field
+    /// the request omits.
+    ///
+    /// An empty `fallbackProvider` clears the fallback to nil so the
+    /// dashboard `(None)` option round-trips; a present `providers` map
+    /// replaces the stored map wholesale (absent means keep), and secrets
+    /// never flow through here — only `apiKeyEnv` names and password-less
+    /// email accounts.
+    public func apply(to config: inout RuneWeaverConfig) {
+        if let engineName {
+            config.engine.name = engineName
+        }
+        if let logLevel {
+            config.engine.logLevel = logLevel
+        }
+        if let defaultProvider {
+            config.llm.defaultProvider = defaultProvider
+        }
+        if let fallbackProvider {
+            config.llm.fallbackProvider = fallbackProvider.isEmpty ? nil : fallbackProvider
+        }
+        if let providers {
+            config.llm.providers = providers
+        }
+        if let memoryVectorDBPath {
+            config.memory.vectorDBPath = memoryVectorDBPath
+        }
+        if let memoryEpisodesDBPath {
+            config.memory.episodesDBPath = memoryEpisodesDBPath
+        }
+        if let memoryEmbeddingModel {
+            config.memory.embeddingModel = memoryEmbeddingModel
+        }
+        if let voiceSTTProvider {
+            config.voice.sttProvider = voiceSTTProvider
+        }
+        if let voiceWhisperModel {
+            config.voice.whisperModel = voiceWhisperModel
+        }
+        if let voiceTTSProvider {
+            config.voice.ttsProvider = voiceTTSProvider
+        }
+        if let sandboxStagingPath {
+            config.sandbox.stagingPath = sandboxStagingPath
+        }
+        if let sandboxAutoApproveAfter {
+            config.sandbox.autoApproveAfter = sandboxAutoApproveAfter
+        }
+        if let emailAccounts {
+            config.email.accounts = emailAccounts
+        }
     }
 }

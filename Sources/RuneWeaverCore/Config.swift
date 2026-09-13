@@ -65,10 +65,14 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var enabled: Bool
     /// Model identifier (e.g. `gemma-4-9b`). Local servers only.
     public var model: String?
-    /// Local server URL (MLX / llama.cpp / vLLM).
+    /// Server URL (MLX / llama.cpp / vLLM / OpenAI-compatible endpoint).
     public var serverURL: String?
-    /// Cloud base URL (OpenAI-compatible endpoints).
-    public var baseURL: String?
+    /// Cloud base URL alias. Deprecated in favor of `serverURL`.
+    public var baseURL: String? {
+        get { serverURL }
+        set { serverURL = newValue }
+    }
+
     /// Environment variable holding the API key. Resolved via
     /// `SecretsManager` (env first, Keychain fallback). Never in TOML.
     public var apiKeyEnv: String?
@@ -101,8 +105,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     ) {
         self.enabled = enabled
         self.model = model
-        self.serverURL = serverURL
-        self.baseURL = baseURL
+        self.serverURL = serverURL ?? baseURL
         self.apiKeyEnv = apiKeyEnv
         self.providerType = providerType
         self.apiStyle = apiStyle
@@ -118,6 +121,30 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case providerType = "provider_type"
         case apiStyle = "api_style"
         case contextLength = "context_length"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.model = try container.decodeIfPresent(String.self, forKey: .model)
+        let server = try container.decodeIfPresent(String.self, forKey: .serverURL)
+        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        self.serverURL = server ?? base
+        self.apiKeyEnv = try container.decodeIfPresent(String.self, forKey: .apiKeyEnv)
+        self.providerType = try container.decodeIfPresent(String.self, forKey: .providerType)
+        self.apiStyle = try container.decodeIfPresent(APIStyle.self, forKey: .apiStyle) ?? .chatCompletions
+        self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(serverURL, forKey: .serverURL)
+        try container.encodeIfPresent(apiKeyEnv, forKey: .apiKeyEnv)
+        try container.encodeIfPresent(providerType, forKey: .providerType)
+        try container.encode(apiStyle, forKey: .apiStyle)
+        try container.encodeIfPresent(contextLength, forKey: .contextLength)
     }
 }
 
@@ -444,7 +471,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
                     ),
                     "openrouter": ProviderConfig(
                         enabled: true,
-                        baseURL: "https://openrouter.ai/api/v1",
+                        serverURL: "https://openrouter.ai/api/v1",
                         apiKeyEnv: "OPENROUTER_API_KEY"
                     ),
                     "local": ProviderConfig(
@@ -508,7 +535,182 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try config.validate()
         return config
     }
+}
 
+// MARK: - RuneWeaverConfig TOML Serialization
+
+// swiftformat:disable extensionAccessControl
+
+extension RuneWeaverConfig {
+    /// Quotes a string for TOML output.
+    ///
+    /// Control characters use spec-valid basic-string escapes so rendered
+    /// values always reparse instead of emitting raw control bytes.
+    public static func tomlQuoted(_ value: String) -> String {
+        var out = "\""
+        for character in value {
+            switch character {
+            case "\\": out += "\\\\"
+            case "\"": out += "\\\""
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            case "\u{08}": out += "\\b"
+            case "\u{0C}": out += "\\f"
+            default:
+                if character.unicodeScalars.count == 1,
+                   let scalar = character.unicodeScalars.first,
+                   scalar.value < 0x20
+                {
+                    out += String(format: "\\u%04X", scalar.value)
+                } else {
+                    out.append(character)
+                }
+            }
+        }
+        out += "\""
+        return out
+    }
+
+    /// Renders this configuration as canonical TOML.
+    ///
+    /// Providers sort by name so repeated saves stay diff-stable; only
+    /// `api_key_env` names persist (secret values resolve at runtime via
+    /// `SecretsManager`), email accounts persist identity fields only, and
+    /// home integrations persist with `token_env` names only.
+    public func renderTOML() -> String {
+        var lines: [String] = ["# Rune Weaver configuration", ""]
+        lines += [
+            "[engine]",
+            "name = \(Self.tomlQuoted(engine.name))",
+            "log_level = \(Self.tomlQuoted(engine.logLevel))",
+            ""
+        ]
+        lines += [
+            "[llm]",
+            "default_provider = \(Self.tomlQuoted(llm.defaultProvider))"
+        ]
+        if let fallback = llm.fallbackProvider, !fallback.isEmpty {
+            lines.append("fallback_provider = \(Self.tomlQuoted(fallback))")
+        }
+        lines.append("")
+        for name in llm.providers.keys.sorted() {
+            guard let entry = llm.providers[name] else { continue }
+            lines.append("[llm.providers.\(name)]")
+            lines.append("enabled = \(entry.enabled ? "true" : "false")")
+            if let model = entry.model, !model.isEmpty {
+                lines.append("model = \(Self.tomlQuoted(model))")
+            }
+            if let serverURL = entry.serverURL, !serverURL.isEmpty {
+                lines.append("server_url = \(Self.tomlQuoted(serverURL))")
+            }
+            if let apiKeyEnv = entry.apiKeyEnv, !apiKeyEnv.isEmpty {
+                lines.append("api_key_env = \(Self.tomlQuoted(apiKeyEnv))")
+            }
+            if let providerType = entry.providerType, !providerType.isEmpty {
+                lines.append("provider_type = \(Self.tomlQuoted(providerType))")
+            }
+            lines.append("api_style = \(Self.tomlQuoted(entry.apiStyle.rawValue))")
+            if let contextLength = entry.contextLength {
+                lines.append("context_length = \(contextLength)")
+            }
+            lines.append("")
+        }
+        lines += [
+            "[memory]",
+            "vector_db_path = \(Self.tomlQuoted(memory.vectorDBPath))",
+            "episodes_db_path = \(Self.tomlQuoted(memory.episodesDBPath))",
+            "embedding_model = \(Self.tomlQuoted(memory.embeddingModel))",
+            "",
+            "[voice]",
+            "stt_provider = \(Self.tomlQuoted(voice.sttProvider))",
+            "whisper_model = \(Self.tomlQuoted(voice.whisperModel))",
+            "tts_provider = \(Self.tomlQuoted(voice.ttsProvider))",
+            "",
+            "[sandbox]",
+            "staging_path = \(Self.tomlQuoted(sandbox.stagingPath))",
+            "auto_approve_after = \(sandbox.autoApproveAfter)",
+            ""
+        ]
+        for account in email.accounts {
+            lines.append("[[email.accounts]]")
+            lines.append("name = \(Self.tomlQuoted(account.name))")
+            lines.append("type = \(Self.tomlQuoted(account.type))")
+            lines.append("host = \(Self.tomlQuoted(account.host))")
+            lines.append("port = \(account.port)")
+            lines.append("username = \(Self.tomlQuoted(account.username))")
+            lines.append("")
+        }
+        // Home integrations persist in array order (order is user intent,
+        // not a map, so no sorting). Only `token_env` names persist; token
+        // values resolve at runtime via `SecretsManager` and never touch TOML.
+        for entry in home.homekit {
+            lines.append("[[home.homekit]]")
+            lines.append("enabled = \(entry.enabled ? "true" : "false")")
+            lines.append("")
+        }
+        for entry in home.homeAssistant {
+            lines.append("[[home.home_assistant]]")
+            lines.append("enabled = \(entry.enabled ? "true" : "false")")
+            if let url = entry.url, !url.isEmpty {
+                lines.append("url = \(Self.tomlQuoted(url))")
+            }
+            if let tokenEnv = entry.tokenEnv, !tokenEnv.isEmpty {
+                lines.append("token_env = \(Self.tomlQuoted(tokenEnv))")
+            }
+            lines.append("")
+        }
+        for job in scheduler.jobs {
+            lines.append("[[scheduler.jobs]]")
+            lines.append("name = \(Self.tomlQuoted(job.name))")
+            lines.append("prompt = \(Self.tomlQuoted(job.prompt))")
+            lines.append("enabled = \(job.enabled ? "true" : "false")")
+            if let schedule = job.schedule, !schedule.isEmpty {
+                lines.append("schedule = \(Self.tomlQuoted(schedule))")
+            }
+            if let poll = job.poll {
+                lines.append("poll_account = \(Self.tomlQuoted(poll.account))")
+                lines.append("poll_query = \(Self.tomlQuoted(poll.query))")
+                if let mailbox = poll.mailbox, !mailbox.isEmpty {
+                    lines.append("poll_mailbox = \(Self.tomlQuoted(mailbox))")
+                }
+                lines.append("poll_interval_seconds = \(poll.pollIntervalSeconds)")
+                lines.append("poll_limit = \(poll.limit)")
+            }
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Saves and validates the configuration to a file URL.
+    /// Creates a `.bak` backup file if the target already exists,
+    /// and atomically replaces the file.
+    public func save(to fileURL: URL? = nil) throws {
+        let url = fileURL ?? Self.defaultConfigFileURL()
+        try validate()
+        let tomlText = renderTOML()
+        let dir = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: url.path) {
+            let backupURL = url.appendingPathExtension("bak")
+            // Stale backup removal is best-effort; a missing backup is
+            // expected on first save so its failure never blocks the write.
+            try? FileManager.default.removeItem(at: backupURL)
+            // The backup must succeed before overwriting so a copy failure
+            // never leaves the config replaced without a recovery copy.
+            try FileManager.default.copyItem(at: url, to: backupURL)
+        }
+        try tomlText.write(to: url, atomically: true, encoding: .utf8)
+    }
+}
+
+// swiftformat:enable extensionAccessControl
+
+// MARK: - RuneWeaverConfig Validation
+
+// swiftformat:disable extensionAccessControl
+
+extension RuneWeaverConfig {
     /// Validates every section, throwing a descriptive error on failure.
     /// - Throws: ``ConfigError/validationError(field:message:)`` or
     ///   ``ConfigError/missingRequired(field:)``.
@@ -567,6 +769,14 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     }
 
     private func validateProvider(_ provider: ProviderConfig, name: String) throws {
+        // Provider names render as bare `[llm.providers.<name>]` segments
+        // where dots or whitespace would fork the table path, so only
+        // TOML bare-key characters are accepted.
+        guard name.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
+            throw ConfigError.validationError(
+                field: "llm.providers.\(name)", message: "must match [A-Za-z0-9_-]+ (got '\(name)')"
+            )
+        }
         let prefix = "llm.providers.\(name)"
         if let model = provider.model, model.isEmpty {
             throw ConfigError.validationError(
@@ -580,9 +790,6 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         }
         if let serverURL = provider.serverURL {
             try Self.validateURLField(serverURL, field: "\(prefix).server_url")
-        }
-        if let baseURL = provider.baseURL {
-            try Self.validateURLField(baseURL, field: "\(prefix).base_url")
         }
         if let env = provider.apiKeyEnv, env.isEmpty {
             throw ConfigError.validationError(
@@ -735,6 +942,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         }
     }
 }
+
+// swiftformat:enable extensionAccessControl
 
 // MARK: - Hot-reloading loader
 

@@ -413,11 +413,12 @@ extension RuneWeaverConfig {
         } else {
             apiStyle = .chatCompletions
         }
+        let serverURL = try node.strictString("server_url", field: "\(prefix).server_url")
+        let baseURL = try node.strictString("base_url", field: "\(prefix).base_url")
         return try ProviderConfig(
             enabled: node.strictBool("enabled", field: "\(prefix).enabled") ?? true,
             model: node.strictString("model", field: "\(prefix).model"),
-            serverURL: node.strictString("server_url", field: "\(prefix).server_url"),
-            baseURL: node.strictString("base_url", field: "\(prefix).base_url"),
+            serverURL: serverURL ?? baseURL,
             apiKeyEnv: node.strictString("api_key_env", field: "\(prefix).api_key_env"),
             providerType: node.strictString("provider_type", field: "\(prefix).provider_type"),
             apiStyle: apiStyle,
