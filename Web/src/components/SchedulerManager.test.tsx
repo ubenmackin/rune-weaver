@@ -77,6 +77,9 @@ describe("SchedulerManager", () => {
         if (input === "/scheduler/jobs" && !init?.method) {
           return json({ jobs: [], count: 0 });
         }
+        if (input.startsWith("/runs") && !init?.method) {
+          return json({ runs: [], count: 0 });
+        }
         bodies.push(String(init?.body ?? ""));
         return json(job());
       }),
@@ -85,10 +88,19 @@ describe("SchedulerManager", () => {
     await waitFor(() => {
       expect(screen.getByText("0 jobs")).toBeInTheDocument();
     });
-    await user.type(screen.getByLabelText("Job name"), "morning digest");
-    await user.type(screen.getByLabelText("Cron schedule"), "0 8 * * *");
-    await user.type(screen.getByLabelText("Job prompt"), "Summarize mail");
-    await user.click(screen.getByRole("button", { name: "Create job" }));
+    await user.click(screen.getByRole("button", { name: "Create Schedule" }));
+    await user.type(screen.getByLabelText("Job Name"), "morning digest");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 2: default preset is daily 8am ("0 8 * * *")
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 3: prompt
+    await user.type(
+      screen.getByLabelText("Agent Task Instructions"),
+      "Summarize mail",
+    );
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 4: confirm
+    await user.click(screen.getByRole("button", { name: "Save Schedule" }));
     await waitFor(() => {
       expect(screen.getByText("morning digest")).toBeInTheDocument();
     });
@@ -108,14 +120,17 @@ describe("SchedulerManager", () => {
         if (input === "/scheduler/jobs" && !init?.method) {
           return json({ jobs: [], count: 0 });
         }
+        if (input.startsWith("/runs") && !init?.method) {
+          return json({ runs: [], count: 0 });
+        }
         bodies.push(String(init?.body ?? ""));
         return json(
           job({
-            id: "44444444-4444-4444-4444-444444444444",
             name: "mail watcher",
             schedule: "",
-            prompt: "Summarize arrivals",
             pollAccount: "icloud",
+            pollQuery: "from:alerts",
+            pollMailbox: "INBOX",
             pollIntervalSeconds: 300,
           }),
         );
@@ -125,14 +140,20 @@ describe("SchedulerManager", () => {
     await waitFor(() => {
       expect(screen.getByText("0 jobs")).toBeInTheDocument();
     });
-    await user.type(screen.getByLabelText("Job name"), "mail watcher");
-    await user.type(screen.getByLabelText("Job prompt"), "Summarize arrivals");
-    await user.type(screen.getByLabelText("Poll account"), "icloud");
+    await user.click(screen.getByRole("button", { name: "Create Schedule" }));
+    await user.type(screen.getByLabelText("Job Name"), "mail watcher");
+    await user.click(screen.getByText("Email Event Watcher"));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 2: poll configuration (account defaults to icloud, interval defaults to 300)
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 3: prompt
     await user.type(
-      screen.getByLabelText("Poll interval seconds"),
-      "300",
+      screen.getByLabelText("Agent Task Instructions"),
+      "Summarize arrivals",
     );
-    await user.click(screen.getByRole("button", { name: "Create job" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Step 4: confirm
+    await user.click(screen.getByRole("button", { name: "Save Schedule" }));
     await waitFor(() => {
       expect(screen.getByText("mail watcher")).toBeInTheDocument();
     });
@@ -151,6 +172,9 @@ describe("SchedulerManager", () => {
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/scheduler/jobs" && !init?.method) {
           return json({ jobs: [job()], count: 1 });
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return json({ runs: [], count: 0 });
         }
         seen.push({ path: input, body: String(init?.body ?? "") });
         return json(job({ enabled: false }));
@@ -176,6 +200,9 @@ describe("SchedulerManager", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
+        if (input.startsWith("/runs") && !init?.method) {
+          return json({ runs: [], count: 0 });
+        }
         calls.push(`${init?.method ?? "GET"} ${input}`);
         if (input === "/scheduler/jobs" && !init?.method) {
           return json({ jobs: [job()], count: 1 });
@@ -207,6 +234,8 @@ describe("SchedulerManager", () => {
       ),
     ).toBe(true);
     await user.click(screen.getByRole("button", { name: "Delete" }));
+    // Non-blocking inline confirm replaces the native prompt.
+    await user.click(screen.getByRole("button", { name: "Confirm delete" }));
     await waitFor(() => {
       expect(screen.getByText(/No scheduled jobs yet/)).toBeInTheDocument();
     });
@@ -220,6 +249,43 @@ describe("SchedulerManager", () => {
     render(<SchedulerManager />);
     await waitFor(() => {
       expect(screen.getByText(/No scheduled jobs yet/)).toBeInTheDocument();
+    });
+  });
+
+  it("detects in-progress run on mount and displays Running… state", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/scheduler/jobs" && !init?.method) {
+          return json({ jobs: [job()], count: 1 });
+        }
+        if (input.startsWith("/runs") && !init?.method) {
+          return json({
+            runs: [
+              {
+                id: "55555555-5555-5555-5555-555555555555",
+                kind: "scheduler",
+                status: "running",
+                message: "Morning digest running",
+                jobID: "33333333-3333-3333-3333-333333333333",
+                timestamp: new Date().toISOString(),
+              },
+            ],
+            count: 1,
+          });
+        }
+        return json({});
+      }),
+    );
+    render(<SchedulerManager />);
+    await waitFor(() => {
+      expect(screen.getByText("morning digest")).toBeInTheDocument();
+    });
+    // The Run Now button should display "Running…" and be disabled
+    await waitFor(() => {
+      const runBtn = screen.getByRole("button", { name: "Run now" });
+      expect(runBtn).toHaveTextContent("Running…");
+      expect(runBtn).toBeDisabled();
     });
   });
 });

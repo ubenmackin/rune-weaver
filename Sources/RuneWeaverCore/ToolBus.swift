@@ -61,18 +61,23 @@ public struct ToolResult: Sendable, Codable, Equatable {
     }
 
     /// Converts this result to a `tool`-role ``Message`` for LLM history.
-    /// - Returns: Message carrying the result content.
+    ///
+    /// Carries the error flag so persisted history renders failures as
+    /// errors instead of success.
+    /// - Returns: Message carrying the result content and error flag.
     public func asMessage() -> Message {
-        Message(role: .tool, content: content, toolCallID: toolCallID)
+        Message(role: .tool, content: content, toolCallID: toolCallID, isError: isError)
     }
 }
 
-/// Decides whether a `requiresApproval` tool call may run.
+/// Decides whether a gated tool call may run.
 ///
 /// Return `true` to allow the execution, `false` to deny it. The bus
 /// invokes this hook before any state-changing tool runs; `readOnly`
-/// and `trusted` tools never consult it, though they still honor
-/// explicit `PermissionGate` denials.
+/// and `trusted` tools consult it only when the gate unexpectedly
+/// returns `requiresApproval`, so a future gate change cannot silently
+/// bypass approval, though they still honor explicit `PermissionGate`
+/// denials.
 public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput) async -> Bool
 
 /// Central registry dispatching LLM-requested tool calls to plugins.
@@ -82,11 +87,14 @@ public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput) async -> 
 /// gate before any execution: `readOnly` and `trusted` tools run unless
 /// explicitly denied via ``PermissionGate/deny(_:reason:)`` (checked
 /// first, matching ``PermissionGate/checkPermission(toolCall:tool:)``),
-/// `requiresApproval` tools consult the ``PermissionGate`` (when
-/// one is attached) for graduated-trust grants, denials, and live
-/// coverage before falling back to the approval handler (or being
-/// denied when no handler is set, unless the context is a `dryRun`
-/// which tools must honor without mutating state).
+/// with an unexpected `requiresApproval` verdict honored through the
+/// approval handler as defense in depth so the service layer never
+/// bypasses approvals; `requiresApproval` tools consult the
+/// ``PermissionGate`` (when one is attached) for graduated-trust grants,
+/// denials, and live coverage before falling back to the approval handler
+/// (or being denied when no handler is set). Dry runs keep the same gate:
+/// denials still hold and approvals are still required, with only the
+/// tool's external side effect suppressed via the `dryRun` flag it receives).
 public actor ToolBus {
     /// Tools indexed by name.
     private var tools: [String: any Tool] = [:]
@@ -182,28 +190,37 @@ public actor ToolBus {
                         content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
                     )
                 case .requiresApproval:
-                    break
+                    // Defense in depth: the gate never returns this verdict
+                    // for these levels today, but a future gate change must
+                    // not silently bypass approval, so honor it through the
+                    // same handler path as gated writes.
+                    if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                        return denial
+                    }
                 }
             }
         case .requiresApproval:
-            if !context.dryRun {
-                if let gate = permissionGate {
-                    switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
-                    case .allowed:
-                        break
-                    case let .denied(reason):
-                        return .failure(
-                            toolCallID: toolCall.callID,
-                            content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
-                        )
-                    case .requiresApproval:
-                        if let denial = await resolveApproval(tool: tool, call: toolCall) {
-                            return denial
-                        }
+            // Graduated trust applies even to dry runs: denials must hold
+            // whether or not the tool promises to avoid mutation, so the gate
+            // is always consulted and only the tool's side effect is skipped
+            // via the dryRun flag it already receives. Trusting every plugin
+            // to honor dryRun without a gate check would bypass approvals.
+            if let gate = permissionGate {
+                switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
+                case .allowed:
+                    break
+                case let .denied(reason):
+                    return .failure(
+                        toolCallID: toolCall.callID,
+                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
+                    )
+                case .requiresApproval:
+                    if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                        return denial
                     }
-                } else if let denial = await resolveApproval(tool: tool, call: toolCall) {
-                    return denial
                 }
+            } else if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                return denial
             }
         }
         do {
@@ -214,11 +231,13 @@ public actor ToolBus {
         }
     }
 
-    /// Resolves `requiresApproval` approval through the attached handler.
+    /// Resolves gated approval through the attached handler.
     ///
     /// Single shared branch for gate-attached and no-gate paths so both
     /// agree on denial text: a missing handler denies, otherwise the
-    /// handler's verdict decides.
+    /// handler's verdict decides. Also covers the unexpected
+    /// `requiresApproval` verdict for `readOnly`/`trusted` tools so a
+    /// future gate change cannot silently bypass approval.
     /// - Parameters:
     ///   - tool: Tool requesting approval.
     ///   - call: Invocation arguments.

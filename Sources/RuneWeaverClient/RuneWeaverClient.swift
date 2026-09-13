@@ -35,7 +35,8 @@ private final class ClientSocketBox: @unchecked Sendable {
 /// `RuneWeaverCore/WSWire.swift` and are aliased here (and in
 /// `RuneWeaverServer`) so the JSON encoding never drifts between modules;
 /// drift breaks `WSInboundKind.classify`, which tells chat frames apart by
-/// the presence of `text` versus `id` plus `approved`.
+/// the presence of `text` versus `id` plus `approved`, and cancel frames by
+/// their explicit `"type": "cancel"` discriminator.
 public typealias ClientChatMessage = RuneWeaverCore.WSChatMessage
 /// Decision frame, single-sourced from core (`WSDecisionMessage`).
 public typealias ClientDecisionMessage = RuneWeaverCore.WSDecisionMessage
@@ -56,8 +57,11 @@ private struct ClientFramePeek: Codable {
 
 /// Thin client connection to the core engine.
 ///
-/// Clients (iOS, macOS menu bar, web dashboard) connect over
-/// WebSocket via WireGuard VPN. This type owns connection state and
+/// Clients (iOS, macOS menu bar, web dashboard) connect over WebSocket to
+/// the loopback-only v1 service (`127.0.0.1` with no auth, so
+/// local-process access is the protection boundary). Remote access over
+/// WireGuard VPN stays deferred until authentication lands and the service
+/// may bind beyond loopback. This type owns connection state and
 /// message transport; UI lives in the app targets.
 ///
 /// The engine exposes a WebSocket endpoint at `/ws` (derived from

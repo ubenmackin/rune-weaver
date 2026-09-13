@@ -1,4 +1,9 @@
-// RuneWeaver - Tests - Episodic tool plumbing
+// Rune Weaver Tests — Episodic tool plumbing between working and durable memory.
+//
+// Verifies per-turn episodic mirroring keeps clean assistant text plus one
+// compact tool record without placeholder lines, call identifiers, or call
+// argument JSON. Covers the MemoryEngine and Orchestrator contract that
+// working history stays replayable while the episodes mirror stays readable.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -90,6 +95,37 @@ private final class ScriptedPlumbingLLM: LLMProvider, @unchecked Sendable {
     /// - Returns: Empty vectors.
     func embeddings(text _: [String]) async throws -> [[Float]] {
         []
+    }
+}
+
+/// Slow fixture tool giving the test a window to cancel mid-turn.
+///
+/// Sleeps before returning so a cancellation issued while the tool runs
+/// still lands after the side effect, exercising the audit-preserving
+/// cancel path instead of the clean rollback path.
+private struct SlowPlumbingTool: Tool, Sendable {
+    /// Registered tool name.
+    let name: String
+    /// Canned outcome text.
+    let output: String
+    /// Human-readable description.
+    var description: String {
+        "Slow fixture stub for \(name)."
+    }
+
+    /// Empty-object schema.
+    let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+    /// Always allowed without prompts.
+    let permissionLevel = PermissionLevel.readOnly
+
+    /// Sleeps briefly then returns the canned outcome.
+    /// - Parameters:
+    ///   - input: Invocation arguments.
+    ///   - context: Ambient execution context.
+    /// - Returns: Canned success output echoing the call identifier.
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        return .success(output, callID: input.callID)
     }
 }
 
@@ -204,5 +240,73 @@ struct EpisodicToolPlumbingTests {
         for episode in episodes {
             #expect(episode.metadata["tool_call_id"] == nil)
         }
+    }
+
+    @Test
+    func `ConversationManager syncs session and messages written by another instance to disk`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+
+        let writer = ConversationManager(episodesDBPath: dbPath)
+        let reader = ConversationManager(episodesDBPath: dbPath)
+
+        let sessionID = UUID()
+        await writer.append(Message(role: .user, content: "Hello from CLI"), to: sessionID)
+        await writer.append(Message(role: .assistant, content: "Hello back"), to: sessionID)
+        try await writer.saveAll()
+
+        let fetched = await reader.session(id: sessionID)
+        try #require(fetched != nil)
+        #expect(fetched?.messages.count == 2)
+        #expect(fetched?.messages[0].content == "Hello from CLI")
+        #expect(fetched?.messages[1].content == "Hello back")
+
+        let summaries = await reader.listSessions()
+        #expect(summaries.contains { $0.id == sessionID })
+    }
+
+    @Test
+    func `Cancelled turn after tool keeps working and episodic audit`() async throws {
+        let (engine, base) = makeToolPlumbingEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        await bus.register(tool: SlowPlumbingTool(name: "email.search", output: "Found 1 email"))
+        let llm = ScriptedPlumbingLLM(texts: ["checking", "final"])
+        let callID = "call_audit_cancel_1"
+        let resolver: OrchestratorToolResolver = { messages, _ in
+            if messages.contains(where: { $0.role == .tool }) {
+                return []
+            }
+            return [ToolInput(toolName: "email.search", argumentsJSON: "{}", callID: callID)]
+        }
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: resolver,
+            memoryEngine: engine
+        )
+        let sessionID = UUID()
+        let task = Task {
+            try await orchestrator.process(input: UserInput(text: "check mail", sessionID: sessionID))
+        }
+        // Cancel while the slow tool runs so the side effect has already
+        // happened when cancellation lands.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        task.cancel()
+        let result = await task.result
+        guard case let .failure(error) = result, error is CancellationError else {
+            Issue.record("Expected CancellationError, got \(result)")
+            return
+        }
+        // Working memory keeps the executed tool instead of rolling back.
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == callID })
+        // Episodic memory mirrors the executed tool for the audit trail.
+        let episodes = try await engine.episodes(for: sessionID)
+        #expect(episodes.contains { $0.role == .tool && $0.content.contains("email.search") })
     }
 }

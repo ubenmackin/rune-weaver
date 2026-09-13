@@ -256,8 +256,9 @@ public extension ChunkStreamingProvider {
                     switch chunk {
                     case let .textDelta(text):
                         continuation.yield(LLMResponse(delta: text))
-                    case .toolCall:
-                        continue
+                    case let .toolCall(call):
+                        let input = ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id)
+                        continuation.yield(LLMResponse(delta: "", toolCalls: [input]))
                     case let .done(meta):
                         continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: meta.usage?.totalTokens))
                         break chunkLoop

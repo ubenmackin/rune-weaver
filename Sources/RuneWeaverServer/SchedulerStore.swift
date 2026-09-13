@@ -6,14 +6,17 @@
 
 import Foundation
 import RuneWeaverCore
+#if canImport(SQLite3)
+    import SQLite3
+#endif
 
 /// One scheduled job: a cron-like trigger and/or an email-arrival poll rule plus the prompt to run.
 ///
-/// `config.toml [[scheduler.jobs]]` (``SchedulerJobConfig``) is the durable
-/// source of truth; ``SchedulerStore`` is the REST runtime registry bridging
-/// to and from that config (see `init(from:)` / `sync(from:)` /
-/// `toSchedulerConfig()`). Cron-like triggers use a five-field expression
-/// (`minute hour day month weekday`, e.g. `"0 8 * * *"` for daily at 08:00)
+/// SQLite persistence (`episodes.db` / `scheduler_jobs` table) is the primary durable
+/// source of truth for scheduled jobs; ``SchedulerStore`` is the REST runtime registry bridging
+/// to that database. `config.toml [[scheduler.jobs]]` is used solely as an initial bootstrap seed
+/// when the database has no jobs, avoiding dual-maintenance disconnects. Cron-like triggers use
+/// a five-field expression (`minute hour day month weekday`, e.g. `"0 8 * * *"` for daily at 08:00)
 /// or a named shortcut (`@hourly`, `@daily`, `@weekly`). Poll triggers watch
 /// one `[email.accounts]` entry for previously unseen arrivals
 /// (`pollAccount` plus optional `pollQuery`/`pollMailbox`, polled every
@@ -103,17 +106,17 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     }
 
     /// Email poll rule for this job, when configured.
+    ///
+    /// Delegates to the shared stored-fields helper so the registry and
+    /// durable row decoding share one blank-account and default mapping.
     /// - Returns: Poll rule, or nil for cron-only jobs.
     public var pollRule: EmailPollRule? {
-        guard let account = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines), !account.isEmpty else {
-            return nil
-        }
-        return EmailPollRule(
-            account: account,
-            query: pollQuery ?? "",
-            mailbox: pollMailbox,
-            pollIntervalSeconds: pollIntervalSeconds ?? EmailPollRule.defaultPollIntervalSeconds,
-            limit: pollLimit ?? EmailPollRule.defaultLimit
+        EmailPollRule.ruleForStoredFields(
+            pollAccount: pollAccount,
+            pollQuery: pollQuery,
+            pollMailbox: pollMailbox,
+            pollIntervalSeconds: pollIntervalSeconds,
+            pollLimit: pollLimit
         )
     }
 }
@@ -253,24 +256,26 @@ public enum SchedulerStoreError: Error, Sendable, Equatable {
     case unknownJob(String)
 }
 
-/// In-memory CRUD store for scheduler jobs.
+/// In-memory CRUD store for scheduler jobs backed by SQLite persistence.
 ///
 /// Runtime owner of job state for the service surface (REST CRUD plus
 /// manual `POST .../run`). The service never auto-fires cron or poll
 /// triggers; the CLI `scheduler run` foreground loop is the sole auto-fire
-/// runner. Durable state lives in `config.toml
-/// [[scheduler.jobs]]`: seed with `init(from:)`, refresh with
-/// `sync(from:)`, and export with `toSchedulerConfig()` so REST edits can
-/// be persisted back to config and survive restart.
+/// runner. Durable state lives in SQLite (`episodes.db` / `scheduler_jobs` table).
 public actor SchedulerStore {
     /// Maximum jobs kept in the store to bound memory and avoid unbounded resource consumption.
     public static let maxJobs = 100
 
     /// Jobs indexed by identifier.
     private var jobs: [UUID: SchedulerJob] = [:]
+    /// Optional filesystem path for SQLite persistence.
+    public let dbPath: String?
 
     /// Creates an empty store.
-    public init() {}
+    /// - Parameter dbPath: Optional SQLite path for durable persistence.
+    public init(dbPath: String? = nil) {
+        self.init(from: .empty, dbPath: dbPath)
+    }
 
     /// Creates a job from a REST payload.
     /// - Parameter input: New-job payload.
@@ -279,7 +284,7 @@ public actor SchedulerStore {
     ///   field is blank, a trigger is malformed, or the trimmed name is
     ///   already taken by another job.
     @discardableResult
-    public func create(_ input: NewSchedulerJob) throws -> SchedulerJob {
+    public func create(_ input: NewSchedulerJob) async throws -> SchedulerJob {
         guard jobs.count < Self.maxJobs else {
             throw SchedulerStoreError.invalidField("Job limit reached (\(Self.maxJobs)). Delete existing jobs before creating new ones.")
         }
@@ -315,19 +320,31 @@ public actor SchedulerStore {
             updatedAt: now
         )
         jobs[job.id] = job
+        if let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.write(job: job, dbPath: dbPath)
+                }
+            #endif
+        }
         return job
     }
 
     /// Lists every job, oldest first.
+    ///
+    /// Memory-only snapshot of the runtime registry; durable state is
+    /// adopted via `bootstrap(from:)` and `load(from:dbPath:)`.
     /// - Returns: All jobs sorted by creation date.
-    public func list() -> [SchedulerJob] {
+    public func list() async -> [SchedulerJob] {
         jobs.values.sorted { $0.createdAt < $1.createdAt }
     }
 
     /// Looks up one job.
+    ///
+    /// Memory-only read of the runtime registry.
     /// - Parameter id: Job identifier.
     /// - Returns: The job, or nil when unknown.
-    public func job(id: UUID) -> SchedulerJob? {
+    public func job(id: UUID) async -> SchedulerJob? {
         jobs[id]
     }
 
@@ -346,7 +363,7 @@ public actor SchedulerStore {
     ///   unknown, or `invalidField` when a supplied field is blank, a
     ///   trigger is malformed, or the new name is already taken.
     @discardableResult
-    public func update(id: UUID, _ input: UpdateSchedulerJob) throws -> SchedulerJob {
+    public func update(id: UUID, _ input: UpdateSchedulerJob) async throws -> SchedulerJob {
         guard var existing = jobs[id] else {
             throw SchedulerStoreError.unknownJob(id.uuidString)
         }
@@ -407,26 +424,51 @@ public actor SchedulerStore {
             pollLimit: existing.pollLimit
         )
         existing.updatedAt = Date()
-        jobs[id] = existing
-        return existing
+        let updatedJob = existing
+        jobs[id] = updatedJob
+        if let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.write(job: updatedJob, dbPath: dbPath)
+                }
+            #endif
+        }
+        return updatedJob
     }
 
     /// Deletes one job. Unknown identifiers are a no-op.
     /// - Parameter id: Job identifier.
     /// - Returns: True when a job was removed.
     @discardableResult
-    public func delete(id: UUID) -> Bool {
-        jobs.removeValue(forKey: id) != nil
+    public func delete(id: UUID) async -> Bool {
+        let removed = jobs.removeValue(forKey: id) != nil
+        if removed, let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.delete(id: id, dbPath: dbPath)
+                }
+            #endif
+        }
+        return removed
     }
 
     /// Removes every job.
-    public func clear() {
+    public func clear() async {
         jobs.removeAll()
+        if let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.clear(dbPath: dbPath)
+                }
+            #endif
+        }
     }
 
     /// Number of stored jobs.
+    ///
+    /// Memory-only count of the runtime registry.
     /// - Returns: Job count.
-    public func count() -> Int {
+    public func count() async -> Int {
         jobs.count
     }
 
@@ -481,14 +523,13 @@ public actor SchedulerStore {
                 throw SchedulerStoreError.invalidField("poll_limit requires poll_account")
             }
         }
-        let trimmedSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let scheduleValue: String? = trimmedSchedule.isEmpty ? nil : trimmedSchedule
-        let pollValue: EmailPollRule? = trimmedAccount.isEmpty ? nil : EmailPollRule(
-            account: trimmedAccount,
-            query: pollQuery ?? "",
-            mailbox: pollMailbox,
-            pollIntervalSeconds: pollIntervalSeconds ?? EmailPollRule.defaultPollIntervalSeconds,
-            limit: pollLimit ?? EmailPollRule.defaultLimit
+        let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
+        let pollValue: EmailPollRule? = EmailPollRule.ruleForStoredFields(
+            pollAccount: pollAccount,
+            pollQuery: pollQuery,
+            pollMailbox: pollMailbox,
+            pollIntervalSeconds: pollIntervalSeconds,
+            pollLimit: pollLimit
         )
         let synthetic = SchedulerJobConfig(
             name: name,
@@ -523,26 +564,102 @@ public actor SchedulerStore {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// Creates a store seeded from `config.toml [[scheduler.jobs]]`.
+    /// Creates a store seeded from configuration without touching disk.
     ///
-    /// The config is the durable source of truth; the store is the REST
-    /// runtime view. Config entries are already validated by
-    /// `RuneWeaverConfig/validate()`, so seeding maps them directly
-    /// without re-throwing. Names are compared trimmed (same as
-    /// `create`); duplicate trimmed names are ignored keep-first so a
-    /// duplicated `config.toml` cannot fork the runtime registry
-    /// (duplicates are rejected at validation time; this is
-    /// defense-in-depth).
-    /// - Parameter config: Scheduler section to seed from.
-    public init(from config: SchedulerConfig) {
+    /// Seeds memory only and never touches disk: actor initializers cannot
+    /// suspend, so synchronous SQLite reads here would block the
+    /// cooperative pool at startup. Disk hydration lives in
+    /// `bootstrap(from:)`; prefer `load(from:dbPath:)` whenever durable
+    /// state matters.
+    /// - Parameters:
+    ///   - config: Scheduler section seeding memory until `bootstrap(from:)` adopts disk state.
+    ///   - dbPath: Optional SQLite path for durable persistence.
+    public init(from config: SchedulerConfig = .empty, dbPath: String? = nil) {
+        self.dbPath = dbPath
+        self.jobs = Self.seedInMemory(from: config)
+    }
+
+    /// Loads a store hydrated from durable SQLite state.
+    ///
+    /// Creates the store, then suspends on the shared serial store queue
+    /// to adopt persisted jobs (or persist the config seed when the
+    /// database is empty), so startup disk I/O never blocks the
+    /// cooperative pool.
+    /// - Parameters:
+    ///   - config: Scheduler section used only as an initial bootstrap seed if the DB is empty.
+    ///   - dbPath: Optional SQLite path for durable persistence.
+    /// - Returns: Store reflecting durable state.
+    public static func load(from config: SchedulerConfig = .empty, dbPath: String? = nil) async -> SchedulerStore {
+        let store = SchedulerStore(dbPath: dbPath)
+        await store.bootstrap(from: config)
+        return store
+    }
+
+    /// Hydrates runtime state from durable SQLite state.
+    ///
+    /// Adopts persisted jobs when present; otherwise persists the config
+    /// seed so later restarts observe it. Without a `dbPath` the runtime
+    /// registry is simply the config seed. Durable reads observe
+    /// cancellation so shutdown never blocks on disk I/O; durable writes
+    /// run to completion so seed and CRUD state always lands.
+    /// - Parameter config: Bootstrap seed for an empty database.
+    public func bootstrap(from config: SchedulerConfig) async {
+        guard let dbPath else {
+            jobs = Self.seedInMemory(from: config)
+            return
+        }
+        #if canImport(SQLite3)
+            let existing: [SchedulerJob] = await (try? SQLiteSerialIO.run {
+                SQLiteSchedulerJobStore.read(dbPath: dbPath)
+            }) ?? []
+            if !existing.isEmpty {
+                // Durable state wins over the config seed: replace the registry
+                // so a store seeded in memory plus a later bootstrap never
+                // reports a seed-plus-database union.
+                jobs = Dictionary(uniqueKeysWithValues: existing.map { ($0.id, $0) })
+                return
+            }
+            let seeded = Self.seedInMemory(from: config)
+            jobs = seeded
+            for job in seeded.values {
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteSchedulerJobStore.write(job: job, dbPath: dbPath)
+                }
+            }
+        #else
+            jobs = Self.seedInMemory(from: config)
+        #endif
+    }
+
+    /// Seeds in-memory state from configuration.
+    private static func seedInMemory(from config: SchedulerConfig) -> [UUID: SchedulerJob] {
+        var seeded: [UUID: SchedulerJob] = [:]
         var seen: Set<String> = []
         for entry in config.jobs {
             let trimmedName = normalizedSchedulerJobName(entry.name)
             guard !seen.contains(trimmedName) else { continue }
             seen.insert(trimmedName)
             let job = SchedulerJob(from: entry)
-            jobs[job.id] = job
+            seeded[job.id] = job
         }
+        return seeded
+    }
+
+    /// Loads persisted jobs from the given SQLite database path.
+    ///
+    /// Suspends on the shared serial store queue so the blocking read
+    /// never occupies the cooperative pool and never races concurrent
+    /// writes torn. Cancellable so shutdown never blocks on disk I/O.
+    /// - Parameter dbPath: SQLite database file path.
+    /// - Returns: Persisted scheduler jobs.
+    public static func persistedJobs(from dbPath: String) async -> [SchedulerJob] {
+        #if canImport(SQLite3)
+            await (try? SQLiteSerialIO.run {
+                SQLiteSchedulerJobStore.read(dbPath: dbPath)
+            }) ?? []
+        #else
+            return []
+        #endif
     }
 
     /// Replaces the runtime registry with `config.toml [[scheduler.jobs]]`.
@@ -583,11 +700,11 @@ public actor SchedulerStore {
 
     /// Exports the runtime registry as a config section for persistence.
     ///
-    /// Use the result to write `[[scheduler.jobs]]` back to `config.toml`
-    /// so REST-created jobs survive restart.
+    /// Memory-only snapshot; use the result to write `[[scheduler.jobs]]`
+    /// back to `config.toml` so REST-created jobs survive restart.
     /// - Returns: Scheduler config mirroring the stored jobs.
-    public func toSchedulerConfig() -> SchedulerConfig {
-        SchedulerConfig(jobs: list().map { $0.toJobConfig() })
+    public func toSchedulerConfig() async -> SchedulerConfig {
+        await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
     }
 
     /// Stable episodic session for one stored job.
@@ -618,7 +735,7 @@ public extension SchedulerJob {
     ///   - updatedAt: Update date. Defaults to now.
     init(from config: SchedulerJobConfig, id: UUID = UUID(), createdAt: Date = Date(), updatedAt: Date = Date()) {
         let trimmedName = normalizedSchedulerJobName(config.name)
-        let schedule = config.schedule?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let schedule = EmailPollRule.storedSchedule(from: config.schedule)
         let rawQuery = config.poll?.query.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         self.init(
             id: id,
@@ -638,12 +755,11 @@ public extension SchedulerJob {
 
     /// Converts this runtime job to a `config.toml` entry.
     ///
-    /// A blank `schedule` becomes nil (poll-only); a missing poll account
-    /// becomes a nil poll rule (cron-only).
+    /// Delegates schedule and poll mapping to the shared helpers so blank
+    /// handling matches durable row decoding exactly.
     /// - Returns: Equivalent config entry.
     func toJobConfig() -> SchedulerJobConfig {
-        let trimmedSchedule = schedule.trimmingCharacters(in: .whitespacesAndNewlines)
-        let scheduleValue: String? = trimmedSchedule.isEmpty ? nil : trimmedSchedule
+        let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
         let pollValue: EmailPollRule? = pollRule
         return SchedulerJobConfig(
             name: name,
@@ -674,3 +790,177 @@ public extension SchedulerJobConfig {
         self = job.toJobConfig()
     }
 }
+
+#if canImport(SQLite3)
+    /// Internal SQLite helper for durable scheduler job persistence.
+    enum SQLiteSchedulerJobStore {
+        private struct SchedulerDBError: Error {
+            let message: String
+        }
+
+        private static func open(dbPath: String) throws -> OpaquePointer? {
+            // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
+            let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { SchedulerDBError(message: $0) })
+            try SQLiteHelpers.exec(
+                handle: handle,
+                sql: """
+                CREATE TABLE IF NOT EXISTS scheduler_jobs(
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    schedule TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    enabled INTEGER NOT NULL,
+                    poll_account TEXT,
+                    poll_query TEXT,
+                    poll_mailbox TEXT,
+                    poll_interval_seconds INTEGER,
+                    poll_limit INTEGER,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_scheduler_jobs_name ON scheduler_jobs(name);
+                """,
+                failure: { SchedulerDBError(message: $0) }
+            )
+            return handle
+        }
+
+        static func read(dbPath: String) -> [SchedulerJob] {
+            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            defer { sqlite3_close(handle) }
+
+            let sql = """
+            SELECT id, name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox, poll_interval_seconds, poll_limit, created_at, updated_at
+            FROM scheduler_jobs
+            ORDER BY created_at ASC;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var loaded: [SchedulerJob] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idStr = SQLiteHelpers.columnText(statement, index: 0),
+                      let id = UUID(uuidString: idStr),
+                      let row = SchedulerJobRow.decode(statement, base: 1)
+                else { continue }
+
+                let createdAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 10))
+                let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 11))
+
+                loaded.append(SchedulerJob(
+                    id: id,
+                    name: row.name,
+                    schedule: row.schedule,
+                    prompt: row.prompt,
+                    enabled: row.enabled,
+                    pollAccount: row.pollAccount,
+                    pollQuery: row.pollQuery,
+                    pollMailbox: row.pollMailbox,
+                    pollIntervalSeconds: row.pollIntervalSeconds,
+                    pollLimit: row.pollLimit,
+                    createdAt: createdAt,
+                    updatedAt: updatedAt
+                ))
+            }
+            return loaded
+        }
+
+        static func write(job: SchedulerJob, dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else {
+                fputs(
+                    "[ERROR] SQLiteSchedulerJobStore: failed opening store"
+                        + " at \(dbPath); job \(job.id) kept"
+                        + " in memory only and will not survive restart.\n",
+                    stderr
+                )
+                return
+            }
+            defer { sqlite3_close(handle) }
+
+            let sql = """
+            INSERT INTO scheduler_jobs(
+                id, name, schedule, prompt, enabled, poll_account, poll_query,
+                poll_mailbox, poll_interval_seconds, poll_limit, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                schedule = excluded.schedule,
+                prompt = excluded.prompt,
+                enabled = excluded.enabled,
+                poll_account = excluded.poll_account,
+                poll_query = excluded.poll_query,
+                poll_mailbox = excluded.poll_mailbox,
+                poll_interval_seconds = excluded.poll_interval_seconds,
+                poll_limit = excluded.poll_limit,
+                updated_at = excluded.updated_at;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed preparing job write (code \(code)); job \(job.id) kept in memory only.\n", stderr)
+                return
+            }
+            defer { sqlite3_finalize(statement) }
+
+            SQLiteHelpers.bindText(statement, index: 1, value: job.id.uuidString)
+            SQLiteHelpers.bindText(statement, index: 2, value: job.name)
+            SQLiteHelpers.bindText(statement, index: 3, value: job.schedule)
+            SQLiteHelpers.bindText(statement, index: 4, value: job.prompt)
+            SQLiteHelpers.bindInt64(statement, index: 5, value: job.enabled ? 1 : 0)
+            SQLiteHelpers.bindText(statement, index: 6, value: job.pollAccount)
+            SQLiteHelpers.bindText(statement, index: 7, value: job.pollQuery)
+            SQLiteHelpers.bindText(statement, index: 8, value: job.pollMailbox)
+            SQLiteHelpers.bindInt64(statement, index: 9, value: job.pollIntervalSeconds.map { Int64($0) })
+            SQLiteHelpers.bindInt64(statement, index: 10, value: job.pollLimit.map { Int64($0) })
+            SQLiteHelpers.bindDouble(statement, index: 11, value: job.createdAt.timeIntervalSince1970)
+            SQLiteHelpers.bindDouble(statement, index: 12, value: job.updatedAt.timeIntervalSince1970)
+
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed writing job \(job.id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                return
+            }
+        }
+
+        static func delete(id: UUID, dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else {
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed opening store at \(dbPath); delete of \(id) kept in memory only.\n", stderr)
+                return
+            }
+            defer { sqlite3_close(handle) }
+
+            let sql = "DELETE FROM scheduler_jobs WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed preparing job delete (code \(code)) for \(id).\n", stderr)
+                return
+            }
+            defer { sqlite3_finalize(statement) }
+
+            SQLiteHelpers.bindText(statement, index: 1, value: id.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed deleting job \(id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                return
+            }
+        }
+
+        static func clear(dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else {
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed opening store at \(dbPath); clear kept in memory only.\n", stderr)
+                return
+            }
+            defer { sqlite3_close(handle) }
+            do {
+                try SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM scheduler_jobs;", failure: { SchedulerDBError(message: $0) })
+            } catch {
+                fputs("[ERROR] SQLiteSchedulerJobStore: failed clearing jobs: \(error)\n", stderr)
+            }
+        }
+    }
+#endif

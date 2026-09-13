@@ -85,6 +85,32 @@ private struct ServerWriteStub: Tool, Sendable {
     }
 }
 
+/// Lock-guarded flag observed across the tracker cancel boundary.
+///
+/// Cancel closures run on whatever task the tracker cancels, so the test
+/// cannot capture a mutable local. The box keeps one immutable handle while
+/// guarding the single bit behind a lock.
+private final class CancelFlag: @unchecked Sendable {
+    /// Guards the observed bit.
+    private let lock = NSLock()
+    /// Whether the cancel closure has fired.
+    private var stored = false
+
+    /// Marks the flag as fired.
+    func set() {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = true
+    }
+
+    /// Whether the flag has been marked.
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 /// Makes an isolated memory engine on a fresh temporary directory.
 /// - Returns: Engine plus its base directory for cleanup.
 private func makeIsolatedEngine() throws -> (MemoryEngine, URL) {
@@ -260,6 +286,55 @@ struct SchedulerStoreTests {
         )
         #expect(direct.pollLimit == 50)
     }
+
+    @Test
+    func `Scheduler store persistence across re-instantiation`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_scheduler.db").path
+
+        let store1 = await SchedulerStore.load(dbPath: dbPath)
+        let job1 = try await store1.create(NewSchedulerJob(
+            name: "Morning Check",
+            schedule: "0 8 * * *",
+            prompt: "Check morning status"
+        ))
+        #expect(await store1.count() == 1)
+
+        let store2 = await SchedulerStore.load(dbPath: dbPath)
+        #expect(await store2.count() == 1)
+        let loaded = await store2.job(id: job1.id)
+        #expect(loaded?.name == "Morning Check")
+        #expect(loaded?.prompt == "Check morning status")
+
+        _ = try await store2.update(id: job1.id, UpdateSchedulerJob(prompt: "Updated prompt"))
+
+        let store3 = await SchedulerStore.load(dbPath: dbPath)
+        #expect(await store3.job(id: job1.id)?.prompt == "Updated prompt")
+
+        #expect(await store3.delete(id: job1.id) == true)
+
+        let store4 = await SchedulerStore.load(dbPath: dbPath)
+        #expect(await store4.count() == 0)
+    }
+
+    @Test
+    func `Scheduler store init stays memory-only without bootstrap`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_scheduler_seed.db").path
+
+        let writer = await SchedulerStore.load(dbPath: dbPath)
+        _ = try await writer.create(NewSchedulerJob(name: "seeded", schedule: "0 8 * * *", prompt: "Seed"))
+        // Plain init never blocks on disk: durable state appears only
+        // after an explicit bootstrap.
+        let unbootstrapped = SchedulerStore(dbPath: dbPath)
+        #expect(await unbootstrapped.count() == 0)
+        await unbootstrapped.bootstrap(from: .empty)
+        #expect(await unbootstrapped.count() == 1)
+    }
 }
 
 @Suite("Run Log Store")
@@ -304,6 +379,25 @@ struct RunLogStoreTests {
         #expect(await store.entry(id: UUID()) == nil)
         await store.clear()
         #expect(await store.count() == 0)
+    }
+
+    @Test
+    func `Persistence survives across store re-instantiation`() async {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_runs.db").path
+
+        let store1 = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        _ = await store1.append(kind: "chat", status: "ok", message: "persisted turn 1")
+        _ = await store1.append(kind: "scheduler", status: "ok", message: "persisted turn 2")
+        #expect(await store1.count() == 2)
+
+        let store2 = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        #expect(await store2.count() == 2)
+        let listed = await store2.list(limit: 10)
+        #expect(listed.first?.message == "persisted turn 2")
+        #expect(listed.last?.message == "persisted turn 1")
     }
 }
 
@@ -455,6 +549,13 @@ struct ServerDTOTests {
             return
         }
         #expect(message.id == decisionID)
+        let cancelID = UUID()
+        let cancelText = "{\"type\":\"cancel\",\"sessionID\":\"\(cancelID.uuidString)\"}"
+        guard case let .cancel(cancelMsg) = WSInboundKind.classify(cancelText) else {
+            Issue.record("Expected cancel kind")
+            return
+        }
+        #expect(cancelMsg.sessionID == cancelID)
         #expect(WSInboundKind.classify("not json {{{") == .unknown)
         #expect(WSInboundKind.classify("{}") == .unknown)
     }
@@ -469,7 +570,7 @@ struct ServerDTOTests {
     }
 
     @Test
-    func `Approval prompt and stream frames round-trip`() throws {
+    func `Approval prompt, tool streaming, and cancel frames round-trip`() throws {
         let request = PermissionRequest(
             toolName: "stub.write",
             description: "Write stub.",
@@ -479,8 +580,176 @@ struct ServerDTOTests {
         #expect(try JSONDecoder().decode(WSApprovalPrompt.self, from: JSONEncoder().encode(prompt)) == prompt)
         #expect(try JSONDecoder().decode(WSStreamDelta.self, from: JSONEncoder().encode(WSStreamDelta(delta: "hi"))) == WSStreamDelta(delta: "hi"))
         let doneID = UUID()
-        let done = WSStreamDone(text: "done", sessionID: doneID)
+        let done = WSStreamDone(text: "done", sessionID: doneID, totalTokens: 100, modelName: "test-model")
         #expect(try JSONDecoder().decode(WSStreamDone.self, from: JSONEncoder().encode(done)) == done)
+
+        let toolStart = WSToolStartFrame(toolName: "email.search", callID: "c1", argumentsJSON: "{\"limit\":1}")
+        #expect(try JSONDecoder().decode(WSToolStartFrame.self, from: JSONEncoder().encode(toolStart)) == toolStart)
+
+        let toolEnd = WSToolEndFrame(toolName: "email.search", callID: "c1", result: ToolResult(toolCallID: "c1", content: "ok", isError: false))
+        #expect(try JSONDecoder().decode(WSToolEndFrame.self, from: JSONEncoder().encode(toolEnd)) == toolEnd)
+
+        let cancelMsg = WSCancelMessage(sessionID: doneID)
+        #expect(try JSONDecoder().decode(WSCancelMessage.self, from: JSONEncoder().encode(cancelMsg)) == cancelMsg)
+        // Encoded cancel frames carry the explicit discriminator and
+        // classify back to `.cancel` with no hand-built JSON.
+        let cancelText = try String(data: JSONEncoder().encode(cancelMsg), encoding: .utf8) ?? ""
+        #expect(cancelText.contains("\"type\":\"cancel\""))
+        guard case let .cancel(roundTripped) = WSInboundKind.classify(cancelText) else {
+            Issue.record("Expected cancel kind from encoded WSCancelMessage")
+            return
+        }
+        #expect(roundTripped == cancelMsg)
+        // Legacy typeless frames still decode for back-compat.
+        let legacyCancel = "{\"sessionID\":\"\(doneID.uuidString)\"}"
+        #expect(try JSONDecoder().decode(WSCancelMessage.self, from: Data(legacyCancel.utf8)) == cancelMsg)
+
+        let cancelledFrame = WSCancelledFrame(sessionID: doneID)
+        #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: JSONEncoder().encode(cancelledFrame)) == cancelledFrame)
+        // The flag distinguishes real aborts from idle cancels for multiplexed views.
+        let idleFrame = WSCancelledFrame(sessionID: doneID, cancelled: false)
+        #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: JSONEncoder().encode(idleFrame)) == idleFrame)
+        // Frames from older engines omit the flag and still read as success.
+        let legacyCancelled = "{\"type\":\"cancelled\",\"sessionID\":\"\(doneID.uuidString)\"}"
+        #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: Data(legacyCancelled.utf8)) == cancelledFrame)
+    }
+
+    @Test
+    func `ActiveTurnTracker registers cancels and unregisters tasks`() async {
+        let tracker = ActiveTurnTracker()
+        let sid = UUID()
+        let task = Task {
+            _ = try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        let registration = await tracker.register(sessionID: sid, task: task)
+        #expect(registration.replaced == false)
+        let cancelled = await tracker.cancel(sessionID: sid)
+        #expect(cancelled == true)
+        #expect(task.isCancelled == true)
+        let cancelAgain = await tracker.cancel(sessionID: sid)
+        #expect(cancelAgain == false)
+    }
+
+    @Test
+    func `ActiveTurnTracker supersedes with cancel and token-checked unregister`() async {
+        let tracker = ActiveTurnTracker()
+        let sid = UUID()
+        let first = Task {
+            _ = try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        let firstRegistration = await tracker.register(sessionID: sid, task: first)
+        #expect(firstRegistration.replaced == false)
+        let second = Task {
+            _ = try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        let secondRegistration = await tracker.register(sessionID: sid, task: second)
+        // The second turn reports the replacement and cooperatively
+        // cancels the first handle instead of leaking it.
+        #expect(secondRegistration.replaced == true)
+        #expect(first.isCancelled == true)
+        #expect(second.isCancelled == false)
+        // A stale completion must not delete the newer registration.
+        await tracker.unregister(sessionID: sid, token: firstRegistration.token)
+        #expect(await tracker.cancel(sessionID: sid) == true)
+        #expect(second.isCancelled == true)
+        await tracker.unregister(sessionID: sid, token: secondRegistration.token)
+        #expect(await tracker.cancel(sessionID: sid) == false)
+    }
+
+    @Test
+    func `ActiveTurnTracker idle cancel reports false without poisoning next turn`() async {
+        let tracker = ActiveTurnTracker()
+        let sid = UUID()
+        // Stray cancel for an unknown session reports false and leaves no
+        // mark, so the next genuine turn starts clean instead of aborting.
+        #expect(await tracker.cancel(sessionID: sid) == false)
+        let firstCancelled = CancelFlag()
+        let first = await tracker.register(sessionID: sid, onCancel: { firstCancelled.set() })
+        #expect(firstCancelled.value == false)
+        await tracker.unregister(sessionID: sid, token: first.token)
+        let secondCancelled = CancelFlag()
+        let second = await tracker.register(sessionID: sid, onCancel: { secondCancelled.set() })
+        #expect(secondCancelled.value == false)
+        await tracker.unregister(sessionID: sid, token: second.token)
+    }
+
+    @Test
+    func `ActiveTurnTracker pending bridge fires only for recently registered sessions`() async {
+        let tracker = ActiveTurnTracker()
+        let sid = UUID()
+        // Establish liveness, then finish the turn so no entry remains.
+        let setup = await tracker.register(sessionID: sid, onCancel: {})
+        await tracker.unregister(sessionID: sid, token: setup.token)
+        // Cancel within the race window still bridges to the next register.
+        #expect(await tracker.cancel(sessionID: sid) == false)
+        let bridged = CancelFlag()
+        let first = await tracker.register(sessionID: sid, onCancel: { bridged.set() })
+        #expect(bridged.value == true)
+        await tracker.unregister(sessionID: sid, token: first.token)
+        // The mark is consumed once, so a later turn starts clean.
+        let later = CancelFlag()
+        let second = await tracker.register(sessionID: sid, onCancel: { later.set() })
+        #expect(later.value == false)
+        await tracker.unregister(sessionID: sid, token: second.token)
+    }
+
+    @Test
+    func `Cancellation rollback restores messages and summary without duplication`() async {
+        let manager = ConversationManager()
+        let sid = UUID()
+        _ = await manager.ensureSession(id: sid)
+        await manager.append(Message(role: .user, content: "hello"), to: sid)
+        await manager.append(Message(role: .assistant, content: "hi there"), to: sid)
+        _ = await manager.summarize(sessionID: sid, keeping: 1)
+        let snapshot = await manager.rollbackSnapshot(for: sid)
+        #expect(snapshot != nil)
+        #expect(snapshot?.summary?.isEmpty == false)
+        // Simulate a cancelled turn's appends on top of the snapshot.
+        await manager.append(Message(role: .user, content: "cancelled question"), to: sid)
+        await manager.append(Message(role: .assistant, content: "partial answer"), to: sid)
+        if let snapshot {
+            await manager.restoreRollbackSnapshot(snapshot)
+        }
+        let restored = await manager.session(id: sid)
+        #expect(restored?.messages.count == snapshot?.messages.count)
+        #expect(restored?.summary == snapshot?.summary)
+        // The restored history carries exactly one synthetic summary
+        // message: no duplicated prefix, no lost summary.
+        let synthetic = await manager.history(for: sid).filter {
+            $0.role == .system && $0.content.hasPrefix(Message.rollingSummaryPrefix)
+        }
+        #expect(synthetic.count == 1)
+    }
+
+    @Test
+    func `Structured tool actions survive brackets in arguments`() async {
+        let manager = ConversationManager()
+        let sid = UUID()
+        _ = await manager.ensureSession(id: sid)
+        await manager.append(Message(role: .user, content: "check mail"), to: sid)
+        let call = ToolInput(
+            toolName: "email.search",
+            argumentsJSON: #"{"filter":"a]b","ids":["x]"}"#,
+            callID: "call-brackets"
+        )
+        await manager.append(
+            Message(role: .assistant, content: ToolInput.placeholderContent(for: [call])),
+            to: sid
+        )
+        await manager.append(Message(role: .tool, content: "1 found", toolCallID: "call-brackets"), to: sid)
+        await manager.append(Message(role: .assistant, content: "You have one match."), to: sid)
+        let grouped = await manager.toolActionsByMessage(for: sid)
+        let actions = grouped.values.flatMap(\.self)
+        #expect(actions.count == 1)
+        #expect(actions.first?.toolName == "email.search")
+        #expect(actions.first?.argumentsJSON == #"{"filter":"a]b","ids":["x]"}"#)
+        #expect(actions.first?.result?.content == "1 found")
+        let response = SessionToolActionsResponse(
+            sessionID: sid,
+            actions: grouped.map { SessionMessageToolActions(messageID: $0.key, actions: $0.value) }
+        )
+        #expect(response.count == 1)
+        #expect(response.sessionID == sid)
     }
 }
 
@@ -589,5 +858,68 @@ struct ServerEngineFlowTests {
         } catch let error as SchedulerStoreError {
             #expect(error == .invalidField("Job limit reached (\(SchedulerStore.maxJobs)). Delete existing jobs before creating new ones."))
         }
+    }
+
+    @Test
+    func `Run log tracks in-progress status and updates to completion`() async throws {
+        let (_, base) = try makeIsolatedEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let runs = await RunLogStore.load(dbPath: dbPath)
+
+        let initial = await runs.append(
+            kind: "scheduler",
+            status: "running",
+            message: "Running report",
+            jobID: UUID(),
+            durationMs: 0
+        )
+        #expect(initial.status == "running")
+
+        let inProgressList = await runs.list(limit: 10)
+        #expect(inProgressList.first?.status == "running")
+
+        let updated = await runs.update(
+            id: initial.id,
+            status: "ok",
+            response: "Report completed successfully",
+            totalTokens: 128,
+            durationMs: 420
+        )
+        #expect(updated?.status == "ok")
+        #expect(updated?.response == "Report completed successfully")
+        #expect(updated?.totalTokens == 128)
+        #expect(updated?.durationMs == 420)
+
+        // Read back from fresh store to verify SQLite persistence
+        let freshRuns = await RunLogStore.load(dbPath: dbPath)
+        let persistedList = await freshRuns.list(limit: 10)
+        #expect(persistedList.first?.id == initial.id)
+        #expect(persistedList.first?.status == "ok")
+        #expect(persistedList.first?.response == "Report completed successfully")
+    }
+
+    @Test
+    func `Conversation session preserves source attribute`() async throws {
+        let (_, base) = try makeIsolatedEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let manager = ConversationManager(episodesDBPath: dbPath)
+
+        let sessionID = UUID()
+        _ = await manager.ensureSession(id: sessionID, title: "Daily Digest", source: "scheduler")
+        await manager.append(Message(role: .user, content: "Start run"), to: sessionID)
+
+        let sessions = await manager.listSessions()
+        let summary = sessions.first { $0.id == sessionID }
+        #expect(summary?.source == "scheduler")
+        #expect(summary?.title == "Daily Digest")
+
+        // Read back from a fresh manager instance to ensure SQLite roundtrip
+        let freshManager = ConversationManager(episodesDBPath: dbPath)
+        let freshSessions = await freshManager.listSessions()
+        let freshSummary = freshSessions.first { $0.id == sessionID }
+        #expect(freshSummary?.source == "scheduler")
+        #expect(freshSummary?.title == "Daily Digest")
     }
 }

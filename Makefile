@@ -11,14 +11,14 @@
 #   make build            # Swift engine + dashboard bundle (Web/dist)
 #   make test             # Swift tests + dashboard tests (vitest)
 #   make lint             # Swift style gates + dashboard typecheck
-#   make audit            # security audit for Web dashboard
+#   make audit            # security audit for Web dashboard and Swift dependencies
 #   make run ARGS="chat"  # launch the engine (extra args pass through)
 #   make all              # build + test + lint (default)
 #   make clean            # remove build outputs
 
 .DEFAULT_GOAL := all
 
-.PHONY: all setup setup-web setup-swift build build-web build-swift test test-web test-swift lint lint-web lint-swift audit audit-web run clean
+.PHONY: all setup setup-web setup-swift build build-web build-swift test test-web test-swift lint lint-web lint-swift audit audit-web audit-swift run clean
 
 all: build test lint
 
@@ -31,6 +31,7 @@ setup-swift:
 	swift package resolve
 	@which swiftformat >/dev/null 2>&1 || echo "swiftformat not found: install with 'brew install swiftformat' (required for 'make lint-swift')"
 	@which swiftlint >/dev/null 2>&1 || echo "swiftlint not found: install with 'brew install swiftlint' (required for 'make lint-swift')"
+	@which osv-scanner >/dev/null 2>&1 || which trivy >/dev/null 2>&1 || echo "osv-scanner not found: install with 'brew install osv-scanner' (required for 'make audit-swift')"
 
 build: build-web build-swift
 
@@ -61,11 +62,22 @@ lint-swift:
 	swiftformat --lint .
 	swiftlint lint
 
-audit: audit-web
+audit: audit-web audit-swift
 
 audit-web:
 	@test -d Web/node_modules || $(MAKE) setup-web
 	cd Web && npm audit --audit-level=high
+
+audit-swift:
+	@test -f Package.resolved || swift package resolve
+	@if which osv-scanner >/dev/null 2>&1; then \
+		osv-scanner scan --lockfile=Package.resolved; \
+	elif which trivy >/dev/null 2>&1; then \
+		trivy fs --scanners vuln Package.resolved; \
+	else \
+		echo "Neither osv-scanner nor trivy found: install with 'brew install osv-scanner' (or 'brew install trivy') to audit Swift packages." >&2; \
+		exit 1; \
+	fi
 
 run:
 	swift run rune-weaver $(ARGS)

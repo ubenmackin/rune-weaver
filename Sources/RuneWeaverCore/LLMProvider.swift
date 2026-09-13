@@ -47,6 +47,8 @@ public struct LLMResponse: Sendable, Equatable {
     /// Nil when the backend reports no usage (e.g. local servers without
     /// usage reporting).
     public let totalTokens: Int?
+    /// Structured tool calls emitted by the model during this chunk.
+    public let toolCalls: [ToolInput]
 
     /// Creates a response chunk.
     /// - Parameters:
@@ -54,11 +56,19 @@ public struct LLMResponse: Sendable, Equatable {
     ///   - isFinished: Whether the response is complete.
     ///   - errorMessage: Failure detail, if the stream failed. Defaults to nil.
     ///   - totalTokens: Billed tokens for the completed response, if reported. Defaults to nil.
-    public init(delta: String, isFinished: Bool = false, errorMessage: String? = nil, totalTokens: Int? = nil) {
+    ///   - toolCalls: Structured tool calls, if any. Defaults to empty.
+    public init(
+        delta: String,
+        isFinished: Bool = false,
+        errorMessage: String? = nil,
+        totalTokens: Int? = nil,
+        toolCalls: [ToolInput] = []
+    ) {
         self.delta = delta
         self.isFinished = isFinished
         self.errorMessage = errorMessage
         self.totalTokens = totalTokens
+        self.toolCalls = toolCalls
     }
 
     /// Whether this chunk reports a stream failure.

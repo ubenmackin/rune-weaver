@@ -153,19 +153,23 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
 #if canImport(SQLite3)
     import SQLite3
 
-    /// Shared SQLite primitives for the episode and session stores.
+    /// Shared SQLite primitives for the episode, session, scheduler, and run-log stores.
     ///
-    /// Centralizes directory creation, handle opening, statement
-    /// execution, and text binding so both stores share one
-    /// `sqlite3_*` policy. Callers map failures to their domain
+    /// Package-scoped (`package`) to share handle opening, statement
+    /// execution, and text binding across `RuneWeaverCore` and `RuneWeaverServer`
+    /// without exposing them publicly. Callers map failures to their domain
     /// errors via the `unavailable`/`failure` closures.
-    enum SQLiteHelpers {
+    package enum SQLiteHelpers {
         /// Opens a database handle, creating parent directories.
+        ///
+        /// Applies the shared durability policy (`busy_timeout` plus WAL)
+        /// so every store inherits identical locking behavior without
+        /// duplicating PRAGMAs per open site.
         /// - Parameters:
         ///   - dbPath: SQLite file path. `~` is expanded.
         ///   - unavailable: Maps an open failure to the caller's domain error.
         /// - Returns: Open database handle. Caller must close it.
-        static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {
+        package static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {
             let expanded = (dbPath as NSString).expandingTildeInPath
             let directory = (expanded as NSString).deletingLastPathComponent
             if !directory.isEmpty {
@@ -179,6 +183,16 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
                 }
                 throw unavailable("Could not open SQLite store at \(dbPath)")
             }
+            do {
+                try exec(
+                    handle: handle,
+                    sql: "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;",
+                    failure: unavailable
+                )
+            } catch {
+                sqlite3_close(handle)
+                throw error
+            }
             return handle
         }
 
@@ -187,7 +201,7 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         ///   - handle: Open database handle.
         ///   - sql: SQL to execute.
         ///   - failure: Maps an execution failure to the caller's domain error.
-        static func exec(handle: OpaquePointer?, sql: String, failure: (String) -> some Error) throws {
+        package static func exec(handle: OpaquePointer?, sql: String, failure: (String) -> some Error) throws {
             var errorMessage: UnsafeMutablePointer<CChar>?
             let status = sql.withCString { sqlite3_exec(handle, $0, nil, nil, &errorMessage) }
             defer { sqlite3_free(errorMessage) }
@@ -202,7 +216,7 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         ///   - statement: Prepared statement.
         ///   - index: One-based bind index.
         ///   - value: Text value, or nil for NULL.
-        static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
+        package static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
             if let value {
                 _ = value.withCString { sqlite3_bind_text(statement, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
             } else {
@@ -215,8 +229,35 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         ///   - statement: Stepped statement positioned on a row.
         ///   - index: Zero-based column index.
         /// - Returns: Column text, or nil when NULL.
-        static func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
+        package static func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
             sqlite3_column_text(statement, index).map { String(cString: $0) }
+        }
+
+        /// Binds optional 64-bit integer, mapping nil to NULL.
+        package static func bindInt64(_ statement: OpaquePointer?, index: Int32, value: Int64?) {
+            if let value {
+                sqlite3_bind_int64(statement, index, value)
+            } else {
+                sqlite3_bind_null(statement, index)
+            }
+        }
+
+        /// Column-int64 helper returning nil for NULL columns.
+        package static func columnInt64(_ statement: OpaquePointer?, index: Int32) -> Int64? {
+            if sqlite3_column_type(statement, index) == SQLITE_NULL {
+                return nil
+            }
+            return sqlite3_column_int64(statement, index)
+        }
+
+        /// Binds double value.
+        package static func bindDouble(_ statement: OpaquePointer?, index: Int32, value: Double) {
+            sqlite3_bind_double(statement, index, value)
+        }
+
+        /// Column-double helper.
+        package static func columnDouble(_ statement: OpaquePointer?, index: Int32) -> Double {
+            sqlite3_column_double(statement, index)
         }
     }
 #endif

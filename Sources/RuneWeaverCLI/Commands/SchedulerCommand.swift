@@ -47,7 +47,11 @@ struct SchedulerListCommand: AsyncParsableCommand {
         if loaded.isFallback {
             print(TerminalStyle.dim("No config found at \(loaded.url.path); showing built-in defaults."))
         }
-        let jobs = loaded.config.scheduler.jobs
+        // Durable SQLite state is the single source of truth; the config
+        // file only seeds an empty database. Direct-core read keeps chat
+        // and scheduler paths off the service layer.
+        let dbJobs = await SchedulerJobConfig.persistedConfigs(from: loaded.config.memory.episodesDBPath)
+        let jobs = dbJobs.isEmpty ? loaded.config.scheduler.jobs : dbJobs
         guard !jobs.isEmpty else {
             print(TerminalStyle.dim("No scheduler jobs configured. Add [[scheduler.jobs]] to \(loaded.url.path)."))
             return
@@ -113,7 +117,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         if loaded.isFallback {
             print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
         }
-        let schedulerJobs = loaded.config.scheduler.jobs
+        let dbJobs = await SchedulerJobConfig.persistedConfigs(from: loaded.config.memory.episodesDBPath)
+        let schedulerJobs = dbJobs.isEmpty ? loaded.config.scheduler.jobs : dbJobs
         guard !schedulerJobs.isEmpty else {
             print(TerminalStyle.dim("No scheduler jobs configured. Add [[scheduler.jobs]] to \(loaded.url.path)."))
             return

@@ -30,6 +30,8 @@ export interface HealthResponse {
   status: string;
   engine: string;
   version: string;
+  model?: string;
+  contextLength?: number;
 }
 
 export interface ToolResult {
@@ -50,6 +52,14 @@ export interface OrchestratorResponse {
   sessionID: string;
   toolActions: ToolAction[];
   totalTokens?: number | null;
+  modelName?: string | null;
+  contextLength?: number | null;
+  sessionTokens?: number | null;
+}
+
+export interface CancelChatResponse {
+  sessionID: string;
+  cancelled: boolean;
 }
 
 export interface ApprovalInput {
@@ -118,10 +128,59 @@ export interface RunLogEntry {
   status: string;
   message: string;
   timestamp: string;
+  response?: string | null;
+  toolActions?: ToolAction[];
+  totalTokens?: number | null;
+  durationMs?: number | null;
 }
 
 export interface RunLogsResponse {
   runs: RunLogEntry[];
+  count: number;
+}
+
+export interface ChatMessage {
+  id?: string;
+  role: "system" | "user" | "assistant" | "tool";
+  content: string;
+  toolCallID?: string | null;
+  isError?: boolean | null;
+  createdAt?: string;
+}
+
+export interface ConversationSession {
+  id: string;
+  title?: string | null;
+  messages: ChatMessage[];
+  summary?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  source?: string | null;
+}
+
+export interface SessionSummary {
+  id: string;
+  title: string;
+  messageCount: number;
+  summary?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  source?: string | null;
+}
+
+export interface SessionsResponse {
+  sessions: SessionSummary[];
+  count: number;
+}
+
+export interface SessionMessageToolActions {
+  messageID: string;
+  actions: ToolAction[];
+}
+
+export interface SessionToolActionsResponse {
+  sessionID: string;
+  actions: SessionMessageToolActions[];
   count: number;
 }
 
@@ -277,6 +336,13 @@ export function postChat(
   });
 }
 
+export function cancelChat(sessionID: string): Promise<CancelChatResponse> {
+  return fetchJson<CancelChatResponse>("/chat/cancel", {
+    method: "POST",
+    body: JSON.stringify({ sessionID }),
+  });
+}
+
 export function listApprovals(limit?: number): Promise<ApprovalsResponse> {
   const query = limit != null && limit > 0 ? `?limit=${encodeURIComponent(limit)}` : "";
   return fetchJson<ApprovalsResponse>(`/approvals${query}`);
@@ -327,13 +393,43 @@ export async function deleteFact(id: string): Promise<void> {
   });
 }
 
-export function listRuns(limit = 50): Promise<RunLogsResponse> {
+export function listRuns(limit = 50, jobID?: string): Promise<RunLogsResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
+  if (jobID) params.set("jobID", jobID);
   return fetchJson<RunLogsResponse>(`/runs?${params.toString()}`);
 }
 
 export function getRun(id: string): Promise<RunLogEntry> {
   return fetchJson<RunLogEntry>(`/runs/${encodeURIComponent(id)}`);
+}
+
+export function listSessions(): Promise<SessionsResponse> {
+  return fetchJson<SessionsResponse>("/sessions");
+}
+
+export function getSession(id: string): Promise<ConversationSession> {
+  return fetchJson<ConversationSession>(`/sessions/${encodeURIComponent(id)}`);
+}
+
+export function getSessionToolActions(
+  id: string,
+): Promise<SessionToolActionsResponse> {
+  return fetchJson<SessionToolActionsResponse>(
+    `/sessions/${encodeURIComponent(id)}/tool-actions`,
+  );
+}
+
+export function updateSessionTitle(id: string, title: string): Promise<void> {
+  return fetchJson<void>(`/sessions/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title }),
+  });
+}
+
+export function deleteSession(id: string): Promise<void> {
+  return fetchJson<void>(`/sessions/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function listJobs(limit?: number): Promise<SchedulerJobsResponse> {

@@ -34,6 +34,12 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     public let content: String
     /// Tool-call identifier this message answers, if `role == .tool`.
     public let toolCallID: String?
+    /// Whether a `tool`-role message represents a failure.
+    ///
+    /// Persisted alongside the result so history clients render past
+    /// failures as errors instead of success; nil for non-tool roles
+    /// and for rows written before the flag existed.
+    public let isError: Bool?
     /// Creation timestamp.
     public let createdAt: Date
 
@@ -43,18 +49,21 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     ///   - role: Who produced the message.
     ///   - content: Text content.
     ///   - toolCallID: Tool-call identifier, for tool results.
+    ///   - isError: Whether a tool result represents a failure. Defaults to nil.
     ///   - createdAt: Creation date. Defaults to now.
     public init(
         id: UUID = UUID(),
         role: Role,
         content: String,
         toolCallID: String? = nil,
+        isError: Bool? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
         self.role = role
         self.content = content
         self.toolCallID = toolCallID
+        self.isError = isError
         self.createdAt = createdAt
     }
 }

@@ -91,4 +91,31 @@ struct ToolBusTests {
         )
         #expect(result.isError == true)
     }
+
+    @Test
+    func `RequiresApproval dry run still honors gate denials`() async {
+        let gate = PermissionGate()
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: ApprovalStubTool())
+        // Explicit denial must hold even when the caller promises dry run.
+        await gate.deny(ActionDescriptor(toolName: "stub.write"), reason: "no writes in test")
+        let denied = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(denied.isError == true)
+        #expect(denied.content.contains("denied") == true)
+    }
+
+    @Test
+    func `RequiresApproval dry run still requires approval`() async {
+        let bus = ToolBus(permissionGate: PermissionGate())
+        await bus.register(tool: ApprovalStubTool())
+        // No handler means denial; dry run must not bypass the gate.
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID(), dryRun: true)
+        )
+        #expect(result.isError == true)
+    }
 }

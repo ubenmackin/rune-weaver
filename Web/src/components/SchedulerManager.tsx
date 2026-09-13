@@ -1,58 +1,54 @@
-// Rune Weaver Dashboard — Scheduler manager for CRUD and manual execution of recurring and poll jobs.
+// Rune Weaver Dashboard — Scheduler manager for automated jobs with Wizard creation and embedded run history.
+// Supports exclusive Recurring Schedules or Email Event Watchers with full run inspection.
 
 import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
-  DEFAULT_POLL_INTERVAL_SECONDS,
   createJob,
   deleteJob,
   listJobs,
+  listRuns,
   runJobNow,
   updateJob,
+  type NewSchedulerJobInput,
+  type RunLogEntry,
   type SchedulerJob,
+  type UpdateSchedulerJobInput,
 } from "../api";
-
-function emptyForm() {
-  return {
-    name: "",
-    schedule: "",
-    prompt: "",
-    enabled: true,
-    pollAccount: "",
-    pollQuery: "",
-    pollMailbox: "",
-    pollIntervalSeconds: "",
-    pollLimit: "",
-  };
-}
-
-type PositiveIntParseResult =
-  | { kind: "empty" }
-  | { kind: "valid"; value: number }
-  | { kind: "invalid" };
-
-function parsePositiveInt(text: string): PositiveIntParseResult {
-  const trimmed = text.trim();
-  if (!trimmed) return { kind: "empty" };
-  // Strict decimal only: reject hex/octal/scientific/float spellings that
-  // Number() would otherwise accept ("1e3", "0x10", "1.0").
-  if (!/^\d+$/.test(trimmed)) return { kind: "invalid" };
-  const value = Number(trimmed);
-  if (!Number.isSafeInteger(value) || value <= 0) return { kind: "invalid" };
-  return { kind: "valid", value };
-}
+import RunDetailModal from "./RunDetailModal";
+import ScheduleWizardModal from "./ScheduleWizardModal";
+import {
+  ClockIcon,
+  EditIcon,
+  MailIcon,
+  PlusIcon,
+  RefreshIcon,
+  TrashIcon,
+} from "./icons";
 
 export default function SchedulerManager() {
   const [jobs, setJobs] = useState<SchedulerJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [form, setForm] = useState(emptyForm);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [toggling, setToggling] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState<string | null>(null);
-  const [running, setRunning] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Wizard state
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [editingJob, setEditingJob] = useState<SchedulerJob | null>(null);
+
+  // Action states
+  const [runningJobId, setRunningJobId] = useState<string | null>(null);
+  const [togglingJobId, setTogglingJobId] = useState<string | null>(null);
+  // Non-blocking delete confirmation: the pending job renders an inline
+  // confirm dialog instead of a blocking native prompt.
+  const [pendingDelete, setPendingDelete] = useState<SchedulerJob | null>(null);
+  const [deletingJobId, setDeletingJobId] = useState<string | null>(null);
+
+  // Job run history inspection
+  const [expandedRunsJobId, setExpandedRunsJobId] = useState<string | null>(null);
+  const [jobRuns, setJobRuns] = useState<Record<string, RunLogEntry[]>>({});
+  const [loadingRunsJobId, setLoadingRunsJobId] = useState<string | null>(null);
+  const [selectedRun, setSelectedRun] = useState<RunLogEntry | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -61,9 +57,7 @@ export default function SchedulerManager() {
       const response = await listJobs();
       setJobs(response.jobs);
     } catch (failure) {
-      setError(
-        failure instanceof ApiError ? failure.message : "Schedules failed",
-      );
+      setError(failure instanceof ApiError ? failure.message : "Schedules failed");
     } finally {
       setLoading(false);
     }
@@ -79,184 +73,98 @@ export default function SchedulerManager() {
       })
       .catch((failure) => {
         if (!cancelled) {
-          setError(
-            failure instanceof ApiError ? failure.message : "Schedules failed",
-          );
+          setError(failure instanceof ApiError ? failure.message : "Schedules failed");
         }
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
+
+    // Check for in-progress runs on mount to restore "Running..." state across page navigation
+    listRuns(20)
+      .then((res) => {
+        if (cancelled) return;
+        const running = res.runs.find((r) => r.status === "running" && r.jobID);
+        if (running && running.jobID) {
+          setRunningJobId(running.jobID);
+        }
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
   }, []);
 
-  function startEdit(job: SchedulerJob) {
-    setEditingId(job.id);
-    setError(null);
-    setNotice(null);
-    setForm({
-      name: job.name,
-      schedule: job.schedule ?? "",
-      prompt: job.prompt,
-      enabled: job.enabled,
-      pollAccount: job.pollAccount ?? "",
-      pollQuery: job.pollQuery ?? "",
-      pollMailbox: job.pollMailbox ?? "",
-      pollIntervalSeconds:
-        job.pollIntervalSeconds == null
-          ? ""
-          : String(job.pollIntervalSeconds),
-      pollLimit: job.pollLimit == null ? "" : String(job.pollLimit),
-    });
-  }
+  // Poll while a job is running to detect completion and refresh runs
+  useEffect(() => {
+    if (!runningJobId) return;
 
-  function cancelEdit() {
-    setEditingId(null);
-    setForm(emptyForm());
-    setError(null);
-  }
+    const interval = setInterval(() => {
+      listRuns(10)
+        .then((res) => {
+          const isStillRunning = res.runs.some(
+            (r) => r.status === "running" && r.jobID === runningJobId
+          );
+          if (!isStillRunning) {
+            setRunningJobId(null);
+            if (expandedRunsJobId) {
+              void fetchJobRuns(expandedRunsJobId);
+            }
+          }
+        })
+        .catch(() => {});
+    }, 2500);
 
-  async function submit() {
-    const name = form.name.trim();
-    const schedule = form.schedule.trim();
-    const prompt = form.prompt.trim();
-    const pollAccount = form.pollAccount.trim();
-    if (!name || !prompt) {
-      setError("Name and prompt are required.");
-      return;
-    }
-    if (!schedule && !pollAccount) {
-      setError("Add a cron schedule or an event rule poll account.");
-      return;
-    }
-    // Single strict parse per submit; reuse intervalParse/limitParse below
-    // instead of re-parsing the same strings.
-    const intervalParse = parsePositiveInt(form.pollIntervalSeconds);
-    if (intervalParse.kind === "invalid") {
-      setError("Poll interval must be a positive integer number of seconds.");
-      return;
-    }
-    const interval =
-      intervalParse.kind === "valid" ? intervalParse.value : undefined;
-    const limitParse = parsePositiveInt(form.pollLimit);
-    if (limitParse.kind === "invalid") {
-      setError("Poll limit must be a positive integer.");
-      return;
-    }
-    const limit = limitParse.kind === "valid" ? limitParse.value : undefined;
-    // Atomic poll validation: poll query/mailbox/interval/limit without a
-    // trimmed account would 400 server-side (`*_requires poll_account`);
-    // reject client-side so no partial poll payload reaches the server.
-    const pollQuery = form.pollQuery.trim();
-    const pollMailbox = form.pollMailbox.trim();
-    if (
-      !pollAccount &&
-      (pollQuery || pollMailbox || interval !== undefined || limit !== undefined)
-    ) {
-      setError("Poll query, mailbox, interval, and limit require a poll account.");
-      return;
-    }
-    setSaving(true);
-    setError(null);
-    setNotice(null);
-    try {
-      if (editingId) {
-        // Blank poll strings clear to null server-side ("" → null
-        // normalization). A cleared interval or limit field (empty) preserves
-        // the stored value (omitted = nil = no-change), so edits never
-        // silently reset e.g. 600 → 300; a cron-only edit (empty account)
-        // sends clearPoll to drop the whole trigger.
-        const clearingPoll = !pollAccount;
-        const updated = await updateJob(editingId, {
-          name,
-          schedule,
-          prompt,
-          enabled: form.enabled,
-          pollAccount,
-          pollQuery: pollQuery ? pollQuery : "",
-          pollMailbox: pollMailbox ? pollMailbox : "",
-          ...(clearingPoll
-            ? { clearPoll: true }
-            : {
-                // Interval/limit preservation: omitted leaves the stored
-                // value alone; only a valid entry overwrites it.
-                ...(interval !== undefined
-                  ? { pollIntervalSeconds: interval }
-                  : {}),
-                ...(limit !== undefined ? { pollLimit: limit } : {}),
-              }),
-        });
-        setJobs((previous) =>
-          previous.map((job) => (job.id === updated.id ? updated : job)),
-        );
-        setNotice(`Saved "${updated.name}".`);
-      } else {
-        const created = await createJob({
-          name,
-          schedule,
-          prompt,
-          enabled: form.enabled,
-          ...(pollAccount ? { pollAccount } : {}),
-          ...(pollQuery ? { pollQuery } : {}),
-          ...(pollMailbox ? { pollMailbox } : {}),
-          ...(interval === undefined ? {} : { pollIntervalSeconds: interval }),
-          ...(limit === undefined ? {} : { pollLimit: limit }),
-        });
-        setJobs((previous) => [...previous, created]);
-        setNotice(`Created "${created.name}".`);
+    return () => clearInterval(interval);
+  }, [runningJobId, expandedRunsJobId]);
+
+  // Keep selected modal updated if its run changes
+  useEffect(() => {
+    if (!selectedRun) return;
+    const currentList = selectedRun.jobID ? jobRuns[selectedRun.jobID] : undefined;
+    if (currentList) {
+      const updated = currentList.find((r) => r.id === selectedRun.id);
+      if (updated && (updated.status !== selectedRun.status || updated.response !== selectedRun.response)) {
+        setSelectedRun(updated);
       }
-      setEditingId(null);
-      setForm(emptyForm());
-    } catch (failure) {
-      setError(
-        failure instanceof ApiError ? failure.message : "Save failed",
-      );
-    } finally {
-      setSaving(false);
     }
-  }
+  }, [jobRuns, selectedRun]);
 
-  async function toggleEnabled(job: SchedulerJob) {
-    setToggling(job.id);
+  async function handleToggle(job: SchedulerJob) {
+    setTogglingJobId(job.id);
     setError(null);
     try {
       const updated = await updateJob(job.id, { enabled: !job.enabled });
-      setJobs((previous) =>
-        previous.map((entry) => (entry.id === updated.id ? updated : entry)),
-      );
+      setJobs((prev) => prev.map((j) => (j.id === job.id ? updated : j)));
     } catch (failure) {
-      setError(
-        failure instanceof ApiError ? failure.message : "Toggle failed",
-      );
+      setError(failure instanceof ApiError ? failure.message : "Toggle failed");
     } finally {
-      setToggling(null);
+      setTogglingJobId(null);
     }
   }
 
-  async function remove(job: SchedulerJob) {
-    setDeleting(job.id);
-    setError(null);
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    const job = pendingDelete;
+    setDeletingJobId(job.id);
     try {
       await deleteJob(job.id);
-      setJobs((previous) => previous.filter((entry) => entry.id !== job.id));
-      if (editingId === job.id) {
-        setEditingId(null);
-        setForm(emptyForm());
-      }
-      setNotice(`Deleted "${job.name}".`);
+      setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      setPendingDelete(null);
     } catch (failure) {
-      setError(
-        failure instanceof ApiError ? failure.message : "Delete failed",
-      );
+      setError(failure instanceof ApiError ? failure.message : "Delete failed");
     } finally {
-      setDeleting(null);
+      setDeletingJobId(null);
     }
   }
 
-  async function runNow(job: SchedulerJob) {
-    setRunning(job.id);
+  function cancelDelete() {
+    setPendingDelete(null);
+  }
+
+  async function handleRunNow(job: SchedulerJob) {
+    setRunningJobId(job.id);
     setError(null);
     setNotice(null);
     try {
@@ -265,267 +173,340 @@ export default function SchedulerManager() {
         response.text.length > 160
           ? `${response.text.slice(0, 160)}…`
           : response.text;
-      setNotice(`Ran "${job.name}": ${preview || "ok"}`);
+      setNotice(`Ran "${job.name}": ${preview || "Completed successfully"}`);
+
+      // Refresh job history if open
+      if (expandedRunsJobId === job.id) {
+        void fetchJobRuns(job.id);
+      }
     } catch (failure) {
-      setError(
-        failure instanceof ApiError ? failure.message : "Run failed",
-      );
+      setError(failure instanceof ApiError ? failure.message : "Run failed");
     } finally {
-      setRunning(null);
+      setRunningJobId(null);
     }
   }
 
-  const isEditing = editingId !== null;
+  async function fetchJobRuns(jobID: string) {
+    setLoadingRunsJobId(jobID);
+    try {
+      const res = await listRuns(20, jobID);
+      setJobRuns((prev) => ({ ...prev, [jobID]: res.runs }));
+    } catch {
+      // Ignore
+    } finally {
+      setLoadingRunsJobId(null);
+    }
+  }
+
+  function toggleJobRuns(jobID: string) {
+    if (expandedRunsJobId === jobID) {
+      setExpandedRunsJobId(null);
+    } else {
+      setExpandedRunsJobId(jobID);
+      void fetchJobRuns(jobID);
+    }
+  }
+
+  async function handleSaveWizard(
+    input: NewSchedulerJobInput | UpdateSchedulerJobInput,
+    id?: string,
+  ) {
+    if (id) {
+      const updated = await updateJob(id, input as UpdateSchedulerJobInput);
+      setJobs((prev) => prev.map((j) => (j.id === id ? updated : j)));
+    } else {
+      const created = await createJob(input as NewSchedulerJobInput);
+      setJobs((prev) => [created, ...prev]);
+    }
+    setWizardOpen(false);
+    setEditingJob(null);
+  }
 
   return (
     <section className="panel" aria-label="Scheduler manager">
-      <h2>Schedules</h2>
-      <div className="row">
-        <button
-          type="button"
-          className="ghost"
-          onClick={() => void refresh()}
-          disabled={loading}
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
-        <span className="muted">{jobs.length} jobs</span>
-      </div>
-      {error ? <p className="error">{error}</p> : null}
-      {notice ? <p className="muted">{notice}</p> : null}
+      <div className="panel-header-row">
+        <div>
+          <h2>Schedules & Automated Jobs</h2>
+          <p className="muted text-sm">
+            Create repeating cron schedules or email-triggered automated agent tasks.
+          </p>
+        </div>
 
-      <div className="card" aria-label="Job form">
-        <h3>{isEditing ? "Edit job" : "New job"}</h3>
-        <div className="column">
-          <label>
-            Name{" "}
-            <input
-              type="text"
-              aria-label="Job name"
-              placeholder="morning digest"
-              value={form.name}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  name: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label>
-            Cron schedule{" "}
-            <input
-              type="text"
-              aria-label="Cron schedule"
-              placeholder="0 8 * * *  (empty for poll-only jobs)"
-              value={form.schedule}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  schedule: event.target.value,
-                }))
-              }
-            />
-          </label>
+        <div className="row">
+          <button
+            type="button"
+            className="ghost icon-text-btn"
+            onClick={() => void refresh()}
+            disabled={loading}
+          >
+            <RefreshIcon size={14} className={loading ? "spin" : ""} />
+            <span>{loading ? "Refreshing…" : "Refresh"}</span>
+          </button>
+          <span className="muted text-sm">{jobs.length} jobs</span>
+
+          <button
+            type="button"
+            className="primary icon-text-btn"
+            onClick={() => {
+              setEditingJob(null);
+              setWizardOpen(true);
+            }}
+          >
+            <PlusIcon size={14} />
+            <span>Create Schedule</span>
+          </button>
+        </div>
+      </div>
+
+      {error ? <p className="error">{error}</p> : null}
+      {notice ? <div className="notice-banner">{notice}</div> : null}
+
+      {jobs.length === 0 && !loading ? (
+        <div className="empty-state-box">
+          <h3>No scheduled jobs yet</h3>
           <p className="muted">
-            Five fields (minute hour day month weekday) or @hourly, @daily,
-            @weekly. Leave empty for poll-only event jobs.
+            Automate recurring digests, email watchers, and background analysis.
           </p>
-          <label>
-            Prompt{" "}
-            <textarea
-              aria-label="Job prompt"
-              placeholder="Summarize new mail since yesterday"
-              value={form.prompt}
-              rows={3}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  prompt: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label className="row">
-            <input
-              type="checkbox"
-              aria-label="Job enabled"
-              checked={form.enabled}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  enabled: event.target.checked,
-                }))
-              }
-            />
-            <span>Enabled</span>
-          </label>
-          <h4>Event rule (email poll)</h4>
-          <p className="muted">
-            Optional trigger that watches one mail account for new arrivals. A
-            job fires on either trigger when both are set.
-          </p>
-          <label>
-            Poll account{" "}
-            <input
-              type="text"
-              aria-label="Poll account"
-              placeholder="icloud (empty for cron-only jobs)"
-              value={form.pollAccount}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  pollAccount: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label>
-            Poll query{" "}
-            <input
-              type="text"
-              aria-label="Poll query"
-              placeholder="from:alerts (blank means most-recent)"
-              value={form.pollQuery}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  pollQuery: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label>
-            Poll mailbox{" "}
-            <input
-              type="text"
-              aria-label="Poll mailbox"
-              placeholder="INBOX (blank means every mailbox)"
-              value={form.pollMailbox}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  pollMailbox: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label>
-            Poll interval seconds{" "}
-            <input
-              type="text"
-              aria-label="Poll interval seconds"
-              placeholder={String(DEFAULT_POLL_INTERVAL_SECONDS)}
-              value={form.pollIntervalSeconds}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  pollIntervalSeconds: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <label>
-            Poll limit{" "}
-            <input
-              type="text"
-              aria-label="Poll limit"
-              placeholder="10"
-              value={form.pollLimit}
-              onChange={(event) =>
-                setForm((previous) => ({
-                  ...previous,
-                  pollLimit: event.target.value,
-                }))
-              }
-            />
-          </label>
-          <div className="row">
-            <button
-              type="button"
-              className="primary"
-              disabled={saving}
-              onClick={() => void submit()}
+          <button
+            type="button"
+            className="primary mt-3"
+            onClick={() => {
+              setEditingJob(null);
+              setWizardOpen(true);
+            }}
+          >
+            Create Your First Schedule
+          </button>
+        </div>
+      ) : null}
+
+      <div className="job-cards-list">
+        {jobs.map((job) => {
+          const isPollJob = Boolean(job.pollAccount);
+          const isExpanded = expandedRunsJobId === job.id;
+          const runsForThisJob = jobRuns[job.id] || [];
+
+          return (
+            <div
+              key={job.id}
+              className={`schedule-card ${job.enabled ? "active" : "disabled"}`}
             >
-              {saving
-                ? "Saving…"
-                : isEditing
-                  ? "Save changes"
-                  : "Create job"}
-            </button>
-            {isEditing ? (
+              <div className="schedule-card-top">
+                <div className="schedule-card-identity">
+                  <div className="schedule-card-title-row">
+                    <strong className="schedule-card-name">{job.name}</strong>
+                    <span className="schedule-card-state-text muted text-xs">
+                      {job.enabled ? "enabled" : "disabled"}
+                    </span>
+                    {isPollJob ? (
+                      <span className="trigger-badge poll">
+                        <MailIcon size={12} />
+                        <span>Email Watcher ({job.pollAccount})</span>
+                      </span>
+                    ) : (
+                      <span className="trigger-badge cron font-mono">
+                        <ClockIcon size={12} />
+                        <span>{job.schedule || "Cron"}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="schedule-card-details muted text-xs">
+                    {isPollJob ? (
+                      <span>
+                        watches {job.pollAccount} · mailbox <code>{job.pollMailbox || "INBOX"}</code>{" "}
+                        every {job.pollIntervalSeconds || 300}s
+                        {job.pollQuery ? ` · query "${job.pollQuery}"` : ""}
+                      </span>
+                    ) : (
+                      <span>Recurring time-based cron schedule</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="schedule-card-actions">
+                  <button
+                    type="button"
+                    className={`status-toggle-btn ${
+                      job.enabled ? "enabled" : "disabled"
+                    }`}
+                    onClick={() => void handleToggle(job)}
+                    disabled={togglingJobId === job.id}
+                    aria-label={job.enabled ? "Disable" : "Enable"}
+                  >
+                    {togglingJobId === job.id
+                      ? "Updating…"
+                      : job.enabled
+                      ? "Disable"
+                      : "Enable"}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="ghost run-now-btn"
+                    onClick={() => void handleRunNow(job)}
+                    disabled={runningJobId === job.id || !job.enabled}
+                    title="Execute this job immediately"
+                    aria-label="Run now"
+                  >
+                    {runningJobId === job.id ? "Running…" : "Run now"}
+                  </button>
+
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => {
+                      setEditingJob(job);
+                      setWizardOpen(true);
+                    }}
+                    title="Edit schedule"
+                    aria-label="Edit schedule"
+                  >
+                    <EditIcon size={15} />
+                  </button>
+
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    onClick={() => setPendingDelete(job)}
+                    title="Delete schedule"
+                    aria-label="Delete"
+                  >
+                    <TrashIcon size={15} />
+                  </button>
+                </div>
+              </div>
+
+              {/* Prompt Preview */}
+              <div className="schedule-card-prompt">
+                <span className="prompt-label">Task:</span>
+                <span className="prompt-text">{job.prompt}</span>
+              </div>
+
+              {/* Run History Toggle */}
+              <div className="schedule-card-footer">
+                <button
+                  type="button"
+                  className="view-history-btn"
+                  onClick={() => toggleJobRuns(job.id)}
+                >
+                  {isExpanded
+                    ? "Hide Past Runs"
+                    : "View Past Runs"}
+                </button>
+              </div>
+
+              {/* Embedded Run History Drawer */}
+              {isExpanded && (
+                <div className="embedded-history-drawer">
+                  <h4>Past Runs for "{job.name}"</h4>
+                  {loadingRunsJobId === job.id && runsForThisJob.length === 0 ? (
+                    <p className="muted text-xs">Loading execution history…</p>
+                  ) : null}
+
+                  {runsForThisJob.length === 0 && loadingRunsJobId !== job.id ? (
+                    <p className="muted text-xs">
+                      No recorded runs yet for this job. Click "Run Now" to test.
+                    </p>
+                  ) : null}
+
+                  <div className="embedded-runs-list">
+                    {runsForThisJob.map((run) => (
+                      <div className="embedded-run-item" key={run.id}>
+                        <div className="embedded-run-meta">
+                          <span className={`status-pill small ${run.status}`}>
+                            {run.status === "running" ? "IN PROGRESS" : run.status.toUpperCase()}
+                          </span>
+                          <span className="text-xs muted">
+                            {new Date(run.timestamp).toLocaleString()}
+                          </span>
+                          {run.durationMs != null ? (
+                            <span className="text-xs muted">
+                              • {run.durationMs >= 1000 ? `${(run.durationMs / 1000).toFixed(1)}s` : `${run.durationMs}ms`}
+                            </span>
+                          ) : null}
+                        </div>
+
+                        {run.response ? (
+                          <div className="embedded-run-response">
+                            {run.response.slice(0, 180)}
+                            {run.response.length > 180 ? "…" : ""}
+                          </div>
+                        ) : (
+                          <div className="embedded-run-response muted">
+                            {run.status === "skipped"
+                              ? "Skipped (already running)"
+                              : run.message}
+                          </div>
+                        )}
+
+                        <button
+                          type="button"
+                          className="ghost text-xs view-run-btn"
+                          onClick={() => setSelectedRun(run)}
+                        >
+                          Full Details
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Creation / Edit Wizard Modal */}
+      {wizardOpen && (
+        <ScheduleWizardModal
+          jobToEdit={editingJob}
+          onSave={handleSaveWizard}
+          onClose={() => {
+            setWizardOpen(false);
+            setEditingJob(null);
+          }}
+        />
+      )}
+
+      {/* Full Run Details Modal */}
+      {selectedRun && (
+        <RunDetailModal
+          run={selectedRun}
+          onClose={() => setSelectedRun(null)}
+        />
+      )}
+
+      {/* Non-blocking delete confirmation */}
+      {pendingDelete && (
+        <div className="modal-overlay" role="dialog" aria-label="Confirm delete schedule">
+          <div className="modal">
+            <h3>Delete schedule?</h3>
+            <p className="muted">
+              Delete schedule &quot;{pendingDelete.name}&quot;? This cannot be undone.
+            </p>
+            <div className="row">
               <button
                 type="button"
                 className="ghost"
-                disabled={saving}
-                onClick={cancelEdit}
+                onClick={cancelDelete}
+                disabled={deletingJobId === pendingDelete.id}
               >
-                Cancel
+                Keep
               </button>
-            ) : null}
+              <button
+                type="button"
+                className="danger"
+                onClick={() => void confirmDelete()}
+                disabled={deletingJobId === pendingDelete.id}
+                aria-label="Confirm delete"
+              >
+                {deletingJobId === pendingDelete.id ? "Deleting…" : "Delete"}
+              </button>
+            </div>
           </div>
         </div>
-      </div>
-
-      {jobs.length === 0 && !loading ? (
-        <p className="muted">
-          No scheduled jobs yet. Create one above without touching config
-          files.
-        </p>
-      ) : null}
-      {jobs.map((job) => (
-        <div className="card" key={job.id}>
-          <div>
-            <strong>{job.name}</strong>{" "}
-            <span className="muted">
-              {job.enabled ? "enabled" : "disabled"}
-            </span>
-          </div>
-          <div className="muted">
-            {job.schedule ? `cron ${job.schedule}` : "poll-only"}
-            {job.pollAccount
-              ? ` · watches ${job.pollAccount}${job.pollQuery ? ` matching "${job.pollQuery}"` : ""}${job.pollMailbox ? ` in ${job.pollMailbox}` : ""}${job.pollIntervalSeconds ? ` every ${job.pollIntervalSeconds}s` : ""}${job.pollLimit != null ? ` limit ${job.pollLimit}` : ""}`
-              : ""}
-          </div>
-          <div>{job.prompt}</div>
-          <div className="row">
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => startEdit(job)}
-            >
-              Edit
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              disabled={toggling === job.id}
-              onClick={() => void toggleEnabled(job)}
-            >
-              {job.enabled ? "Disable" : "Enable"}
-            </button>
-            <button
-              type="button"
-              className="ghost"
-              disabled={running === job.id || !job.enabled}
-              onClick={() => void runNow(job)}
-              title={
-                job.enabled ? "Run this job now" : "Enable the job to run it"
-              }
-            >
-              {running === job.id ? "Running…" : "Run now"}
-            </button>
-            <button
-              type="button"
-              className="danger"
-              disabled={deleting === job.id}
-              onClick={() => void remove(job)}
-            >
-              Delete
-            </button>
-          </div>
-        </div>
-      ))}
+      )}
     </section>
   );
 }

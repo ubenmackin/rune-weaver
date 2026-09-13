@@ -11,8 +11,8 @@ import Foundation
 /// The API binds to loopback only (`127.0.0.1:8082` by default) and serves
 /// every client — iOS, macOS menu bar, and web dashboard — from one shared
 /// surface with no per-client feature forks. There is no authentication:
-/// single-user design trusts the local machine and the WireGuard VPN for
-/// remote access. Never bind to `0.0.0.0` or expose this port to the public
+/// single-user design trusts the local machine only; remote access over
+/// WireGuard deferred until auth lands. Never bind to `0.0.0.0` or expose this port to the public
 /// internet. The default port avoids the local LLM servers (MLX on 8080,
 /// llama.cpp on 8081) so the engine and inference can run side by side.
 ///

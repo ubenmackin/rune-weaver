@@ -4,6 +4,11 @@
 // within the API service. Prevents duplicate concurrent executions of the same
 // job by UUID or normalized name while keeping API execution distinct from the
 // standalone CLI scheduler foreground loop.
+//
+// Service notifications travel exclusively through the WebSocket event hub
+// plus Web Notifications; the service never shells to `osascript`. Local
+// popups for terminal-driven runs stay with the CLI foreground loop via the
+// core notifier.
 
 import Foundation
 import RuneWeaverCore
@@ -109,25 +114,5 @@ public actor SchedulerRunLock {
     public func release(id: UUID, name: String) {
         runningIDs.remove(id)
         runningNames.remove(normalizedSchedulerJobName(name))
-    }
-}
-
-/// Best-effort macOS notification for scheduler fires.
-///
-/// Thin server-side bridge over the core scheduler notifier so API
-/// routes share one escaping and capping policy with the CLI foreground
-/// runner without duplicating `osascript` handling. Blocks on
-/// `Process.waitUntilExit`; callers must invoke it off the cooperative
-/// executor (e.g. `DispatchQueue.global`), never via `await` on a Vapor
-/// worker or `Task.detached` alone.
-public enum SchedulerMacOSNotifier {
-    /// Posts a notification for a fired job, best-effort.
-    ///
-    /// Synchronous and blocking; invoke only from a non-cooperative queue.
-    /// - Parameters:
-    ///   - jobName: Job name shown in the title.
-    ///   - preview: Result preview shown in the body.
-    public static func notify(jobName: String, preview: String) {
-        MacOSSchedulerNotifier.post(title: "Rune Weaver: \(jobName)", body: preview)
     }
 }
