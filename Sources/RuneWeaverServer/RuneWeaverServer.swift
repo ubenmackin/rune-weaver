@@ -142,6 +142,16 @@ public actor WSHub {
         sockets.count
     }
 
+    /// Closes and drains all connected sockets cleanly on server shutdown.
+    public func closeAll() async {
+        let targets = Array(sockets.values)
+        sockets.removeAll()
+        queues.removeAll()
+        for box in targets {
+            _ = try? await box.socket.close(code: .goingAway)
+        }
+    }
+
     /// Queue for a connection, creating it when missing.
     /// - Parameter id: Connection identifier.
     /// - Returns: Serial sender for the connection.
@@ -164,6 +174,26 @@ public actor WSHub {
     /// - Parameter request: Pending request to announce.
     public func broadcastApproval(_ request: PermissionRequest) async {
         guard let data = try? JSONEncoder().encode(WSApprovalPrompt(request: request)),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
+        await withTaskGroup(of: Void.self) { group in
+            for (queue, box) in targets {
+                group.addTask {
+                    await queue.send(text, to: box)
+                }
+            }
+        }
+    }
+
+    /// Broadcasts a run log event (started or completed) to every connected socket.
+    public func broadcastRun(_ run: RunLogEntry) async {
+        struct WSRunEvent: Codable {
+            let type: String
+            let run: RunLogEntry
+        }
+        let eventType = run.status == "running" ? "run_started" : "run_completed"
+        guard let data = try? JSONEncoder().encode(WSRunEvent(type: eventType, run: run)),
               let text = String(data: data, encoding: .utf8)
         else { return }
         let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
@@ -323,18 +353,249 @@ private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanos
     }
 }
 
-/// Shared collaborators for every engine API route.
+/// Receipt binding one registered turn to its tracker slot.
 ///
-/// One context per engine process. REST handlers read it from
-/// `Application` storage and WebSocket handlers capture it once per
-/// connection so streamed chat and live approvals share the same
-/// orchestrator, memory, approvals, scheduler, and run logs as REST with
-/// no per-client forks.
+/// The token identifies the registration so completion cleanup only
+/// removes its own entry; `replaced` reports whether a prior turn for
+/// the same session was superseded (and cooperatively cancelled).
+public struct TurnRegistration: Sendable, Equatable {
+    /// Identity of this registration.
+    public let token: UUID
+    /// Whether a prior turn was replaced by this registration.
+    public let replaced: Bool
+
+    /// Creates a registration receipt.
+    /// - Parameters:
+    ///   - token: Identity of the registration.
+    ///   - replaced: Whether a prior turn was replaced.
+    public init(token: UUID, replaced: Bool) {
+        self.token = token
+        self.replaced = replaced
+    }
+}
+
+/// Manages in-flight chat turn tasks so they can be cancelled cooperatively.
 ///
-/// Checked `Sendable` (no `unchecked`): every stored collaborator is an
-/// actor (`ConversationManager`, `ToolBus`, `Orchestrator`,
+/// A cancel arriving before its turn registers leaves a short-lived
+/// pending mark that the next register for the same session consumes
+/// immediately, so a fast cancel-before-register never gets lost. The
+/// mark is only left when the session registered recently (same narrow
+/// race window), so an idle cancel for an unknown or long-idle session
+/// reports `false` without poisoning the next genuine turn started later.
+public actor ActiveTurnTracker {
+    /// One slot: registration identity plus its cooperative cancel action.
+    private struct Entry {
+        /// Identity of the registered turn.
+        let token: UUID
+        /// Cooperative cancel action for the registered turn.
+        let cancel: @Sendable () -> Void
+    }
+
+    /// Active turns indexed by session identifier.
+    private var entries: [UUID: Entry] = [:]
+    /// Cancel marks waiting for a turn that has not registered yet.
+    private var pendingCancels: [UUID: Date] = [:]
+    /// Last registration per session, bounding idle-cancel poisoning.
+    ///
+    /// A pending mark is only left when the session registered within the
+    /// race window below; without recent liveness an idle cancel is just a
+    /// `false` report with no side effect on the next turn.
+    private var recentRegistrations: [UUID: Date] = [:]
+    /// How long a pending cancel survives before it expires.
+    ///
+    /// Kept to a tight race-bridge window so a stray cancel (no turn
+    /// behind it) cannot poison a genuinely new turn started seconds
+    /// later; the mark is consumed once by the next register either way.
+    private static let pendingCancelTTL: TimeInterval = 2
+
+    public init() {}
+
+    /// Registers an active turn task for a session.
+    ///
+    /// A second turn for the same session supersedes the first: the prior
+    /// action is cancelled cooperatively before overwrite so it never
+    /// leaks as an un-cancellable handle.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - task: In-flight turn task to cancel on supersede or cancel.
+    /// - Returns: Receipt identifying this registration.
+    @discardableResult
+    public func register(sessionID: UUID, task: Task<some Sendable, some Error>) -> TurnRegistration {
+        store(sessionID: sessionID, cancel: { task.cancel() })
+    }
+
+    /// Registers a custom cancel closure for a session.
+    ///
+    /// Supersedes any prior turn for the session exactly like
+    /// `register(sessionID:task:)`. Consumes a pending cancel left by a
+    /// fast cancel-before-register so the new turn cancels immediately.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - onCancel: Cooperative cancel action for the turn.
+    /// - Returns: Receipt identifying this registration.
+    @discardableResult
+    public func register(sessionID: UUID, onCancel: @Sendable @escaping () -> Void) -> TurnRegistration {
+        store(sessionID: sessionID, cancel: onCancel)
+    }
+
+    /// Stores one entry, cancelling any prior turn for the session first.
+    ///
+    /// A pending cancel left by a fast cancel-before-register is consumed
+    /// once here: the mark is always removed, and only a fresh mark (within
+    /// the narrow race window) cancels the new turn, so a later user turn
+    /// is never held hostage by a stale cancel. Registration also stamps
+    /// session liveness so a later idle cancel can tell a plausible race
+    /// (recent registration) from a stray cancel for an unknown session.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - cancel: Cooperative cancel action for the new turn.
+    /// - Returns: Receipt identifying the new registration.
+    private func store(sessionID: UUID, cancel: @Sendable @escaping () -> Void) -> TurnRegistration {
+        let replaced: Bool
+        if let existing = entries[sessionID] {
+            existing.cancel()
+            replaced = true
+        } else {
+            replaced = false
+        }
+        let token = UUID()
+        entries[sessionID] = Entry(token: token, cancel: cancel)
+        recentRegistrations[sessionID] = Date()
+        pruneRecentRegistrations()
+        if let marked = pendingCancels[sessionID] {
+            pendingCancels.removeValue(forKey: sessionID)
+            if Date().timeIntervalSince(marked) <= Self.pendingCancelTTL {
+                cancel()
+            } else {
+                pruneExpiredPendingCancels()
+            }
+        }
+        return TurnRegistration(token: token, replaced: replaced)
+    }
+
+    /// Unregisters the turn for a session when it completes.
+    ///
+    /// Token-checked: only removes the entry when it still belongs to
+    /// this turn, so a stale completion never deletes a newer turn's
+    /// registration for the same session.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - token: Registration token from `register`.
+    public func unregister(sessionID: UUID, token: UUID) {
+        guard entries[sessionID]?.token == token else { return }
+        entries.removeValue(forKey: sessionID)
+    }
+
+    /// Cancels the in-flight turn for a session.
+    ///
+    /// When no turn is registered the cancel only leaves a pending mark
+    /// when the session registered recently, preserving the fast
+    /// cancel-before-register bridge for plausible races while a stray
+    /// cancel for an unknown or long-idle session simply reports `false`
+    /// with no side effect on the next genuine turn.
+    /// - Returns: True if a task was found and cancelled.
+    @discardableResult
+    public func cancel(sessionID: UUID) -> Bool {
+        if let entry = entries.removeValue(forKey: sessionID) {
+            entry.cancel()
+            return true
+        }
+        if let lastSeen = recentRegistrations[sessionID],
+           Date().timeIntervalSince(lastSeen) <= Self.pendingCancelTTL
+        {
+            pendingCancels[sessionID] = Date()
+            pruneExpiredPendingCancels()
+        }
+        return false
+    }
+
+    /// Drops stale registration timestamps so abandoned identifiers never accumulate.
+    private func pruneRecentRegistrations() {
+        let now = Date()
+        for (id, marked) in recentRegistrations where now.timeIntervalSince(marked) > Self.pendingCancelTTL {
+            recentRegistrations.removeValue(forKey: id)
+        }
+        while recentRegistrations.count > Self.maxPendingCancels {
+            guard let oldest = recentRegistrations.min(by: { $0.value < $1.value })?.key else { break }
+            recentRegistrations.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Drops expired pending cancels so abandoned session identifiers never accumulate.
+    private func pruneExpiredPendingCancels() {
+        let now = Date()
+        for (id, marked) in pendingCancels where now.timeIntervalSince(marked) > Self.pendingCancelTTL {
+            pendingCancels.removeValue(forKey: id)
+        }
+        while pendingCancels.count > Self.maxPendingCancels {
+            guard let oldest = pendingCancels.min(by: { $0.value < $1.value })?.key else { break }
+            pendingCancels.removeValue(forKey: oldest)
+        }
+    }
+
+    /// Bounds pending cancel marks so random identifiers never grow memory without bound.
+    private static let maxPendingCancels = 500
+}
+
+/// Bridges a tracker cancel action to a chat task created just after registration.
+///
+/// Registration must precede task creation so a fast turn can never finish
+/// before its slot exists; the box carries a cancel arriving in that gap
+/// and applies it once the task is set.
+///
+/// Stays a lock-guarded box instead of an actor because `ActiveTurnTracker`
+/// stores a synchronous `@Sendable () -> Void` cancel closure invoked
+/// synchronously from actor-isolated `store`/`cancel`; an actor `cancel()`
+/// would require `await`, which the synchronous closure cannot provide
+/// without hopping to an unstructured task and reopening the
+/// cancel-before-register race this box closes. Lock discipline: `NSLock`
+/// guards `cancelAction`/`cancelled` only, and the stored cancel action is
+/// copied under lock then invoked after unlock so cancellation never runs
+/// while holding the lock and cannot deadlock.
+final class TurnTaskBox: @unchecked Sendable {
+    /// Guards `cancelAction` and `cancelled`.
+    private let lock = NSLock()
+    /// Cancel action for the chat task, once created.
+    private var cancelAction: (@Sendable () -> Void)?
+    /// Whether cancel arrived before the task was set.
+    private var cancelled = false
+
+    /// Creates an empty box.
+    init() {}
+
+    /// Publishes the chat task, cancelling it when a cancel already arrived.
+    /// - Parameter task: In-flight chat turn task.
+    func set(_ task: Task<some Sendable, some Error>) {
+        let shouldCancel: Bool
+        do {
+            lock.lock()
+            defer { lock.unlock() }
+            cancelAction = { task.cancel() }
+            shouldCancel = cancelled
+        }
+        if shouldCancel {
+            task.cancel()
+        }
+    }
+
+    /// Cancels the chat task, or flags the box when it is not set yet.
+    func cancel() {
+        let current: (@Sendable () -> Void)?
+        do {
+            lock.lock()
+            defer { lock.unlock() }
+            cancelled = true
+            current = cancelAction
+        }
+        current?()
+    }
+}
+
+/// Shared engine collaborators held in Vapor application storage.
+///
+/// Bundles every subsystem actor (`ConversationManager`, `ToolBus`,
 /// `MemoryEngine`, `PermissionGate`, `ApprovalQueue`, `SchedulerStore`,
-/// `RunLogStore`, `WSHub`, `SchedulerRunLock`) plus the `Sendable`
+/// `RunLogStore`, `WSHub`, `SchedulerRunLock`, `ActiveTurnTracker`) plus the `Sendable`
 /// `ServerConfig` value, all held in immutable `let`s, so no field forces
 /// unchecked sharing.
 public final class ServerContext: Sendable {
@@ -362,6 +623,8 @@ public final class ServerContext: Sendable {
     /// Guards concurrent `POST .../run` calls only; it does not coordinate
     /// with the CLI foreground runner, which owns cron/poll auto-fire.
     public let runLock: SchedulerRunLock
+    /// Active in-flight chat turn tasks for cancellation.
+    public let activeTurns: ActiveTurnTracker
 
     /// Creates a server context.
     /// - Parameters:
@@ -376,6 +639,7 @@ public final class ServerContext: Sendable {
     ///   - runs: Run audit trail. Defaults to empty.
     ///   - hub: Live sockets. Defaults to empty.
     ///   - runLock: Single-flight lock for manual runs. Defaults to empty.
+    ///   - activeTurns: Active chat turn tracker. Defaults to empty.
     public init(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -387,7 +651,8 @@ public final class ServerContext: Sendable {
         scheduler: SchedulerStore = SchedulerStore(),
         runs: RunLogStore = RunLogStore(),
         hub: WSHub = WSHub(),
-        runLock: SchedulerRunLock = SchedulerRunLock()
+        runLock: SchedulerRunLock = SchedulerRunLock(),
+        activeTurns: ActiveTurnTracker = ActiveTurnTracker()
     ) {
         self.config = config
         self.conversations = conversations
@@ -400,6 +665,7 @@ public final class ServerContext: Sendable {
         self.runs = runs
         self.hub = hub
         self.runLock = runLock
+        self.activeTurns = activeTurns
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -418,6 +684,7 @@ public final class ServerContext: Sendable {
     ///   - systemPrompt: Developer instructions. Defaults to nil.
     ///   - schedulerConfig: Durable `config.toml [[scheduler.jobs]]` used
     ///     to seed the runtime scheduler registry. Defaults to empty.
+    ///   - episodesDBPath: SQLite file path for durable run log and schedule persistence. Defaults to nil.
     /// - Returns: Context with an approval-broadcasting bus.
     public static func make(
         config: ServerConfig = .default,
@@ -426,11 +693,15 @@ public final class ServerContext: Sendable {
         permissionGate: PermissionGate,
         llm: any LLMProvider,
         systemPrompt: String? = nil,
-        schedulerConfig: SchedulerConfig = .empty
+        schedulerConfig: SchedulerConfig = .empty,
+        episodesDBPath: String? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
-        let scheduler = SchedulerStore(from: schedulerConfig)
-        let runs = RunLogStore()
+        // Durable stores bootstrap asynchronously: actor initializers never
+        // block the cooperative pool on SQLite reads, so disk hydration
+        // suspends here on the shared serial store queue instead.
+        let scheduler = await SchedulerStore.load(from: schedulerConfig, dbPath: episodesDBPath)
+        let runs = await RunLogStore.load(dbPath: episodesDBPath)
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
@@ -493,11 +764,20 @@ extension Application {
     }
 }
 
+/// Lifecycle hook draining live WebSockets on application shutdown.
+struct WSHubShutdownLifecycle: LifecycleHandler {
+    let hub: WSHub
+
+    func shutdownAsync(_: Application) async {
+        await hub.closeAll()
+    }
+}
+
 /// Configures loopback binding plus every engine route.
 ///
 /// Binds `127.0.0.1:8082` by default with no auth (single-user,
-/// local-machine trust; remote access rides the WireGuard VPN, never a
-/// public port). Refuses to bind a non-loopback interface until
+/// local-machine trust; remote access deferred until auth lands; never bind
+/// non-loopback or expose via VPN/tunnel/port-forward in v1). Refuses to bind a non-loopback interface until
 /// authentication lands (auth-before-exposure). Registers REST (`/health`, `/chat`, `/tools`,
 /// `/memory`, `/approvals`, `/scheduler/jobs`, `/runs`) plus the
 /// WebSocket (`/ws`) for streamed chat and live approval prompts, plus
@@ -511,6 +791,8 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
     context.config.requireLoopback()
     app.http.server.configuration.hostname = context.config.hostname
     app.http.server.configuration.port = context.config.port
+    app.http.server.configuration.shutdownTimeout = .seconds(2)
+    app.lifecycle.use(WSHubShutdownLifecycle(hub: context.hub))
     app.runeWeaver = context
     registerRuneWeaverRoutes(app)
 }
@@ -525,6 +807,7 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
 public func registerRuneWeaverRoutes(_ app: Application) {
     registerHealthRoute(app)
     registerChatRoute(app)
+    registerSessionRoutes(app)
     registerToolRoutes(app)
     registerMemoryRoutes(app)
     registerApprovalRoutes(app)
@@ -613,7 +896,12 @@ private func parseQueryLimit(
 /// - Parameter app: Application receiving the route.
 private func registerHealthRoute(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.health)) { req async throws -> HealthResponse in
-        HealthResponse(engine: req.application.runeWeaver.memoryEngineDescription)
+        let modelInfo = await req.application.runeWeaver.orchestrator.modelInfo
+        return HealthResponse(
+            engine: req.application.runeWeaver.memoryEngineDescription,
+            model: modelInfo.name,
+            contextLength: modelInfo.contextLength
+        )
     }
 }
 
@@ -621,11 +909,14 @@ private func registerHealthRoute(_ app: Application) {
 ///
 /// Trims surrounding whitespace, rejects empty text, and enforces
 /// `ChatRequest/maxTextLength` so both entry points share one rule.
+/// Intentionally internal (not private) so the REST route and the WebSocket
+/// handler share one limit; both live in the service module, so no wider
+/// scope is needed.
 /// - Parameter raw: Raw user text.
 /// - Returns: Trimmed text safe to process.
 /// - Throws: `Abort` with `.badRequest` for empty text or
 ///   `.payloadTooLarge` when over the limit.
-private func validatedChatText(_ raw: String) throws -> String {
+func validatedChatText(_ raw: String) throws -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
         throw Abort(.badRequest, reason: "text must not be empty")
@@ -636,7 +927,27 @@ private func validatedChatText(_ raw: String) throws -> String {
     return trimmed
 }
 
-/// Registers the chat completion route.
+/// Validates a session title once for the rename route.
+///
+/// Trims surrounding whitespace, rejects empty titles, and enforces
+/// `UpdateSessionRequest/maxTitleLength` so empty or huge titles never
+/// reach the sessions table or the sidebar.
+/// - Parameter raw: Raw title text.
+/// - Returns: Trimmed title safe to store.
+/// - Throws: `Abort` with `.badRequest` for empty titles or
+///   `.payloadTooLarge` when over the limit.
+func validatedSessionTitle(_ raw: String) throws -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        throw Abort(.badRequest, reason: "title must not be empty")
+    }
+    guard trimmed.count <= UpdateSessionRequest.maxTitleLength else {
+        throw Abort(.payloadTooLarge, reason: "title exceeds \(UpdateSessionRequest.maxTitleLength) characters")
+    }
+    return trimmed
+}
+
+/// Registers the chat completion route plus cancellation endpoint.
 /// - Parameter app: Application receiving the route.
 private func registerChatRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat)) { req async throws -> OrchestratorResponse in
@@ -644,16 +955,58 @@ private func registerChatRoute(_ app: Application) {
         let text = try validatedChatText(body.text)
         let context = req.application.runeWeaver
         let sessionID = body.resolvedSessionID
-        do {
-            let response = try await context.orchestrator.process(input: UserInput(
+        let startTime = Date()
+
+        // Register before spawning so a fast turn can never finish before
+        // its slot exists; the box bridges a cancel arriving in that gap
+        // to the task created just below, matching `handleWebSocketChat`.
+        // Token-checked, await-ordered cleanup: every exit below awaits
+        // `unregister` with this turn's token before returning, so a stale
+        // completion never deletes a newer turn's registration and no
+        // fire-and-forget task outlives the response.
+        let taskBox = TurnTaskBox()
+        let registration = await context.activeTurns.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
+        let chatTask: Task<OrchestratorResponse, Error> = Task {
+            try await context.orchestrator.process(input: UserInput(
                 text: text,
                 sessionID: sessionID,
                 source: body.resolvedSource
             ))
-            await context.runs.append(kind: "chat", status: "ok", message: text)
+        }
+        taskBox.set(chatTask)
+
+        do {
+            // Tie the inner turn to the request lifetime so a disconnect
+            // cancels the model and tools instead of leaving them running
+            // with no client, matching the WebSocket close path. Cleanup
+            // stays token-checked: cancellation surfaces as
+            // `CancellationError` below and unregisters only this turn.
+            let response = try await withTaskCancellationHandler {
+                try await chatTask.value
+            } onCancel: {
+                chatTask.cancel()
+            }
+            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            await context.runs.append(
+                kind: "chat",
+                status: "ok",
+                message: text,
+                response: response.text,
+                toolActions: response.toolActions,
+                totalTokens: response.totalTokens,
+                durationMs: durationMs
+            )
             return response
+        } catch is CancellationError {
+            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            await context.runs.append(kind: "chat", status: "cancelled", message: text, durationMs: durationMs)
+            throw Abort(.gone, reason: "Turn was cancelled by user")
         } catch let error as OrchestratorError {
-            await context.runs.append(kind: "chat", status: "error", message: text)
+            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            await context.runs.append(kind: "chat", status: "error", message: text, durationMs: durationMs)
             switch error {
             case .emptyInput:
                 throw Abort(.badRequest, reason: "text must not be empty")
@@ -662,7 +1015,16 @@ private func registerChatRoute(_ app: Application) {
             case let .llmFailed(detail):
                 throw Abort(.badGateway, reason: detail)
             }
+        } catch {
+            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            throw error
         }
+    }
+
+    app.post(PathComponent.constant(ServerPaths.chat), PathComponent.constant("cancel")) { req async throws -> CancelChatResponse in
+        let body = try req.content.decode(CancelChatRequest.self)
+        let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
+        return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
     }
 }
 
@@ -685,10 +1047,29 @@ private func registerToolRoutes(_ app: Application) {
             argumentsJSON: body.resolvedArgumentsJSON,
             callID: body.resolvedCallID
         )
-        return await context.toolBus.execute(
+        let startTime = Date()
+        let result = await context.toolBus.execute(
             toolCall: call,
             context: ToolContext(conversationID: UUID())
         )
+        // Direct tool calls are service-triggered writes, so they join the
+        // same local audit trail as chat and scheduler runs instead of
+        // returning silently.
+        let action = ToolAction(
+            toolName: call.toolName,
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON,
+            result: result
+        )
+        await context.runs.append(
+            kind: "tool",
+            status: result.isError ? "error" : "ok",
+            message: call.toolName,
+            response: result.content,
+            toolActions: [action],
+            durationMs: Int(Date().timeIntervalSince(startTime) * 1000)
+        )
+        return result
     }
 }
 
@@ -845,7 +1226,9 @@ private func registerSchedulerCRUDRoutes(_ app: Application) {
 /// the service; the CLI `scheduler run` foreground loop is the sole
 /// auto-fire runner (separate process, separate `SchedulerEngine.running`
 /// lock). Concurrent manual runs for the same job inside this process are
-/// rejected with `409`.
+/// rejected with `409`. Run completion is broadcast via WebSocket to the
+/// dashboard and native Web Notifications, intentionally superseding Script
+/// Editor (`osascript`) dialogs.
 /// - Parameter app: Application receiving the route.
 private func registerSchedulerRunRoute(_ app: Application) {
     let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
@@ -864,33 +1247,76 @@ private func registerSchedulerRunRoute(_ app: Application) {
             await context.runs.append(kind: "scheduler", status: "skipped", message: "Skipped '\(job.name)': already running", jobID: id)
             throw Abort(.conflict, reason: "Job \(raw) is already running")
         }
+        let startTime = Date()
+        // Stable per-name session shared with the scheduler engine so
+        // manual runs and engine fires append to one episodic session.
+        // Single upsert with overwrite keeps renames to one persist
+        // instead of ensure plus update.
+        let sessionID = SchedulerEngine.deterministicSessionID(forJobNamed: job.name)
+        _ = await context.conversations.ensureSession(id: sessionID, title: job.name, source: "scheduler", overwrite: true)
+
+        let initialEntry = await context.runs.append(
+            kind: "scheduler",
+            status: "running",
+            message: job.prompt,
+            jobID: id,
+            durationMs: 0
+        )
+        await context.hub.broadcastRun(initialEntry)
+
         do {
-            // Stable per-name session shared with the scheduler engine so
-            // manual runs and engine fires append to one episodic session.
-            let sessionID = SchedulerEngine.deterministicSessionID(forJobNamed: job.name)
             let response = try await context.orchestrator.process(input: UserInput(
                 text: job.prompt,
                 sessionID: sessionID,
                 source: "scheduler"
             ))
-            await context.runs.append(kind: "scheduler", status: "ok", message: job.prompt, jobID: id)
-            // Offload the blocking `osascript` spawn (`Process.run` plus
-            // `waitUntilExit`) to a non-cooperative queue so the Vapor
-            // worker never blocks on a child process per manual run
-            // (`Task.detached` alone would still occupy a cooperative
-            // executor thread).
-            let notifyName = job.name
-            let notifyPreview = response.text
-            DispatchQueue.global(qos: .utility).async {
-                SchedulerMacOSNotifier.notify(jobName: notifyName, preview: notifyPreview)
-            }
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            let entry = await context.runs.update(
+                id: initialEntry.id,
+                status: "ok",
+                response: response.text,
+                toolActions: response.toolActions,
+                totalTokens: response.totalTokens,
+                durationMs: durationMs
+            ) ?? initialEntry
+            await context.hub.broadcastRun(entry)
             await context.runLock.release(id: id, name: job.name)
             return response
         } catch let error as CancellationError {
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            let entry = await context.runs.update(
+                id: initialEntry.id,
+                status: "cancelled",
+                durationMs: durationMs
+            ) ?? initialEntry
+            await context.hub.broadcastRun(entry)
             await context.runLock.release(id: id, name: job.name)
             throw error
+        } catch let error as OrchestratorError {
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            let entry = await context.runs.update(
+                id: initialEntry.id,
+                status: "error",
+                durationMs: durationMs
+            ) ?? initialEntry
+            await context.hub.broadcastRun(entry)
+            await context.runLock.release(id: id, name: job.name)
+            switch error {
+            case .emptyInput:
+                throw Abort(.badRequest, reason: "text must not be empty")
+            case let .toolLoopExceeded(iterations):
+                throw Abort(.unprocessableEntity, reason: "Tool loop exceeded \(iterations) rounds")
+            case let .llmFailed(detail):
+                throw Abort(.badGateway, reason: detail)
+            }
         } catch {
-            await context.runs.append(kind: "scheduler", status: "error", message: job.prompt, jobID: id)
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            let entry = await context.runs.update(
+                id: initialEntry.id,
+                status: "error",
+                durationMs: durationMs
+            ) ?? initialEntry
+            await context.hub.broadcastRun(entry)
             await context.runLock.release(id: id, name: job.name)
             throw Abort(.badGateway, reason: error.localizedDescription)
         }
@@ -902,7 +1328,8 @@ private func registerSchedulerRunRoute(_ app: Application) {
 private func registerRunRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.runs)) { req async throws -> RunLogsResponse in
         let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
-        let entries = await req.application.runeWeaver.runs.list(limit: limit)
+        let jobID = req.query[String.self, at: "jobID"].flatMap { UUID(uuidString: $0) }
+        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID)
         return RunLogsResponse(runs: entries)
     }
     app.get(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> RunLogEntry in
@@ -916,42 +1343,105 @@ private func registerRunRoutes(_ app: Application) {
     }
 }
 
+/// Registers session listing, retrieval, renaming, and deletion routes.
+/// - Parameter app: Application receiving the routes.
+private func registerSessionRoutes(_ app: Application) {
+    let sessions = app.grouped(PathComponent.constant(ServerPaths.sessions))
+    sessions.get { req async throws -> SessionsResponse in
+        let list = await req.application.runeWeaver.conversations.listSessions()
+        return SessionsResponse(sessions: list)
+    }
+    sessions.get(PathComponent.parameter("id")) { req async throws -> ConversationSession in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        guard let session = await req.application.runeWeaver.conversations.session(id: id) else {
+            throw Abort(.notFound, reason: "Unknown session \(raw)")
+        }
+        return session
+    }
+    sessions.get(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.toolActions)) { req async throws -> SessionToolActionsResponse in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        let context = req.application.runeWeaver
+        guard let session = await context.conversations.session(id: id) else {
+            throw Abort(.notFound, reason: "Unknown session \(raw)")
+        }
+        // Authoritative per-message records derived server-side with the
+        // shared placeholder parser, ordered oldest message first so
+        // clients never regex-parse placeholder lines themselves.
+        let grouped = await context.conversations.toolActionsByMessage(for: id)
+        let actions = session.messages.compactMap { message -> SessionMessageToolActions? in
+            guard let list = grouped[message.id] else { return nil }
+            return SessionMessageToolActions(messageID: message.id, actions: list)
+        }
+        return SessionToolActionsResponse(sessionID: id, actions: actions)
+    }
+    sessions.patch(PathComponent.parameter("id")) { req async throws -> Response in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        let body = try req.content.decode(UpdateSessionRequest.self)
+        let title = try validatedSessionTitle(body.title)
+        // Renaming an unknown session is a 404 like `GET /sessions/:id`,
+        // not a silent no-op: `updateTitle` skips missing sessions.
+        guard await req.application.runeWeaver.conversations.session(id: id) != nil else {
+            throw Abort(.notFound, reason: "Unknown session \(raw)")
+        }
+        await req.application.runeWeaver.conversations.updateTitle(id: id, title: title)
+        return Response(status: .noContent)
+    }
+    sessions.delete(PathComponent.parameter("id")) { req async throws -> Response in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        // Single orchestrator entry point drops working memory and the
+        // billed total together so deletes never leak token totals.
+        await req.application.runeWeaver.orchestrator.removeSession(id: id)
+        return Response(status: .noContent)
+    }
+}
+
 /// Registers the chat WebSocket with live approval prompts.
 ///
 /// One connection task registers on the hub before consuming a serial
 /// `AsyncStream` of inbound frames, so chat turns stay ordered and
 /// `remove` always runs after `add` in the same task (no stale
 /// sockets). Each frame is awaited serially in the `for await` loop so
-/// per-connection frame order is preserved by design; the close handler's
-/// `connectionTask.cancel()` still cancels the in-flight turn promptly
-/// (cooperative via `Task.isCancelled` checks and the cancellable
-/// `ApprovalQueue.waitForDecision`), and `remove` still runs after the
-/// loop drains. The close handler finishes the stream and cancels the
-/// stored task handle so no per-message tasks leak.
+/// per-connection frame order is preserved by design; chat turns run as
+/// tracked unstructured tasks so a later cancel frame still runs while
+/// the turn works, and the close handler cancels every tracked task so
+/// a disconnect never leaves the model or tools running. The close
+/// handler finishes the stream and cancels the stored task handle so no
+/// per-message tasks leak.
 /// - Parameter app: Application receiving the route.
 private func registerWebSocketRoute(_ app: Application) {
     app.webSocket(PathComponent.constant(ServerPaths.websocket)) { req, webSocket in
         let context = req.application.runeWeaver
         let connectionID = UUID()
         let box = WSSocketBox(webSocket)
+        let connectionTasks = ConnectionChatTasks()
         let (stream, continuation) = AsyncStream<String>.makeStream()
-        let connectionTask = Task { [box, context, connectionID, stream] in
+        let connectionTask = Task { [box, context, connectionID, stream, connectionTasks] in
             await context.hub.add(id: connectionID, box: box)
             for await text in stream {
                 if Task.isCancelled {
                     break
                 }
-                await handleWebSocketText(text, connectionID: connectionID, context: context)
+                await handleWebSocketText(text, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
                 if Task.isCancelled {
                     break
                 }
             }
+            connectionTasks.cancelAll()
             await context.hub.remove(id: connectionID)
         }
         webSocket.onText { _, text in
             continuation.yield(text)
         }
         webSocket.onClose.whenComplete { _ in
+            connectionTasks.cancelAll()
             continuation.finish()
             connectionTask.cancel()
         }
@@ -977,111 +1467,6 @@ public func registerDashboardRoutes(_ app: Application) {
         let remainder = req.parameters.getCatchall().joined(separator: "/")
         return bundle.response(for: remainder)
     }
-}
-
-/// Handles one inbound WebSocket text frame.
-///
-/// Chat frames run the orchestrator and stream the final text back as
-/// `delta` chunks plus a `done` frame; decision frames resolve the
-/// matching pending approval; anything else answers with an `error`
-/// frame so the socket stays open. Cooperative with task cancellation:
-/// checks `Task.isCancelled` before work and between sends so closing
-/// the socket (or Vapor shutdown) stops the turn promptly instead of
-/// streaming into a dead connection. All sends funnel through the hub
-/// (`send(id:text:)`) so streamed deltas never race broadcast prompts.
-/// - Parameters:
-///   - text: Raw socket text frame.
-///   - connectionID: Connection identifier owning the reply.
-///   - context: Shared engine collaborators.
-private func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerContext) async {
-    if Task.isCancelled {
-        return
-    }
-    switch WSInboundKind.classify(text) {
-    case let .chat(message):
-        let trimmed: String
-        do {
-            trimmed = try validatedChatText(message.text)
-        } catch let abort as Abort {
-            await sendWSError(abort.reason, connectionID: connectionID, context: context)
-            return
-        } catch {
-            await sendWSError(error.localizedDescription, connectionID: connectionID, context: context)
-            return
-        }
-        if Task.isCancelled {
-            return
-        }
-        let sessionID = message.sessionID ?? UUID()
-        let source = (message.source ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            let response = try await context.orchestrator.process(input: UserInput(
-                text: trimmed,
-                sessionID: sessionID,
-                source: source.isEmpty ? "websocket" : source
-            ))
-            if Task.isCancelled {
-                return
-            }
-            await context.runs.append(kind: "chat", status: "ok", message: trimmed)
-            for chunk in WSStreaming.deltas(for: response.text) {
-                if Task.isCancelled {
-                    break
-                }
-                guard let data = try? JSONEncoder().encode(WSStreamDelta(delta: chunk)),
-                      let frame = String(data: data, encoding: .utf8)
-                else { continue }
-                await context.hub.send(id: connectionID, text: frame)
-            }
-            if Task.isCancelled {
-                return
-            }
-            if let data = try? JSONEncoder().encode(WSStreamDone(text: response.text, sessionID: response.sessionID)),
-               let frame = String(data: data, encoding: .utf8)
-            {
-                await context.hub.send(id: connectionID, text: frame)
-            }
-        } catch is CancellationError {
-            return
-        } catch {
-            if Task.isCancelled {
-                return
-            }
-            await context.runs.append(kind: "chat", status: "error", message: trimmed)
-            await sendWSError(error.localizedDescription, connectionID: connectionID, context: context)
-        }
-    case let .decision(message):
-        if Task.isCancelled {
-            return
-        }
-        let resolved = await context.approvals.decide(
-            id: message.id,
-            approved: message.approved,
-            duration: message.resolvedDuration
-        )
-        guard resolved else {
-            await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)
-            return
-        }
-    case .unknown:
-        let hint = "Expected a chat frame {\"text\": \"...\"} or a decision frame {\"id\": \"...\", \"approved\": true}"
-        await sendWSError(hint, connectionID: connectionID, context: context)
-    }
-}
-
-/// Sends one WebSocket error frame through the hub, best-effort.
-/// - Parameters:
-///   - message: Human-readable failure.
-///   - connectionID: Connection identifier owning the reply.
-///   - context: Shared engine collaborators.
-private func sendWSError(_ message: String, connectionID: UUID, context: ServerContext) async {
-    if Task.isCancelled {
-        return
-    }
-    guard let data = try? JSONEncoder().encode(WSErrorFrame(message: message)),
-          let frame = String(data: data, encoding: .utf8)
-    else { return }
-    await context.hub.send(id: connectionID, text: frame)
 }
 
 extension ServerContext {

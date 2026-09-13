@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  cancelChat,
   createJob,
   decideApproval,
   deleteFact,
@@ -60,6 +61,19 @@ describe("dashboard api client", () => {
       sessionID: "s1",
       source: "dashboard",
     });
+  });
+
+  it("cancels chat with session ID", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ sessionID: "s1", cancelled: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await cancelChat("s1");
+    expect(response.cancelled).toBe(true);
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/chat/cancel");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toMatchObject({ sessionID: "s1" });
   });
 
   it("lists approvals and decides with durations", async () => {

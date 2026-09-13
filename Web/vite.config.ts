@@ -43,13 +43,19 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test-setup.ts"],
     globals: true,
+    // Isolated workers per test file: no shared module state or globals
+    // leak between suites, so one file's mocks and timers cannot flake
+    // another. Threads share memory and need that justification; forks
+    // keep the default isolation instead.
     pool: "forks",
     testTimeout: 5000,
     hookTimeout: 5000,
     teardownTimeout: 5000,
     // GHSA-5xrq-8626-4rwp (CVE-2026-47429): arbitrary file read/exec
-    // when the Vitest UI/API server listens, fixed in vitest 3.2.6 /
-    // 4.1.0. Keep `vitest run` headless with no standalone API listener
+    // when the Vitest UI/API server listens, fixed in vitest 3.2.6 / 4.1.0.
+    // GHSA-82fw-gwwq-j7x9: path traversal / arbitrary file read via
+    // @vitest/mocker redirect mock, fixed in vitest 5.0.0 / 4.1.11.
+    // Keep `vitest run` headless with no standalone API listener
     // (middleware mode). Only enable --ui/--api for local debugging on
     // loopback, never on untrusted networks.
     ui: false,

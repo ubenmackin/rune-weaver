@@ -1,4 +1,10 @@
-// RuneWeaver - Tests - Narration fallback
+// Rune Weaver Tests — Narration fallback for local models without function calling.
+//
+// Verifies text narration (`Calling <tool> {...} [...]`) converts only to
+// read-only tool calls with fresh identifiers, while approval-gated,
+// trusted, unknown, and malformed narrations stay unexecuted. Covers the
+// Orchestrator safety contract that local-model prose can never bypass
+// permission gates.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -76,6 +82,39 @@ private final class ScriptedNarrationLLM: LLMProvider, @unchecked Sendable {
     /// Unused embeddings stub.
     /// - Parameter text: Ignored texts.
     /// - Returns: Empty vectors.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+/// Scripted provider replaying canned responses per turn.
+private final class ScriptedChunkedTurnLLM: LLMProvider, @unchecked Sendable {
+    let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    private let lock = NSLock()
+    private var rounds: [[LLMResponse]]
+    private var index = 0
+
+    init(rounds: [[LLMResponse]]) {
+        self.rounds = rounds
+    }
+
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let chunks: [LLMResponse] = {
+            lock.lock()
+            defer { lock.unlock() }
+            guard index < rounds.count else { return [] }
+            let r = rounds[index]
+            index += 1
+            return r
+        }()
+        return AsyncStream { continuation in
+            for chunk in chunks {
+                continuation.yield(chunk)
+            }
+            continuation.finish()
+        }
+    }
+
     func embeddings(text _: [String]) async throws -> [[Float]] {
         []
     }
@@ -302,5 +341,88 @@ struct NarrationFallbackTests {
         #expect(response.text == narrated)
         let history = await conversations.history(for: sessionID)
         #expect(!history.contains { $0.role == .tool })
+    }
+
+    @Test
+    func `Orchestrator executes structured tool call yielded by LLM stream and returns synthesis`() async throws {
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        await bus.register(tool: makeNarrationReadTool(
+            name: "email.search",
+            output: "Found 1 email from Google"
+        ))
+        let call = ToolInput(toolName: "email.search", argumentsJSON: #"{"limit":1}"#, callID: "call_test_123")
+        let round1 = [
+            LLMResponse(delta: "", toolCalls: [call]),
+            LLMResponse(delta: "", isFinished: true, totalTokens: 150)
+        ]
+        let round2 = [
+            LLMResponse(delta: "Your latest email is from Google.", isFinished: true, totalTokens: 100)
+        ]
+        let llm = ScriptedChunkedTurnLLM(rounds: [round1, round2])
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: llm)
+        let sessionID = UUID()
+        let response = try await orchestrator.process(input: UserInput(text: "Check my email", sessionID: sessionID))
+        #expect(response.toolActions.count == 1)
+        #expect(response.toolActions[0].toolName == "email.search")
+        #expect(response.toolActions[0].result?.content == "Found 1 email from Google")
+        #expect(response.text == "Your latest email is from Google.")
+        #expect(response.totalTokens == 250)
+    }
+
+    @Test
+    func `Orchestrator emits onEvent during tool calls and text streaming`() async throws {
+        actor EventCollector {
+            var events: [OrchestratorEvent] = []
+            func append(_ event: OrchestratorEvent) {
+                events.append(event)
+            }
+        }
+
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        await bus.register(tool: makeNarrationReadTool(name: "email.search", output: "Found 1 email from Google"))
+        let round1 = [
+            LLMResponse(
+                delta: "",
+                totalTokens: 100,
+                toolCalls: [ToolInput(toolName: "email.search", argumentsJSON: "{\"query\":\"test\"}", callID: "call_abc")]
+            )
+        ]
+        let round2 = [
+            LLMResponse(delta: "Your latest email ", toolCalls: []),
+            LLMResponse(delta: "is from Google.", isFinished: true, totalTokens: 150)
+        ]
+        let llm = ScriptedChunkedTurnLLM(rounds: [round1, round2])
+        let orchestrator = Orchestrator(conversations: conversations, toolBus: bus, llm: llm)
+        let sessionID = UUID()
+
+        let collector = EventCollector()
+        let response = try await orchestrator.process(
+            input: UserInput(text: "Check my email", sessionID: sessionID),
+            onEvent: { event in
+                await collector.append(event)
+            }
+        )
+        let events = await collector.events
+        #expect(response.text == "Your latest email is from Google.")
+        #expect(events.contains(where: {
+            if case let .toolStarted(name, id, _) = $0 {
+                return name == "email.search" && id == "call_abc"
+            }
+            return false
+        }))
+        #expect(events.contains(where: {
+            if case let .toolCompleted(name, id, res) = $0 {
+                return name == "email.search" && id == "call_abc" && res.content.contains("Google")
+            }
+            return false
+        }))
+        #expect(events.contains(where: {
+            if case let .textDelta(delta) = $0 {
+                return delta.contains("Your latest email")
+            }
+            return false
+        }))
     }
 }

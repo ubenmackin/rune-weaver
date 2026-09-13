@@ -524,7 +524,8 @@ private func runChatREPL(
             input,
             conversations: context.conversations,
             sessionID: context.sessionID,
-            memoryEngine: context.memoryEngine
+            memoryEngine: context.memoryEngine,
+            sessionTokens: context.sessionTokens
         ) {
             if action == .quit {
                 break
@@ -658,12 +659,14 @@ private enum REPLAction {
 ///   - conversations: Session and history owner.
 ///   - sessionID: Current session identifier.
 ///   - memoryEngine: Shared engine for `/remember` captures.
+///   - sessionTokens: Session-cumulative billed counter reset on `/clear`.
 /// - Returns: The loop action, or nil when `input` is not a command.
 private func handleSlashCommand(
     _ input: String,
     conversations: ConversationManager,
     sessionID: UUID,
-    memoryEngine: MemoryEngine
+    memoryEngine: MemoryEngine,
+    sessionTokens: CLILockedValue<Int>
 ) async -> REPLAction? {
     if input.hasPrefix("/"), let fact = MemoryEngine.rememberFactText(from: input) {
         await appendUserAndHandleRemember(
@@ -686,6 +689,10 @@ private func handleSlashCommand(
         return .keepGoing
     case "/clear":
         await conversations.clear(sessionID: sessionID)
+        // The REPL tracks billed totals beside working memory rather than
+        // inside the orchestrator map, so clearing history must also reset
+        // the counter or the next trailer would bill the cleared turns.
+        sessionTokens.withLock { $0 = 0 }
         do {
             try await memoryEngine.deleteSession(sessionID)
         } catch {

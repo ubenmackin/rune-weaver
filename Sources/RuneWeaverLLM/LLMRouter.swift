@@ -125,8 +125,10 @@ public actor LLMRouter {
             case let .textDelta(text):
                 yieldedText = yieldedText || !text.isEmpty
                 continuation.yield(LLMResponse(delta: text))
-            case .toolCall:
-                continue
+            case let .toolCall(call):
+                yieldedText = true
+                let input = ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id)
+                continuation.yield(LLMResponse(delta: "", toolCalls: [input]))
             case let .done(meta):
                 lastUsage = meta.usage?.totalTokens
                 break chunkLoop

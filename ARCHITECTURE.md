@@ -31,6 +31,11 @@ LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/
 - Plugin isolation: a bad Python plugin can't crash the Swift core
 - Easy for community contributors to write new skills
 
+### Unified Toolchain & Quality Gates
+- **Single Build Entrypoint**: A root `Makefile` coordinates build, test, lint, and security auditing across both the Swift 6.0 engine and the React + TypeScript + Vite web dashboard.
+- **Workflow Targets**: `make build` (compiles Vite bundle to `Web/dist` and builds Swift products), `make test` (runs Vitest unit tests and Swift Testing suites), `make lint` (`tsc --noEmit`, `swiftformat --lint .`, `swiftlint lint`).
+- **Multi-Ecosystem Security Auditing**: `make audit` coordinates vulnerability scanning across both package ecosystems: `npm audit --audit-level=high` for web frontend dependencies, and `osv-scanner` (with `trivy` fallback) scanning `Package.resolved` against open-source vulnerability databases.
+
 ---
 
 ## SYSTEM ARCHITECTURE
@@ -51,7 +56,7 @@ LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/
 │         └─────────────────┼─────────────────────┘                │
 │                           │                                      │
 │                    WebSocket / REST                               │
-│                    (via WireGuard VPN)                            │
+│              (loopback only in v1; remote via VPN deferred)         │
 ├───────────────────────────┼──────────────────────────────────────┤
 │                    CORE ENGINE (Swift)                            │
 │                           │                                      │
@@ -117,10 +122,12 @@ LANGUAGE: Swift (core engine + iOS/macOS client), Python (tool plugins where ML/
 The core engine is shifting from a CLI-only tool to a local service that other UIs drive through one HTTP surface.
 
 - **Vapor API layer**: A Vapor service fronts the core engine and exposes chat, health, tools, memory, approvals, runs, and scheduler operations as JSON routes. The dashboard and future clients call the engine through this layer; the CLI remains direct-core for v1 (`chat` and `scheduler run` link `RuneWeaverCore` directly via `CLIShared.makeToolBus` and `Orchestrator` instead of going through HTTP, so terminal use works with no service running). The service itself launches from the CLI binary via `rune-weaver serve`, which builds a `ServerContext` with `ServerContext.make(...)`, registers the shared plugin tools, configures a Vapor `Application` with `configureRuneWeaver(_:context:)`, and runs it.
+- **WebSocket event hub & real-time streaming**: The service maintains a persistent WebSocket endpoint (`/ws`) managed by `WSHub`. Chat turns stream live text deltas (`WSStreamDelta`), tool invocations (`WSToolStartFrame`), and tool outcomes (`WSToolEndFrame`), tagged with `sessionID` to allow frontend views to multiplex over a single shared connection (`useSharedWebSocket`) without cross-session leakage. In-flight turns support mid-turn cancellation via WebSocket frame (`{"type": "cancel"}`) or REST (`POST /chat/cancel`), which aborts the underlying Swift task via `ActiveTurnTracker`.
+- **Durable SQLite persistence for scheduler & run history**: Scheduled jobs (`scheduler_jobs` table) and execution audit logs (`run_logs` table) persist in SQLite (`episodes.db`). The `config.toml` `[[scheduler.jobs]]` table is used solely as an initial bootstrap seed when the database has zero jobs, preventing dual-maintenance configuration drift. Runtime edits persist immediately to SQLite, and run states (`running` -> `ok`/`error`/`cancelled`) are tracked live, with interrupted runs reconciled on restart.
 - **Static dashboard bundle**: The web dashboard ships as a static bundle served by the engine itself. It chats, browses memory, inspects run history, manages schedules, and surfaces the approvals inbox in a browser with no separate frontend host process.
 - **Same trust boundary**: Every service-triggered write still flows through the permission gate with graduated trust, sandbox staging, and the local audit trail. The service layer adds transport; it does not bypass approvals.
 - **Localhost-only, no-auth v1**: The v1 service binds loopback (`127.0.0.1`) only with no auth, relying on local-process access for protection.
-- **Auth-before-exposure rule**: Authentication must land before the service binds a non-loopback interface or leaves the machine. No VPN, tunnel, or port-forward exposure without auth.
+- **Auth-before-exposure rule**: Authentication must land before the service binds a non-loopback interface or leaves the machine. No VPN, tunnel, or port-forward exposure without auth. Remote access over WireGuard (or any non-loopback transport) is deferred until auth lands; the service refuses non-loopback binds in v1.
 - **Known v1 limitation — split-brain single-flight**: Scheduler single-flight is per-process only. `SchedulerRunLock` guards concurrent `POST /scheduler/jobs/:id/run` calls inside the service process and `SchedulerEngine.running` guards overlapping fires inside the CLI `scheduler run` foreground loop, but the two live in separate processes with no shared state, so the same job name can still run concurrently via API plus CLI in v1. A cross-process lock (file lock under `~/.runeweaver/` or SQLite) is deferred; do not run manual API runs and the CLI foreground loop for the same job at the same time.
 
 ---
@@ -132,7 +139,10 @@ The core engine is shifting from a CLI-only tool to a local service that other U
 The core engine is a Swift package that runs as a persistent process. It owns:
 
 - **Orchestration**: Receives user input (text or voice transcription), routes it through the LLM, executes tool calls, and returns responses.
-- **Conversation Manager**: Maintains session state, conversation history, and context windows. Manages multi-turn conversations.
+  - **Dynamic System Prompt Composition**: `SystemPromptComposer` snapshots the live tool registry (`ToolBus.availableTools()`) at session start and generates a deterministic system prompt including tool names, descriptions, input schemas, permission levels, tool-use policies, and memory guidance.
+  - **Narration Fallback for Local LLMs**: When local or quantized models (e.g. Gemma, Qwen on MLX / llama.cpp) output text narration (`Calling <tool> with arguments {...}`) instead of structured function calling, `OrchestratorToolLoop` extracts and executes read-only tool calls with fresh call IDs, while keeping approval-gated tools protected.
+  - **In-Flight Turn Cancellation**: `ActiveTurnTracker` tracks running turn tasks across both WebSocket and REST routes, allowing callers to cleanly abort long-running turns.
+- **Conversation Manager**: Maintains session state, conversation history, and context windows. Manages multi-turn conversations across durable SQLite tables (`sessions`, `messages`) and hydrates missing cache entries from disk.
 - **LLM Router**: Abstracts LLM providers. Selects the active provider, handles fallback chains, manages API keys and connection pooling.
 
 Key patterns:
@@ -239,10 +249,12 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - **Config file**: `~/.runeweaver/config.toml` for non-sensitive settings (provider URLs, model preferences, feature toggles)
 - Secrets are never written to logs, never sent to LLMs, never stored in plaintext
 
-### 7. Scheduler
+### 7. Scheduler & Run Execution Engine
 
-- **Cron-like**: User-defined schedules for recurring tasks (e.g., "summarize my emails every morning at 8 AM")
-- **Event-driven**: React to triggers (new email arrived, calendar event upcoming, webhook received)
+- **Cron-like & Polling**: User-defined schedules for recurring tasks (5-field cron or named shortcuts like `@hourly`, `@daily`, `@weekly`) and email polling triggers (`pollAccount`, `pollQuery`, `pollIntervalSeconds`).
+- **SQLite as Durable Source of Truth**: All job definitions (`scheduler_jobs` table) and execution audit logs (`run_logs` table) reside in `~/.runeweaver/memory/episodes.db`. The `config.toml` `[[scheduler.jobs]]` table is strictly an initial bootstrap seed when the database has zero jobs, preventing dual-maintenance configuration drift. Runtime edits from the web dashboard persist directly to SQLite.
+- **In-Progress Run State Machine**: Every job execution begins by persisting an in-progress run record (`status: "running"`), broadcasting `run_started` across WebSocket subscribers, and updating the record upon completion (`status: "ok"`, `"error"`, or `"cancelled"`). On server startup, any stale `"running"` entries left by abnormal process termination are automatically reconciled to `"interrupted"`.
+- **Deterministic Job Sessions & Visual Badging**: Each scheduled job executes within a deterministic session ID (`SchedulerEngine.deterministicSessionID(forJobNamed:)`) stamped with `source: "scheduler"` and titled with the job's name. This isolates background automated runs from interactive user chat sessions while preserving episodic memory continuity across repeated runs of the same job. Clients display scheduled sessions with distinct clock badges (`ClockIcon`).
 - **Foreground loop plus per-process single-flight**: The CLI `scheduler run` foreground loop (`while true` plus `Task.sleep` at `--interval` cadence) is the sole auto-fire runner; the service exposes CRUD plus a manual `POST .../run` entry point and never auto-fires. Overlapping fires skip with a log line instead of stacking: `SchedulerEngine.running` guards the CLI loop and `SchedulerRunLock` guards concurrent manual runs inside the service process. Known v1 limitation: the two locks share no cross-process state, so the same job name can still run concurrently via API plus CLI (see the Engine-to-Service Shift).
 
 ### 8. Voice Pipeline
@@ -269,12 +281,16 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - System audio integration
 
 **Web Dashboard (static bundle served by the engine)**:
-- Full chat interface
-- Memory browser (search what the agent remembers)
-- Scheduler management
-- Run history inspector
-- Approvals inbox (approve-with-duration or deny gated writes)
-- Served by the Vapor API layer on loopback only; no separate frontend host process
+- Full chat interface with session history sidebar and distinct visual badging for scheduled job sessions (`ClockIcon` vs `ChatIcon`).
+- Real-time tool execution visibility: displays in-flight tool start/end frames, input arguments, and completion outcomes live as the LLM works via shared `ToolActionRow` components.
+- Interactive turn controls: supports prompt cancellation mid-stream with responsive input lock releasing.
+- Memory browser (search what the agent remembers, inspect facts and profile attributes).
+- Scheduler management (wizard-driven job creation, cron & poll triggers, toggle enable/disable, manual "Run Now").
+- Run history inspector with live in-progress run tracking across page loads and route changes.
+- Approvals inbox (approve-with-duration or deny gated writes).
+- Spec-compliant markdown rendering via `react-markdown` and `remark-gfm` with zero `dangerouslySetInnerHTML`, GFM table support, fenced code blocks with language tags, and protocol-whitelisted URL sanitization on links and images.
+- Native Web Notifications API integration and unread badge counters for background runs and pending approvals, powered by a shared WebSocket connection (`useSharedWebSocket`).
+- Served by the Vapor API layer on loopback only; no separate frontend host process.
 
 ---
 
@@ -351,7 +367,7 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 │   ├── approved/        # Approved for real filesystem
 │   └── attachments/     # `email.attachment` downloads only (10 MB cap, requiresApproval)
 ├── memory/
-│   ├── episodes.db      # SQLite: conversation history
+│   ├── episodes.db      # SQLite: conversation history (sessions, messages, episodes), scheduler jobs, run logs
 │   └── vectors/         # LanceDB: semantic memory
 ├── logs/                # Audit trail
 ├── plugins/             # Installed tool plugins
@@ -488,15 +504,21 @@ token_env = "HA_TOKEN"
 
 1. **Swift over Python for core**: Performance, type safety, native Apple integration. Python is for plugins only.
 2. **Actor model for concurrency**: Each subsystem (LLM, tools, memory) is a Swift actor, preventing data races.
-3. **WebSocket for client-server**: Low-latency, bidirectional. Clients connect over WireGuard VPN.
+3. **WebSocket for client-server**: Low-latency, bidirectional. Local clients connect over loopback in v1; remote access over WireGuard VPN is deferred until auth lands.
 4. **JSON keyword store (LanceDB-compatible shape), vector deferred**: Semantic memory persists as keyword-only JSON rows scored by token overlap until a local embeddings backend exists. The store exposes the LanceDB table shape (append facts, cosine similarity, metadata filtering) so a native LanceDB binding can replace the file backend without changing callers. ChromaDB rejected (server process, heavier footprint).
 5. **Playwright over Selenium**: Modern API, better async support, multi-browser, cleaner subprocess model.
 6. **Graduated trust over binary permissions**: More nuanced than "always ask" or "never ask." Respects user's comfort level.
+7. **Native WebSocket & Web Notifications for the service, best-effort osascript retained for the CLI foreground loop**: The service and dashboard path uses native WebSocket push broadcasting (`WSHub` emits `run_started`, `run_completed`, `approval_request`) paired with standard HTML5 Web Notifications (`Notification` API) and unread badge counters in the Web dashboard. Routing service notifications through AppleScript subprocesses would cause blocking I/O, create disruptive modal prompts, require brittle macOS Terminal / Script Editor automation permissions that fail in headless setups, background daemons, or containerized environments, and cannot reach remote web or mobile clients, so the service never shells to AppleScript. The CLI `scheduler run` foreground loop retains a best-effort local `osascript` display notification via `MacOSSchedulerNotifier` for CLI foreground runs only when a GUI session exists; the service never shells to `osascript` and notifies exclusively through WebSocket broadcast plus Web Notifications; failures never fail the run so headless operation stays silent. This split keeps browser delivery non-blocking, cross-platform, multi-subscriber, and honoring browser notification preferences, while preserving a local popup for terminal-driven runs.
+8. **SQLite as Primary Source of Truth for Scheduler and Runs**: Scheduled jobs (`scheduler_jobs` table) and run execution history (`run_logs` table) are stored durably in SQLite (`episodes.db`), with real-time in-memory caching in `SchedulerStore` and `RunLogStore`. `config.toml` serves solely as a bootstrap seed on initial setup when 0 jobs exist in SQLite, avoiding dual-maintenance divergence between database state and config files.
+9. **Deterministic Job Sessions & Badged History**: Every scheduler run executes within a deterministic session ID (`SchedulerEngine.deterministicSessionID(forJobNamed:)`) stamped with `source: "scheduler"` and titled with the job's name. This keeps automated task execution cleanly partitioned from interactive chat sessions while preserving episodic memory continuity across repeated runs of the same job. Clients display scheduled sessions with visual clock badges (`ClockIcon`).
+10. **Dynamic System Prompt Composition & Narration Fallback**: The system prompt is assembled at runtime by `SystemPromptComposer`, introspecting the active `ToolBus` to inject tool names, descriptions, input schemas, permission levels, and memory policies into the LLM context. When local or smaller models (e.g. Gemma on MLX / llama.cpp) output text describing tool execution (`Calling tool_name with arguments {...}`) rather than native function calling tokens, `Orchestrator` uses `OrchestratorToolLoop.narratedToolCalls` as a safe fallback parser to convert valid read-only requests into structured calls, without bypassing approval gates.
+11. **Spec-Compliant Markdown & Protocol-Whitelisted Sanitization**: Replaced custom regex markdown parsers with spec-compliant `react-markdown` and `remark-gfm` for full CommonMark and GitHub Flavored Markdown (tables, code fences, blockquotes, lists) with zero `dangerouslySetInnerHTML`. Sanitizes links and images using a strict protocol whitelist (`isSafeUrl`) that blocks `javascript:`, `vbscript:`, `data:`, and protocol-relative `//` URLs, while permitting relative dashboard navigation and secure external URLs.
+12. **Unified Toolchain & Multi-Ecosystem Security Audit**: A single `Makefile` standardizes workflows across both the Swift engine and Web dashboard (`build`, `test`, `lint`, `audit`). `make audit` covers both ecosystems: `npm audit` for Node/React dependencies and `osv-scanner` (with `trivy` fallback) scanning `Package.resolved` against open-source vulnerability databases.
 
 ### Constraints
 
 - **Apple Silicon required** for MLX provider. Intel Macs can use llama.cpp/vLLM/cloud only.
-- **WireGuard VPN** required for phone-to-Mac Studio communication. No public internet exposure.
+- **Remote access deferred until auth lands**: Phone-to-Mac Studio communication over WireGuard (or any non-loopback transport) is a deferred post-v1 path. V1 serves loopback only with no remote exposure.
 - **Single-user design** (v1): No multi-user auth. The agent serves one person.
 - **Localhost-only, no-auth v1**: The Vapor API layer and static dashboard bundle bind loopback (`127.0.0.1`) only with no auth in v1; local-process access is the protection boundary.
 - **Auth-before-exposure**: Authentication must land before the service binds a non-loopback interface or is exposed beyond the machine (VPN, tunnel, or port forward).

@@ -14,9 +14,10 @@ import Foundation
 /// back to JSON files beside the configured database path so behavior
 /// stays identical.
 ///
-/// Blocking SQLite/JSON work runs off the actor executor via the
-/// nonisolated `runStoreIO(_:)` helper (background queue plus
-/// continuation) so actor methods stay suspension-friendly.
+/// Blocking SQLite/JSON work runs off the actor executor via the shared
+/// serial store queue (`SQLiteSerialIO`) so disk order matches actor call
+/// order and shares ordering with the session, scheduler, and run stores
+/// in `episodes.db`, keeping actor methods suspension-friendly.
 public actor EpisodeStore {
     /// Filesystem path of the SQLite database (or JSON sidecar anchor).
     public let dbPath: String
@@ -44,7 +45,7 @@ public actor EpisodeStore {
     /// Stores one conversation turn.
     ///
     /// Blocking SQLite/JSON work runs off the actor executor via the
-    /// background helper so the actor stays suspension-friendly.
+    /// shared serial store queue (`SQLiteSerialIO`) so the actor stays suspension-friendly.
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
     ///   - role: Who produced the content.
@@ -67,7 +68,7 @@ public actor EpisodeStore {
     /// - Parameter episode: Episode to persist.
     public func store(_ episode: Episode) async throws {
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.write(episodes: [episode], dbPath: dbPath, merge: true)
         }
     }
@@ -77,8 +78,46 @@ public actor EpisodeStore {
     public func store(_ episodes: [Episode]) async throws {
         guard !episodes.isEmpty else { return }
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)
+        }
+    }
+
+    /// Stores one conversation turn without observing cancellation.
+    ///
+    /// Audit path for cancelled turns: the caller is already cancelled when
+    /// tools have executed, so a cancellable store would throw before dispatch
+    /// and drop the mirror. Runs to completion on the shared serial store
+    /// queue instead.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - role: Who produced the content.
+    ///   - content: Text content.
+    ///   - metadata: Key/value annotations. Defaults to empty.
+    /// - Returns: True when the write succeeded.
+    @discardableResult
+    public func storeUncancellable(
+        sessionID: UUID,
+        role: Message.Role,
+        content: String,
+        metadata: [String: String] = [:]
+    ) async -> Bool {
+        let episode = Episode(sessionID: sessionID, role: role, content: content, metadata: metadata)
+        return await storeUncancellable(episode)
+    }
+
+    /// Stores an already-constructed episode without observing cancellation.
+    ///
+    /// Shares the cancelled-turn rationale above: audit writes issued while
+    /// the task is already cancelled must still land.
+    /// - Parameter episode: Episode to persist.
+    /// - Returns: True when the write succeeded.
+    @discardableResult
+    public func storeUncancellable(_ episode: Episode) async -> Bool {
+        let dbPath = self.dbPath
+        let episodes = [episode]
+        return await SQLiteSerialIO.runUncancellable {
+            (try? EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)) != nil
         }
     }
 
@@ -90,7 +129,7 @@ public actor EpisodeStore {
     /// newest. Use `recentEpisodes(for:limit:)` for resume hydration
     /// needing the newest turns. Storage order (`timestamp`, `rowid`) is
     /// preserved so rapid turns sharing a timestamp hydrate deterministically.
-    /// The blocking read runs off the actor executor via the background helper.
+    /// The blocking read runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
     ///   - limit: Maximum episodes. Defaults to nil (all). When set,
@@ -103,7 +142,7 @@ public actor EpisodeStore {
         }
         let clamped = limit.map { min($0, Self.maxResults) }
         let dbPath = self.dbPath
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.episodes(sessionID: sessionID, dbPath: dbPath, limit: clamped)
         }
     }
@@ -114,7 +153,7 @@ public actor EpisodeStore {
     /// of loading the whole session, then returns them in chronological
     /// order for direct history use. Storage order is preserved for
     /// deterministic hydration of same-timestamp turns. The blocking read
-    /// runs off the actor executor via the background helper.
+    /// runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameters:
     ///   - sessionID: Owning session identifier.
     ///   - limit: Maximum episodes. Non-positive limits return an empty list.
@@ -124,14 +163,14 @@ public actor EpisodeStore {
         guard limit > 0 else { return [] }
         let dbPath = self.dbPath
         let clamped = min(limit, Self.maxResults)
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.recentEpisodes(sessionID: sessionID, dbPath: dbPath, limit: clamped)
         }
     }
 
     /// Returns the most recent episodes across all sessions.
     ///
-    /// The blocking read runs off the actor executor via the background helper.
+    /// The blocking read runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameter limit: Maximum episodes. Defaults to 20. Non-positive
     ///   limits return an empty list. Larger limits are capped.
     /// - Returns: Episodes newest first.
@@ -139,7 +178,7 @@ public actor EpisodeStore {
         guard limit > 0 else { return [] }
         let dbPath = self.dbPath
         let clamped = min(limit, Self.maxResults)
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.recent(dbPath: dbPath, limit: clamped)
         }
     }
@@ -149,7 +188,7 @@ public actor EpisodeStore {
     /// Uses the FTS5 index (`porter` tokenizer, BM25 rank) when SQLite
     /// is available; otherwise falls back to case-insensitive token
     /// overlap scoring over the JSON sidecar. The blocking read runs off
-    /// the actor executor via the background helper.
+    /// the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameters:
     ///   - query: Search text.
     ///   - limit: Maximum results. Defaults to 10. Non-positive limits
@@ -161,29 +200,29 @@ public actor EpisodeStore {
         guard !trimmed.isEmpty else { return [] }
         let dbPath = self.dbPath
         let clamped = min(limit, Self.maxResults)
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.search(query: trimmed, dbPath: dbPath, limit: clamped)
         }
     }
 
     /// All session identifiers that have stored episodes.
     ///
-    /// The blocking read runs off the actor executor via the background helper.
+    /// The blocking read runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Returns: Session identifiers.
     public func sessionIDs() async throws -> [UUID] {
         let dbPath = self.dbPath
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.sessionIDs(dbPath: dbPath)
         }
     }
 
     /// Total stored episode count.
     ///
-    /// The blocking read runs off the actor executor via the background helper.
+    /// The blocking read runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Returns: Row count.
     public func count() async throws -> Int {
         let dbPath = self.dbPath
-        return try await runStoreIO {
+        return try await SQLiteSerialIO.run {
             try EpisodeStoreIO.count(dbPath: dbPath)
         }
     }
@@ -192,32 +231,32 @@ public actor EpisodeStore {
 
     /// Deletes one episode. Missing rows are a no-op.
     ///
-    /// The blocking delete runs off the actor executor via the background helper.
+    /// The blocking delete runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameter id: Episode identifier.
     public func delete(id: UUID) async throws {
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.delete(id: id, dbPath: dbPath)
         }
     }
 
     /// Deletes every episode for a session. Unknown sessions are a no-op.
     ///
-    /// The blocking delete runs off the actor executor via the background helper.
+    /// The blocking delete runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameter sessionID: Owning session identifier.
     public func deleteSession(_ sessionID: UUID) async throws {
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.deleteSession(sessionID, dbPath: dbPath)
         }
     }
 
     /// Deletes all episodes.
     ///
-    /// The blocking delete runs off the actor executor via the background helper.
+    /// The blocking delete runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     public func clear() async throws {
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.clear(dbPath: dbPath)
         }
     }
@@ -228,7 +267,7 @@ public actor EpisodeStore {
     ///
     /// Non-destructive: the store is left untouched and the caller
     /// decides what to do with the returned summaries. The blocking read
-    /// runs off the actor executor via the background helper.
+    /// runs off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameters:
     ///   - olderThan: Episodes at or before this date are summarized.
     ///   - summarizer: Override summarizer. Defaults to the store's own.
@@ -239,7 +278,7 @@ public actor EpisodeStore {
     ) async throws -> [EpisodeSummary] {
         let summarize = summarizer ?? self.summarizer
         let dbPath = self.dbPath
-        let old = try await runStoreIO {
+        let old = try await SQLiteSerialIO.run {
             try EpisodeStoreIO.episodes(olderThan: olderThan, dbPath: dbPath)
         }
         guard !old.isEmpty else { return [] }
@@ -267,7 +306,7 @@ public actor EpisodeStore {
     /// SQLite runs delete plus insert atomically in one transaction while
     /// the JSON fallback writes the replacement first and then deletes so
     /// a crash never loses both. Blocking I/O runs off the actor executor
-    /// via the background helper.
+    /// via the shared serial store queue (`SQLiteSerialIO`).
     /// - Parameters:
     ///   - olderThan: Episodes at or before this date are compacted.
     ///   - summarizer: Override summarizer. Defaults to the store's own.
@@ -287,7 +326,7 @@ public actor EpisodeStore {
                 content: "Summary of \(summary.messageCount) earlier messages: \(summary.summary)",
                 metadata: ["compacted": "true"]
             )
-            try await runStoreIO {
+            try await SQLiteSerialIO.run {
                 try EpisodeStoreIO.compact(
                     sessionID: summary.sessionID,
                     beforeOrAt: olderThan,
@@ -303,10 +342,10 @@ public actor EpisodeStore {
     ///
     /// Useful after bulk imports or if the index ever drifts from the
     /// table. A no-op for the JSON fallback. The blocking rebuild runs
-    /// off the actor executor via the background helper.
+    /// off the actor executor via the shared serial store queue (`SQLiteSerialIO`).
     public func rebuildSearchIndex() async throws {
         let dbPath = self.dbPath
-        try await runStoreIO {
+        try await SQLiteSerialIO.run {
             try EpisodeStoreIO.rebuildFTS(dbPath: dbPath)
         }
     }
@@ -520,12 +559,8 @@ enum EpisodeStoreIO {
         /// - Parameter dbPath: SQLite file path. `~` is expanded.
         /// - Returns: Open database handle. Caller must close it.
         private static func open(dbPath: String) throws -> OpaquePointer? {
+            // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: EpisodeStoreError.storeUnavailable)
-            try SQLiteHelpers.exec(
-                handle: handle,
-                sql: "PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;",
-                failure: EpisodeStoreError.persistenceFailed
-            )
             try SQLiteHelpers.exec(
                 handle: handle,
                 sql: """

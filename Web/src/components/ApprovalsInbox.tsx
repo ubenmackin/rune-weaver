@@ -9,6 +9,7 @@ import {
   type PermissionRequest,
   type TrustDuration,
 } from "../api";
+import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 
 function isTrustDuration(value: string): value is TrustDuration {
   return trustDurationOptions.some((option) => option.value === value);
@@ -35,6 +36,21 @@ export default function ApprovalsInbox() {
       setLoading(false);
     }
   }, []);
+
+  // Live approval prompts arrive over the shared socket; merge them so the
+  // inbox updates without waiting for the next manual refresh.
+  const handleWSApproval = useCallback((data: unknown) => {
+    if (!data || typeof data !== "object") return;
+    const frame = data as { type?: unknown; request?: unknown };
+    if (frame.type !== "approval" || !frame.request || typeof frame.request !== "object") return;
+    const request = frame.request as PermissionRequest;
+    if (!request.id) return;
+    setApprovals((previous) =>
+      previous.some((item) => item.id === request.id) ? previous : [...previous, request],
+    );
+  }, []);
+
+  useSharedWebSocket(handleWSApproval);
 
   useEffect(() => {
     let cancelled = false;

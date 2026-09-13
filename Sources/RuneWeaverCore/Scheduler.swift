@@ -6,6 +6,9 @@
 // contexts, and records run outcomes.
 
 import Foundation
+#if canImport(SQLite3)
+    import SQLite3
+#endif
 
 /// Failures raised while parsing a cron-like schedule expression.
 public enum CronScheduleError: Error, Sendable, Equatable {
@@ -408,6 +411,58 @@ public struct EmailPollRule: Sendable, Codable, Equatable {
         guard let mailbox else { return nil }
         let trimmed = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Builds the poll rule for stored job fields, when an account is set.
+    ///
+    /// Single source for the blank-account-means-cron-only rule plus the
+    /// default interval/limit, shared by durable row decoding and the
+    /// runtime registry so both agree on when stored fields carry a mail
+    /// trigger.
+    /// - Parameters:
+    ///   - pollAccount: Stored account nickname, if any.
+    ///   - pollQuery: Stored query, if any.
+    ///   - pollMailbox: Stored mailbox, if any.
+    ///   - pollIntervalSeconds: Stored interval, if any.
+    ///   - pollLimit: Stored limit, if any.
+    /// - Returns: Poll rule, or nil for cron-only rows.
+    public static func ruleForStoredFields(
+        pollAccount: String?,
+        pollQuery: String?,
+        pollMailbox: String?,
+        pollIntervalSeconds: Int?,
+        pollLimit: Int?
+    ) -> EmailPollRule? {
+        let trimmedAccount = pollAccount?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmedAccount.isEmpty else { return nil }
+        return EmailPollRule(
+            account: trimmedAccount,
+            query: pollQuery ?? "",
+            mailbox: pollMailbox,
+            pollIntervalSeconds: pollIntervalSeconds ?? EmailPollRule.defaultPollIntervalSeconds,
+            limit: pollLimit ?? EmailPollRule.defaultLimit
+        )
+    }
+
+    /// Maps a stored schedule to its config form, folding blank to nil.
+    ///
+    /// Single source for the blank-schedule-means-poll-only mapping so
+    /// durable rows and runtime jobs agree.
+    /// - Parameter storedSchedule: Stored cron text (`""` for poll-only).
+    /// - Returns: Config schedule, or nil for poll-only jobs.
+    public static func configSchedule(from storedSchedule: String) -> String? {
+        let trimmed = storedSchedule.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Maps a config schedule to its stored form, folding nil/blank to `""`.
+    ///
+    /// Single source for the nil-schedule-means-poll-only mapping so
+    /// config bridging and row decoding stay aligned.
+    /// - Parameter configSchedule: Config cron text, if any.
+    /// - Returns: Stored cron text (`""` for poll-only).
+    public static func storedSchedule(from configSchedule: String?) -> String {
+        configSchedule?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }
 
@@ -1298,4 +1353,152 @@ public actor SchedulerEngine {
     public func lastFireDate(named name: String) -> Date? {
         lastFire[normalizedSchedulerJobName(name)]
     }
+}
+
+#if canImport(SQLite3)
+    /// Single shared decoder for `scheduler_jobs` rows.
+    ///
+    /// The direct-core bootstrap read and the service registry read select
+    /// the same durable columns in the same order; decoding them here keeps
+    /// nullability, column offsets, and poll defaults pinned in one place
+    /// so the two readers cannot drift when the table evolves.
+    package struct SchedulerJobRow: Sendable {
+        /// Job name as stored.
+        package let name: String
+        /// Cron expression as stored (empty for poll-only jobs).
+        package let schedule: String
+        /// Prompt as stored.
+        package let prompt: String
+        /// Whether the job fires.
+        package let enabled: Bool
+        /// Poll account nickname, when the job watches email arrival.
+        package let pollAccount: String?
+        /// Poll query, when set.
+        package let pollQuery: String?
+        /// Poll mailbox, when set.
+        package let pollMailbox: String?
+        /// Seconds between poll checks, when set.
+        package let pollIntervalSeconds: Int?
+        /// Maximum hits fetched per poll, when set.
+        package let pollLimit: Int?
+
+        /// Decodes the shared columns starting at an offset.
+        ///
+        /// The direct-core query has no `id` prefix (`base == 0`) while the
+        /// service query prefixes `id` (`base == 1`); sharing the offset keeps
+        /// one column mapping for both shapes.
+        /// - Parameters:
+        ///   - statement: Stepped statement positioned on a row.
+        ///   - base: Zero-based index of the `name` column.
+        /// - Returns: Decoded row, or nil when a required column is missing.
+        package static func decode(_ statement: OpaquePointer?, base: Int32) -> Self? {
+            guard let name = SQLiteHelpers.columnText(statement, index: base),
+                  let schedule = SQLiteHelpers.columnText(statement, index: base + 1),
+                  let prompt = SQLiteHelpers.columnText(statement, index: base + 2)
+            else { return nil }
+            let enabled = (SQLiteHelpers.columnInt64(statement, index: base + 3) ?? 1) != 0
+            return Self(
+                name: name,
+                schedule: schedule,
+                prompt: prompt,
+                enabled: enabled,
+                pollAccount: SQLiteHelpers.columnText(statement, index: base + 4),
+                pollQuery: SQLiteHelpers.columnText(statement, index: base + 5),
+                pollMailbox: SQLiteHelpers.columnText(statement, index: base + 6),
+                pollIntervalSeconds: SQLiteHelpers.columnInt64(statement, index: base + 7).map { Int($0) },
+                pollLimit: SQLiteHelpers.columnInt64(statement, index: base + 8).map { Int($0) }
+            )
+        }
+
+        /// Builds the poll rule for this row, when an account is set.
+        ///
+        /// Delegates to the shared stored-fields helper so row readers and
+        /// the runtime registry cannot drift on defaults.
+        /// - Returns: Poll rule, or nil for cron-only rows.
+        package func makePollRule() -> EmailPollRule? {
+            EmailPollRule.ruleForStoredFields(
+                pollAccount: pollAccount,
+                pollQuery: pollQuery,
+                pollMailbox: pollMailbox,
+                pollIntervalSeconds: pollIntervalSeconds,
+                pollLimit: pollLimit
+            )
+        }
+
+        /// Cron expression for config readers, with blank folded to nil.
+        ///
+        /// Delegates to the shared schedule helper so stored and config
+        /// forms map identically everywhere.
+        package var configSchedule: String? {
+            EmailPollRule.configSchedule(from: schedule)
+        }
+    }
+#endif
+
+public extension SchedulerJobConfig {
+    /// Loads durable scheduler configs for direct-core entry points.
+    ///
+    /// Reads the `scheduler_jobs` table in `episodes.db` on the shared
+    /// serial store queue so CLI list and run stay direct-core without
+    /// importing the service layer. Empty when the store is missing or
+    /// SQLite is unavailable; callers fall back to `config.toml` seed.
+    /// Cancellable so shutdown never blocks on disk I/O; audit writes
+    /// elsewhere stay run-to-completion.
+    /// - Parameter dbPath: SQLite database file path.
+    /// - Returns: Persisted job configs in creation order.
+    static func persistedConfigs(from dbPath: String) async -> [SchedulerJobConfig] {
+        #if canImport(SQLite3)
+            await (try? SQLiteSerialIO.run {
+                persistedConfigsBlocking(from: dbPath)
+            }) ?? []
+        #else
+            return []
+        #endif
+    }
+
+    #if canImport(SQLite3)
+        /// Blocking SQLite read behind `persistedConfigs(from:)`.
+        ///
+        /// Opens via the shared handle (busy_timeout plus WAL) so CLI
+        /// reads never block the cooperative pool and never race service
+        /// writes torn. A missing database file is an expected first launch
+        /// and reads as empty for the config seed; open and prepare failures
+        /// warn so callers do not mistake corruption for an empty store.
+        /// - Parameter dbPath: SQLite database file path.
+        /// - Returns: Persisted job configs, empty on any failure.
+        private static func persistedConfigsBlocking(from dbPath: String) -> [SchedulerJobConfig] {
+            struct LoadError: Error {}
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            guard let handle = try? SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { _ in LoadError() }) else {
+                fputs("[WARN] SchedulerJobConfig: Failed opening scheduler store at \(dbPath); falling back to config seed.\n", stderr)
+                return []
+            }
+            defer { sqlite3_close(handle) }
+            let sql = """
+            SELECT name, schedule, prompt, enabled, poll_account, poll_query, poll_mailbox, poll_interval_seconds, poll_limit
+            FROM scheduler_jobs
+            ORDER BY created_at ASC;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                fputs("[WARN] SchedulerJobConfig: Failed preparing scheduler read (code \(code)); falling back to config seed.\n", stderr)
+                return []
+            }
+            defer { sqlite3_finalize(statement) }
+            var loaded: [SchedulerJobConfig] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let row = SchedulerJobRow.decode(statement, base: 0) else { continue }
+                loaded.append(SchedulerJobConfig(
+                    name: row.name,
+                    prompt: row.prompt,
+                    enabled: row.enabled,
+                    schedule: row.configSchedule,
+                    poll: row.makePollRule()
+                ))
+            }
+            return loaded
+        }
+    #endif
 }

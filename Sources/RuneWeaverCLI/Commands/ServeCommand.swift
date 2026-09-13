@@ -101,7 +101,8 @@ struct ServeCommand: AsyncParsableCommand {
             permissionGate: permissionGate,
             llm: selected,
             systemPrompt: effectiveSystemPrompt,
-            schedulerConfig: loaded.config.scheduler
+            schedulerConfig: loaded.config.scheduler,
+            episodesDBPath: loaded.config.memory.episodesDBPath
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)
@@ -113,8 +114,10 @@ struct ServeCommand: AsyncParsableCommand {
             try configureRuneWeaver(app, context: context)
             print(TerminalStyle.dim("Serving engine API on \(serverConfig.hostname):\(serverConfig.port) (\(selected.name)). Ctrl+C to stop."))
             try await app.execute()
+            await context.hub.closeAll()
             try await app.asyncShutdown()
         } catch {
+            await context.hub.closeAll()
             try? await app.asyncShutdown()
             throw error
         }

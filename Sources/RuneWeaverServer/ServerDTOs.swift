@@ -37,6 +37,10 @@ public enum ServerPaths {
     public static let run = "run"
     /// Run log group.
     public static let runs = "runs"
+    /// Sessions group.
+    public static let sessions = "sessions"
+    /// Structured tool actions subpath under `/sessions/:id`.
+    public static let toolActions = "tool-actions"
     /// WebSocket endpoint for streamed chat plus live approval prompts.
     public static let websocket = "ws"
     /// Engine API version served on `/health`.
@@ -98,16 +102,30 @@ public struct HealthResponse: Content, Equatable {
     public let engine: String
     /// Engine API version.
     public let version: String
+    /// Active serving model name.
+    public let model: String?
+    /// Active context window limit.
+    public let contextLength: Int?
 
     /// Creates a health response.
     /// - Parameters:
     ///   - status: Health status. Defaults to `"ok"`.
     ///   - engine: Engine display name. Defaults to `"Rune Weaver"`.
     ///   - version: API version. Defaults to `ServerPaths/apiVersion`.
-    public init(status: String = "ok", engine: String = "Rune Weaver", version: String = ServerPaths.apiVersion) {
+    ///   - model: Active model name. Defaults to nil.
+    ///   - contextLength: Active context limit. Defaults to nil.
+    public init(
+        status: String = "ok",
+        engine: String = "Rune Weaver",
+        version: String = ServerPaths.apiVersion,
+        model: String? = nil,
+        contextLength: Int? = nil
+    ) {
         self.status = status
         self.engine = engine
         self.version = version
+        self.model = model
+        self.contextLength = contextLength
     }
 }
 
@@ -414,43 +432,100 @@ public typealias WSStreamDone = RuneWeaverCore.WSStreamDone
 public typealias WSApprovalPrompt = RuneWeaverCore.WSApprovalPrompt
 /// Error frame, single-sourced from core.
 public typealias WSErrorFrame = RuneWeaverCore.WSErrorFrame
+/// Tool start frame, single-sourced from core.
+public typealias WSToolStartFrame = RuneWeaverCore.WSToolStartFrame
+/// Tool end frame, single-sourced from core.
+public typealias WSToolEndFrame = RuneWeaverCore.WSToolEndFrame
+/// Cancel message, single-sourced from core.
+public typealias WSCancelMessage = RuneWeaverCore.WSCancelMessage
+/// Cancelled confirmation frame, single-sourced from core.
+public typealias WSCancelledFrame = RuneWeaverCore.WSCancelledFrame
 
 /// Classifies one inbound WebSocket text frame.
 ///
-/// Chat frames carry `text`; decision frames carry `id` plus `approved`.
-/// Frames carrying neither decode as `unknown` so the socket can answer
+/// Chat frames carry `text`; decision frames carry `id` plus `approved`;
+/// cancel frames carry `type: "cancel"`.
+/// Frames carrying none of these decode as `unknown` so the socket can answer
 /// with an error frame instead of dropping the connection.
 public enum WSInboundKind: Sendable, Equatable {
     /// A chat message with user text.
     case chat(WSChatMessage)
     /// An approval decision for a pending request.
     case decision(WSDecisionMessage)
-    /// A frame that is neither chat nor decision.
+    /// A request to cancel the active turn.
+    case cancel(WSCancelMessage)
+    /// A frame that is neither chat, decision, nor cancel.
     case unknown
 }
 
+private struct WSCancelFramePeek: Codable, Sendable {
+    let type: String?
+    let sessionID: UUID?
+    let text: String?
+    let content: String?
+    let id: UUID?
+}
+
 public extension WSInboundKind {
-    /// Classifies raw socket text into a chat, decision, or unknown kind.
+    /// Classifies raw socket text into a chat, decision, cancel, or unknown kind.
     ///
-    /// Decoding tries the chat shape first (it requires `text`), then the
-    /// legacy `{"content":"..."}` shape (accepted for thin-client
-    /// migration), then the decision shape (it requires `id`
-    /// plus `approved`), so one socket carries both streamed chat and
-    /// live approval decisions.
+    /// Chat takes precedence when user text is present: a frame carrying
+    /// both `text` and `type: "cancel"` routes to chat so the turn is
+    /// never dropped, while an explicit cancel without text routes to
+    /// cancel. Then tries the legacy `{"content":"..."}` shape, then the
+    /// decision shape (it requires `id` plus `approved`). A typeless
+    /// `{"sessionID":...}` frame with no chat or decision fields falls
+    /// back to cancel for thin-client migration.
     /// - Parameter text: Raw socket text frame.
     /// - Returns: The inbound kind, or `unknown` when no shape decodes.
     static func classify(_ text: String) -> WSInboundKind {
         guard let data = text.data(using: .utf8) else { return .unknown }
-        if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data) {
+        let peek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data)
+        let hasText = !(peek?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+            || !(peek?.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data),
+           !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
             return .chat(chat)
         }
-        if let legacy = try? JSONDecoder().decode(WSLegacyContentMessage.self, from: data),
-           !legacy.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return .chat(WSChatMessage(text: legacy.content))
+        if peek?.type == "cancel", !hasText {
+            return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
+        }
+        if hasText {
+            // Text-bearing frames with an explicit cancel discriminator but
+            // blank or undecodable chat text fall through to unknown rather
+            // than cancelling, so ambiguous frames never drop a user turn
+            // nor trigger an unintended cancel.
+            if let legacy = try? JSONDecoder().decode(WSLegacyContentMessage.self, from: data),
+               !legacy.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return .chat(WSChatMessage(text: legacy.content))
+            }
+            if peek?.type == "cancel" {
+                return .unknown
+            }
+        } else if let legacy = try? JSONDecoder().decode(WSLegacyContentMessage.self, from: data) {
+            if !legacy.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .chat(WSChatMessage(text: legacy.content))
+            }
         }
         if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
             return .decision(decision)
+        }
+        if peek?.type == "cancel" {
+            return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
+        }
+        // Legacy typeless cancel: only when the frame carries a session
+        // without any chat or decision payload, so text-bearing frames
+        // never misroute here.
+        if let legacyPeek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data),
+           legacyPeek.type == nil,
+           let sid = legacyPeek.sessionID,
+           legacyPeek.text == nil,
+           legacyPeek.content == nil,
+           legacyPeek.id == nil
+        {
+            return .cancel(WSCancelMessage(sessionID: sid))
         }
         return .unknown
     }
@@ -482,5 +557,100 @@ public enum WSStreaming {
             start = end
         }
         return chunks
+    }
+}
+
+// MARK: - Sessions DTOs & Conformance
+
+extension SessionSummary: Content {}
+extension ConversationSession: Content {}
+extension Message: Content {}
+
+/// Session list response for `GET /sessions`.
+public struct SessionsResponse: Content, Equatable {
+    public let sessions: [SessionSummary]
+    public let count: Int
+
+    public init(sessions: [SessionSummary]) {
+        self.sessions = sessions
+        self.count = sessions.count
+    }
+}
+
+/// Request payload to update session title for `PATCH /sessions/:id`.
+public struct UpdateSessionRequest: Content, Equatable {
+    /// Maximum accepted title length, mirroring
+    /// `ConversationManager/maxTitleLength` so the API rejects huge titles
+    /// with `413` before they reach the sessions table.
+    public static var maxTitleLength: Int {
+        ConversationManager.maxTitleLength
+    }
+
+    public let title: String
+
+    public init(title: String) {
+        self.title = title
+    }
+}
+
+/// Structured tool actions of one assistant message for
+/// `GET /sessions/:id/tool-actions`.
+public struct SessionMessageToolActions: Content, Equatable {
+    /// Parent assistant message identifier.
+    public let messageID: UUID
+    /// Tool calls derived from that message, in stored order.
+    public let actions: [ToolAction]
+
+    /// Creates a per-message actions row.
+    /// - Parameters:
+    ///   - messageID: Parent assistant message identifier.
+    ///   - actions: Tool calls derived from that message.
+    public init(messageID: UUID, actions: [ToolAction]) {
+        self.messageID = messageID
+        self.actions = actions
+    }
+}
+
+/// Structured tool-action history for `GET /sessions/:id/tool-actions`.
+///
+/// Lets history clients render past tool activity from authoritative
+/// server-derived records instead of re-parsing assistant placeholder
+/// lines with fragile cross-language regular expressions.
+public struct SessionToolActionsResponse: Content, Equatable {
+    /// Owning session identifier.
+    public let sessionID: UUID
+    /// Per-message actions, oldest message first.
+    public let actions: [SessionMessageToolActions]
+    /// Number of tool actions across all messages.
+    public let count: Int
+
+    /// Creates a tool-actions response.
+    /// - Parameters:
+    ///   - sessionID: Owning session identifier.
+    ///   - actions: Per-message actions, oldest first.
+    public init(sessionID: UUID, actions: [SessionMessageToolActions]) {
+        self.sessionID = sessionID
+        self.actions = actions
+        self.count = actions.reduce(0) { $0 + $1.actions.count }
+    }
+}
+
+/// Request payload to cancel an in-flight chat turn via `POST /chat/cancel`.
+public struct CancelChatRequest: Content, Equatable {
+    public let sessionID: UUID
+
+    public init(sessionID: UUID) {
+        self.sessionID = sessionID
+    }
+}
+
+/// Response payload from `POST /chat/cancel`.
+public struct CancelChatResponse: Content, Equatable {
+    public let sessionID: UUID
+    public let cancelled: Bool
+
+    public init(sessionID: UUID, cancelled: Bool) {
+        self.sessionID = sessionID
+        self.cancelled = cancelled
     }
 }

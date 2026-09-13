@@ -1196,6 +1196,34 @@ public extension MemoryEngine {
         return stored
     }
 
+    /// Mirrors one turn without observing cancellation.
+    ///
+    /// Cancelled turns keep working-memory partials for executed tools, so the
+    /// episodic mirror must land even though the surrounding task is already
+    /// cancelled; a cancellable store would throw before dispatch and leave
+    /// the audit trail behind.
+    /// - Parameters:
+    ///   - content: Turn text to persist.
+    ///   - sessionID: Session identifier used as the conversation key.
+    ///   - role: Who produced the turn. Defaults to `.user`.
+    /// - Returns: True when the turn was stored.
+    @discardableResult
+    func mirrorTurnUncancellable(
+        content: String,
+        sessionID: UUID,
+        role: Message.Role = .user
+    ) async -> Bool {
+        guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        guard content.count <= Self.maxContentLength else { return false }
+        return await episodeStore.storeUncancellable(
+            sessionID: sessionID,
+            role: role,
+            content: content
+        )
+    }
+
     /// Maximum characters kept from a tool outcome in a compact episodic record.
     ///
     /// Bounds the outcome portion of `episodicToolRecord(toolName:content:isError:)`
