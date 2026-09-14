@@ -199,17 +199,29 @@ public actor LLMRouter {
     /// Embeds texts via the first healthy provider, falling through on failure.
     ///
     /// Providers are tried in priority order, skipping unreachable ones;
-    /// per-provider errors fall through to the next provider. Throws the
-    /// last provider error when every provider fails, or an
+    /// per-provider errors fall through to the next provider. Cancellation is
+    /// never treated as a provider failure: a cancelled task aborts before the
+    /// next provider is consulted instead of silently trying another endpoint.
+    /// Throws the last provider error when every provider fails, or an
     /// `unavailable` error when no provider can serve the request.
     /// - Parameter text: Texts to embed.
     /// - Returns: One embedding vector per input text.
+    /// - Throws: `CancellationError` when the enclosing task is cancelled.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         var lastError: (any Error)?
         for provider in providers {
+            if Task.isCancelled {
+                // Abort before consulting a fallback provider so cancellation
+                // never masquerades as provider exhaustion.
+                throw CancellationError()
+            }
             guard await provider.isAvailable() else { continue }
             do {
                 return try await provider.embeddings(text: text)
+            } catch let error as CancellationError {
+                // Bound rethrow preserves the original cancellation error
+                // instead of recording it for fallthrough.
+                throw error
             } catch {
                 lastError = error
                 continue

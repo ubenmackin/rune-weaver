@@ -96,6 +96,12 @@ public actor VectorStore {
     public let directoryPath: String
     /// Embedding width fixed by the first stored fact, if any.
     public private(set) var dimension: Int?
+    /// Expected width from init, preserved across clear and reload.
+    ///
+    /// Derived widths come from stored rows and reset when the store empties;
+    /// this configured width survives empties so an explicit expectation never
+    /// silently clears to nil behind callers.
+    private let configuredDimension: Int?
     /// Maximum results returned per query.
     ///
     /// Bounds keyword and vector fan-out so huge limits never materialize
@@ -113,6 +119,7 @@ public actor VectorStore {
     ///     any other width throw even on an empty store.
     public init(directoryPath: String, dimension: Int? = nil) {
         self.directoryPath = directoryPath
+        self.configuredDimension = dimension
         self.dimension = dimension
         let loaded = Self.loadBestEffort(directoryPath: directoryPath)
         self.facts = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
@@ -210,18 +217,32 @@ public actor VectorStore {
 
     /// Removes a fact. Missing identifiers are a no-op.
     ///
-    /// The file mirror persists off the actor executor.
+    /// The derived width is recomputed from the surviving rows so removing the
+    /// last sized row never leaves a stale width behind: an empty (or
+    /// keyword-only) store that still reported the old width would reject the
+    /// next backend's first vector even though no sized row remains. An
+    /// init-configured expectation survives so explicit width enforcement is
+    /// never dropped behind callers. The file mirror persists off the actor
+    /// executor.
     /// - Parameter id: Fact identifier.
     public func remove(id: UUID) async throws {
         guard facts.removeValue(forKey: id) != nil else { return }
+        if configuredDimension == nil {
+            let widths = Set(facts.values.map(\.embedding.count).filter { $0 > 0 })
+            dimension = widths.count == 1 ? widths.first : nil
+        }
         try await persistSnapshot()
     }
 
-    /// Removes every fact, keeping the configured dimension.
+    /// Removes every fact, resetting derived width but keeping configured width.
     ///
-    /// The file mirror persists off the actor executor.
+    /// Derived widths learned from stored rows clear so the next backend width
+    /// starts clean; an init-configured expectation survives so direct clears
+    /// never drop the enforcement callers constructed with. The file mirror
+    /// persists off the actor executor.
     public func clear() async throws {
         facts.removeAll()
+        dimension = configuredDimension
         try await persistSnapshot()
     }
 
@@ -319,8 +340,10 @@ public actor VectorStore {
     /// newest), revalidates a single embedding dimension across all
     /// rows, and rewrites `facts.json` atomically. A corrupt file throws
     /// without mutating memory or overwriting disk, so reindex never
-    /// wipes the store; only a missing file loads as empty. Call after
-    /// bulk edits or manual file changes.
+    /// wipes the store; only a missing file loads as empty. An
+    /// init-configured width survives compaction so explicit expectations
+    /// never clear behind callers. Call after bulk edits or manual file
+    /// changes.
     /// - Returns: Fact count after compaction.
     /// - Throws: `VectorStoreError/persistenceFailed(_:)` when the file
     ///   exists but cannot be read or decoded, or when stored rows have
@@ -354,19 +377,24 @@ public actor VectorStore {
             throw VectorStoreError.persistenceFailed("Stored facts have mixed embedding dimensions: \(widths.sorted())")
         }
         facts = compacted
-        dimension = widths.first
+        dimension = configuredDimension ?? widths.first
         try await persistSnapshot()
         return facts.count
     }
 
     /// Reloads facts from disk, replacing memory.
     ///
-    /// Recomputes `dimension` from the loaded widths unconditionally so
-    /// externally changed files never leave a stale width behind: a
-    /// single width sets the dimension, while mixed or missing widths
-    /// clear it to nil.
+    /// A configured init width survives reloads so an explicit expectation is
+    /// never lost to an empty or externally changed file; without one, the
+    /// dimension derives from the loaded widths (a single width wins while
+    /// mixed or missing widths clear to nil) so externally changed files never
+    /// leave a stale width behind.
     public func reload() {
         facts = Dictionary(uniqueKeysWithValues: Self.loadBestEffort(directoryPath: directoryPath).map { ($0.id, $0) })
+        if let configuredDimension {
+            dimension = configuredDimension
+            return
+        }
         let widths = Set(facts.values.map(\.embedding.count).filter { $0 > 0 })
         dimension = widths.count == 1 ? widths.first : nil
     }

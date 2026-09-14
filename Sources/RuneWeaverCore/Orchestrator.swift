@@ -547,6 +547,12 @@ public actor Orchestrator {
     private let toolResolver: OrchestratorToolResolver?
     /// Episodic mirror for every turn, when configured.
     private let memoryEngine: MemoryEngine?
+    /// Optional embeddings producer for vector-ranked automatic recall.
+    ///
+    /// Nil preserves the keyword-only path; when set, each turn's recall
+    /// query is embedded best-effort with a nil fallback so recall never
+    /// fails because vectors did.
+    private let embedder: (any EmbeddingsBackend)?
     /// Queue receiving narrated gated calls, when configured.
     ///
     /// Nil keeps the legacy drop behavior for callers without an approvals
@@ -592,6 +598,8 @@ public actor Orchestrator {
     ///     failure-isolated. Defaults to nil (no mirroring).
     ///   - approvalQueue: Queue receiving narrated gated calls for
     ///     file-and-park plus resume. Defaults to nil (drop gated narration).
+    ///   - embedder: Optional embeddings producer for vector-ranked
+    ///     automatic recall. Defaults to nil (keyword-only).
     public init(
         conversations: ConversationManager,
         toolBus: ToolBus,
@@ -600,7 +608,8 @@ public actor Orchestrator {
         maxToolIterations: Int = 8,
         toolResolver: OrchestratorToolResolver? = nil,
         memoryEngine: MemoryEngine? = nil,
-        approvalQueue: ApprovalQueue? = nil
+        approvalQueue: ApprovalQueue? = nil,
+        embedder: (any EmbeddingsBackend)? = nil
     ) {
         self.conversations = conversations
         self.toolBus = toolBus
@@ -610,6 +619,7 @@ public actor Orchestrator {
         self.toolResolver = toolResolver
         self.memoryEngine = memoryEngine
         self.approvalQueue = approvalQueue
+        self.embedder = embedder
     }
 
     /// Processes one user input through the full loop.
@@ -673,7 +683,7 @@ public actor Orchestrator {
             await conversations.append(Message(role: .user, content: text), to: sessionID)
             pendingEpisodic.append((text, .user))
 
-            if let earlyResponse = await rememberEarlyResponse(
+            if let earlyResponse = try await rememberEarlyResponse(
                 text: text,
                 source: input.source,
                 sessionID: sessionID,
@@ -693,7 +703,7 @@ public actor Orchestrator {
                 systemPrompt
             }
             let recall: Message? = if let memoryEngine {
-                await memoryEngine.recallMessage(for: text, sessionID: sessionID)
+                try await memoryEngine.recallMessage(for: text, sessionID: sessionID, embedder: embedder)
             } else {
                 nil
             }
@@ -729,7 +739,7 @@ public actor Orchestrator {
                     sessionTokens: cumulativeTokens
                 )
             }
-        } catch is CancellationError {
+        } catch let error as CancellationError {
             // Executed tools already changed the world: keep working-memory
             // partials and mirror them so the audit trail survives the
             // cancel instead of being rolled back as if nothing ran.
@@ -739,7 +749,7 @@ public actor Orchestrator {
             } else if let preTurnSnapshot {
                 await conversations.restoreRollbackSnapshot(preTurnSnapshot)
             }
-            throw CancellationError()
+            throw error
         } catch {
             // Non-cancellation failures keep working-memory partials, so
             // flush the buffered mirror to match instead of diverging.
@@ -1485,11 +1495,11 @@ extension Orchestrator {
         sessionID: UUID,
         pendingEpisodic: inout [(content: String, role: Message.Role)],
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    ) async -> OrchestratorResponse? {
+    ) async throws -> OrchestratorResponse? {
         guard let factText = MemoryEngine.rememberFactText(from: text) else {
             return nil
         }
-        let acknowledgement = await rememberAcknowledgement(factText: factText, source: source)
+        let acknowledgement = try await rememberAcknowledgement(factText: factText, source: source)
         await conversations.append(Message(role: .assistant, content: acknowledgement), to: sessionID)
         pendingEpisodic.append((acknowledgement, .assistant))
         await onEvent?(.textDelta(acknowledgement))
@@ -1601,23 +1611,26 @@ extension Orchestrator {
     /// Shares acknowledgement text with the CLI remember path via
     /// `MemoryEngine.rememberAcknowledgementText(for:stored:)` so every
     /// caller stores the same assistant turn: storable facts persist via
-    /// the memory engine failure-isolated, empty or punctuation-only facts
+    /// the memory engine failure-isolated with vectors when an embedder is
+    /// set (falling back to keyword-only), empty or punctuation-only facts
     /// yield usage text, and store failures yield a failure note without
-    /// touching the LLM path.
+    /// touching the LLM path. Cancellation propagates instead of storing a
+    /// downgraded row.
     /// - Parameters:
     ///   - factText: Stripped fact text from the remember parser.
     ///   - source: Input origin stored on the profile fact.
     /// - Returns: Acknowledgement text for the assistant turn.
-    private func rememberAcknowledgement(factText: String, source: String) async -> String {
+    private func rememberAcknowledgement(factText: String, source: String) async throws -> String {
         guard MemoryEngine.isStorableFact(factText) else {
             return MemoryEngine.rememberAcknowledgementText(for: factText, stored: false)
         }
         guard let memoryEngine else {
             return MemoryEngine.rememberAcknowledgementText(for: factText, stored: false)
         }
-        let stored = await memoryEngine.storeRememberedFact(
+        let stored = try await memoryEngine.storeRememberedFact(
             content: factText,
-            source: OrchestratorToolLoop.resolvedSource(source)
+            source: OrchestratorToolLoop.resolvedSource(source),
+            embedder: embedder
         )
         return MemoryEngine.rememberAcknowledgementText(for: factText, stored: stored)
     }

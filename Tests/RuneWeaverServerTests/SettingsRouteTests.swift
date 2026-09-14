@@ -22,10 +22,12 @@ struct SettingsRouteTests {
         #expect(response.logLevel == config.engine.logLevel)
         #expect(response.configPath == "/test/config.toml")
         #expect(response.sandboxStagingPath == config.sandbox.stagingPath)
+        #expect(response.memoryEmbeddingModel == config.memory.embeddingModel)
+        #expect(response.memoryEmbeddingBackend == config.memory.embeddingBackend)
     }
 
     @Test
-    func `UpdateSettingsRequest modifies config and preserves unmodified fields`() {
+    func `UpdateSettingsRequest modifies config and preserves unmodified fields`() throws {
         var config = RuneWeaverConfig.default
         let update = UpdateSettingsRequest(
             engineName: "Custom Engine",
@@ -33,7 +35,7 @@ struct SettingsRouteTests {
             sandboxAutoApproveAfter: 42
         )
 
-        update.apply(to: &config)
+        try update.apply(to: &config)
         #expect(config.engine.name == "Custom Engine")
         #expect(config.engine.logLevel == "debug")
         #expect(config.sandbox.autoApproveAfter == 42)
@@ -42,7 +44,7 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `SettingsResponse and UpdateSettingsRequest map emailAccounts`() {
+    func `SettingsResponse and UpdateSettingsRequest map emailAccounts`() throws {
         var config = RuneWeaverConfig.default
         let newAccounts = [
             EmailAccount(
@@ -54,7 +56,7 @@ struct SettingsRouteTests {
             )
         ]
         let update = UpdateSettingsRequest(emailAccounts: newAccounts)
-        update.apply(to: &config)
+        try update.apply(to: &config)
         #expect(config.email.accounts == newAccounts)
 
         let response = SettingsResponse(config: config, configPath: "/test/config.toml")
@@ -62,21 +64,60 @@ struct SettingsRouteTests {
     }
 
     @Test
-    func `UpdateSettingsRequest clears fallback when empty and keeps providers when omitted`() {
+    func `UpdateSettingsRequest clears fallback when empty and keeps providers when omitted`() throws {
         var config = RuneWeaverConfig.default
         config.llm.fallbackProvider = "openrouter"
         let preserved = config.llm.providers
 
         // An empty fallback clears to nil so the dashboard `(None)` choice
         // round-trips, while an omitted provider map keeps stored entries.
-        UpdateSettingsRequest(fallbackProvider: "").apply(to: &config)
+        try UpdateSettingsRequest(fallbackProvider: "").apply(to: &config)
         #expect(config.llm.fallbackProvider == nil)
         #expect(config.llm.providers == preserved)
 
         // A present map replaces wholesale instead of merging per entry.
         let replacement = ["solo": ProviderConfig(enabled: true, model: "m")]
-        UpdateSettingsRequest(providers: replacement).apply(to: &config)
+        try UpdateSettingsRequest(providers: replacement).apply(to: &config)
         #expect(config.llm.providers == replacement)
+    }
+
+    @Test
+    func `SettingsResponse and UpdateSettingsRequest map memoryEmbeddingBackend`() throws {
+        var config = RuneWeaverConfig.default
+
+        // Response mirrors the stored backend so the dashboard select stays in sync.
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.memoryEmbeddingBackend == config.memory.embeddingBackend)
+
+        // A present value updates the stored backend.
+        try UpdateSettingsRequest(memoryEmbeddingBackend: "provider").apply(to: &config)
+        #expect(config.memory.embeddingBackend == "provider")
+
+        // An omitted value preserves the stored backend.
+        try UpdateSettingsRequest(engineName: "Kept Backend").apply(to: &config)
+        #expect(config.engine.name == "Kept Backend")
+        #expect(config.memory.embeddingBackend == "provider")
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects unknown memoryEmbeddingBackend`() {
+        var config = RuneWeaverConfig.default
+        let preserved = config.memory.embeddingBackend
+
+        // Unknown backends fail closed so invalid strings never persist
+        // and silently degrade recall to keyword-only later.
+        do {
+            try UpdateSettingsRequest(memoryEmbeddingBackend: "carrier-pigeon").apply(to: &config)
+            Issue.record("Expected a validation error for an unknown embedding backend")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "memory.embedding_backend" else {
+                Issue.record("Expected memory.embedding_backend validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+        #expect(config.memory.embeddingBackend == preserved)
     }
 
     @Test

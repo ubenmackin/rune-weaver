@@ -603,6 +603,7 @@ export interface SettingsResponse {
   memoryVectorDBPath: string;
   memoryEpisodesDBPath: string;
   memoryEmbeddingModel: string;
+  memoryEmbeddingBackend: string;
   voiceSTTProvider: string;
   voiceWhisperModel: string;
   voiceTTSProvider: string;
@@ -621,6 +622,7 @@ export interface UpdateSettingsInput {
   memoryVectorDBPath?: string;
   memoryEpisodesDBPath?: string;
   memoryEmbeddingModel?: string;
+  memoryEmbeddingBackend?: string;
   voiceSTTProvider?: string;
   voiceWhisperModel?: string;
   voiceTTSProvider?: string;

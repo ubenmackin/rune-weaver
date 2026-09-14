@@ -77,11 +77,12 @@ api_style = "responses"  # muse-spark family; omit or use "chat-completions" for
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON keyword store path for semantic memory (LanceDB-compatible shape); vector embeddings deferred pending an embeddings backend. Must not be empty. |
+| `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON store path for semantic memory (LanceDB-compatible shape) holding keyword-only rows plus optional embedding vectors written through `embedding_backend`. Must not be empty. |
 | `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite path for episodic memory (conversation history). Must not be empty. |
-| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Embedding model identifier. Must not be empty. |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Embedding model identifier used by the `provider` backend; informational for the `apple` backend. Must not be empty. |
+| `embedding_backend` | string | `"apple"` | Embedding backend: `"apple"` (on-device), `"provider"` (LLM embeddings), or `"none"` (keyword-only). Must be one of the three. |
 
-Vector-backed semantic memory is deferred until a local embeddings backend exists. Until then `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-only vector rows — so `memory facts` lists them without requiring embeddings.
+Semantic memory selects its vector backend via `embedding_backend` (default `"apple"`). `apple` embeds on-device and keeps data local-first, `provider` opts into LLM embeddings using `embedding_model`, and `none` stays keyword-only with no vectors. `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-scored vector rows — so `memory facts` lists them in every mode.
 
 ### `[voice]`
 

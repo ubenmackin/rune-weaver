@@ -158,6 +158,11 @@ public actor MemoryEngine {
     /// Episodic conversation-history store.
     private let episodeStore: EpisodeStore
     /// Semantic fact/vector store.
+    ///
+    /// Private so every read and write funnels through this engine's
+    /// validation and dimension guards. The companion backfill file reaches
+    /// the store only through the narrow maintenance helpers below, never
+    /// the store itself; still actor-isolated.
     private let vectorStore: VectorStore
     /// In-memory profile snapshot, mirrored to disk best-effort.
     private var profile: UserProfile
@@ -465,25 +470,15 @@ public actor MemoryEngine {
         await (try? episodeStore.count()) ?? 0
     }
 
-    /// Total stored semantic fact count from the shared vector store.
-    /// - Returns: Fact count.
-    public func semanticFactCount() async -> Int {
-        await vectorStore.count()
-    }
-
-    /// All semantic facts, oldest first, from the shared vector store.
-    /// - Returns: Stored facts for display commands.
-    public func allSemanticFacts() async -> [StoredFact] {
-        await vectorStore.allFacts().sorted { $0.createdAt < $1.createdAt }
-    }
-
     /// Stores an explicit user-supplied fact in structured memory.
     ///
-    /// Persists `content` as a keyword-only row in the vector store (no
-    /// embeddings model required) and mirrors it into the user profile
-    /// so both `getUserProfile()` and `allSemanticFacts()` surface it
-    /// for display commands. Vector-backed similarity stays deferred
-    /// until a local embeddings backend exists.
+    /// Persists `content` as a keyword-only row in the vector store and
+    /// mirrors it into the user profile so both `getUserProfile()` and
+    /// `allSemanticFacts()` surface it for display commands. This is the
+    /// durable fallback when no embeddings producer is configured (or its
+    /// output is unavailable): for a vector-backed row with cosine-ranked
+    /// recall, store through `storeSemantic(fact:embedding:...)` or run an
+    /// embedding backfill over keyword-only rows.
     /// - Parameters:
     ///   - content: Fact text. Leading/trailing whitespace is trimmed. Must not
     ///     exceed `maxContentLength` characters.
@@ -831,6 +826,56 @@ public actor MemoryEngine {
         // `perTier * 3` cannot overflow.
         let cap = perTier * 3
         return Array(Self.dedupe(sorted).prefix(cap))
+    }
+}
+
+// MARK: - MemoryEngine Semantic Store Maintenance
+
+extension MemoryEngine {
+    /// Total stored semantic fact count without exposing the store.
+    ///
+    /// Narrow maintenance access for the backfill surface: keeps every read
+    /// and write funneled through the engine's validation and dimension
+    /// guards while living outside the actor body so the type stays within
+    /// style budgets. Extension methods on the actor stay actor-isolated,
+    /// so behavior and isolation are unchanged.
+    /// - Returns: Fact count.
+    func semanticStoreCount() async -> Int {
+        await vectorStore.count()
+    }
+
+    /// All stored semantic facts without exposing the store.
+    /// - Returns: Stored facts in store order.
+    func semanticStoreAllFacts() async -> [StoredFact] {
+        await vectorStore.allFacts()
+    }
+
+    /// Active embedding width of the semantic store, if known.
+    /// - Returns: Store dimension, or nil when unknown or empty.
+    func semanticStoreDimension() async -> Int? {
+        await vectorStore.dimension
+    }
+
+    /// Clears every semantic row, resetting derived width but keeping configured width.
+    ///
+    /// Persists empty first, then reloads from disk so a stale derived width
+    /// never blocks the next backend while an init-configured expectation
+    /// survives the empty.
+    func semanticStoreClear() async throws {
+        try await vectorStore.clear()
+        await vectorStore.reload()
+    }
+
+    /// Compacts the semantic store and revalidates its dimension.
+    /// - Returns: Fact count after compaction.
+    func semanticStoreReindex() async throws -> Int {
+        try await vectorStore.reindex()
+    }
+
+    /// Inserts or replaces one semantic fact by `id`.
+    /// - Parameter fact: Fact to persist.
+    func semanticStoreUpsert(_ fact: StoredFact) async throws {
+        try await vectorStore.upsert(fact)
     }
 }
 
@@ -1307,22 +1352,76 @@ public extension MemoryEngine {
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Stores a remembered fact without throwing.
+    /// Stores one fact preferring vectors, falling back to keyword-only.
     ///
-    /// Used by the chat REPL for explicit remember requests so a failing
-    /// store never interrupts the conversation. Punctuation-only facts
-    /// (no alphanumeric characters) are rejected like empty facts.
+    /// Single helper for explicit remember paths, the remember tool, and the
+    /// server facts route so embed-then-`storeSemantic`-fallback-to-`storeProfileFact`
+    /// stays in one place. When `embedder` is set the fact is embedded
+    /// best-effort and stored with its vector; a missing vector or a
+    /// dimension/store failure falls back to the keyword-only path so vectors
+    /// never fail the write. Only cancellation propagates so a cancelled write
+    /// never stores a downgraded row.
+    /// - Parameters:
+    ///   - content: Fact text.
+    ///   - source: Origin label.
+    ///   - embedder: Optional embeddings producer. Nil keeps keyword-only.
+    /// - Returns: The profile fact that was recorded.
+    func storeFactWithEmbedder(
+        content: String,
+        source: String,
+        embedder: (any EmbeddingsBackend)?
+    ) async throws -> UserFact {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let embedder {
+            if let vector = try await embedder.embedQuery(trimmed) {
+                do {
+                    return try await storeSemantic(
+                        fact: trimmed,
+                        embedding: vector,
+                        metadata: ["source": source],
+                        source: source
+                    )
+                } catch let error as CancellationError {
+                    throw error
+                } catch {
+                    // Fall through to keyword-only storage below.
+                }
+            }
+        }
+        return try await storeProfileFact(content: trimmed, source: source)
+    }
+
+    /// Stores a remembered fact, preferring vectors when a producer is set.
+    ///
+    /// Used by explicit remember requests so a failing store never interrupts
+    /// the conversation. Punctuation-only facts (no alphanumeric characters)
+    /// are rejected like empty facts. When `embedder` is set the fact carries
+    /// vectors via `storeFactWithEmbedder(content:source:embedder:)`; any
+    /// embedding or dimension failure falls back to keyword-only, while
+    /// cancellation propagates instead of storing a downgraded row.
     /// - Parameters:
     ///   - content: Fact text.
     ///   - source: Origin label. Defaults to `"chat"`.
+    ///   - embedder: Optional embeddings producer. Defaults to nil
+    ///     (keyword-only).
     /// - Returns: True when the fact was stored.
     @discardableResult
-    func storeRememberedFact(content: String, source: String = "chat") async -> Bool {
+    func storeRememberedFact(
+        content: String,
+        source: String = "chat",
+        embedder: (any EmbeddingsBackend)? = nil
+    ) async throws -> Bool {
         guard Self.isStorableFact(content) else { return false }
         do {
             let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            try await storeProfileFact(content: trimmed, source: source)
+            if let embedder {
+                _ = try await storeFactWithEmbedder(content: trimmed, source: source, embedder: embedder)
+            } else {
+                try await storeProfileFact(content: trimmed, source: source)
+            }
             return true
+        } catch let error as CancellationError {
+            throw error
         } catch {
             return false
         }
@@ -1465,28 +1564,43 @@ public extension MemoryEngine {
         return spliced
     }
 
-    /// Resolves automatic recall for one user turn, failure-isolated.
+    /// Resolves automatic recall for one user turn, failure-isolated except cancellation.
     ///
     /// Single `MemoryEngine`-owned helper for the orchestrator and the CLI
-    /// chat loop: runs one bounded keyword `recall` (nil embeddings),
-    /// drops the just-mirrored self-echo via `filteredRecallResults`, and
-    /// wraps the survivors via `automaticRecallMessage`. Recall failures,
-    /// empty queries, and below-threshold hits yield nil so the turn
-    /// proceeds with no injected context.
+    /// chat loop: runs one bounded `recall`, drops the just-mirrored
+    /// self-echo via `filteredRecallResults`, and wraps the survivors via
+    /// `automaticRecallMessage`. Recall failures, empty queries, and
+    /// below-threshold hits yield nil so the turn proceeds with no injected
+    /// context. When `embedder` is set the query is embedded best-effort so
+    /// semantic hits rank by cosine similarity; any embedding failure keeps
+    /// the keyword path (nil embedding) so recall never fails because
+    /// vectors did. Cancellation propagates instead of degrading to
+    /// no-memory so the turn aborts rather than continuing as if uncancelled.
     /// - Parameters:
     ///   - query: Current user message used as the recall query.
     ///   - sessionID: Current session identifier for self-echo filtering.
+    ///   - embedder: Optional embeddings producer for vector-ranked recall.
+    ///     Defaults to nil (keyword-only).
     /// - Returns: System message to inject, or nil when nothing is relevant.
-    func recallMessage(for query: String, sessionID: UUID) async -> Message? {
+    func recallMessage(for query: String, sessionID: UUID, embedder: (any EmbeddingsBackend)? = nil) async throws -> Message? {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        // `embedQuery` isolates embedding failures internally (falling back
+        // to nil) and only rethrows cancellation, so a bare await suffices.
+        let embedding: [Float]? = if let embedder {
+            try await embedder.embedQuery(query)
+        } else {
+            nil
+        }
         do {
             let results = try await recall(
                 query: query,
-                embedding: nil,
+                embedding: embedding,
                 limit: Self.automaticRecallLimit
             )
             let filtered = Self.filteredRecallResults(results, query: query, sessionID: sessionID)
             return Self.automaticRecallMessage(for: filtered)
+        } catch let error as CancellationError {
+            throw error
         } catch {
             return nil
         }

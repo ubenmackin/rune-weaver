@@ -31,6 +31,7 @@ const mockSettings = {
   memoryVectorDBPath: "memory/vectors",
   memoryEpisodesDBPath: "memory/episodes.db",
   memoryEmbeddingModel: "bge-small-en-v1.5",
+  memoryEmbeddingBackend: "apple",
   voiceSTTProvider: "whisper",
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
@@ -153,5 +154,52 @@ describe("SettingsManager", () => {
 
     expect(screen.getByDisplayValue("mail_2")).toBeDefined();
     expect(screen.getByText("EMAIL_MAIL_2_PASSWORD")).toBeDefined();
+  });
+
+  it("exposes the embedding backend select and saves it", async () => {
+    const user = userEvent.setup();
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Switch to Memory & Storage tab
+    const memoryTabBtn = screen.getByRole("button", { name: /Memory & Storage/i });
+    await user.click(memoryTabBtn);
+
+    // Backend select reflects the loaded value with local-first guidance.
+    const backendSelect = screen.getByLabelText(/Embedding Backend/i) as HTMLSelectElement;
+    expect(backendSelect.value).toBe("apple");
+    expect(screen.getByText(/local-first/i)).toBeDefined();
+
+    await user.selectOptions(backendSelect, "provider");
+    expect(backendSelect.value).toBe("provider");
+
+    // Save settings
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+    });
+
+    expect(sentPayload).toBeDefined();
+    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingBackend"]).toBe(
+      "provider"
+    );
   });
 });

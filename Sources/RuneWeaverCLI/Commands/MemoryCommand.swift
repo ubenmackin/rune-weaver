@@ -1,18 +1,21 @@
 import ArgumentParser
 import Foundation
 import RuneWeaverCore
+import RuneWeaverLLM
 
 /// Searches semantic memory and shows what the agent knows.
 ///
 /// `rune-weaver memory search <query>` recalls across episodic, semantic,
 /// and profile tiers. `rune-weaver memory facts` lists long-lived profile
-/// facts, preferences, and stored fact counts.
+/// facts, preferences, and stored fact counts. `rune-weaver memory reindex`
+/// rebuilds the semantic index and optionally backfills embeddings for
+/// keyword-only rows.
 struct MemoryCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
         commandName: "memory",
         abstract: "Search semantic memory and show what the agent knows.",
-        subcommands: [MemorySearchCommand.self, MemoryFactsCommand.self]
+        subcommands: [MemorySearchCommand.self, MemoryFactsCommand.self, MemoryReindexCommand.self]
     )
 }
 
@@ -51,7 +54,23 @@ struct MemorySearchCommand: AsyncParsableCommand {
         let loaded = try CLIConfigLoader.loadConfig(path: config)
         let engine = CLIShared.memoryEngine(for: loaded.config.memory)
         let requested = limit
-        let results = try await engine.recall(query: query, limit: requested)
+        // Resolve the embeddings producer from config through the shared
+        // factory so every backend (`apple`, `provider`, `none`) behaves
+        // like chat and reindex; any embedding failure keeps the keyword
+        // path while cancellation propagates.
+        let providers = await CLIProviderBuilder.buildProviders(from: loaded.config.llm)
+        let embedder = EmbeddingsBackendFactory.makeBackend(
+            memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+            router: LLMRouter(providers: providers)
+        )
+        // `embedQuery` isolates embedding failures internally (falling back
+        // to nil) and only rethrows cancellation, so a bare await suffices.
+        let embedding: [Float]? = if let embedder {
+            try await embedder.embedQuery(query)
+        } else {
+            nil
+        }
+        let results = try await engine.recall(query: query, embedding: embedding, limit: requested)
         let displayed = Array(results.prefix(requested))
         guard !displayed.isEmpty else {
             print(TerminalStyle.dim("No memories found for '\(query)'."))
@@ -111,5 +130,92 @@ struct MemoryFactsCommand: AsyncParsableCommand {
         if vectorFacts.count > 5 {
             print(TerminalStyle.dim("  …and \(vectorFacts.count - 5) more. Use 'memory search' to explore."))
         }
+    }
+}
+
+/// Rebuilds the semantic index and optionally backfills embeddings.
+///
+/// Without `--embed` the command compacts the keyword store (deduplicating
+/// rows and revalidating the width) without touching vectors. With `--embed`
+/// it gives keyword-only rows vectors using the configured backend, so older
+/// installs gain similarity search without losing facts. `--reset` clears the
+/// vector store first so a new backend width never mixes with the old one;
+/// the flag itself is the confirmation, no prompt follows.
+struct MemoryReindexCommand: AsyncParsableCommand {
+    /// Top-level command configuration.
+    static let configuration = CommandConfiguration(
+        commandName: "reindex",
+        abstract: "Rebuild the semantic index and optionally backfill embeddings."
+    )
+
+    /// Embed keyword-only facts using the configured backend.
+    @Flag(name: .long, help: "Embed keyword-only facts using the configured backend.")
+    var embed: Bool = false
+
+    /// Clear the vector store before reindexing.
+    @Flag(name: .long, help: "Clear the vector store before reindexing.")
+    var reset: Bool = false
+
+    /// Texts per embedding call.
+    @Option(name: .long, help: "Batch size for embedding calls.")
+    var batchSize: Int = 32
+
+    /// Config file path override.
+    @Option(name: .long, help: "Path to config.toml (defaults to ~/.runeweaver/config.toml).")
+    var config: String?
+
+    /// Rebuilds the index, backfilling vectors when requested.
+    ///
+    /// With `--embed` a disabled or unknown backend never destroys data: it
+    /// prints guidance and leaves the keyword-only store untouched, ignoring
+    /// `--reset` on that path. Without `--embed` an explicit `--reset` clears
+    /// first so the next width starts clean, and every path reports counts
+    /// plus the active dimension when done.
+    mutating func run() async throws {
+        guard batchSize > 0 else {
+            throw ValidationError("--batch-size must be positive (got \(batchSize)).")
+        }
+        let loaded = try CLIConfigLoader.loadConfig(path: config)
+        let engine = CLIShared.memoryEngine(for: loaded.config.memory)
+
+        if embed {
+            let backendName = loaded.config.memory.embeddingBackend
+            let providers = await CLIProviderBuilder.buildProviders(from: loaded.config.llm)
+            let router = LLMRouter(providers: providers)
+            guard let embedder = EmbeddingsBackendFactory.makeBackend(
+                memoryEmbeddingBackend: backendName,
+                router: router
+            ) else {
+                if backendName == MemoryConfig.embeddingBackendNone {
+                    print(TerminalStyle.dim(
+                        "Embeddings are disabled (memory.embedding_backend = \"none\"). " +
+                            "Set it to \"apple\" or \"provider\" to backfill vectors; leaving the keyword-only store untouched."
+                    ))
+                } else {
+                    print(TerminalStyle.dim("Unknown embedding backend \"\(backendName)\"; leaving the keyword-only store untouched."))
+                }
+                return
+            }
+            // Clearing is explicit backfill intent on the enabled path only;
+            // the disabled path above returns before touching the store.
+            if reset {
+                try await engine.clearSemanticStore()
+            }
+            let result = try await engine.backfillEmbeddings(embedder: embedder, batchSize: batchSize)
+            let dimension = await engine.semanticDimension()
+            let dimensionText = dimension.map(String.init) ?? "unknown"
+            print("Backfilled embeddings: \(result.embedded) embedded, \(result.skipped) skipped, \(result.failed) failed (dimension \(dimensionText)).")
+            return
+        }
+
+        // Without `--embed` the flag is explicit clearing intent even when
+        // vectors are disabled, so `--reset` alone still clears.
+        if reset {
+            try await engine.clearSemanticStore()
+        }
+        let count = try await engine.reindexSemantic()
+        let dimension = await engine.semanticDimension()
+        let dimensionText = dimension.map(String.init) ?? "unknown"
+        print("Reindexed semantic store: \(count) facts (dimension \(dimensionText)).")
     }
 }

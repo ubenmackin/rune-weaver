@@ -247,14 +247,22 @@ enum CLIShared {
     ///   - emailConfig: Decoded `[email]` section, if any.
     ///   - memoryEngine: Shared engine for memory tools, if any.
     ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
+    ///   - embedder: Optional embeddings producer forwarded to the memory
+    ///     tools for vector-backed writes and vector-ranked recall. Defaults
+    ///     to nil (keyword-only).
     /// - Returns: Tools to register.
-    static func pluginTools(emailConfig: EmailConfig? = nil, memoryEngine: MemoryEngine? = nil, sandboxConfig: SandboxConfig? = nil) -> [any Tool] {
+    static func pluginTools(
+        emailConfig: EmailConfig? = nil,
+        memoryEngine: MemoryEngine? = nil,
+        sandboxConfig: SandboxConfig? = nil,
+        embedder: (any EmbeddingsBackend)? = nil
+    ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
             tools += EmailTools.makeTools(emailConfig: emailConfig, sandboxConfig: sandboxConfig ?? SandboxConfig())
         }
         if let memoryEngine {
-            tools += MemoryTools.makeTools(engine: memoryEngine)
+            tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }
         return tools
     }
@@ -266,16 +274,19 @@ enum CLIShared {
     ///   - permissionGate: Graduated-trust gate, if any.
     ///   - approvalHandler: Approval hook, if any.
     ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
+    ///   - embedder: Optional embeddings producer forwarded to the memory
+    ///     tools. Defaults to nil (keyword-only).
     /// - Returns: Bus with every shared plugin registered.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil,
-        sandboxConfig: SandboxConfig? = nil
+        sandboxConfig: SandboxConfig? = nil,
+        embedder: (any EmbeddingsBackend)? = nil
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
-        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine, sandboxConfig: sandboxConfig) {
+        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine, sandboxConfig: sandboxConfig, embedder: embedder) {
             await bus.register(tool: tool)
         }
         return bus
