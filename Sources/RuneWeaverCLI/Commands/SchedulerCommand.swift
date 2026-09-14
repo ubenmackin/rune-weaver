@@ -145,50 +145,14 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Unknown provider '\(provider ?? "")'. Available: \(names)."))
             throw ExitCode(1)
         }
-        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
-        let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
-        do {
-            try await conversations.loadAll()
-        } catch {
-            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
-        }
-        let permissionGate = PermissionGate()
-        let approvalQueue = ApprovalQueue(permissionGate: permissionGate)
-        let headlessHandler = await approvalQueue.headlessApprovalHandler()
-        let toolBus = await CLIShared.makeToolBus(
-            emailConfig: loaded.config.email,
-            memoryEngine: memoryEngine,
-            permissionGate: permissionGate,
-            approvalHandler: headlessHandler,
-            sandboxConfig: loaded.config.sandbox
-        )
-        let orchestrator = Orchestrator(
-            conversations: conversations,
-            toolBus: toolBus,
-            llm: selected,
-            memoryEngine: memoryEngine
-        )
-        let capturedBus = toolBus
-        let pollChecker: SchedulerPollChecker = { rule in
-            await SchedulerRunCommand.pollCheck(rule: rule, bus: capturedBus)
-        }
-        let turnRunner: SchedulerTurnRunner = { prompt, sessionID, source in
-            let response = try await orchestrator.process(input: UserInput(
-                text: prompt,
-                sessionID: sessionID,
-                source: source
-            ))
-            return response.text
-        }
-        let engine = SchedulerEngine(
+        let runtime = await Self.makeHeadlessRuntime(
             jobs: schedulerJobs,
-            turnRunner: turnRunner,
-            pollChecker: pollChecker,
-            logger: { message in
-                print(TerminalStyle.dim(message))
-            },
-            notifier: MacOSSchedulerNotifier()
+            loaded: loaded,
+            providers: providers,
+            selected: selected
         )
+        let engine = runtime.engine
+        let approvalQueue = runtime.approvalQueue
         print(TerminalStyle.dim("Scheduler running \(schedulerJobs.count) job(s) every \(interval)s. Ctrl+C to stop."))
         var lastCheck = Date().addingTimeInterval(TimeInterval(-interval))
         if once {
@@ -208,6 +172,92 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             }
         }
         print(TerminalStyle.dim("Scheduler stopped."))
+    }
+
+    /// Headless collaborators for one foreground-loop invocation.
+    ///
+    /// Bundles the single-flight engine with its headless approval queue so
+    /// `run()` stays within style budgets while the wiring below stays in
+    /// one place.
+    private struct HeadlessRuntime {
+        /// Engine firing due jobs headless.
+        let engine: SchedulerEngine
+        /// Queue holding gated writes filed without prompting.
+        let approvalQueue: ApprovalQueue
+    }
+
+    /// Wires headless collaborators for the foreground loop.
+    ///
+    /// Shares one embeddings backend across scheduled turns so background
+    /// runs rank and write vectors exactly like chat; nil keeps keyword-only
+    /// behavior when vectors are disabled. The tool bus and orchestrator
+    /// share that backend so memory tools and automatic recall agree on
+    /// vectors, and the engine captures them through its poll and turn
+    /// runners. Conversation history still loads best-effort so a corrupt
+    /// store starts fresh instead of aborting the loop.
+    /// - Parameters:
+    ///   - jobs: Validated jobs to fire.
+    ///   - loaded: Resolved config plus its file URL.
+    ///   - providers: Enabled LLM providers.
+    ///   - selected: Active LLM provider serving turns.
+    /// - Returns: Engine plus its headless approval queue.
+    private static func makeHeadlessRuntime(
+        jobs: [SchedulerJobConfig],
+        loaded: CLIConfigLoader.LoadedConfig,
+        providers: [any LLMProvider],
+        selected: any LLMProvider
+    ) async -> HeadlessRuntime {
+        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
+        let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
+        do {
+            try await conversations.loadAll()
+        } catch {
+            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
+        }
+        let permissionGate = PermissionGate()
+        let approvalQueue = ApprovalQueue(permissionGate: permissionGate)
+        let headlessHandler = await approvalQueue.headlessApprovalHandler()
+        let embedder = EmbeddingsBackendFactory.makeBackend(
+            memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+            router: LLMRouter(providers: providers)
+        )
+        let toolBus = await CLIShared.makeToolBus(
+            emailConfig: loaded.config.email,
+            memoryEngine: memoryEngine,
+            permissionGate: permissionGate,
+            approvalHandler: headlessHandler,
+            sandboxConfig: loaded.config.sandbox,
+            embedder: embedder
+        )
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: toolBus,
+            llm: selected,
+            memoryEngine: memoryEngine,
+            embedder: embedder
+        )
+        let capturedBus = toolBus
+        let pollChecker: SchedulerPollChecker = { rule in
+            await SchedulerRunCommand.pollCheck(rule: rule, bus: capturedBus)
+        }
+        let turnRunner: SchedulerTurnRunner = { prompt, sessionID, source in
+            let response = try await orchestrator.process(input: UserInput(
+                text: prompt,
+                sessionID: sessionID,
+                source: source
+            ))
+            return response.text
+        }
+        let engine = SchedulerEngine(
+            jobs: jobs,
+            turnRunner: turnRunner,
+            pollChecker: pollChecker,
+            logger: { message in
+                print(TerminalStyle.dim(message))
+            },
+            notifier: MacOSSchedulerNotifier()
+        )
+        return HeadlessRuntime(engine: engine, approvalQueue: approvalQueue)
     }
 
     /// Reports one check batch: per-job outcomes plus pending approvals.

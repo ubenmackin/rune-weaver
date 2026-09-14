@@ -34,6 +34,9 @@ server_url = "http://localhost:8081"
 vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 embedding_model = "all-MiniLM-L6-v2"
+# embedding_backend selects the vector backend: "apple" (on-device, local-first default),
+# "provider" (LLM embeddings via embedding_model), or "none" (keyword-only, no vectors).
+embedding_backend = "apple"
 
 [voice]
 stt_provider = "whisper"

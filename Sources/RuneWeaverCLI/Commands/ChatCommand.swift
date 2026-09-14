@@ -234,8 +234,10 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 /// sandbox staging area (10 MB cap, approval required). Configured email accounts print at startup
 /// (name plus `username@host:port`, never secrets) so the model and the
 /// user know which nickname to use. Every user turn also runs automatic
-/// recall (bounded keyword `recall`
-/// with nil embeddings): top matches inject as source-labeled,
+/// recall (bounded `recall`, with the query embedded best-effort so the
+/// vector ranks semantic hits by cosine similarity when an embeddings
+/// backend is configured, falling back to keyword overlap): top matches
+/// inject as source-labeled,
 /// token-bounded system context, skipped when nothing scores above
 /// threshold. Assistant tokens stream back with a typewriter effect,
 /// requested tool calls are shown inline (yellow) with their results, and
@@ -340,12 +342,20 @@ struct ChatCommand: AsyncParsableCommand {
         // below only fires for `requiresApproval` tools (including
         // `email.attachment`), so find-and-summarize and remember/recall
         // run prompt-free with memory writes audit-logged.
+        // Resolve the embeddings producer once from config so every turn
+        // shares one backend; nil keeps the keyword-only path when vectors
+        // are disabled or the selector is unknown.
+        let embedder = EmbeddingsBackendFactory.makeBackend(
+            memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+            router: LLMRouter(providers: providers)
+        )
         let permissionGate = PermissionGate()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
-            sandboxConfig: loaded.config.sandbox
+            sandboxConfig: loaded.config.sandbox,
+            embedder: embedder
         )
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
@@ -391,6 +401,7 @@ struct ChatCommand: AsyncParsableCommand {
             systemPrompt: effectiveSystemPrompt,
             maxToolIterations: max(1, maxToolIterations),
             memoryEngine: memoryEngine,
+            embedder: embedder,
             sessionTokens: CLILockedValue(0)
         )
         await runChatREPL(
@@ -431,6 +442,11 @@ private struct ChatTurnContext: Sendable {
     let maxToolIterations: Int
     /// Shared engine receiving one episode per turn.
     let memoryEngine: MemoryEngine
+    /// Optional embeddings producer for vector-ranked recall and tool writes.
+    ///
+    /// Resolved once from config at startup so every turn shares one
+    /// backend; nil keeps the keyword-only path.
+    let embedder: (any EmbeddingsBackend)?
     /// Session-cumulative billed tokens rendered via `SessionTokenDisplay`.
     let sessionTokens: CLILockedValue<Int>
 }
@@ -520,48 +536,62 @@ private func runChatREPL(
                 cliPrintError(TerminalStyle.dim("Could not save prompt history; continuing."))
             }
         }
-        if let action = await handleSlashCommand(
-            input,
-            conversations: context.conversations,
-            sessionID: context.sessionID,
-            memoryEngine: context.memoryEngine,
-            sessionTokens: context.sessionTokens
-        ) {
-            if action == .quit {
-                break
-            }
-            continue
-        }
-        if let fact = MemoryEngine.rememberFactText(from: input) {
-            await appendUserAndHandleRemember(
-                input: input,
-                fact: fact,
+        do {
+            if let action = try await handleSlashCommand(
+                input,
                 conversations: context.conversations,
                 sessionID: context.sessionID,
-                engine: context.memoryEngine
+                memoryEngine: context.memoryEngine,
+                sessionTokens: context.sessionTokens,
+                embedder: context.embedder
+            ) {
+                if action == .quit {
+                    break
+                }
+                continue
+            }
+            if let fact = MemoryEngine.rememberFactText(from: input) {
+                try await appendUserAndHandleRemember(
+                    input: input,
+                    fact: fact,
+                    conversations: context.conversations,
+                    sessionID: context.sessionID,
+                    engine: context.memoryEngine,
+                    embedder: context.embedder
+                )
+                continue
+            }
+            await context.conversations.append(Message(role: .user, content: input), to: context.sessionID)
+            await context.memoryEngine.mirrorTurn(
+                content: input,
+                sessionID: context.sessionID,
+                role: .user,
+                failurePolicy: .report,
+                onFailure: chatMirrorFailureHandler
             )
-            continue
-        }
-        await context.conversations.append(Message(role: .user, content: input), to: context.sessionID)
-        await context.memoryEngine.mirrorTurn(
-            content: input,
-            sessionID: context.sessionID,
-            role: .user,
-            failurePolicy: .report,
-            onFailure: chatMirrorFailureHandler
-        )
-        let outcome = await runAssistantTurn(
-            provider: provider,
-            context: context,
-            query: input,
-            interrupt: interrupt
-        )
-        if outcome == .cancelled {
-            // The turn already discarded its partial working-memory writes
-            // and printed its cancellation notice. Consume the flag so the
-            // loop returns to the prompt within the same interaction; a
-            // second SIGINT at the prompt still exits.
+            let outcome = try await runAssistantTurn(
+                provider: provider,
+                context: context,
+                query: input,
+                interrupt: interrupt
+            )
+            if outcome == .cancelled {
+                // The turn already discarded its partial working-memory writes
+                // and printed its cancellation notice. Consume the flag so the
+                // loop returns to the prompt within the same interaction; a
+                // second SIGINT at the prompt still exits.
+                interrupt.reset()
+                continue
+            }
+        } catch is CancellationError {
+            // Task cancellation aborts the turn rather than degrading to
+            // no-memory or a downgraded remember; return to the prompt like a
+            // SIGINT-cancelled turn.
+            print(TerminalStyle.dim("Cancelled."))
             interrupt.reset()
+            continue
+        } catch {
+            cliPrintError(TerminalStyle.dim("Request failed: \(error.localizedDescription)"))
             continue
         }
     }
@@ -585,19 +615,23 @@ private let chatMirrorFailureHandler: @Sendable (String) -> Void = { message in
 /// working memory and mirrored to episodic memory like any other turn;
 /// empty or punctuation-only facts print usage after the turn is mirrored,
 /// and storage failures print a dim note without touching the LLM path.
+/// Vector-backed writes use the shared embedder with keyword-only fallback;
+/// cancellation propagates without storing a downgraded row.
 /// - Parameters:
 ///   - fact: Stripped fact text.
 ///   - engine: Shared memory engine for the session.
 ///   - conversations: Session and history owner.
 ///   - sessionID: Current session identifier.
+///   - embedder: Optional embeddings producer for vector-backed writes.
 private func chatStoreRememberedFact(
     _ fact: String,
     engine: MemoryEngine,
     conversations: ConversationManager,
-    sessionID: UUID
-) async {
+    sessionID: UUID,
+    embedder: (any EmbeddingsBackend)? = nil
+) async throws {
     let storable = MemoryEngine.isStorableFact(fact)
-    let stored = storable ? await engine.storeRememberedFact(content: fact, source: "chat") : false
+    let stored = storable ? try await engine.storeRememberedFact(content: fact, source: "chat", embedder: embedder) : false
     let acknowledgement = MemoryEngine.rememberAcknowledgementText(for: fact, stored: stored)
     await conversations.append(Message(role: .assistant, content: acknowledgement), to: sessionID)
     await engine.mirrorTurn(
@@ -620,20 +654,22 @@ private func chatStoreRememberedFact(
 /// `/remember` behave identically. Every turn is recorded in working
 /// and episodic memory, including the acknowledgement assistant turn;
 /// empty or punctuation-only requests still print usage after both turns
-/// are mirrored.
+/// are mirrored. Cancellation propagates without storing a downgraded row.
 /// - Parameters:
 ///   - input: Raw user input preserved as the working-memory turn.
 ///   - fact: Stripped fact text from the remember parser.
 ///   - conversations: Session and history owner.
 ///   - sessionID: Current session identifier.
 ///   - engine: Shared engine for episodic and fact storage.
+///   - embedder: Optional embeddings producer for vector-backed writes.
 private func appendUserAndHandleRemember(
     input: String,
     fact: String,
     conversations: ConversationManager,
     sessionID: UUID,
-    engine: MemoryEngine
-) async {
+    engine: MemoryEngine,
+    embedder: (any EmbeddingsBackend)? = nil
+) async throws {
     await conversations.append(Message(role: .user, content: input), to: sessionID)
     await engine.mirrorTurn(
         content: input,
@@ -642,7 +678,7 @@ private func appendUserAndHandleRemember(
         failurePolicy: .report,
         onFailure: chatMirrorFailureHandler
     )
-    await chatStoreRememberedFact(fact, engine: engine, conversations: conversations, sessionID: sessionID)
+    try await chatStoreRememberedFact(fact, engine: engine, conversations: conversations, sessionID: sessionID, embedder: embedder)
 }
 
 /// REPL slash-command outcome.
@@ -660,21 +696,24 @@ private enum REPLAction {
 ///   - sessionID: Current session identifier.
 ///   - memoryEngine: Shared engine for `/remember` captures.
 ///   - sessionTokens: Session-cumulative billed counter reset on `/clear`.
+///   - embedder: Optional embeddings producer for vector-backed remember.
 /// - Returns: The loop action, or nil when `input` is not a command.
 private func handleSlashCommand(
     _ input: String,
     conversations: ConversationManager,
     sessionID: UUID,
     memoryEngine: MemoryEngine,
-    sessionTokens: CLILockedValue<Int>
-) async -> REPLAction? {
+    sessionTokens: CLILockedValue<Int>,
+    embedder: (any EmbeddingsBackend)? = nil
+) async throws -> REPLAction? {
     if input.hasPrefix("/"), let fact = MemoryEngine.rememberFactText(from: input) {
-        await appendUserAndHandleRemember(
+        try await appendUserAndHandleRemember(
             input: input,
             fact: fact,
             conversations: conversations,
             sessionID: sessionID,
-            engine: memoryEngine
+            engine: memoryEngine,
+            embedder: embedder
         )
         return .keepGoing
     }
@@ -722,21 +761,23 @@ private func handleSlashCommand(
 ///   - query: Current user message used as the recall query.
 ///   - interrupt: Shared SIGINT flag polled during streaming and tools.
 /// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
+/// - Throws: `CancellationError` from recall or the delegated turn path so
+///   task cancellation propagates instead of degrading the turn.
 private func runAssistantTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,
     query: String,
     interrupt: ChatInterruptState
-) async -> ChatTurnOutcome {
+) async throws -> ChatTurnOutcome {
     if let chunked = provider as? any ChunkStreamingProvider {
-        await runChunkedTurn(
+        try await runChunkedTurn(
             provider: chunked,
             context: context,
             query: query,
             interrupt: interrupt
         )
     } else {
-        await runTextTurn(
+        try await runTextTurn(
             provider: provider,
             context: context,
             query: query,
@@ -933,8 +974,10 @@ private func handleChunkedStructuredTurn(
 /// Text deltas print as they arrive (typewriter effect); model-requested
 /// tool calls print in yellow, execute via the bus, and show their results
 /// inline before the next LLM round. Automatic recall runs once per user
-/// turn (bounded keyword `recall` with nil embeddings, source-labeled and
-/// token-bounded) and the same injected system context is reused across
+/// turn (bounded `recall`, with the query embedded best-effort so the
+/// vector ranks semantic hits by cosine similarity when an embeddings
+/// backend is configured, falling back to keyword overlap; source-labeled
+/// and token-bounded) and the same injected system context is reused across
 /// tool rounds without re-querying; below-threshold turns send no recall.
 /// Up to `maxToolIterations` tool rounds run, followed by one final
 /// synthesis turn so the last tool results are always answered; when the
@@ -975,15 +1018,17 @@ private func handleChunkedStructuredTurn(
 ///   - query: Current user message used as the recall query.
 ///   - interrupt: Shared SIGINT flag polled during streaming and tools.
 /// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
+/// - Throws: `CancellationError` from recall, streaming, or tool execution
+///   so task cancellation propagates instead of degrading the turn.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
     context: ChatTurnContext,
     query: String,
     interrupt: ChatInterruptState
-) async -> ChatTurnOutcome {
+) async throws -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
     let definitions = tools.map { ToolDefinition($0) }
-    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
+    let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var progress = ChunkedTurnProgress(snapshot: historySnapshot, rounds: 0)
     while true {
@@ -1202,14 +1247,16 @@ private func drainTextStream(
 ///   - query: Current user message used as the recall query.
 ///   - interrupt: Shared SIGINT flag polled during streaming and tools.
 /// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
+/// - Throws: `CancellationError` from recall, streaming, or tool execution
+///   so task cancellation propagates instead of degrading the turn.
 private func runTextTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,
     query: String,
     interrupt: ChatInterruptState
-) async -> ChatTurnOutcome {
+) async throws -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
-    let recall = await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID)
+    let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var toolRounds = 0
     while true {

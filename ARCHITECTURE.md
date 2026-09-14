@@ -203,18 +203,18 @@ Three tiers of memory, each backed by different storage:
 |------|------|---------|-----------|
 | **Working Memory** | Current conversation context | In-memory + SQLite sessions (Core Engine) | Session-scoped, oldest turns fold into a rolling summary when over budget |
 | **Episodic Memory** | Past conversation turns as cleaned per-turn rows | SQLite + FTS5 | Permanent, mirrored clean every turn via `mirrorTurn` for resume; auto-compacts sessions older than 30 days when records exceed `maxEpisodicCount` (10,000) |
-| **Semantic Memory** | Facts, preferences, user profile | JSON keyword store (LanceDB-compatible shape) + JSON profile | Permanent, indexed; vectors deferred pending an embeddings backend |
+| **Semantic Memory** | Facts, preferences, user profile | JSON vector store (LanceDB-compatible shape) with optional embeddings + JSON profile | Permanent, indexed; cosine-ranked when the embeddings backend supplies vectors, keyword overlap otherwise |
 
 **Memory Flow**:
 1. User says something → goes into Working Memory and is mirrored clean into Episodic Memory via `mirrorTurn` for session resume: user/final text verbatim plus one compact `"Used <tool>: <outcome>"` record per meaningful tool execution, with interim narration, `Calling ... [...]` placeholder lines, call identifiers, and call-argument JSON skipped
 2. Context fills → oldest working turns fold into the rolling session summary, keeping recent turns intact
 3. Deterministic remember capture → `remember` / `remember that` / `/remember` parsed by `rememberFactText` and stored via `storeProfileFact` (`storeRememberedFact`), acknowledged without touching the LLM path
-4. Key facts persist → stored in Semantic Memory as keyword-only rows (no embeddings yet), mirrored into the JSON profile
-5. On future queries → `recall` merges episodic, semantic, and profile hits via keyword overlap (vector similarity deferred until a local embeddings backend exists)
+4. Key facts persist → stored in Semantic Memory with vectors from the configured embeddings backend (`apple` on-device default, `provider` opt-in, `none` keyword-only), mirrored into the JSON profile
+5. On future queries → `recall` merges episodic, semantic, and profile hits, ranking semantic hits by cosine similarity when the query is embedded and falling back to keyword overlap otherwise
 
 Summarization helper `summarizeSessions` (non-destructive per-session summaries) exists on the episode store; `compactSessions` (replace old rows with a summary episode) is called automatically by `MemoryEngine` when episodic storage exceeds `maxEpisodicCount` (10,000 records) to prune sessions older than 30 days.
 
-**Embeddings**: Vector-backed semantic memory is deferred pending a local embeddings backend. Until then facts persist as keyword-only rows scored by token overlap. When available, embeddings are generated locally using a small model (e.g., `all-MiniLM-L6-v2` via sentence-transformers in Python, or a Swift-native embeddings model when available).
+**Embeddings**: Semantic memory vectors flow through the `EmbeddingsBackend` seam (`EmbeddingsBackendFactory` selects from `memory.embedding_backend`). `apple` keeps vectors on-device by default via the NaturalLanguage sentence model, `provider` reuses the configured LLM embeddings endpoint as an opt-in, and `none` stays keyword-only. Facts without vectors persist as keyword-only rows scored by token overlap, and older rows gain vectors via embedding backfill. Dimension discipline keeps comparisons honest: the store fixes its width from the first vector, a backend width that disagrees with a non-empty store requires an explicit reset instead of mixing widths, and per-row width rejections are isolated as skips. Failure isolation keeps recall and writes durable: any embedding failure falls back to the keyword path (vectors never fail a turn or a write), while cancellation propagates instead of degrading.
 
 ### 5. Permission Gate & Sandboxing
 
@@ -459,6 +459,7 @@ server_url = "http://localhost:8081"
 vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 embedding_model = "all-MiniLM-L6-v2"
+embedding_backend = "apple"  # apple (on-device) | provider (LLM embeddings) | none (keyword-only)
 
 [voice]
 stt_provider = "whisper"
@@ -505,7 +506,7 @@ token_env = "HA_TOKEN"
 1. **Swift over Python for core**: Performance, type safety, native Apple integration. Python is for plugins only.
 2. **Actor model for concurrency**: Each subsystem (LLM, tools, memory) is a Swift actor, preventing data races.
 3. **WebSocket for client-server**: Low-latency, bidirectional. Local clients connect over loopback in v1; remote access over WireGuard VPN is deferred until auth lands.
-4. **JSON keyword store (LanceDB-compatible shape), vector deferred**: Semantic memory persists as keyword-only JSON rows scored by token overlap until a local embeddings backend exists. The store exposes the LanceDB table shape (append facts, cosine similarity, metadata filtering) so a native LanceDB binding can replace the file backend without changing callers. ChromaDB rejected (server process, heavier footprint).
+4. **JSON vector store (LanceDB-compatible shape) with pluggable embeddings**: Semantic memory persists as JSON rows carrying optional embedding vectors scored by cosine similarity, falling back to keyword-only token overlap when no vector is available. The store exposes the LanceDB table shape (append facts, cosine similarity, metadata filtering) so a native LanceDB binding can replace the file backend without changing callers, and the `EmbeddingsBackend` seam (`apple` on-device default, `provider` opt-in, `none` keyword-only) lets new models land without touching callers. ChromaDB rejected (server process, heavier footprint).
 5. **Playwright over Selenium**: Modern API, better async support, multi-browser, cleaner subprocess model.
 6. **Graduated trust over binary permissions**: More nuanced than "always ask" or "never ask." Respects user's comfort level.
 7. **Native WebSocket & Web Notifications for the service, best-effort osascript retained for the CLI foreground loop**: The service and dashboard path uses native WebSocket push broadcasting (`WSHub` emits `run_started`, `run_completed`, `approval_request`) paired with standard HTML5 Web Notifications (`Notification` API) and unread badge counters in the Web dashboard. Routing service notifications through AppleScript subprocesses would cause blocking I/O, create disruptive modal prompts, require brittle macOS Terminal / Script Editor automation permissions that fail in headless setups, background daemons, or containerized environments, and cannot reach remote web or mobile clients, so the service never shells to AppleScript. The CLI `scheduler run` foreground loop retains a best-effort local `osascript` display notification via `MacOSSchedulerNotifier` for CLI foreground runs only when a GUI session exists; the service never shells to `osascript` and notifies exclusively through WebSocket broadcast plus Web Notifications; failures never fail the run so headless operation stays silent. This split keeps browser delivery non-blocking, cross-platform, multi-subscriber, and honoring browser notification preferences, while preserving a local popup for terminal-driven runs.

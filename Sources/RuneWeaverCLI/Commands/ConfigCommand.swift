@@ -75,6 +75,7 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("vector_db_path = \(config.memory.vectorDBPath)")
         print("episodes_db_path = \(config.memory.episodesDBPath)")
         print("embedding_model = \(config.memory.embeddingModel)")
+        print("embedding_backend = \(config.memory.embeddingBackend)")
         print("")
         print("[voice]")
         print("stt_provider = \(config.voice.sttProvider)")
@@ -120,7 +121,7 @@ struct ConfigSetCommand: AsyncParsableCommand {
     )
 
     /// Dotted config key to update.
-    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model).")
+    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, memory.embedding_backend).")
     var key: String
 
     /// New value for the key.
@@ -235,6 +236,8 @@ private func memoryTOMLAssignment(key lower: String, value: String) -> TOMLAssig
         TOMLAssignment(section: "memory", key: "episodes_db_path", rendered: tomlQuoted(value))
     case "memory.embedding_model":
         TOMLAssignment(section: "memory", key: "embedding_model", rendered: tomlQuoted(value))
+    case "memory.embedding_backend":
+        TOMLAssignment(section: "memory", key: "embedding_backend", rendered: tomlQuoted(value))
     default:
         nil
     }
@@ -373,6 +376,9 @@ private func applyMemoryValue(key lower: String, value: String, config: inout Ru
         return true
     case "memory.embedding_model":
         config.memory.embeddingModel = value
+        return true
+    case "memory.embedding_backend":
+        config.memory.embeddingBackend = value
         return true
     default:
         return false
@@ -576,6 +582,7 @@ private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
         "vector_db_path = \(tomlQuoted(config.memory.vectorDBPath))",
         "episodes_db_path = \(tomlQuoted(config.memory.episodesDBPath))",
         "embedding_model = \(tomlQuoted(config.memory.embeddingModel))",
+        "embedding_backend = \(tomlQuoted(config.memory.embeddingBackend))",
         "",
         "[voice]",
         "stt_provider = \(tomlQuoted(config.voice.sttProvider))",

@@ -632,6 +632,11 @@ public final class ServerContext: Sendable {
     public let orchestrator: Orchestrator
     /// Three-tier memory serving search and facts.
     public let memoryEngine: MemoryEngine
+    /// Optional embeddings producer for vector-ranked memory routes.
+    ///
+    /// Threaded next to `memoryEngine` so recall and store routes share one
+    /// backend; nil preserves the keyword-only path.
+    public let embedder: (any EmbeddingsBackend)?
     /// Graduated-trust gate backing approvals.
     public let permissionGate: PermissionGate
     /// Pending approval prompts shared by REST and WebSocket.
@@ -660,6 +665,8 @@ public final class ServerContext: Sendable {
     ///   - toolBus: Tool registry.
     ///   - orchestrator: Orchestration loop.
     ///   - memoryEngine: Memory tiers.
+    ///   - embedder: Optional embeddings producer for memory routes.
+    ///     Defaults to nil (keyword-only).
     ///   - permissionGate: Trust gate.
     ///   - approvals: Pending approvals.
     ///   - scheduler: Job registry. Defaults to empty.
@@ -674,6 +681,7 @@ public final class ServerContext: Sendable {
         toolBus: ToolBus,
         orchestrator: Orchestrator,
         memoryEngine: MemoryEngine,
+        embedder: (any EmbeddingsBackend)? = nil,
         permissionGate: PermissionGate,
         approvals: ApprovalQueue,
         scheduler: SchedulerStore = SchedulerStore(),
@@ -688,6 +696,7 @@ public final class ServerContext: Sendable {
         self.toolBus = toolBus
         self.orchestrator = orchestrator
         self.memoryEngine = memoryEngine
+        self.embedder = embedder
         self.permissionGate = permissionGate
         self.approvals = approvals
         self.scheduler = scheduler
@@ -717,6 +726,8 @@ public final class ServerContext: Sendable {
     ///   - config: Loopback binding. Defaults to `.default`.
     ///   - conversations: Session owner.
     ///   - memoryEngine: Memory tiers.
+    ///   - embedder: Optional embeddings producer for memory routes and
+    ///     automatic recall. Defaults to nil (keyword-only).
     ///   - permissionGate: Trust gate.
     ///   - llm: LLM backend serving completions.
     ///   - systemPrompt: Developer instructions. Defaults to nil.
@@ -730,6 +741,7 @@ public final class ServerContext: Sendable {
         config: ServerConfig = .default,
         conversations: ConversationManager,
         memoryEngine: MemoryEngine,
+        embedder: (any EmbeddingsBackend)? = nil,
         permissionGate: PermissionGate,
         llm: any LLMProvider,
         systemPrompt: String? = nil,
@@ -756,7 +768,8 @@ public final class ServerContext: Sendable {
             llm: llm,
             systemPrompt: systemPrompt,
             memoryEngine: memoryEngine,
-            approvalQueue: approvals
+            approvalQueue: approvals,
+            embedder: embedder
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: scheduler,
@@ -774,6 +787,7 @@ public final class ServerContext: Sendable {
             toolBus: bus,
             orchestrator: orchestrator,
             memoryEngine: memoryEngine,
+            embedder: embedder,
             permissionGate: permissionGate,
             approvals: approvals,
             scheduler: scheduler,
@@ -1188,7 +1202,15 @@ private func registerMemoryRoutes(_ app: Application) {
         }
         let limit = try parseQueryLimit(req, default: 10, min: 1, max: 50)
         let context = req.application.runeWeaver
-        let memories = try await context.memoryEngine.recall(query: query, limit: limit)
+        // Embed best-effort so vector hits rank by cosine similarity while
+        // the response shape stays unchanged; any failure keeps keywords
+        // while cancellation propagates.
+        let embedding: [Float]? = if let embedder = context.embedder {
+            try await embedder.embedQuery(query)
+        } else {
+            nil
+        }
+        let memories = try await context.memoryEngine.recall(query: query, embedding: embedding, limit: limit)
         return MemorySearchResponse(query: query, memories: memories)
     }
 
@@ -1211,11 +1233,19 @@ private func registerMemoryRoutes(_ app: Application) {
             throw Abort(.badRequest, reason: "content must contain alphanumeric characters")
         }
         let context = req.application.runeWeaver
+        let trimmed = body.content.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = body.resolvedSource
+        // Vector-backed writes share the engine helper with the remember tool
+        // so embedding, fallback, and cancellation stay single-sourced;
+        // cancellation propagates while other failures surface as 422.
         do {
-            return try await context.memoryEngine.storeProfileFact(
-                content: body.content.trimmingCharacters(in: .whitespacesAndNewlines),
-                source: body.resolvedSource
+            return try await context.memoryEngine.storeFactWithEmbedder(
+                content: trimmed,
+                source: source,
+                embedder: context.embedder
             )
+        } catch let error as CancellationError {
+            throw error
         } catch {
             throw Abort(.unprocessableEntity, reason: error.localizedDescription)
         }
@@ -1362,8 +1392,8 @@ private func registerSettingsRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
-        body.apply(to: &config)
         do {
+            try body.apply(to: &config)
             try config.save(to: url)
         } catch let error as ConfigError {
             throw Abort(.badRequest, reason: String(describing: error))

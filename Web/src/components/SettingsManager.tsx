@@ -58,6 +58,7 @@ export default function SettingsManager() {
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
+  const [memoryEmbeddingBackend, setMemoryEmbeddingBackend] = useState("apple");
   const [voiceSTTProvider, setVoiceSTTProvider] = useState("");
   const [voiceWhisperModel, setVoiceWhisperModel] = useState("");
   const [voiceTTSProvider, setVoiceTTSProvider] = useState("");
@@ -98,6 +99,7 @@ export default function SettingsManager() {
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
+    setMemoryEmbeddingBackend(data.memoryEmbeddingBackend ?? "apple");
     setVoiceSTTProvider(data.voiceSTTProvider);
     setVoiceWhisperModel(data.voiceWhisperModel);
     setVoiceTTSProvider(data.voiceTTSProvider);
@@ -211,6 +213,7 @@ export default function SettingsManager() {
         memoryVectorDBPath,
         memoryEpisodesDBPath,
         memoryEmbeddingModel,
+        memoryEmbeddingBackend,
         voiceSTTProvider,
         voiceWhisperModel,
         voiceTTSProvider,
@@ -862,6 +865,24 @@ export default function SettingsManager() {
                   required
                 />
               </div>
+            </div>
+            <div className="form-group">
+              <label htmlFor="embedding-backend">Embedding Backend</label>
+              <select
+                id="embedding-backend"
+                className="input-field"
+                value={memoryEmbeddingBackend}
+                onChange={(e) => setMemoryEmbeddingBackend(e.target.value)}
+              >
+                <option value="apple">apple</option>
+                <option value="provider">provider</option>
+                <option value="none">none</option>
+              </select>
+              <span className="form-group-hint">
+                Apple keeps vectors on-device by default (local-first). Provider
+                opts in to LLM embeddings via the embedding model above, while
+                none stays keyword-only with no vectors.
+              </span>
             </div>
           </div>
         )}

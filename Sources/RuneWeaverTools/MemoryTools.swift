@@ -326,13 +326,15 @@ public enum MemoryToolEncoding {
 
 /// `remember_fact` tool: persists one fact to long-lived memory.
 ///
-/// Stores `text` via `MemoryEngine.storeProfileFact`, which writes a
-/// keyword-only row to the vector store and mirrors it into the user
-/// profile so both `recall` and profile display surface it. The
-/// optional `category` is recorded as the fact source (defaulting to
-/// `"tool"`). Every successful write is audit-logged via the injected
-/// handler or the local JSONL file; `dryRun` previews without storing
-/// or auditing.
+/// Stores `text` preferring a vector-backed row via
+/// `MemoryEngine.storeSemantic` when an embedder is configured, falling
+/// back to a keyword-only row via `MemoryEngine.storeProfileFact` on any
+/// embedding or dimension failure so writes stay durable. Either path
+/// mirrors the fact into the user profile so both `recall` and profile
+/// display surface it. The optional `category` is recorded as the fact
+/// source (defaulting to `"tool"`). Every successful write is
+/// audit-logged via the injected handler or the local JSONL file;
+/// `dryRun` previews without storing or auditing.
 ///
 /// Always `trusted`: single-user owner memory writes are explicitly
 /// blessed per the owner memory-write trust ruling, so the model can
@@ -360,15 +362,25 @@ public struct RememberFactTool: Tool, Sendable {
     private let engine: MemoryEngine
     /// Audit sink for successful writes. Defaults to nil (file audit).
     private let audit: MemoryAuditHandler?
+    /// Optional embeddings producer for vector-backed writes.
+    ///
+    /// Nil preserves the keyword-only path so existing call sites behave
+    /// identically; when set, writes prefer a vector row and fall back to
+    /// keyword-only on any embedding or dimension failure so embeddings
+    /// never fail the write.
+    private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a remember tool.
     /// - Parameters:
     ///   - engine: Shared memory engine for profile and vector stores.
     ///   - audit: Audit sink for successful writes. Defaults to nil,
     ///     which appends to the local JSONL audit file.
-    public init(engine: MemoryEngine, audit: MemoryAuditHandler? = nil) {
+    ///   - embedder: Optional embeddings producer for vector-backed writes.
+    ///     Defaults to nil (keyword-only).
+    public init(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) {
         self.engine = engine
         self.audit = audit
+        self.embedder = embedder
     }
 
     /// Stores the fact, audit-logging every write.
@@ -396,12 +408,19 @@ public struct RememberFactTool: Tool, Sendable {
         if context.dryRun {
             return .success("Dry run: would remember '\(text)' (category: \(category ?? "none")).", callID: input.callID)
         }
+        // Vector-backed writes share the engine helper with the server facts
+        // route so embedding, fallback, and cancellation stay single-sourced;
+        // cancellation propagates while other failures surface as tool errors.
         do {
-            let fact = try await engine.storeProfileFact(content: text, source: source)
+            let fact = try await engine.storeFactWithEmbedder(content: text, source: source, embedder: embedder)
             let envelope = RememberFactEnvelope(text: fact.content, category: category, id: fact.id.uuidString, source: fact.source)
             let content = try MemoryToolEncoding.encodeRememberEnvelope(envelope)
             recordAudit(text: fact.content, category: category, conversationID: context.conversationID, factID: fact.id.uuidString)
             return .success(content, callID: input.callID)
+        } catch let error as CancellationError {
+            // Bound rethrow preserves the original cancellation error so the
+            // turn aborts instead of surfacing as a tool failure.
+            throw error
         } catch {
             return .failure("Could not remember that: \(error.localizedDescription)", callID: input.callID)
         }
@@ -429,13 +448,15 @@ public struct RememberFactTool: Tool, Sendable {
     }
 }
 
-/// `recall_memories` tool: searches episodic and profile memory.
+/// `recall_memories` tool: searches episodic, semantic, and profile memory.
 ///
 /// Recalls via `MemoryEngine.recall`, which merges episodic FTS hits,
-/// semantic keyword hits, and profile keyword hits best-first, so the
-/// model recovers past turns and stored facts with zero ML
-/// dependencies. Read-only in effect: it never mutates stores and
-/// ignores `dryRun`.
+/// semantic hits, and profile keyword hits best-first, so the model
+/// recovers past turns and stored facts. When an embedder is configured
+/// the query is embedded best-effort and semantic hits rank by cosine
+/// similarity; otherwise (or on any embedding failure) semantic search
+/// uses keyword overlap, so recall works with zero ML dependencies.
+/// Read-only in effect: it never mutates stores and ignores `dryRun`.
 ///
 /// Always `trusted`: owner memory reads are explicitly blessed per the
 /// owner memory-write trust ruling alongside `remember_fact`, so the
@@ -460,11 +481,22 @@ public struct RecallMemoriesTool: Tool, Sendable {
 
     /// Shared memory engine serving recall.
     private let engine: MemoryEngine
+    /// Optional embeddings producer for vector-ranked recall.
+    ///
+    /// Nil preserves the keyword-only path so existing call sites behave
+    /// identically; when set, the query is embedded best-effort and the
+    /// vector ranks semantic hits by cosine similarity, falling back to
+    /// nil (keyword overlap) on any embedding failure.
+    private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a recall tool.
-    /// - Parameter engine: Shared memory engine for episodic and profile stores.
-    public init(engine: MemoryEngine) {
+    /// - Parameters:
+    ///   - engine: Shared memory engine for episodic and profile stores.
+    ///   - embedder: Optional embeddings producer for vector-ranked recall.
+    ///     Defaults to nil (keyword-only).
+    public init(engine: MemoryEngine, embedder: (any EmbeddingsBackend)? = nil) {
         self.engine = engine
+        self.embedder = embedder
     }
 
     /// Searches memory and returns ranked hits.
@@ -472,6 +504,8 @@ public struct RecallMemoriesTool: Tool, Sendable {
     ///   - input: Invocation with `query` and optional `limit`.
     ///   - context: Ambient execution context.
     /// - Returns: JSON envelope with ranked memories, or a failure.
+    /// - Throws: `CancellationError` when the enclosing task is cancelled; the
+    ///   abort propagates instead of degrading to a tool failure.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: RecallMemoriesArgs
         do {
@@ -483,11 +517,24 @@ public struct RecallMemoriesTool: Tool, Sendable {
         guard !query.isEmpty else {
             return .failure("Invalid recall_memories arguments: 'query' must not be empty.", callID: input.callID)
         }
+        // Embed the query best-effort when a producer is configured: vector
+        // hits then rank by cosine similarity while keyword tiers stay
+        // unchanged, and any embedding failure keeps today's keyword path.
+        // Cancellation propagates so a cancelled recall never degrades.
+        let embedding: [Float]? = if let embedder {
+            try await embedder.embedQuery(query)
+        } else {
+            nil
+        }
         do {
-            let results = try await engine.recall(query: query, limit: args.limit)
+            let results = try await engine.recall(query: query, embedding: embedding, limit: args.limit)
             let hits = results.map(MemoryHit.init)
             let content = try MemoryToolEncoding.encodeRecallEnvelope(RecallMemoriesEnvelope(query: query, memories: hits))
             return .success(content, callID: input.callID)
+        } catch let error as CancellationError {
+            // Bound rethrow preserves the original cancellation error so a
+            // cancelled recall never disguises itself as a tool failure.
+            throw error
         } catch {
             return .failure("Could not recall memories: \(error.localizedDescription)", callID: input.callID)
         }
@@ -510,10 +557,12 @@ public enum MemoryTools {
     ///   - engine: Shared memory engine for profile and episodic stores.
     ///   - audit: Audit sink for `remember_fact` writes. Defaults to
     ///     nil (local JSONL file audit).
+    ///   - embedder: Optional embeddings producer forwarded to both tools.
+    ///     Defaults to nil (keyword-only).
     /// - Returns: Remember and recall tools in registration order.
-    public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil) -> [any Tool] {
-        let remember: any Tool = RememberFactTool(engine: engine, audit: audit)
-        let recall: any Tool = RecallMemoriesTool(engine: engine)
+    public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) -> [any Tool] {
+        let remember: any Tool = RememberFactTool(engine: engine, audit: audit, embedder: embedder)
+        let recall: any Tool = RecallMemoriesTool(engine: engine, embedder: embedder)
         return [remember, recall]
     }
 
@@ -524,8 +573,10 @@ public enum MemoryTools {
     ///   - engine: Shared memory engine for profile and episodic stores.
     ///   - audit: Audit sink for `remember_fact` writes. Defaults to
     ///     nil (local JSONL file audit).
-    public static func register(on bus: ToolBus, engine: MemoryEngine, audit: MemoryAuditHandler? = nil) async {
-        for tool in makeTools(engine: engine, audit: audit) {
+    ///   - embedder: Optional embeddings producer forwarded to both tools.
+    ///     Defaults to nil (keyword-only).
+    public static func register(on bus: ToolBus, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) async {
+        for tool in makeTools(engine: engine, audit: audit, embedder: embedder) {
             await bus.register(tool: tool)
         }
     }

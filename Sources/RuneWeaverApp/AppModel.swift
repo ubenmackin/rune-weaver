@@ -121,11 +121,19 @@ public final class AppModel: ObservableObject {
                 print("[RuneWeaverApp] Could not load conversation history; starting fresh: \(error)")
             }
 
+            // Share one embeddings backend across memory tools and served
+            // recall so menu-bar turns rank and write vectors like the CLI;
+            // nil keeps keyword-only behavior when vectors are disabled.
+            let embedder = EmbeddingsBackendFactory.makeBackend(
+                memoryEmbeddingBackend: config.memory.embeddingBackend,
+                router: LLMRouter(providers: providers)
+            )
+
             // Keep the menu-bar registry identical to the serve command's shared
             // plugin set so served turns see the same tools as terminal use.
             var plugins: [any Tool] = []
             plugins += EmailTools.makeTools(emailConfig: config.email, sandboxConfig: config.sandbox)
-            plugins += MemoryTools.makeTools(engine: memoryEngine)
+            plugins += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
 
             let effectiveSystemPrompt = SystemPromptComposer.resolve(flag: nil, tools: plugins)
             let serverConfig = bindConfig
@@ -135,6 +143,7 @@ public final class AppModel: ObservableObject {
                 config: serverConfig,
                 conversations: conversations,
                 memoryEngine: memoryEngine,
+                embedder: embedder,
                 permissionGate: permissionGate,
                 llm: selectedProvider,
                 systemPrompt: effectiveSystemPrompt,

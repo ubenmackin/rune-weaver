@@ -177,28 +177,73 @@ public struct LLMConfig: Sendable, Codable, Equatable {
 
 /// `[memory]` — episodic and semantic memory storage locations.
 public struct MemoryConfig: Sendable, Codable, Equatable {
-    /// JSON keyword store path for semantic memory (LanceDB-compatible shape; vectors deferred).
+    /// JSON store path for semantic memory (LanceDB-compatible shape) holding
+    /// keyword-only rows plus optional embedding vectors written through the
+    /// configured `embedding_backend`.
     public var vectorDBPath: String
     /// SQLite path for episodic memory.
     public var episodesDBPath: String
     /// Embedding model identifier.
+    ///
+    /// Consumed by the `provider` backend; retained as informational for the
+    /// `apple` backend so switching back never loses the previous choice.
     public var embeddingModel: String
+    /// Embedding backend selector.
+    ///
+    /// `apple` keeps vectors on-device by default, `provider` reuses the
+    /// configured LLM embeddings, and `none` stays keyword-only. The
+    /// default preserves local-first behavior for existing installs.
+    public var embeddingBackend: String
+
+    /// `embedding_backend` selector that disables vectors (keyword-only recall).
+    ///
+    /// Named constants keep every selector's spelling in one place so config
+    /// defaults, validation, the Settings API, and backend construction cannot
+    /// drift to mismatched literals.
+    public static let embeddingBackendNone = "none"
+    /// `embedding_backend` selector that keeps vectors on-device via NaturalLanguage.
+    public static let embeddingBackendApple = "apple"
+    /// `embedding_backend` selector that reuses the configured LLM embeddings endpoint.
+    public static let embeddingBackendProvider = "provider"
+
+    /// Closed set of valid `embedding_backend` selectors.
+    ///
+    /// Single source for config validation, the Settings API, and backend
+    /// construction so the paths never drift on which backends are accepted
+    /// or how each selector maps to a concrete backend.
+    public static let allowedEmbeddingBackends = [embeddingBackendApple, embeddingBackendProvider, embeddingBackendNone]
 
     /// Creates a memory config.
     public init(
         vectorDBPath: String = "~/.runeweaver/memory/vectors",
         episodesDBPath: String = "~/.runeweaver/memory/episodes.db",
-        embeddingModel: String = "all-MiniLM-L6-v2"
+        embeddingModel: String = "all-MiniLM-L6-v2",
+        embeddingBackend: String = MemoryConfig.embeddingBackendApple
     ) {
         self.vectorDBPath = vectorDBPath
         self.episodesDBPath = episodesDBPath
         self.embeddingModel = embeddingModel
+        self.embeddingBackend = embeddingBackend
     }
 
     private enum CodingKeys: String, CodingKey {
         case vectorDBPath = "vector_db_path"
         case episodesDBPath = "episodes_db_path"
         case embeddingModel = "embedding_model"
+        case embeddingBackend = "embedding_backend"
+    }
+
+    /// Decodes a memory config, defaulting an absent backend to `apple`.
+    ///
+    /// Older payloads predate the backend selector, so only the new key is
+    /// lenient; every other key stays strict to surface typos instead of
+    /// silently falling back.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.vectorDBPath = try container.decode(String.self, forKey: .vectorDBPath)
+        self.episodesDBPath = try container.decode(String.self, forKey: .episodesDBPath)
+        self.embeddingModel = try container.decode(String.self, forKey: .embeddingModel)
+        self.embeddingBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendApple
     }
 }
 
@@ -621,6 +666,7 @@ extension RuneWeaverConfig {
             "vector_db_path = \(Self.tomlQuoted(memory.vectorDBPath))",
             "episodes_db_path = \(Self.tomlQuoted(memory.episodesDBPath))",
             "embedding_model = \(Self.tomlQuoted(memory.embeddingModel))",
+            "embedding_backend = \(Self.tomlQuoted(memory.embeddingBackend))",
             "",
             "[voice]",
             "stt_provider = \(Self.tomlQuoted(voice.sttProvider))",
@@ -817,6 +863,16 @@ extension RuneWeaverConfig {
         if memory.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
                 field: "memory.embedding_model", message: "must not be empty"
+            )
+        }
+        // Closed backend set keeps recall behavior predictable: unknown
+        // strings would silently pick a path, so they fail with the field
+        // name just like the neighboring `embedding_model` check.
+        let allowedBackends = MemoryConfig.allowedEmbeddingBackends
+        if !allowedBackends.contains(memory.embeddingBackend) {
+            throw ConfigError.validationError(
+                field: "memory.embedding_backend",
+                message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memory.embeddingBackend)')"
             )
         }
     }

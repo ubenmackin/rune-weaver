@@ -677,6 +677,7 @@ public struct SettingsResponse: Content, Equatable {
     public let memoryVectorDBPath: String
     public let memoryEpisodesDBPath: String
     public let memoryEmbeddingModel: String
+    public let memoryEmbeddingBackend: String
     public let voiceSTTProvider: String
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
@@ -694,6 +695,7 @@ public struct SettingsResponse: Content, Equatable {
         self.memoryVectorDBPath = config.memory.vectorDBPath
         self.memoryEpisodesDBPath = config.memory.episodesDBPath
         self.memoryEmbeddingModel = config.memory.embeddingModel
+        self.memoryEmbeddingBackend = config.memory.embeddingBackend
         self.voiceSTTProvider = config.voice.sttProvider
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
@@ -719,6 +721,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let memoryVectorDBPath: String?
     public let memoryEpisodesDBPath: String?
     public let memoryEmbeddingModel: String?
+    public let memoryEmbeddingBackend: String?
     public let voiceSTTProvider: String?
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
@@ -735,6 +738,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         memoryVectorDBPath: String? = nil,
         memoryEpisodesDBPath: String? = nil,
         memoryEmbeddingModel: String? = nil,
+        memoryEmbeddingBackend: String? = nil,
         voiceSTTProvider: String? = nil,
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
@@ -750,6 +754,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.memoryVectorDBPath = memoryVectorDBPath
         self.memoryEpisodesDBPath = memoryEpisodesDBPath
         self.memoryEmbeddingModel = memoryEmbeddingModel
+        self.memoryEmbeddingBackend = memoryEmbeddingBackend
         self.voiceSTTProvider = voiceSTTProvider
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
@@ -765,8 +770,11 @@ public struct UpdateSettingsRequest: Content, Equatable {
     /// dashboard `(None)` option round-trips; a present `providers` map
     /// replaces the stored map wholesale (absent means keep), and secrets
     /// never flow through here — only `apiKeyEnv` names and password-less
-    /// email accounts.
-    public func apply(to config: inout RuneWeaverConfig) {
+    /// email accounts. A present `memoryEmbeddingBackend` must name a
+    /// known backend (`apple`, `provider`, `none`) so invalid strings fail
+    /// here instead of persisting and silently degrading recall later.
+    /// - Throws: `ConfigError.validationError` for an unknown embedding backend.
+    public func apply(to config: inout RuneWeaverConfig) throws {
         if let engineName {
             config.engine.name = engineName
         }
@@ -790,6 +798,16 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let memoryEmbeddingModel {
             config.memory.embeddingModel = memoryEmbeddingModel
+        }
+        if let memoryEmbeddingBackend {
+            let allowedBackends = MemoryConfig.allowedEmbeddingBackends
+            guard allowedBackends.contains(memoryEmbeddingBackend) else {
+                throw ConfigError.validationError(
+                    field: "memory.embedding_backend",
+                    message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memoryEmbeddingBackend)')"
+                )
+            }
+            config.memory.embeddingBackend = memoryEmbeddingBackend
         }
         if let voiceSTTProvider {
             config.voice.sttProvider = voiceSTTProvider

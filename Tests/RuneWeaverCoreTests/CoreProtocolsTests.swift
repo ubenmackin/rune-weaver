@@ -152,7 +152,7 @@ struct ChatMemoryHelperTests {
     }
 
     @Test
-    func `Chat helpers isolate store failures`() async {
+    func `Chat helpers isolate store failures`() async throws {
         let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: base) }
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -165,7 +165,7 @@ struct ChatMemoryHelperTests {
         )
         let chatStored = await engine.storeChatTurn(content: "hello", sessionID: UUID())
         #expect(chatStored == false)
-        let remembered = await engine.storeRememberedFact(content: "I love testing")
+        let remembered = try await engine.storeRememberedFact(content: "I love testing")
         #expect(remembered == false)
     }
 }

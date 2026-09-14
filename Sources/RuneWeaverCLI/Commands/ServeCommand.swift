@@ -90,19 +90,28 @@ struct ServeCommand: AsyncParsableCommand {
         guard serverConfig.isLoopbackOnly else {
             throw ValidationError("--hostname must be loopback (127.0.0.1, localhost, or ::1) until auth lands (got '\(hostname)').")
         }
+        // Resolve the embeddings producer once from config so served memory
+        // routes and the orchestrator share one backend; nil keeps the
+        // keyword-only path when vectors are disabled or unknown.
+        let embedder = EmbeddingsBackendFactory.makeBackend(
+            memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+            router: LLMRouter(providers: providers)
+        )
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.
         let plugins = CLIShared.pluginTools(
             emailConfig: loaded.config.email,
             memoryEngine: memoryEngine,
-            sandboxConfig: loaded.config.sandbox
+            sandboxConfig: loaded.config.sandbox,
+            embedder: embedder
         )
         let effectiveSystemPrompt = SystemPromptComposer.resolve(flag: systemPrompt, tools: plugins)
         let context = await ServerContext.make(
             config: serverConfig,
             conversations: conversations,
             memoryEngine: memoryEngine,
+            embedder: embedder,
             permissionGate: permissionGate,
             llm: selected,
             systemPrompt: effectiveSystemPrompt,

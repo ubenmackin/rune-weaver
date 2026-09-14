@@ -437,6 +437,11 @@ extension RuneWeaverConfig {
         if let model = try memory.strictString("embedding_model", field: "memory.embedding_model") {
             config.memory.embeddingModel = model
         }
+        // Absent backend keeps the local-first default; present values are
+        // validated later so a typo surfaces with the dotted field name.
+        if let backend = try memory.strictString("embedding_backend", field: "memory.embedding_backend") {
+            config.memory.embeddingBackend = backend
+        }
     }
 
     private static func decodeVoice(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
