@@ -120,6 +120,12 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public var contextLength: Int?
     /// Cumulative tokens for session.
     public var sessionTokens: Int?
+    /// Whether this turn parked waiting on approval.
+    ///
+    /// Mirrors `OrchestratorResponse.isParked` so REST and WebSocket
+    /// consumers share one end-to-end parked contract. Older frames omit
+    /// the flag and decode as not parked.
+    public var isParked: Bool = false
 
     /// Creates a stream done frame.
     /// - Parameters:
@@ -130,6 +136,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     ///   - modelName: Serving model name.
     ///   - contextLength: Context window limit.
     ///   - sessionTokens: Cumulative tokens for session.
+    ///   - isParked: Whether the turn parked waiting on approval. Defaults to false.
     public init(
         text: String,
         sessionID: UUID,
@@ -137,7 +144,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         totalTokens: Int? = nil,
         modelName: String? = nil,
         contextLength: Int? = nil,
-        sessionTokens: Int? = nil
+        sessionTokens: Int? = nil,
+        isParked: Bool = false
     ) {
         self.type = "done"
         self.text = text
@@ -147,13 +155,51 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.modelName = modelName
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
+        self.isParked = isParked
+    }
+
+    /// Coding keys for the terminal frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Final assistant text.
+        case text
+        /// Owning session identifier.
+        case sessionID
+        /// Tool invocations performed.
+        case toolActions
+        /// Billed tokens for turn.
+        case totalTokens
+        /// Serving model name.
+        case modelName
+        /// Context window limit.
+        case contextLength
+        /// Cumulative tokens for session.
+        case sessionTokens
+        /// Whether the turn parked waiting on approval.
+        case isParked
+    }
+
+    /// Decodes a terminal frame, defaulting a missing parked flag for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "done"
+        self.text = try container.decode(String.self, forKey: .text)
+        self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions)
+        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
+        self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+        self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
+        self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
     }
 
     /// Creates a terminal frame from an orchestrator response.
     ///
-    /// Single shared mapping for the response token and model fields so
-    /// the REST and WebSocket surfaces never drift when those fields
-    /// evolve.
+    /// Single shared mapping for the response token, model, and parked
+    /// fields so the REST and WebSocket surfaces stay in sync when those
+    /// fields evolve.
     /// - Parameter response: Completed turn to report.
     public init(from response: OrchestratorResponse) {
         self.init(
@@ -163,7 +209,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             totalTokens: response.totalTokens,
             modelName: response.modelName,
             contextLength: response.contextLength,
-            sessionTokens: response.sessionTokens
+            sessionTokens: response.sessionTokens,
+            isParked: response.isParked
         )
     }
 }

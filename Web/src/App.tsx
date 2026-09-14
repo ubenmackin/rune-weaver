@@ -40,7 +40,7 @@ export default function App() {
     function handleHashChange() {
       const current = window.location.hash.replace("#", "").toLowerCase() as Tab;
       if (VALID_TABS.includes(current)) {
-        setTab(current);
+        setTab((previous) => (previous === current ? previous : current));
       }
     }
     window.addEventListener("hashchange", handleHashChange);
@@ -62,8 +62,13 @@ export default function App() {
   }, []);
 
   function handleSelectTab(selected: Tab) {
-    setTab(selected);
-    window.location.hash = selected;
+    setTab((previous) => (previous === selected ? previous : selected));
+    // Writing the hash fires `hashchange`, which would set the same tab a
+    // second time; guard the write so selecting the active tab (or an
+    // already-synced hash) never triggers the redundant second update.
+    if (typeof window !== "undefined" && window.location.hash !== `#${selected}`) {
+      window.location.hash = selected;
+    }
     if (selected === "runs") clearRunsBadge();
     if (selected === "approvals") clearApprovalsBadge();
   }

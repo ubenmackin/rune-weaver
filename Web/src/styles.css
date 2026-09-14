@@ -548,6 +548,40 @@ a {
   background: rgba(255, 255, 255, 0.05);
 }
 
+.sidebar-filter-tabs {
+  display: flex;
+  padding: 6px 12px;
+  gap: 4px;
+  border-bottom: 1px solid var(--border-color);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.sidebar-filter-tab {
+  flex: 1;
+  padding: 4px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.15s ease;
+}
+
+.sidebar-filter-tab:hover {
+  color: #ffffff;
+  background: var(--bg-card);
+}
+
+.sidebar-filter-tab.active {
+  color: #ffffff;
+  background: var(--bg-card);
+  border-color: var(--border-color);
+  font-weight: 600;
+}
+
 .sidebar-session-list {
   flex: 1;
   overflow-y: auto;
@@ -645,11 +679,11 @@ a {
   width: 100%;
 }
 
-.session-rename-input {
+.session-rename-form .session-rename-input {
   flex: 1;
-  padding: 2px 6px !important;
-  font-size: 12px !important;
-  border-radius: 4px !important;
+  padding: 2px 6px;
+  font-size: 12px;
+  border-radius: 4px;
 }
 
 .sidebar-muted {
@@ -914,11 +948,11 @@ a {
 
 /* Animated Typing Indicator */
 
-.pending-bubble {
+.message.assistant.pending-bubble {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px !important;
+  padding: 10px 16px;
 }
 
 .typing-indicator {
@@ -1017,6 +1051,19 @@ a {
   flex: 1;
 }
 
+/* Visible but truncated call identifier for debug correlation: the full
+ * value stays available via `title` while the row keeps a compact width. */
+.chat-tool-call-id {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
 .chat-tool-status {
   font-size: 10px;
   padding: 1px 6px;
@@ -1037,6 +1084,14 @@ a {
   background: rgba(245, 158, 11, 0.15);
   color: #fbbf24;
   animation: pulseTool 1.5s infinite ease-in-out;
+}
+
+/* Static pending state for completed turns awaiting a result: shares the
+ * amber status token with the running state but stays solid so honesty
+ * (pending vs genuinely executing) never depends on inline styles. */
+.chat-tool-status.pending {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--status-amber);
 }
 
 @keyframes pulseTool {
@@ -1246,6 +1301,10 @@ a {
   background: #141419;
 }
 
+.session-delete-modal {
+  max-width: 440px;
+}
+
 /* Run Details */
 
 .run-meta-grid {
@@ -1351,6 +1410,32 @@ a {
   font-family: ui-monospace, monospace;
   font-size: 11px;
   color: var(--text-muted);
+}
+
+/* Shared badge states for the run-log card variant: single stylesheet source
+ * so card and chat rows stay visually consistent without inline styles.
+ * Green/red/amber map to the global status tokens. */
+.tool-badge-ok,
+.tool-badge-error,
+.tool-badge-pending {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.tool-badge-ok {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--status-green);
+}
+
+.tool-badge-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--status-red);
+}
+
+.tool-badge-pending {
+  background: rgba(245, 158, 11, 0.2);
+  color: var(--status-amber);
 }
 
 .tool-action-body {
@@ -1706,10 +1791,32 @@ a {
    Run Log Cards & Filters
    ========================================================================== */
 
+.filter-controls-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
 .filter-chip-row {
   display: flex;
+  align-items: center;
   gap: 8px;
-  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+.filter-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  min-width: 50px;
+}
+
+.ghost.icon-text-btn.danger-hover:hover,
+.icon-button.danger-hover:hover {
+  color: var(--danger-color, #ef4444);
+  border-color: rgba(239, 68, 68, 0.4);
 }
 
 .filter-chip {
@@ -1784,6 +1891,26 @@ a {
   background: rgba(245, 158, 11, 0.2);
   color: #fbbf24;
   animation: pulseTool 2s infinite ease-in-out;
+}
+
+.status-pill.awaiting_approval {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  animation: pulseTool 2s infinite ease-in-out;
+}
+
+/* Shared amber badge for runs or sessions parked awaiting an approval
+ * decision. Single class replaces duplicated inline badge styles so every
+ * pending indicator stays visually consistent. */
+.pending-approval-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
 }
 
 .run-kind-tag {

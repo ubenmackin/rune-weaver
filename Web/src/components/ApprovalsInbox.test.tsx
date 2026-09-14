@@ -4,6 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ApprovalsInbox from "./ApprovalsInbox";
+import { jsonResponse } from "../test-utils/http";
 
 const pending = {
   approvals: [
@@ -30,12 +31,7 @@ describe("ApprovalsInbox", () => {
   it("renders pending approvals with allow and deny", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify(pending), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
+      vi.fn(async () => jsonResponse(pending)),
     );
     render(<ApprovalsInbox />);
     await waitFor(() => {
@@ -55,20 +51,14 @@ describe("ApprovalsInbox", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/approvals") {
-          return new Response(JSON.stringify(pending), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          return jsonResponse(pending);
         }
         calls.push({ path: input, body: String(init?.body ?? "") });
-        return new Response(
-          JSON.stringify({
-            id: pending.approvals[0].id,
-            approved: true,
-            duration: "oneHour",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
+        return jsonResponse({
+          id: pending.approvals[0].id,
+          approved: true,
+          duration: "oneHour",
+        });
       }),
     );
     render(<ApprovalsInbox />);
@@ -96,19 +86,13 @@ describe("ApprovalsInbox", () => {
       "fetch",
       vi.fn(async (input: string) => {
         if (input === "/approvals") {
-          return new Response(JSON.stringify(pending), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          return jsonResponse(pending);
         }
-        return new Response(
-          JSON.stringify({
-            id: pending.approvals[0].id,
-            approved: false,
-            duration: "thisTime",
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
+        return jsonResponse({
+          id: pending.approvals[0].id,
+          approved: false,
+          duration: "thisTime",
+        });
       }),
     );
     render(<ApprovalsInbox />);

@@ -17,9 +17,20 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     public let id: UUID
     /// Owning scheduler job, when this run came from a job.
     public let jobID: UUID?
-    /// Run kind (`"chat"` or `"scheduler"`).
+    /// Owning chat session, when the run came from an interactive turn or a deterministic scheduler session.
+    ///
+    /// Every chat and scheduler entry carries its session so approval-gated
+    /// turns can correlate pending prompts without reopening history.
+    /// Tool-only entries without an owning conversation leave this untagged.
+    public let sessionID: UUID?
+    /// Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
     public let kind: String
-    /// Outcome (`"ok"`, `"error"`, or `"skipped"` for already-running jobs).
+    /// Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`, `"interrupted"`,
+    /// `"cancelled"`, `"awaiting_approval"`, or `"denied"`).
+    ///
+    /// Parked approval-gated turns persist as `"awaiting_approval"` instead
+    /// of `"ok"` until their inbox decision transitions them to `"ok"`,
+    /// `"error"`, or `"denied"`.
     public let status: String
     /// Human-readable summary (user text or job prompt).
     public let message: String
@@ -34,12 +45,40 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     /// Execution duration in milliseconds.
     public let durationMs: Int?
 
+    /// Coding keys matching the JSON wire shape.
+    private enum CodingKeys: String, CodingKey {
+        /// Stable entry identifier.
+        case id
+        /// Owning scheduler job, when present.
+        case jobID
+        /// Owning session, when tagged.
+        case sessionID
+        /// Run kind.
+        case kind
+        /// Outcome status.
+        case status
+        /// Human-readable summary.
+        case message
+        /// Finish date.
+        case timestamp
+        /// Assistant response or job output.
+        case response
+        /// Tools invoked during the run.
+        case toolActions
+        /// Billed tokens.
+        case totalTokens
+        /// Execution duration in milliseconds.
+        case durationMs
+    }
+
     /// Creates a run log entry.
     /// - Parameters:
     ///   - id: Entry identifier. Defaults to a new UUID.
     ///   - jobID: Owning scheduler job, if any.
-    ///   - kind: Run kind (`"chat"` or `"scheduler"`).
-    ///   - status: Outcome (`"ok"`, `"error"`, or `"skipped"`).
+    ///   - sessionID: Owning session, if any.
+    ///   - kind: Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
+    ///   - status: Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`,
+    ///     `"awaiting_approval"`, `"denied"`, and related lifecycle values).
     ///   - message: Human-readable summary.
     ///   - timestamp: Finish date. Defaults to now.
     ///   - response: Assistant response or job output. Defaults to nil.
@@ -49,6 +88,7 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     public init(
         id: UUID = UUID(),
         jobID: UUID? = nil,
+        sessionID: UUID? = nil,
         kind: String,
         status: String,
         message: String,
@@ -60,6 +100,7 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     ) {
         self.id = id
         self.jobID = jobID
+        self.sessionID = sessionID
         self.kind = kind
         self.status = status
         self.message = message
@@ -68,6 +109,40 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         self.toolActions = toolActions
         self.totalTokens = totalTokens
         self.durationMs = durationMs
+    }
+
+    /// Decodes an entry, tolerating payloads written before session tagging.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.jobID = try container.decodeIfPresent(UUID.self, forKey: .jobID)
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.kind = try container.decode(String.self, forKey: .kind)
+        self.status = try container.decode(String.self, forKey: .status)
+        self.message = try container.decode(String.self, forKey: .message)
+        self.timestamp = try container.decode(Date.self, forKey: .timestamp)
+        self.response = try container.decodeIfPresent(String.self, forKey: .response)
+        self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions) ?? []
+        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        self.durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
+    }
+
+    /// Encodes an entry, omitting the session tag when untagged.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(jobID, forKey: .jobID)
+        try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(status, forKey: .status)
+        try container.encode(message, forKey: .message)
+        try container.encode(timestamp, forKey: .timestamp)
+        try container.encodeIfPresent(response, forKey: .response)
+        try container.encode(toolActions, forKey: .toolActions)
+        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try container.encodeIfPresent(durationMs, forKey: .durationMs)
     }
 }
 
@@ -144,6 +219,7 @@ public actor RunLogStore {
                 let reconciled = RunLogEntry(
                     id: loaded[index].id,
                     jobID: loaded[index].jobID,
+                    sessionID: loaded[index].sessionID,
                     kind: loaded[index].kind,
                     status: "interrupted",
                     message: loaded[index].message,
@@ -166,11 +242,15 @@ public actor RunLogStore {
     ///
     /// The message is truncated to `maxMessageLength` characters (with a
     /// trailing `…`) so capacity bounds bytes as well as entry count.
+    /// Parked approval-gated turns persist as `"awaiting_approval"` instead
+    /// of `"ok"` so inbox resolution can transition them later.
     /// - Parameters:
-    ///   - kind: Run kind (`"chat"` or `"scheduler"`).
-    ///   - status: Outcome (`"ok"`, `"error"`, or `"skipped"`).
+    ///   - kind: Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
+    ///   - status: Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`,
+    ///     `"awaiting_approval"`, `"denied"`, and related lifecycle values).
     ///   - message: Human-readable summary.
     ///   - jobID: Owning scheduler job, if any.
+    ///   - sessionID: Owning session, if any.
     ///   - response: Assistant response text, if any.
     ///   - toolActions: Tools invoked during the run.
     ///   - totalTokens: Billed tokens.
@@ -182,6 +262,7 @@ public actor RunLogStore {
         status: String,
         message: String,
         jobID: UUID? = nil,
+        sessionID: UUID? = nil,
         response: String? = nil,
         toolActions: [ToolAction] = [],
         totalTokens: Int? = nil,
@@ -189,6 +270,7 @@ public actor RunLogStore {
     ) async -> RunLogEntry {
         let entry = RunLogEntry(
             jobID: jobID,
+            sessionID: sessionID,
             kind: kind,
             status: status,
             message: Self.truncated(message),
@@ -210,6 +292,7 @@ public actor RunLogStore {
         let stored = RunLogEntry(
             id: entry.id,
             jobID: entry.jobID,
+            sessionID: entry.sessionID,
             kind: entry.kind,
             status: entry.status,
             message: Self.truncated(entry.message),
@@ -234,9 +317,13 @@ public actor RunLogStore {
     }
 
     /// Updates an existing run entry by identifier.
+    ///
+    /// Preserves the owning session so an `"awaiting_approval"` turn keeps
+    /// its linkage when transitioning to `"ok"`, `"error"`, or `"denied"`.
     /// - Parameters:
     ///   - id: Target entry identifier.
-    ///   - status: New status (e.g. "ok", "error", "cancelled").
+    ///   - status: New status (e.g. "ok", "error", "cancelled",
+    ///     "awaiting_approval", "denied").
     ///   - response: Final assistant response, if any.
     ///   - toolActions: Tool actions executed, if any.
     ///   - totalTokens: Billed tokens, if any.
@@ -258,6 +345,7 @@ public actor RunLogStore {
         let updated = RunLogEntry(
             id: existing.id,
             jobID: existing.jobID,
+            sessionID: existing.sessionID,
             kind: existing.kind,
             status: status,
             message: existing.message,
@@ -302,12 +390,16 @@ public actor RunLogStore {
     /// - Parameters:
     ///   - limit: Maximum entries. Defaults to 50. Non-positive limits return an empty list.
     ///   - jobID: Optional scheduler job filter.
+    ///   - sessionID: Optional owning session filter for per-conversation history.
     /// - Returns: Entries newest first.
-    public func list(limit: Int = 50, jobID: UUID? = nil) async -> [RunLogEntry] {
+    public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil) async -> [RunLogEntry] {
         guard limit > 0 else { return [] }
         let matching = entries.filter { entry in
-            if let jobID {
-                return entry.jobID == jobID
+            if let jobID, entry.jobID != jobID {
+                return false
+            }
+            if let sessionID, entry.sessionID != sessionID {
+                return false
             }
             return true
         }
@@ -342,6 +434,19 @@ public actor RunLogStore {
             #endif
         }
     }
+
+    /// Removes a specific run entry by identifier.
+    /// - Parameter id: Entry identifier.
+    public func delete(id: UUID) async {
+        entries.removeAll { $0.id == id }
+        if let dbPath {
+            #if canImport(SQLite3)
+                await SQLiteSerialIO.runUncancellable {
+                    SQLiteRunLogStore.delete(id: id, dbPath: dbPath)
+                }
+            #endif
+        }
+    }
 }
 
 #if canImport(SQLite3)
@@ -360,6 +465,7 @@ public actor RunLogStore {
                 CREATE TABLE IF NOT EXISTS run_logs(
                     id TEXT PRIMARY KEY,
                     job_id TEXT,
+                    session_id TEXT,
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
                     message TEXT NOT NULL,
@@ -370,8 +476,21 @@ public actor RunLogStore {
                     duration_ms INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_logs_job_id ON run_logs(job_id);
+                CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);
                 CREATE INDEX IF NOT EXISTS idx_run_logs_timestamp ON run_logs(timestamp);
                 """,
+                failure: { RunLogError(message: $0) }
+            )
+            // Best-effort migration for databases created before session linkage:
+            // existing tables gain the column once, later opens no-op on duplicate.
+            try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "ALTER TABLE run_logs ADD COLUMN session_id TEXT;",
+                failure: { RunLogError(message: $0) }
+            )
+            try? SQLiteHelpers.exec(
+                handle: handle,
+                sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);",
                 failure: { RunLogError(message: $0) }
             )
             return handle
@@ -382,6 +501,68 @@ public actor RunLogStore {
             guard let handle = try? open(dbPath: dbPath) else { return [] }
             defer { sqlite3_close(handle) }
 
+            // Preferred shape includes the session tag; legacy tables without
+            // the migration fall back to the session-less shape below.
+            let sql = """
+            SELECT id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
+            FROM run_logs
+            ORDER BY timestamp ASC, rowid ASC;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                return readLegacy(handle: handle, limit: limit)
+            }
+            defer { sqlite3_finalize(statement) }
+
+            var loaded: [RunLogEntry] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idStr = SQLiteHelpers.columnText(statement, index: 0),
+                      let id = UUID(uuidString: idStr),
+                      let kind = SQLiteHelpers.columnText(statement, index: 3),
+                      let status = SQLiteHelpers.columnText(statement, index: 4),
+                      let message = SQLiteHelpers.columnText(statement, index: 5)
+                else { continue }
+
+                let jobID = SQLiteHelpers.columnText(statement, index: 1).flatMap { UUID(uuidString: $0) }
+                let sessionID = SQLiteHelpers.columnText(statement, index: 2).flatMap { UUID(uuidString: $0) }
+                let timestamp = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 6))
+                let response = SQLiteHelpers.columnText(statement, index: 7)
+                let toolActionsText = SQLiteHelpers.columnText(statement, index: 8)
+                let toolActions = toolActionsText.flatMap { raw in
+                    raw.data(using: .utf8).flatMap { try? JSONDecoder().decode([ToolAction].self, from: $0) }
+                } ?? []
+                let totalTokens = SQLiteHelpers.columnInt64(statement, index: 9).map { Int($0) }
+                let durationMs = SQLiteHelpers.columnInt64(statement, index: 10).map { Int($0) }
+
+                loaded.append(RunLogEntry(
+                    id: id,
+                    jobID: jobID,
+                    sessionID: sessionID,
+                    kind: kind,
+                    status: status,
+                    message: message,
+                    timestamp: timestamp,
+                    response: response,
+                    toolActions: toolActions,
+                    totalTokens: totalTokens,
+                    durationMs: durationMs
+                ))
+            }
+            if loaded.count > limit {
+                return Array(loaded.suffix(limit))
+            }
+            return loaded
+        }
+
+        /// Reads tables predating session linkage, attributing no session.
+        ///
+        /// Runs when the preferred `session_id` select cannot prepare, so an
+        /// unmigrated database still hydrates instead of returning empty.
+        /// - Parameters:
+        ///   - handle: Open database handle.
+        ///   - limit: Maximum entries to keep.
+        /// - Returns: Entries with nil sessions, oldest first capped to `limit`.
+        private static func readLegacy(handle: OpaquePointer?, limit: Int) -> [RunLogEntry] {
             let sql = """
             SELECT id, job_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
             FROM run_logs
@@ -415,6 +596,7 @@ public actor RunLogStore {
                 loaded.append(RunLogEntry(
                     id: id,
                     jobID: jobID,
+                    sessionID: nil,
                     kind: kind,
                     status: status,
                     message: message,
@@ -444,8 +626,8 @@ public actor RunLogStore {
             defer { sqlite3_close(handle) }
 
             let sql = """
-            INSERT OR REPLACE INTO run_logs(id, job_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT OR REPLACE INTO run_logs(id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -457,15 +639,16 @@ public actor RunLogStore {
 
             SQLiteHelpers.bindText(statement, index: 1, value: entry.id.uuidString)
             SQLiteHelpers.bindText(statement, index: 2, value: entry.jobID?.uuidString)
-            SQLiteHelpers.bindText(statement, index: 3, value: entry.kind)
-            SQLiteHelpers.bindText(statement, index: 4, value: entry.status)
-            SQLiteHelpers.bindText(statement, index: 5, value: entry.message)
-            SQLiteHelpers.bindDouble(statement, index: 6, value: entry.timestamp.timeIntervalSince1970)
-            SQLiteHelpers.bindText(statement, index: 7, value: entry.response)
+            SQLiteHelpers.bindText(statement, index: 3, value: entry.sessionID?.uuidString)
+            SQLiteHelpers.bindText(statement, index: 4, value: entry.kind)
+            SQLiteHelpers.bindText(statement, index: 5, value: entry.status)
+            SQLiteHelpers.bindText(statement, index: 6, value: entry.message)
+            SQLiteHelpers.bindDouble(statement, index: 7, value: entry.timestamp.timeIntervalSince1970)
+            SQLiteHelpers.bindText(statement, index: 8, value: entry.response)
             let toolActionsJSON = (try? JSONEncoder().encode(entry.toolActions)).flatMap { String(data: $0, encoding: .utf8) }
-            SQLiteHelpers.bindText(statement, index: 8, value: toolActionsJSON)
-            SQLiteHelpers.bindInt64(statement, index: 9, value: entry.totalTokens.map { Int64($0) })
-            SQLiteHelpers.bindInt64(statement, index: 10, value: entry.durationMs.map { Int64($0) })
+            SQLiteHelpers.bindText(statement, index: 9, value: toolActionsJSON)
+            SQLiteHelpers.bindInt64(statement, index: 10, value: entry.totalTokens.map { Int64($0) })
+            SQLiteHelpers.bindInt64(statement, index: 11, value: entry.durationMs.map { Int64($0) })
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
@@ -503,10 +686,41 @@ public actor RunLogStore {
                 return
             }
             defer { sqlite3_close(handle) }
-            do {
-                try SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM run_logs;", failure: { RunLogError(message: $0) })
-            } catch {
-                fputs("[ERROR] SQLiteRunLogStore: failed clearing runs: \(error)\n", stderr)
+            let sql = "DELETE FROM run_logs;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteRunLogStore: failed preparing run clear (code \(code)).\n", stderr)
+                return
+            }
+            defer { sqlite3_finalize(statement) }
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteRunLogStore: failed clearing runs (code \(code)).\n", stderr)
+                return
+            }
+        }
+
+        static func delete(id: UUID, dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else {
+                fputs("[ERROR] SQLiteRunLogStore: failed opening store at \(dbPath); delete kept in memory only.\n", stderr)
+                return
+            }
+            defer { sqlite3_close(handle) }
+            let sql = "DELETE FROM run_logs WHERE id = ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteRunLogStore: failed preparing run delete (code \(code)); run \(id) kept in memory only.\n", stderr)
+                return
+            }
+            defer { sqlite3_finalize(statement) }
+            let idStr = id.uuidString
+            SQLiteHelpers.bindText(statement, index: 1, value: idStr)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                let code = sqlite3_errcode(handle)
+                fputs("[ERROR] SQLiteRunLogStore: failed deleting run \(id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                return
             }
         }
     }

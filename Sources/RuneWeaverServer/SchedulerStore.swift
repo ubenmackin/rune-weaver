@@ -21,11 +21,12 @@ import RuneWeaverCore
 /// one `[email.accounts]` entry for previously unseen arrivals
 /// (`pollAccount` plus optional `pollQuery`/`pollMailbox`, polled every
 /// `pollIntervalSeconds`). A job fires on either trigger when both are set;
-/// disabled jobs are kept but never run. Headless fires run under the stable
-/// job session (`SchedulerEngine/deterministicSessionID(forJobNamed:)` of
-/// the job name with `source "scheduler"`) so CLI, engine, and manual REST
-/// runs share one episodic session per job name instead of forking history
-/// per entry point.
+/// disabled jobs are kept but never run. Each headless fire runs under a
+/// fresh per-run session (new `UUID()` per execution, stamped
+/// `source "scheduler"` and titled `"name (timestamp)"`) so executions stay
+/// isolated from interactive chat and from each other; continuity across
+/// runs flows through scheduled background prompting plus `run_logs` job
+/// linkage instead of one shared episodic session per job name.
 public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     /// Stable job identifier.
     public let id: UUID
@@ -706,18 +707,6 @@ public actor SchedulerStore {
     public func toSchedulerConfig() async -> SchedulerConfig {
         await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
     }
-
-    /// Stable episodic session for one stored job.
-    ///
-    /// Shared single-flight identity with `SchedulerEngine`: deterministic
-    /// per job name so manual REST runs and CLI/engine fires append to the
-    /// same session instead of forking history per entry point.
-    /// - Parameter id: Job identifier.
-    /// - Returns: Stable session, or nil when the job is unknown.
-    public func stableSessionID(for id: UUID) -> UUID? {
-        guard let job = jobs[id] else { return nil }
-        return job.stableSessionID()
-    }
 }
 
 public extension SchedulerJob {
@@ -768,15 +757,6 @@ public extension SchedulerJob {
             schedule: scheduleValue,
             poll: pollValue
         )
-    }
-
-    /// Stable episodic session shared with the scheduler engine.
-    ///
-    /// Deterministic per job name so every entry point (CLI foreground
-    /// loop, engine fires, manual REST runs) appends to one session.
-    /// - Returns: Stable session identifier.
-    func stableSessionID() -> UUID {
-        SchedulerEngine.deterministicSessionID(forJobNamed: name)
     }
 }
 

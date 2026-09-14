@@ -28,9 +28,10 @@ const sessionsPayload = {
   count: 1,
 };
 
-describe("SessionSidebar rename", () => {
+describe("SessionSidebar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     vi.mocked(listSessions).mockResolvedValue(sessionsPayload);
     vi.mocked(updateSessionTitle).mockResolvedValue(undefined);
   });
@@ -55,11 +56,109 @@ describe("SessionSidebar rename", () => {
     expect(form).not.toBeNull();
     // Real browsers blur the input on submit, so both the form submit
     // and the input blur fire for one save; only one PATCH may go out.
-    fireEvent.submit(form!);
+    if (form === null) {
+      throw new Error("Expected rename form to be present");
+    }
+    fireEvent.submit(form);
     fireEvent.blur(input);
     await waitFor(() => {
       expect(updateSessionTitle).toHaveBeenCalledTimes(1);
     });
     expect(updateSessionTitle).toHaveBeenCalledWith("session-1", "New title");
+  });
+
+  it("immediately renders an optimistic active 'New Chat' entry when currentSessionID is not in history", async () => {
+    render(
+      <SessionSidebar
+        currentSessionID="brand-new-session"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+      />,
+    );
+    await screen.findByText("Old title");
+    // "New Chat" should appear immediately in the sidebar
+    expect(screen.getByTitle("New Chat")).toBeInTheDocument();
+    // It should have the active class
+    const activeItem = screen.getByTitle("New Chat").closest(".session-item");
+    expect(activeItem).toHaveClass("active");
+  });
+
+  it("filters sessions between Chats and Scheduled runs", async () => {
+    const user = userEvent.setup();
+    const mixedPayload = {
+      sessions: [
+        {
+          id: "chat-1",
+          title: "User conversation",
+          messageCount: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: "chat",
+        },
+        {
+          id: "scheduled-1",
+          title: "Daily Digest (Run)",
+          messageCount: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: "scheduler",
+        },
+      ],
+      count: 2,
+    };
+    vi.mocked(listSessions).mockResolvedValue(mixedPayload);
+
+    render(
+      <SessionSidebar
+        currentSessionID="chat-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+      />,
+    );
+
+    // By default, filter is "chat", so "User conversation" is visible and "Daily Digest" is not
+    await screen.findByText("User conversation");
+    expect(screen.queryByText("Daily Digest (Run)")).not.toBeInTheDocument();
+
+    // Click "Scheduled" tab
+    await user.click(screen.getByRole("button", { name: "Scheduled" }));
+    expect(screen.getByText("Daily Digest (Run)")).toBeInTheDocument();
+    expect(screen.queryByText("User conversation")).not.toBeInTheDocument();
+
+    // Click "All" tab
+    await user.click(screen.getByRole("button", { name: "All" }));
+    expect(screen.getByText("Daily Digest (Run)")).toBeInTheDocument();
+    expect(screen.getByText("User conversation")).toBeInTheDocument();
+  });
+
+  it("opens centered delete confirmation modal and confirms deletion", async () => {
+    const user = userEvent.setup();
+    render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+      />,
+    );
+
+    await screen.findByText("Old title");
+    await user.click(screen.getByTitle("Delete session"));
+
+    // Modal dialog should appear in document.body
+    const dialog = screen.getByRole("dialog", { name: "Confirm delete session" });
+    expect(dialog).toBeInTheDocument();
+    expect(screen.getByText("Delete chat session?")).toBeInTheDocument();
+
+    // Confirm deletion
+    await user.click(screen.getByRole("button", { name: "Confirm delete session" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Confirm delete session" })).not.toBeInTheDocument();
+    });
   });
 });

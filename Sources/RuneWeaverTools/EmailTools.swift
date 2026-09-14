@@ -1,3 +1,9 @@
+// Rune Weaver Tools — IMAP email search, read, and attachment tools.
+//
+// Provides the `email.search`, `email.read`, and `email.attachment` plugin
+// tools over the `python3 imaplib` bridge with read-only fetches, staged
+// sandbox downloads, and execution-time credential resolution.
+
 import Foundation
 import RuneWeaverCore
 

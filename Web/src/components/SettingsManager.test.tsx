@@ -4,6 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager from "./SettingsManager";
+import { jsonResponse } from "../test-utils/http";
 
 const mockSettings = {
   engineName: "Test Engine",
@@ -47,13 +48,6 @@ const mockSettings = {
   configPath: "/Users/test/.runeweaver/config.toml",
 };
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 describe("SettingsManager", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -63,7 +57,7 @@ describe("SettingsManager", () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => json(mockSettings))
+      vi.fn(async () => jsonResponse(mockSettings))
     );
 
     render(<SettingsManager />);
@@ -95,16 +89,16 @@ describe("SettingsManager", () => {
 
   it("allows adding a new provider and saving changes", async () => {
     const user = userEvent.setup();
-    let sentPayload: any = null;
+    let sentPayload: Record<string, unknown> | null = null;
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       if (init?.method === "PUT") {
-        sentPayload = JSON.parse(init.body as string);
-        return json({
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
           ...mockSettings,
           ...sentPayload,
         });
       }
-      return json(mockSettings);
+      return jsonResponse(mockSettings);
     });
     vi.stubGlobal("fetch", fetchMock);
 
@@ -129,14 +123,18 @@ describe("SettingsManager", () => {
     });
 
     expect(sentPayload).toBeDefined();
-    expect(sentPayload.providers.provider_3).toBeDefined();
+    const providers = (sentPayload as unknown as Record<string, unknown>)["providers"] as Record<
+      string,
+      unknown
+    >;
+    expect(providers["provider_3"]).toBeDefined();
   });
 
   it("allows adding an email account", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => json(mockSettings))
+      vi.fn(async () => jsonResponse(mockSettings))
     );
 
     render(<SettingsManager />);

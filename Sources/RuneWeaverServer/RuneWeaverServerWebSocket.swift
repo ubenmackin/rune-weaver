@@ -94,8 +94,24 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
 }
 
 /// Dispatches an orchestrator event to a connected WebSocket client.
+///
+/// Filed narrated approvals broadcast live to every connected socket so
+/// dashboards surface the inbox prompt without polling, matching the
+/// structured gate broadcast path. All other events send to the owning
+/// connection only.
+/// - Parameters:
+///   - event: Orchestrator progress event to dispatch.
+///   - connectionID: Connection identifier owning the reply.
+///   - sessionID: Owning session for scoped frames.
+///   - context: Shared engine collaborators owning the hub.
 func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID: UUID, context: ServerContext) async {
-    guard !Task.isCancelled else { return }
+    guard !Task.isCancelled else {
+        return
+    }
+    if case let .approval(request) = event {
+        await context.hub.broadcastApproval(request)
+        return
+    }
     let frameText: String? = switch event {
     case let .toolStarted(toolName, callID, argumentsJSON):
         try? String(
@@ -109,6 +125,8 @@ func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID:
         )
     case let .textDelta(delta):
         try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
+    case .approval:
+        nil
     }
     if let frameText {
         await context.hub.send(id: connectionID, text: frameText)
@@ -159,15 +177,29 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
                 return
             }
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(
+            // Parked approval-gated turns persist as awaiting_approval instead
+            // of ok so the inbox decision can transition the same session entry.
+            // The per-turn parked flag keeps a stale prior park in this
+            // session from mis-marking a fresh normal turn.
+            let parked = response.isParked
+            let parkedStatus = if parked {
+                "awaiting_approval"
+            } else {
+                "ok"
+            }
+            let entry = await context.runs.append(
                 kind: "chat",
-                status: "ok",
+                status: parkedStatus,
                 message: trimmed,
+                sessionID: sessionID,
                 response: response.text,
                 toolActions: response.toolActions,
                 totalTokens: response.totalTokens,
                 durationMs: durationMs
             )
+            if parked {
+                await context.hub.broadcastRun(entry)
+            }
             let done = WSStreamDone(from: response)
             if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
                 await context.hub.send(id: connectionID, text: frame)
@@ -175,7 +207,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
         } catch is CancellationError {
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "cancelled", message: trimmed, durationMs: durationMs)
+            await context.runs.append(kind: "chat", status: "cancelled", message: trimmed, sessionID: sessionID, durationMs: durationMs)
             let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
             if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
                 await context.hub.send(id: connectionID, text: frame)
@@ -187,7 +219,7 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
                 return
             }
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "error", message: trimmed, durationMs: durationMs)
+            await context.runs.append(kind: "chat", status: "error", message: trimmed, sessionID: sessionID, durationMs: durationMs)
             await sendWSError(error.localizedDescription, connectionID: connectionID, context: context, sessionID: sessionID)
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
         }
@@ -215,8 +247,22 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
 }
 
 /// Resolves an approval decision received over WebSocket.
+///
+/// Captures the tagged session and call identifier before resolving so a
+/// narrated parked turn can resume in the same conversation with its owning
+/// run, mirroring the REST decide route. Structured waits resolve through
+/// the bus handler alone; tagged narrations additionally continue via the
+/// orchestrator resume path with the outcome joining the run log for live
+/// dashboard refresh.
+/// - Parameters:
+///   - message: Inbound decision frame.
+///   - connectionID: Connection identifier owning the reply.
+///   - context: Shared engine collaborators owning approvals and runs.
 func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, context: ServerContext) async {
-    guard !Task.isCancelled else { return }
+    guard !Task.isCancelled else {
+        return
+    }
+    let pending = await context.approvals.request(id: message.id)
     let resolved = await context.approvals.decide(
         id: message.id,
         approved: message.approved,
@@ -225,6 +271,15 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
     guard resolved else {
         await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)
         return
+    }
+    if pending?.sessionID != nil {
+        await resumeNarratedApproval(
+            id: message.id,
+            approved: message.approved,
+            context: context,
+            sessionID: pending?.sessionID,
+            decidedCallID: pending?.input.callID
+        )
     }
 }
 

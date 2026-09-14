@@ -10,6 +10,7 @@ import {
   type TrustDuration,
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { mergeApprovalFrame } from "../approvalsSession";
 import { RefreshIcon } from "./icons";
 
 function isTrustDuration(value: string): value is TrustDuration {
@@ -41,11 +42,8 @@ export default function ApprovalsInbox() {
   // Live approval prompts arrive over the shared socket; merge them so the
   // inbox updates without waiting for the next manual refresh.
   const handleWSApproval = useCallback((data: unknown) => {
-    if (!data || typeof data !== "object") return;
-    const frame = data as { type?: unknown; request?: unknown };
-    if (frame.type !== "approval" || !frame.request || typeof frame.request !== "object") return;
-    const request = frame.request as PermissionRequest;
-    if (!request.id) return;
+    const request = mergeApprovalFrame(data);
+    if (!request) return;
     setApprovals((previous) =>
       previous.some((item) => item.id === request.id) ? previous : [...previous, request],
     );

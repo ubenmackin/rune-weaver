@@ -187,12 +187,16 @@ public actor WSHub {
     }
 
     /// Broadcasts a run log event (started or completed) to every connected socket.
+    ///
+    /// Parked approval-gated turns (`awaiting_approval`) broadcast as started
+    /// so live views keep them in-progress instead of filing a finished
+    /// notification before the inbox decision lands.
     public func broadcastRun(_ run: RunLogEntry) async {
         struct WSRunEvent: Codable {
             let type: String
             let run: RunLogEntry
         }
-        let eventType = run.status == "running" ? "run_started" : "run_completed"
+        let eventType = (run.status == "running" || run.status == "awaiting_approval") ? "run_started" : "run_completed"
         guard let data = try? JSONEncoder().encode(WSRunEvent(type: eventType, run: run)),
               let text = String(data: data, encoding: .utf8)
         else { return }
@@ -724,12 +728,16 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
+        // The orchestrator shares the approvals queue so narrated gated
+        // calls file parked requests tagged with their session instead of
+        // dropping, with resume continuing the same session on decision.
         let orchestrator = Orchestrator(
             conversations: conversations,
             toolBus: bus,
             llm: llm,
             systemPrompt: systemPrompt,
-            memoryEngine: memoryEngine
+            memoryEngine: memoryEngine,
+            approvalQueue: approvals
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: scheduler,
@@ -870,13 +878,15 @@ public func registerRuneWeaverRoutes(_ app: Application) {
 /// Bounds an integer limit to the closed range `minLimit...maxLimit`.
 ///
 /// Single shared clamp for every query-`limit` parsing path so bound logic
-/// cannot drift between overloads.
+/// cannot drift between overloads. Intentionally internal (not private) so
+/// the main service routes and the scheduler routes share one bound; both
+/// live in the service module, so no wider scope is needed.
 /// - Parameters:
 ///   - raw: Candidate value.
 ///   - minLimit: Minimum allowed value.
 ///   - maxLimit: Maximum allowed value.
 /// - Returns: Value bounded to `minLimit...maxLimit`.
-private func clampLimit(_ raw: Int, min minLimit: Int, max maxLimit: Int) -> Int {
+func clampLimit(_ raw: Int, min minLimit: Int, max maxLimit: Int) -> Int {
     min(max(raw, minLimit), maxLimit)
 }
 
@@ -885,14 +895,16 @@ private func clampLimit(_ raw: Int, min minLimit: Int, max maxLimit: Int) -> Int
 /// Inspects the raw query string so `?limit=abc` (which Vapor decodes as
 /// nil `Int`) surfaces as `400` instead of silently falling back to the
 /// default, and out-of-range values `400` instead of silently clamping to
-/// the nearest bound.
+/// the nearest bound. Intentionally internal (not private) so the main
+/// service routes and the scheduler routes share one parsing rule; both
+/// live in the service module, so no wider scope is needed.
 /// - Parameters:
 ///   - req: Inbound request.
 ///   - minLimit: Minimum allowed value.
 ///   - maxLimit: Maximum allowed value.
 /// - Returns: Bounded limit, or nil when the parameter is omitted.
 /// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
-private func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit: Int) throws -> Int? {
+func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit: Int) throws -> Int? {
     guard let rawString = req.query[String.self, at: "limit"] else {
         return nil
     }
@@ -907,6 +919,10 @@ private func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit
 }
 
 /// Extracts, parses, and validates a query `limit` parameter with a fallback default.
+///
+/// Intentionally internal (not private) so the main service routes and the
+/// scheduler routes share one validation rule; both live in the service
+/// module, so no wider scope is needed.
 /// - Parameters:
 ///   - req: Inbound request.
 ///   - defaultLimit: Default limit when query parameter is omitted.
@@ -914,7 +930,7 @@ private func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit
 ///   - maxLimit: Maximum allowed value.
 /// - Returns: Validated integer limit.
 /// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
-private func parseQueryLimit(
+func parseQueryLimit(
     _ req: Request,
     default defaultLimit: Int,
     min minLimit: Int = 1,
@@ -927,13 +943,17 @@ private func parseQueryLimit(
 }
 
 /// Extracts, parses, and validates an optional query `limit` parameter.
+///
+/// Intentionally internal (not private) so the main service routes and the
+/// scheduler routes share one validation rule; both live in the service
+/// module, so no wider scope is needed.
 /// - Parameters:
 ///   - req: Inbound request.
 ///   - minLimit: Minimum allowed value. Defaults to 1.
 ///   - maxLimit: Maximum allowed value.
 /// - Returns: Validated integer limit, or nil if omitted.
 /// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
-private func parseQueryLimit(
+func parseQueryLimit(
     _ req: Request,
     min minLimit: Int = 1,
     max maxLimit: Int
@@ -1038,25 +1058,40 @@ private func registerChatRoute(_ app: Application) {
             }
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(
+            // Parked approval-gated turns persist as awaiting_approval instead
+            // of ok so the inbox decision can transition the same session entry.
+            // The per-turn parked flag keeps a stale prior park in this
+            // session from mis-marking a fresh normal turn.
+            await broadcastParkedApprovals(for: response, context: context)
+            let parked = response.isParked
+            let parkedStatus = if parked {
+                "awaiting_approval"
+            } else {
+                "ok"
+            }
+            let entry = await context.runs.append(
                 kind: "chat",
-                status: "ok",
+                status: parkedStatus,
                 message: text,
+                sessionID: sessionID,
                 response: response.text,
                 toolActions: response.toolActions,
                 totalTokens: response.totalTokens,
                 durationMs: durationMs
             )
+            if parked {
+                await context.hub.broadcastRun(entry)
+            }
             return response
         } catch is CancellationError {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "cancelled", message: text, durationMs: durationMs)
+            await context.runs.append(kind: "chat", status: "cancelled", message: text, sessionID: sessionID, durationMs: durationMs)
             throw Abort(.gone, reason: "Turn was cancelled by user")
         } catch let error as OrchestratorError {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "error", message: text, durationMs: durationMs)
+            await context.runs.append(kind: "chat", status: "error", message: text, sessionID: sessionID, durationMs: durationMs)
             switch error {
             case .emptyInput:
                 throw Abort(.badRequest, reason: "text must not be empty")
@@ -1181,6 +1216,13 @@ private func registerMemoryRoutes(_ app: Application) {
 }
 
 /// Registers approvals list plus decide routes.
+///
+/// The decide route resolves the inbox entry first so structured waits
+/// resume through the bus handler, then resumes a narrated parked turn in
+/// its tagged session when one exists: an allow executes the filed call
+/// and runs a synthesis turn, while a deny records the denial in that
+/// session. Resume failures never fail the decide itself because the inbox
+/// entry is already resolved; they surface as a run-log entry instead.
 /// - Parameter app: Application receiving the routes.
 private func registerApprovalRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.approvals)) { req async throws -> ApprovalsResponse in
@@ -1200,188 +1242,42 @@ private func registerApprovalRoutes(_ app: Application) {
             }
             let body = try req.content.decode(ApprovalDecisionRequest.self)
             let context = req.application.runeWeaver
+            // Capture the tagged session before resolving: `decide` removes
+            // the pending entry, so the resume path would otherwise lose
+            // which conversation to continue.
+            let pending = await context.approvals.request(id: id)
             let resolved = await context.approvals.decide(id: id, approved: body.approved, duration: body.resolvedDuration)
             guard resolved else {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
+            }
+            if pending?.sessionID != nil {
+                await resumeNarratedApproval(
+                    id: id,
+                    approved: body.approved,
+                    context: context,
+                    sessionID: pending?.sessionID,
+                    decidedCallID: pending?.input.callID
+                )
             }
             return ApprovalDecisionResponse(id: id, approved: body.approved, duration: body.resolvedDuration)
         }
 }
 
-/// Registers scheduler job CRUD routes (list, create, fetch, update, delete).
-/// - Parameter app: Application receiving the routes.
-private func registerSchedulerCRUDRoutes(_ app: Application) {
-    let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
-    jobs.get { req async throws -> SchedulerJobsResponse in
-        let all = await req.application.runeWeaver.scheduler.list()
-        if let limit = try parseQueryLimit(req, min: 1, max: SchedulerStore.maxJobs) {
-            return SchedulerJobsResponse(jobs: Array(all.prefix(limit)))
-        }
-        return SchedulerJobsResponse(jobs: all)
-    }
-    jobs.post { req async throws -> SchedulerJob in
-        let body = try req.content.decode(NewSchedulerJob.self)
-        do {
-            return try await req.application.runeWeaver.scheduler.create(body)
-        } catch let error as SchedulerStoreError {
-            switch error {
-            case let .invalidField(detail):
-                throw Abort(.badRequest, reason: detail)
-            case let .unknownJob(detail):
-                throw Abort(.notFound, reason: detail)
-            }
-        }
-    }
-    jobs.get(PathComponent.parameter("id")) { req async throws -> SchedulerJob in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        guard let job = await req.application.runeWeaver.scheduler.job(id: id) else {
-            throw Abort(.notFound, reason: "Unknown job \(raw)")
-        }
-        return job
-    }
-    jobs.put(PathComponent.parameter("id")) { req async throws -> SchedulerJob in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let body = try req.content.decode(UpdateSchedulerJob.self)
-        do {
-            return try await req.application.runeWeaver.scheduler.update(id: id, body)
-        } catch let error as SchedulerStoreError {
-            switch error {
-            case let .invalidField(detail):
-                throw Abort(.badRequest, reason: detail)
-            case let .unknownJob(detail):
-                throw Abort(.notFound, reason: detail)
-            }
-        }
-    }
-    jobs.delete(PathComponent.parameter("id")) { req async throws -> HTTPStatus in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let removed = await req.application.runeWeaver.scheduler.delete(id: id)
-        guard removed else {
-            throw Abort(.notFound, reason: "Unknown job \(raw)")
-        }
-        return .noContent
-    }
-}
-
-/// Registers the manual scheduler job run route.
-///
-/// Manual entry point alongside in-process auto-fire: the service exposes CRUD
-/// plus this single-flight `POST .../run` entry point and auto-fires cron and
-/// poll triggers via `ServerSchedulerWorker` on the shared `SchedulerRunLock`.
-/// The CLI `scheduler run` foreground loop is a separate auto-fire runner in
-/// another process with its own `SchedulerEngine.running` lock and no shared
-/// state, so concurrent service plus CLI runners can double-fire the same job —
-/// run one auto-fire runner at a time. Concurrent runs for the same job inside
-/// this process are rejected with `409`. Run completion is broadcast via
-/// WebSocket to the dashboard and native Web Notifications, intentionally
-/// superseding Script Editor (`osascript`) dialogs.
-/// - Parameter app: Application receiving the route.
-private func registerSchedulerRunRoute(_ app: Application) {
-    let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
-    jobs.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.run)) { req async throws -> OrchestratorResponse in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let context = req.application.runeWeaver
-        guard let job = await context.scheduler.job(id: id) else {
-            throw Abort(.notFound, reason: "Unknown job \(raw)")
-        }
-        guard job.enabled else {
-            throw Abort(.conflict, reason: "Job \(raw) is disabled")
-        }
-        guard await context.runLock.tryAcquire(id: id, name: job.name) else {
-            await context.runs.append(kind: "scheduler", status: "skipped", message: "Skipped '\(job.name)': already running", jobID: id)
-            throw Abort(.conflict, reason: "Job \(raw) is already running")
-        }
-        let startTime = Date()
-        // Stable per-name session shared with the scheduler engine so
-        // manual runs and engine fires append to one episodic session.
-        // Single upsert with overwrite keeps renames to one persist
-        // instead of ensure plus update.
-        let sessionID = SchedulerEngine.deterministicSessionID(forJobNamed: job.name)
-        _ = await context.conversations.ensureSession(id: sessionID, title: job.name, source: "scheduler", overwrite: true)
-
-        let initialEntry = await context.runs.append(
-            kind: "scheduler",
-            status: "running",
-            message: job.prompt,
-            jobID: id,
-            durationMs: 0
-        )
-        await context.hub.broadcastRun(initialEntry)
-
-        do {
-            let response = try await context.orchestrator.process(input: UserInput(
-                text: job.prompt,
-                sessionID: sessionID,
-                source: "scheduler"
-            ))
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "ok",
-                response: response.text,
-                toolActions: response.toolActions,
-                totalTokens: response.totalTokens,
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            return response
-        } catch let error as CancellationError {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            throw error
-        } catch let error as OrchestratorError {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "error",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            switch error {
-            case .emptyInput:
-                throw Abort(.badRequest, reason: "text must not be empty")
-            case let .toolLoopExceeded(iterations):
-                throw Abort(.unprocessableEntity, reason: "Tool loop exceeded \(iterations) rounds")
-            case let .llmFailed(detail):
-                throw Abort(.badGateway, reason: detail)
-            }
-        } catch {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "error",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            await context.runLock.release(id: id, name: job.name)
-            throw Abort(.badGateway, reason: error.localizedDescription)
-        }
-    }
-}
-
 /// Registers run-log list plus entry routes.
+///
+/// The list accepts an optional session filter (`sessionID`, with `sessionId`
+/// and `session_id` tolerated) so per-conversation views scope the audit trail
+/// without scanning every entry client-side.
 /// - Parameter app: Application receiving the routes.
 private func registerRunRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.runs)) { req async throws -> RunLogsResponse in
         let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
         let jobID = req.query[String.self, at: "jobID"].flatMap { UUID(uuidString: $0) }
-        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID)
+        let sessionID = req.query[String.self, at: "sessionID"]
+            .flatMap { UUID(uuidString: $0) }
+            ?? req.query[String.self, at: "sessionId"].flatMap { UUID(uuidString: $0) }
+            ?? req.query[String.self, at: "session_id"].flatMap { UUID(uuidString: $0) }
+        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID, sessionID: sessionID)
         return RunLogsResponse(runs: entries)
     }
     app.get(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> RunLogEntry in
@@ -1392,6 +1288,17 @@ private func registerRunRoutes(_ app: Application) {
             throw Abort(.notFound, reason: "Unknown run \(raw)")
         }
         return entry
+    }
+    app.delete(PathComponent.constant(ServerPaths.runs)) { req async throws -> Response in
+        await req.application.runeWeaver.runs.clear()
+        return Response(status: .noContent)
+    }
+    app.delete(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> Response in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        await req.application.runeWeaver.runs.delete(id: id)
+        return Response(status: .noContent)
     }
 }
 

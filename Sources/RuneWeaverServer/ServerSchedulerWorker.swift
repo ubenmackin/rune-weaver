@@ -240,22 +240,25 @@ public actor ServerSchedulerWorker {
     /// Executes one scheduled job under single-flight locking, logging outcomes.
     private func executeJob(_ job: SchedulerJob, reason: SchedulerFireReason) async -> SchedulerRunResult {
         let startTime = Date()
-        let sessionID = SchedulerEngine.deterministicSessionID(forJobNamed: job.name)
 
         guard await runLock.tryAcquire(id: job.id, name: job.name) else {
             let skipMsg = "Skipped '\(job.name)': already running"
             await logger?(skipMsg)
+            // Skipped runs create no conversation, so the audit entry stays
+            // untagged and the result reuses the job identifier as a stable
+            // placeholder instead of inventing an orphan session for filtering.
             let entry = await runs.append(
                 kind: "scheduler",
                 status: "skipped",
                 message: skipMsg,
                 jobID: job.id,
+                sessionID: nil,
                 durationMs: 0
             )
             await hub.broadcastRun(entry)
             return SchedulerRunResult(
                 jobName: job.name,
-                sessionID: sessionID,
+                sessionID: job.id,
                 fired: false,
                 skippedReason: "already running",
                 fireReason: nil,
@@ -264,13 +267,14 @@ public actor ServerSchedulerWorker {
             )
         }
 
-        _ = await conversations.ensureSession(id: sessionID, title: job.name, source: "scheduler", overwrite: true)
+        let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: conversations)
 
         let initialEntry = await runs.append(
             kind: "scheduler",
             status: "running",
             message: job.prompt,
             jobID: job.id,
+            sessionID: sessionID,
             durationMs: 0
         )
         await hub.broadcastRun(initialEntry)
@@ -286,9 +290,18 @@ public actor ServerSchedulerWorker {
                 source: "scheduler"
             ))
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            // Parked scheduler turns remain as awaiting_approval like chat turns,
+            // resolving through the same inbox resume path in their session.
+            // The per-turn parked flag keeps a stale prior park in this
+            // session from mis-marking a fresh normal turn.
+            let parkedStatus = if response.isParked {
+                "awaiting_approval"
+            } else {
+                "ok"
+            }
             let entry = await runs.update(
                 id: initialEntry.id,
-                status: "ok",
+                status: parkedStatus,
                 response: response.text,
                 toolActions: response.toolActions,
                 totalTokens: response.totalTokens,

@@ -4,6 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SchedulerManager from "./SchedulerManager";
+import { jsonResponse } from "../test-utils/http";
 
 function job(overrides: Record<string, unknown> = {}) {
   return {
@@ -22,13 +23,6 @@ function job(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
-
 describe("SchedulerManager", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -38,7 +32,7 @@ describe("SchedulerManager", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        json({
+        jsonResponse({
           jobs: [
             job(),
             job({
@@ -75,13 +69,13 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/scheduler/jobs" && !init?.method) {
-          return json({ jobs: [], count: 0 });
+          return jsonResponse({ jobs: [], count: 0 });
         }
         if (input.startsWith("/runs") && !init?.method) {
-          return json({ runs: [], count: 0 });
+          return jsonResponse({ runs: [], count: 0 });
         }
         bodies.push(String(init?.body ?? ""));
-        return json(job());
+        return jsonResponse(job());
       }),
     );
     render(<SchedulerManager />);
@@ -118,13 +112,13 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/scheduler/jobs" && !init?.method) {
-          return json({ jobs: [], count: 0 });
+          return jsonResponse({ jobs: [], count: 0 });
         }
         if (input.startsWith("/runs") && !init?.method) {
-          return json({ runs: [], count: 0 });
+          return jsonResponse({ runs: [], count: 0 });
         }
         bodies.push(String(init?.body ?? ""));
-        return json(
+        return jsonResponse(
           job({
             name: "mail watcher",
             schedule: "",
@@ -171,13 +165,13 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/scheduler/jobs" && !init?.method) {
-          return json({ jobs: [job()], count: 1 });
+          return jsonResponse({ jobs: [job()], count: 1 });
         }
         if (input.startsWith("/runs") && !init?.method) {
-          return json({ runs: [], count: 0 });
+          return jsonResponse({ runs: [], count: 0 });
         }
         seen.push({ path: input, body: String(init?.body ?? "") });
-        return json(job({ enabled: false }));
+        return jsonResponse(job({ enabled: false }));
       }),
     );
     render(<SchedulerManager />);
@@ -201,14 +195,14 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input.startsWith("/runs") && !init?.method) {
-          return json({ runs: [], count: 0 });
+          return jsonResponse({ runs: [], count: 0 });
         }
         calls.push(`${init?.method ?? "GET"} ${input}`);
         if (input === "/scheduler/jobs" && !init?.method) {
-          return json({ jobs: [job()], count: 1 });
+          return jsonResponse({ jobs: [job()], count: 1 });
         }
         if (input.endsWith("/run")) {
-          return json({
+          return jsonResponse({
             text: "digest done",
             sessionID: job().id,
             toolActions: [],
@@ -217,7 +211,7 @@ describe("SchedulerManager", () => {
         if (init?.method === "DELETE") {
           return new Response(null, { status: 204 });
         }
-        return json(job());
+        return jsonResponse(job());
       }),
     );
     render(<SchedulerManager />);
@@ -244,7 +238,7 @@ describe("SchedulerManager", () => {
   it("shows an empty state when no jobs exist", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => json({ jobs: [], count: 0 })),
+      vi.fn(async () => jsonResponse({ jobs: [], count: 0 })),
     );
     render(<SchedulerManager />);
     await waitFor(() => {
@@ -257,10 +251,10 @@ describe("SchedulerManager", () => {
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
         if (input === "/scheduler/jobs" && !init?.method) {
-          return json({ jobs: [job()], count: 1 });
+          return jsonResponse({ jobs: [job()], count: 1 });
         }
         if (input.startsWith("/runs") && !init?.method) {
-          return json({
+          return jsonResponse({
             runs: [
               {
                 id: "55555555-5555-5555-5555-555555555555",
@@ -274,7 +268,7 @@ describe("SchedulerManager", () => {
             count: 1,
           });
         }
-        return json({});
+        return jsonResponse({});
       }),
     );
     render(<SchedulerManager />);
