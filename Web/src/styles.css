@@ -637,6 +637,14 @@ a {
   color: #7dd3fc;
 }
 
+.session-item-icon.pending-approval {
+  color: #f59e0b;
+}
+
+.session-item.active .session-item-icon.pending-approval {
+  color: #fbbf24;
+}
+
 .session-title {
   flex: 1;
   overflow: hidden;

@@ -57,6 +57,23 @@ describe("ChatView", () => {
     expect(screen.queryByText("reply")).not.toBeInTheDocument();
   });
 
+  it("does not fetch session from server when starting a new draft session", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (url: string) => {
+      if (typeof url === "string" && url.includes("/sessions/")) {
+        return jsonResponse({ reason: "Not found" }, 404);
+      }
+      return jsonResponse({ sessions: [], count: 0 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ChatView />);
+    await user.click(screen.getByRole("button", { name: "New session" }));
+    const sessionCalls = fetchMock.mock.calls.filter(([url]) =>
+      typeof url === "string" && url.includes("/sessions/"),
+    );
+    expect(sessionCalls).toHaveLength(0);
+  });
+
   it("mints a fresh session when the stored session was deleted server-side", async () => {
     localStorage.setItem("rw_active_session_id", "stale-session-id");
     vi.stubGlobal(
@@ -581,6 +598,112 @@ describe("reconstructMessages with structured tool actions", () => {
     expect(map.get("missing")).toBeUndefined();
     expect(toolActionMap(undefined).size).toBe(0);
   });
+
+  it("deduplicates interim waiting message when a parked turn resumes and completes via WS", async () => {
+    resetSharedSocket();
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "download file");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string }).sessionID;
+
+    // Turn parks waiting for approval
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      isParked: true,
+      text: "Waiting for approval to run email.attachment. Approve in the approvals inbox to continue.",
+      toolActions: [
+        {
+          toolName: "email.attachment",
+          callID: "call-att-1",
+          argumentsJSON: "{}",
+          result: null,
+        },
+      ],
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Waiting for approval to run email.attachment/),
+      ).toBeInTheDocument();
+      expect(screen.getByText("Pending")).toBeInTheDocument();
+    });
+
+    // Approval is granted and tool starts
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval_decided",
+      id: "app-1",
+      approved: true,
+      sessionID: turnSID,
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.attachment",
+      callID: "call-att-1",
+      argumentsJSON: "{}",
+      sessionID: turnSID,
+    });
+
+    // Tool completes
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "email.attachment",
+      callID: "call-att-1",
+      result: {
+        toolCallID: "call-att-1",
+        content: "File downloaded",
+        isError: false,
+      },
+      sessionID: turnSID,
+    });
+
+    // Resume turn finishes with final synthesis
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      isParked: false,
+      text: "The attachment has been successfully downloaded.",
+      toolActions: [
+        {
+          toolName: "email.attachment",
+          callID: "call-att-1",
+          argumentsJSON: "{}",
+          result: {
+            toolCallID: "call-att-1",
+            content: "File downloaded",
+            isError: false,
+          },
+        },
+      ],
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("The attachment has been successfully downloaded."),
+      ).toBeInTheDocument();
+    });
+
+    // Old waiting text should be gone
+    expect(
+      screen.queryByText(/Waiting for approval to run email.attachment/),
+    ).not.toBeInTheDocument();
+    // Only one "Done" tool pill should exist, and no "Pending" tool pill
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+    expect(screen.getByText("Done")).toBeInTheDocument();
+  });
 });
 
 describe("reconstructMessages", () => {
@@ -646,4 +769,96 @@ describe("reconstructMessages", () => {
     expect(result[1].toolActions).toBeUndefined();
     expect(result[1].text).toBe("Hello! How can I help?");
   });
+
+  it("skips interim waiting placeholders when the turn subsequently resumed", async () => {
+    const { reconstructMessages, toolActionMap } = await import("./ChatView");
+    const raw = [
+      { role: "user", content: "download attachment" },
+      {
+        id: "m-note",
+        role: "assistant",
+        content: 'Calling email.attachment {"id":"123"} [call_att]',
+      },
+      {
+        id: "m-wait",
+        role: "assistant",
+        content: "Waiting for approval to run email.attachment. Approve in the approvals inbox to continue.",
+      },
+      {
+        role: "tool",
+        content: '{"downloaded":true}',
+        toolCallID: "call_att",
+      },
+      {
+        id: "m-final",
+        role: "assistant",
+        content: "The attachment has been downloaded successfully.",
+      },
+    ];
+    const structured = toolActionMap([
+      {
+        messageID: "m-note",
+        actions: [
+          {
+            toolName: "email.attachment",
+            callID: "call_att",
+            argumentsJSON: '{"id":"123"}',
+            result: {
+              toolCallID: "call_att",
+              content: '{"downloaded":true}',
+              isError: false,
+            },
+          },
+        ],
+      },
+    ]);
+
+    const result = reconstructMessages(raw, structured);
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe("user");
+    expect(result[1].role).toBe("assistant");
+    expect(result[1].text).toBe("The attachment has been downloaded successfully.");
+    expect(result[1].toolActions).toHaveLength(1);
+    expect(result[1].toolActions?.[0]?.toolName).toBe("email.attachment");
+    expect(result[1].toolActions?.[0]?.result?.content).toBe('{"downloaded":true}');
+  });
+
+  it("keeps interim waiting placeholder when the turn is still parked and awaiting approval", async () => {
+    const { reconstructMessages, toolActionMap } = await import("./ChatView");
+    const raw = [
+      { role: "user", content: "download attachment" },
+      {
+        id: "m-note",
+        role: "assistant",
+        content: 'Calling email.attachment {"id":"123"} [call_att]',
+      },
+      {
+        id: "m-wait",
+        role: "assistant",
+        content: "Waiting for approval to run email.attachment. Approve in the approvals inbox to continue.",
+      },
+    ];
+    const structured = toolActionMap([
+      {
+        messageID: "m-note",
+        actions: [
+          {
+            toolName: "email.attachment",
+            callID: "call_att",
+            argumentsJSON: '{"id":"123"}',
+            result: null,
+          },
+        ],
+      },
+    ]);
+
+    const result = reconstructMessages(raw, structured);
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe("user");
+    expect(result[1].role).toBe("assistant");
+    expect(result[1].text).toBe("Waiting for approval to run email.attachment. Approve in the approvals inbox to continue.");
+    expect(result[1].toolActions).toHaveLength(1);
+    expect(result[1].toolActions?.[0]?.result).toBeNull();
+  });
 });
+

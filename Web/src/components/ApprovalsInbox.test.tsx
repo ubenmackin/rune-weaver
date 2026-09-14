@@ -104,4 +104,47 @@ describe("ApprovalsInbox", () => {
       expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
     });
   });
+
+  it("displays Allowing & resuming spinner while decision is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveDecide: ((value: Response) => void) | null = null;
+    const decidePromise = new Promise<Response>((resolve) => {
+      resolveDecide = resolve;
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/approvals") {
+          return jsonResponse(pending);
+        }
+        return decidePromise;
+      }),
+    );
+
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+
+    // While in flight, the "Allowing & resuming…" spinner label should appear
+    expect(screen.getByText("Allowing & resuming…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Allow" })).not.toBeInTheDocument();
+
+    // Resolve the decision
+    resolveDecide!(
+      jsonResponse({
+        id: pending.approvals[0].id,
+        approved: true,
+        duration: "thisTime",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+  });
 });
+

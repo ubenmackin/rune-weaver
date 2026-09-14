@@ -139,11 +139,46 @@ export interface RunLogEntry {
   kind: string;
   status: string;
   message: string;
-  timestamp: string;
+  timestamp: string | number;
   response?: string | null;
   toolActions?: ToolAction[];
   totalTokens?: number | null;
   durationMs?: number | null;
+}
+
+// Parses a run timestamp from the engine wire shape into a Date.
+//
+// The engine persists run times as Unix seconds (REAL seconds since 1970 in
+// SQLite, encoded as JSON numbers) while older payloads carry ISO-8601
+// strings; very old numeric payloads may carry Unix milliseconds. Values
+// above 1e12 must be milliseconds (1e12 seconds would land in year 33658),
+// so everything else numeric is Unix seconds. There is intentionally no
+// CoreFoundation absolute-time branch: current values cluster near 1.7e9
+// Unix seconds and the 978307200 offset would misplace them by 31 years.
+// Zero, empty, non-finite, and negative inputs carry no meaningful run time,
+// so they normalize to the epoch instead of 2001-01-01 or an Invalid Date,
+// keeping time-range filters and relative display stable.
+export function parseRunTimestamp(value: string | number | undefined | null): Date {
+  if (value == null) return new Date(0);
+  if (typeof value === "number") {
+    // Non-finite and non-positive numbers predate any real run.
+    if (!Number.isFinite(value) || value <= 0) return new Date(0);
+    // Unix milliseconds versus Unix seconds by magnitude.
+    if (value > 1e12) return new Date(value);
+    return new Date(value * 1000);
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") return new Date(0);
+  const numeric = Number(trimmed);
+  // Pure numeric strings (including negatives and exponents) follow the
+  // numeric path so "-5" normalizes to the epoch instead of mis-parsing as
+  // a date; ISO strings fall through to Date parsing below.
+  if (!Number.isNaN(numeric) && /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(trimmed)) {
+    return parseRunTimestamp(numeric);
+  }
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return new Date(0);
+  return parsed;
 }
 
 export interface RunLogsResponse {

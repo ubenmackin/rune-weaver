@@ -899,6 +899,10 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
 struct OpenAICompatibleHTTPClient: Sendable {
     /// API root ending in `/v1` (no trailing slash).
     let baseURL: String
+    /// Effective base URL used for requests, rewritten to an RFC 1918 private IP when needed under ATS.
+    let targetBaseURL: String
+    /// Preserved Host header when targetBaseURL was rewritten from a multi-label local domain.
+    let targetHostHeader: String?
     /// Bearer token, if the endpoint requires auth.
     let apiKey: String?
     /// Model identifier sent with every request.
@@ -918,11 +922,27 @@ struct OpenAICompatibleHTTPClient: Sendable {
     ///   - apiStyle: Request style. Defaults to Chat Completions.
     ///   - sessionID: Chat session identifier sent as `x-opencode-session`. Defaults to nil (header omitted).
     init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil) {
-        self.baseURL = openAIBaseURL(from: baseURL)
+        let normalized = openAIBaseURL(from: baseURL)
+        self.baseURL = normalized
         self.apiKey = apiKey
         self.model = model
         self.apiStyle = apiStyle
         self.sessionID = sessionID
+        // Intent: Resolve multi-label cleartext HTTP LAN hostnames (e.g. http://nas.int.example.com:11434/v1)
+        // to their RFC 1918 / RFC 4193 private IP addresses once at client initialization time.
+        // Under macOS App Transport Security (ATS) with NSAllowsLocalNetworking = true, ATS permits
+        // cleartext connections to RFC 1918 IP literals and .local domains, but blocks cleartext to
+        // multi-label domain names even when DNS maps them to private addresses.
+        // LocalNetworking memoizes DNS resolution in a thread-safe cache with a 5-minute TTL, so repeat
+        // client instantiations do not perform redundant synchronous DNS queries on the calling executor.
+        if let parsed = URL(string: normalized) {
+            let target = LocalNetworking.resolvedLocalTarget(for: parsed)
+            self.targetBaseURL = target.url.absoluteString
+            self.targetHostHeader = target.originalHost
+        } else {
+            self.targetBaseURL = normalized
+            self.targetHostHeader = nil
+        }
     }
 
     /// Builds an authorized JSON request.
@@ -932,12 +952,15 @@ struct OpenAICompatibleHTTPClient: Sendable {
     ///   - timeout: Request timeout in seconds.
     /// - Returns: Configured URL request, or nil for a malformed URL.
     func makeRequest(path: String, body: Data, timeout: TimeInterval = 120) -> URLRequest? {
-        guard let url = URL(string: baseURL + path) else { return nil }
+        guard let url = URL(string: targetBaseURL + path) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if let targetHostHeader {
+            request.setValue(targetHostHeader, forHTTPHeaderField: "Host")
         }
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let sessionID, !sessionID.isEmpty {
@@ -1009,7 +1032,13 @@ struct OpenAICompatibleHTTPClient: Sendable {
                 } catch is CancellationError {
                     continuation.finish()
                 } catch {
-                    continuation.yield(.error("\(label) stream failed: \(error.localizedDescription)"))
+                    let message = if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
+                        "\(label) cleartext HTTP was blocked by macOS App Transport Security. " +
+                            "For local endpoints, use an RFC 1918 private IP address, a .local domain, or HTTPS."
+                    } else {
+                        "\(label) stream failed: \(error.localizedDescription)"
+                    }
+                    continuation.yield(.error(message))
                     continuation.finish()
                 }
             }
@@ -1061,6 +1090,12 @@ struct OpenAICompatibleHTTPClient: Sendable {
         do {
             (data, response) = try await URLSession.shared.data(for: request)
         } catch {
+            if let urlError = error as? URLError, urlError.code == .appTransportSecurityRequiresSecureConnection {
+                throw LLMProviderError.unavailable(
+                    "Embeddings cleartext HTTP was blocked by macOS App Transport Security. " +
+                        "For local endpoints, use an RFC 1918 private IP address, a .local domain, or HTTPS."
+                )
+            }
             throw LLMProviderError.unavailable("Embeddings request failed: \(error.localizedDescription)")
         }
         guard let http = response as? HTTPURLResponse else {
@@ -1084,11 +1119,14 @@ struct OpenAICompatibleHTTPClient: Sendable {
     /// Probes `GET <base>/models` without throwing.
     /// - Returns: True when the server answers with 2xx.
     func ping() async -> Bool {
-        guard let url = URL(string: baseURL + "/models") else { return false }
+        guard let url = URL(string: targetBaseURL + "/models") else { return false }
         var request = URLRequest(url: url, timeoutInterval: 3)
         request.httpMethod = "GET"
         if let apiKey, !apiKey.isEmpty {
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        if let targetHostHeader {
+            request.setValue(targetHostHeader, forHTTPHeaderField: "Host")
         }
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         if let sessionID, !sessionID.isEmpty {

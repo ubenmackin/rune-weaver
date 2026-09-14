@@ -476,7 +476,6 @@ public actor RunLogStore {
                     duration_ms INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_run_logs_job_id ON run_logs(job_id);
-                CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);
                 CREATE INDEX IF NOT EXISTS idx_run_logs_timestamp ON run_logs(timestamp);
                 """,
                 failure: { RunLogError(message: $0) }

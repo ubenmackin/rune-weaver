@@ -45,6 +45,17 @@ interface InFlightTurn {
 
 const MAX_MESSAGES = 200;
 
+// Interim waiting placeholder prefix for parked approval turns.
+//
+// The engine composes parked text without a structured history flag
+// (`waitingOnApprovalMessage`: "Waiting for approval to run ..."), so live
+// updates and history reconstruction key interim detection on this prefix.
+// Prefer the structured `isParked` flag wherever the wire carries it (done
+// frames, REST responses); this prefix covers only history lines and
+// in-flight placeholders that predate structured state. A server wording
+// change silently breaks dedup, so every call site shares this constant.
+const WAITING_PREFIX = "Waiting for approval";
+
 // Per-session cached cumulative token total so a reload hydrates the status
 // bar instead of resetting to zero; the authoritative `sessionTokens` from
 // the next done frame always overwrites it.
@@ -179,6 +190,22 @@ export function reconstructMessages(
     }
 
     if (m.role === "assistant") {
+      const isInterimWaiting = (() => {
+        if (!m.content.trim().startsWith(WAITING_PREFIX)) return false;
+        for (let j = i + 1; j < rawMessages.length; j++) {
+          const next = rawMessages[j];
+          if (next.role === "user") break;
+          if (next.role === "tool") return true;
+          if (next.role === "assistant" && !next.content.trim().startsWith(WAITING_PREFIX)) {
+            return true;
+          }
+        }
+        return false;
+      })();
+      if (isInterimWaiting) {
+        continue;
+      }
+
       const structured = getStructured(m.id);
       if (structured && structured.length > 0) {
         const coveredCallIDs = new Set(
@@ -303,6 +330,11 @@ export default function ChatView({ health }: ChatViewProps) {
   // A server-side delete leaves the stored active ID stale; regenerate
   // it exactly once instead of resurrecting the deleted UUID on send.
   const didRecoverSessionRef = useRef(false);
+  // Tracks whether the active session is a local draft (new session not yet on server)
+  // so we do not issue GET /sessions/<uuid> which would return 404.
+  const knownDraftIDRef = useRef<string | null>(
+    localStorage.getItem("rw_active_session_id") ? null : sessionID,
+  );
 
   // Mirror latest values after commit so concurrent rendering never observes
   // a torn ref written during render.
@@ -438,6 +470,23 @@ export default function ChatView({ health }: ChatViewProps) {
       const toolName = rawToolName;
       const callID = rawCallID;
       const argumentsJSON = rawArgumentsJSON;
+      setPending(true);
+      pendingRef.current = true;
+      // Evict only this batch's waiting placeholder (same callID) or
+      // uncorrelated waiting with no tool actions; other parked batches in
+      // the same session keep their placeholders so resuming one never wipes
+      // the other. Non-waiting duplicates still evict by callID overlap.
+      setMessages((prev) =>
+        prev.filter((m) => {
+          if (m.role !== "assistant") return true;
+          const overlapsCall =
+            m.toolActions?.some((a) => a.callID === callID) ?? false;
+          if (overlapsCall) return false;
+          if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+          if (!m.toolActions || m.toolActions.length === 0) return false;
+          return true;
+        }),
+      );
       setInFlightTurn((prev) => {
         const currentActions = prev ? [...prev.toolActions] : [];
         currentActions.push({
@@ -468,6 +517,23 @@ export default function ChatView({ health }: ChatViewProps) {
       const endCallID = rawEndCallID;
       const endToolName = rawEndToolName;
       const endResult = isToolResult(rawEndResult) ? rawEndResult : null;
+      setMessages((prev) =>
+        prev.map((msg) => {
+          if (!msg.toolActions || msg.toolActions.length === 0) return msg;
+          const hasMatch = msg.toolActions.some(
+            (a) => a.callID === endCallID || (!a.result && a.toolName === endToolName)
+          );
+          if (!hasMatch) return msg;
+          return {
+            ...msg,
+            toolActions: msg.toolActions.map((a) =>
+              a.callID === endCallID || (!a.result && a.toolName === endToolName)
+                ? { ...a, result: endResult }
+                : a
+            ),
+          };
+        })
+      );
       setInFlightTurn((prev) => {
         if (!prev) return prev;
         const updated = prev.toolActions.map((action) => {
@@ -490,8 +556,22 @@ export default function ChatView({ health }: ChatViewProps) {
     } else if (frameType === "delta") {
       armTurnTimeout();
       if (cancelledRef.current) return;
+      setPending(true);
+      pendingRef.current = true;
       const rawDelta: unknown = data.delta;
       const deltaText = typeof rawDelta === "string" ? rawDelta : "";
+      // Deltas carry no batch correlation, so they must not evict parked
+      // batches' waiting placeholders (which carry their batch callIDs);
+      // batch-specific eviction belongs to tool_start/done callID overlap.
+      // Only generic waiting with no tool actions is safe to replace here.
+      setMessages((prev) =>
+        prev.filter((m) => {
+          if (m.role !== "assistant") return true;
+          if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+          if (m.toolActions && m.toolActions.length > 0) return true;
+          return false;
+        }),
+      );
       setInFlightTurn((prev) => ({
         toolActions: prev ? prev.toolActions : [],
         text: (prev ? prev.text : "") + deltaText,
@@ -602,7 +682,34 @@ export default function ChatView({ health }: ChatViewProps) {
         text: doneText ?? snapshot?.text ?? "",
         toolActions: finalActions.length > 0 ? finalActions : undefined,
       };
-      setMessages((prev) => [...prev, finalMsg].slice(-MAX_MESSAGES));
+      setMessages((prev) => {
+        // Terminal dedup stays batch-scoped: evict only placeholders whose
+        // batch overlaps this turn's actions, plus generic waiting with no
+        // correlation. Other parked batches in the same session keep their
+        // placeholders so completing one resume never wipes the other. An
+        // empty terminal (denied resume with no executed actions) carries no
+        // batch correlation, so it falls back to replacing generic waiting
+        // only; batch-specific waiting for the denied call clears via its
+        // tool_start overlap or the next overlapping done.
+        const base = !isParked
+          ? prev.filter((m) => {
+              if (m.role !== "assistant") return true;
+              const overlaps =
+                finalActions.length > 0 &&
+                (m.toolActions?.some((a) =>
+                  finalActions.some(
+                    (fa) => fa.callID && fa.callID === a.callID,
+                  ),
+                ) ??
+                  false);
+              if (overlaps) return false;
+              if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+              if (!m.toolActions || m.toolActions.length === 0) return false;
+              return true;
+            })
+          : prev;
+        return [...base, finalMsg].slice(-MAX_MESSAGES);
+      });
       setInFlightTurn(null);
       inFlightTurnRef.current = null;
       setPending(false);
@@ -685,6 +792,14 @@ export default function ChatView({ health }: ChatViewProps) {
           previous.filter((item) => item.id !== decidedID),
         );
       }
+      if (
+        frameSessionID &&
+        normalizeSessionID(frameSessionID) === normalizeSessionID(sessionIDRef.current) &&
+        data.approved === true
+      ) {
+        setPending(true);
+        pendingRef.current = true;
+      }
       refreshApprovals();
     }
   }, [armTurnTimeout, clearTurnTimeout, refreshApprovals]);
@@ -700,6 +815,14 @@ export default function ChatView({ health }: ChatViewProps) {
     // frame corrects it when the server has newer usage.
     setSessionTokens(loadSessionTokens(activeID));
     setLastTurnTokens(null);
+
+    // If this session is a local draft (not yet sent or persisted to the server),
+    // skip fetching to avoid expected 404 errors in the console.
+    if (knownDraftIDRef.current === activeID) {
+      setMessages([]);
+      return;
+    }
+
     Promise.all([
       getSession(activeID),
       getSessionToolActions(activeID).catch(() => null),
@@ -725,6 +848,7 @@ export default function ChatView({ health }: ChatViewProps) {
           ) {
             didRecoverSessionRef.current = true;
             const next = newSessionId();
+            knownDraftIDRef.current = next;
             localStorage.setItem("rw_active_session_id", next);
             setSessionID(next);
           }
@@ -810,6 +934,7 @@ export default function ChatView({ health }: ChatViewProps) {
     const text = input.trim();
     if (!text || pending) return;
     cancelledRef.current = false;
+    knownDraftIDRef.current = null;
     setPending(true);
     setError(null);
 
@@ -932,6 +1057,7 @@ export default function ChatView({ health }: ChatViewProps) {
       void handleCancel();
     }
     const nextID = newSessionId();
+    knownDraftIDRef.current = nextID;
     setSessionID(nextID);
     setMessages([]);
     setInFlightTurn(null);
@@ -940,37 +1066,17 @@ export default function ChatView({ health }: ChatViewProps) {
     setSessionTokens(loadSessionTokens(nextID));
   }
 
-  async function handleSelectSession(id: string) {
+  function handleSelectSession(id: string) {
     if (normalizeSessionID(id) === normalizeSessionID(sessionID)) return;
     if (pending) {
       void handleCancel();
     }
+    knownDraftIDRef.current = null;
     setSessionID(id);
     setInFlightTurn(null);
     setError(null);
     setLastTurnTokens(null);
     setSessionTokens(loadSessionTokens(id));
-    try {
-      const [res, structured] = await Promise.all([
-        getSession(id),
-        getSessionToolActions(id).catch(() => null),
-      ]);
-      const mapped = reconstructMessages(
-        res?.messages || [],
-        structured ? toolActionMap(structured.actions) : undefined,
-      );
-      setMessages(mapped);
-    } catch (failure) {
-      // A 404 means the session was deleted server-side: mint a fresh
-      // session instead of resurrecting the stale UUID on the next send.
-      if (failure instanceof ApiError && failure.status === 404) {
-        didRecoverSessionRef.current = true;
-        const next = newSessionId();
-        localStorage.setItem("rw_active_session_id", next);
-        setSessionID(next);
-      }
-      setMessages([]);
-    }
   }
 
   const usedPercent =
@@ -989,11 +1095,12 @@ export default function ChatView({ health }: ChatViewProps) {
       {/* Session History Sidebar */}
       <SessionSidebar
         currentSessionID={sessionID}
-        onSelectSession={(id) => void handleSelectSession(id)}
+        onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         isOpen={sidebarOpen}
         onToggleOpen={() => setSidebarOpen(!sidebarOpen)}
         refreshTrigger={sessionRefreshKey}
+        pendingApprovals={pendingApprovals}
       />
 
       {/* Main Chat Area */}

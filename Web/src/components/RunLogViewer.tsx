@@ -8,6 +8,7 @@ import {
   deleteRun,
   listApprovals,
   listRuns,
+  parseRunTimestamp,
   type PermissionRequest,
   type RunLogEntry,
 } from "../api";
@@ -242,7 +243,7 @@ export default function RunLogViewer() {
     if (filter === "scheduler" && run.kind !== "scheduler") return false;
 
     if (timeRange !== "all") {
-      const runTime = new Date(run.timestamp).getTime();
+      const runTime = parseRunTimestamp(run.timestamp).getTime();
       const now = Date.now();
       if (timeRange === "24h" && now - runTime > 86_400_000) return false;
       if (timeRange === "7d" && now - runTime > 7 * 86_400_000) return false;
@@ -391,7 +392,7 @@ export default function RunLogViewer() {
                     {run.kind === "scheduler" ? "Scheduled Job" : "Chat Turn"}
                   </span>
                   <span className="run-time-muted">
-                    {new Date(run.timestamp).toLocaleString()}
+                    {parseRunTimestamp(run.timestamp).toLocaleString()}
                   </span>
                   {run.durationMs != null ? (
                     <span className="run-time-muted">

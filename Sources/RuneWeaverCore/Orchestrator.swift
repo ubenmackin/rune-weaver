@@ -187,6 +187,19 @@ public enum OrchestratorError: Error, Sendable, Equatable {
     case llmFailed(String)
 }
 
+extension OrchestratorError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .emptyInput:
+            "Input text was empty or whitespace-only."
+        case let .toolLoopExceeded(iterations):
+            "Tool loop exceeded \(iterations) rounds."
+        case let .llmFailed(detail):
+            detail
+        }
+    }
+}
+
 /// Real-time progress event emitted during turn orchestration.
 public enum OrchestratorEvent: Sendable, Codable, Equatable {
     /// Tool execution is about to begin.

@@ -22,7 +22,10 @@ export default function ApprovalsInbox() {
   const [durations, setDurations] = useState<Record<string, TrustDuration>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [deciding, setDeciding] = useState<string | null>(null);
+  const [decidingState, setDecidingState] = useState<{
+    id: string;
+    action: "allowing" | "denying";
+  } | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -40,8 +43,20 @@ export default function ApprovalsInbox() {
   }, []);
 
   // Live approval prompts arrive over the shared socket; merge them so the
-  // inbox updates without waiting for the next manual refresh.
+  // inbox updates without waiting for the next manual refresh. Decision frames
+  // evict promptly so cross-tab or menu-bar decisions disappear immediately.
   const handleWSApproval = useCallback((data: unknown) => {
+    if (typeof data === "object" && data !== null) {
+      const frame = data as Record<string, unknown>;
+      if (
+        (frame.type === "approval_decided" || frame.type === "approval_resolved") &&
+        typeof frame.id === "string"
+      ) {
+        const decidedID = frame.id;
+        setApprovals((previous) => previous.filter((item) => item.id !== decidedID));
+        return;
+      }
+    }
     const request = mergeApprovalFrame(data);
     if (!request) return;
     setApprovals((previous) =>
@@ -79,7 +94,7 @@ export default function ApprovalsInbox() {
   }
 
   async function decide(id: string, approved: boolean) {
-    setDeciding(id);
+    setDecidingState({ id, action: approved ? "allowing" : "denying" });
     setError(null);
     try {
       await decideApproval(id, approved, durationFor(id));
@@ -89,7 +104,7 @@ export default function ApprovalsInbox() {
         failure instanceof ApiError ? failure.message : "Decision failed",
       );
     } finally {
-      setDeciding(null);
+      setDecidingState(null);
     }
   }
 
@@ -167,22 +182,38 @@ export default function ApprovalsInbox() {
               </label>
 
               <div className="approval-decision-buttons">
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={deciding === request.id}
-                  onClick={() => void decide(request.id, true)}
-                >
-                  Allow
-                </button>
-                <button
-                  type="button"
-                  className="danger"
-                  disabled={deciding === request.id}
-                  onClick={() => void decide(request.id, false)}
-                >
-                  Deny
-                </button>
+                {decidingState?.id === request.id ? (
+                  <span className="text-xs muted approval-resuming-label">
+                    <RefreshIcon size={12} className="spin" />
+                    <span>
+                      {decidingState.action === "allowing"
+                        ? "Allowing & resuming…"
+                        : "Denying…"}
+                    </span>
+                  </span>
+                ) : (
+                  <>
+                    {/* Per-row locking: only the deciding row disables so
+                        independent approvals stay actionable while one
+                        decision (and its parked resume) is in flight. */}
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={decidingState?.id === request.id}
+                      onClick={() => void decide(request.id, true)}
+                    >
+                      Allow
+                    </button>
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={decidingState?.id === request.id}
+                      onClick={() => void decide(request.id, false)}
+                    >
+                      Deny
+                    </button>
+                  </>
+                )}
               </div>
             </div>
           </div>

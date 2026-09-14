@@ -176,14 +176,7 @@ public actor WSHub {
         guard let data = try? JSONEncoder().encode(WSApprovalPrompt(request: request)),
               let text = String(data: data, encoding: .utf8)
         else { return }
-        let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
-        await withTaskGroup(of: Void.self) { group in
-            for (queue, box) in targets {
-                group.addTask {
-                    await queue.send(text, to: box)
-                }
-            }
-        }
+        await fanOut(text)
     }
 
     /// Broadcasts a run log event (started or completed) to every connected socket.
@@ -200,6 +193,32 @@ public actor WSHub {
         guard let data = try? JSONEncoder().encode(WSRunEvent(type: eventType, run: run)),
               let text = String(data: data, encoding: .utf8)
         else { return }
+        await fanOut(text)
+    }
+
+    /// Broadcasts an arbitrary text frame to every connected socket.
+    ///
+    /// Fans out to all current connections; receiving views filter by the
+    /// frame's embedded `sessionID` so one shared socket multiplexes many
+    /// sessions without cross-session leakage. Untagged global frames
+    /// (`approval`, `run_started`, `run_completed`, `approval_decided`) reach
+    /// every view, while tagged chat frames are ignored by other sessions.
+    /// Sends to the same connection serialize through its per-connection
+    /// queue so successive broadcasts keep frame order, and concurrent
+    /// fan-out across connections avoids head-of-line blocking.
+    /// - Parameter text: Pre-encoded JSON frame to announce.
+    public func broadcast(text: String) async {
+        await fanOut(text)
+    }
+
+    /// Concurrent best-effort fan-out shared by every broadcast path.
+    ///
+    /// Snapshots the current sockets plus their per-connection queues, then
+    /// sends concurrently across connections while each connection's own
+    /// frames stay ordered through its serial queue. A slow or closed socket
+    /// resolves via its per-send timeout instead of stalling the group.
+    /// - Parameter text: Pre-encoded JSON frame to announce.
+    private func fanOut(_ text: String) async {
         let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
         await withTaskGroup(of: Void.self) { group in
             for (queue, box) in targets {
@@ -1251,13 +1270,15 @@ private func registerApprovalRoutes(_ app: Application) {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
             }
             if pending?.sessionID != nil {
-                await resumeNarratedApproval(
-                    id: id,
-                    approved: body.approved,
-                    context: context,
-                    sessionID: pending?.sessionID,
-                    decidedCallID: pending?.input.callID
-                )
+                Task {
+                    await resumeNarratedApproval(
+                        id: id,
+                        approved: body.approved,
+                        context: context,
+                        sessionID: pending?.sessionID,
+                        decidedCallID: pending?.input.callID
+                    )
+                }
             }
             return ApprovalDecisionResponse(id: id, approved: body.approved, duration: body.resolvedDuration)
         }
