@@ -14,6 +14,7 @@ import {
   deleteSession,
   listSessions,
   updateSessionTitle,
+  type PermissionRequest,
   type SessionSummary,
 } from "../api";
 import {
@@ -22,6 +23,7 @@ import {
   persistEnum,
 } from "../approvalsSession";
 import {
+  AlertTriangleIcon,
   ChatIcon,
   CheckIcon,
   ClockIcon,
@@ -41,6 +43,7 @@ interface SessionSidebarProps {
   isOpen: boolean;
   onToggleOpen: () => void;
   refreshTrigger?: number;
+  pendingApprovals?: PermissionRequest[];
 }
 
 interface GroupedSessions {
@@ -112,6 +115,7 @@ export default function SessionSidebar({
   isOpen,
   onToggleOpen,
   refreshTrigger,
+  pendingApprovals,
 }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -279,11 +283,31 @@ export default function SessionSidebar({
                 }
               }}
             >
-              {isScheduled ? (
-                <ClockIcon size={14} className="session-item-icon scheduled" title="Scheduled run" />
-              ) : (
-                <ChatIcon size={14} className="session-item-icon" />
-              )}
+              {(() => {
+                const hasPendingApproval = pendingApprovals?.some((req) =>
+                  isSameSession(req.sessionID, session.id),
+                );
+                if (hasPendingApproval) {
+                  return (
+                    <AlertTriangleIcon
+                      size={14}
+                      className="session-item-icon pending-approval"
+                      title="Approval pending"
+                      data-testid="session-approval-pending-icon"
+                    />
+                  );
+                }
+                if (isScheduled) {
+                  return (
+                    <ClockIcon
+                      size={14}
+                      className="session-item-icon scheduled"
+                      title="Scheduled run"
+                    />
+                  );
+                }
+                return <ChatIcon size={14} className="session-item-icon" />;
+              })()}
               {isEditing ? (
                 <form
                   className="session-rename-form"

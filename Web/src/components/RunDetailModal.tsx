@@ -1,7 +1,7 @@
 // Rune Weaver Dashboard — Detailed modal viewer for inspectable run logs.
 // Shows prompt, executed tool actions, full assistant response, and performance metrics.
 
-import type { RunLogEntry } from "../api";
+import { parseRunTimestamp, type RunLogEntry } from "../api";
 import { CloseIcon } from "./icons";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
@@ -59,7 +59,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
             <div className="meta-card">
               <span className="meta-label">Triggered At</span>
               <span className="meta-value">
-                {new Date(run.timestamp).toLocaleString()}
+                {parseRunTimestamp(run.timestamp).toLocaleString()}
               </span>
             </div>
             {run.durationMs != null ? (

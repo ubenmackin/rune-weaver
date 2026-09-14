@@ -94,6 +94,11 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <true/>
     <key>NSUserNotificationAlertStyle</key>
     <string>banner</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>
 PLIST_EOF

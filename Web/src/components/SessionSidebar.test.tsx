@@ -161,4 +161,34 @@ describe("SessionSidebar", () => {
       expect(screen.queryByRole("dialog", { name: "Confirm delete session" })).not.toBeInTheDocument();
     });
   });
+
+  it("renders amber warning icon when a session has an unresolved pending approval", async () => {
+    const pendingApprovals = [
+      {
+        id: "approval-1",
+        toolName: "email.attachment",
+        description: "Allow email.attachment",
+        input: { toolName: "email.attachment", argumentsJSON: "{}", callID: "call-1" },
+        suggestedDurations: ["thisTime" as const],
+        sessionID: "session-1",
+      },
+    ];
+
+    render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        pendingApprovals={pendingApprovals}
+      />,
+    );
+
+    await screen.findByText("Old title");
+    const warningIcon = screen.getByTestId("session-approval-pending-icon");
+    expect(warningIcon).toBeInTheDocument();
+    expect(warningIcon).toHaveClass("pending-approval");
+  });
 });
+

@@ -93,6 +93,35 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
     }
 }
 
+/// Encodes an orchestrator event to its shared WebSocket wire text, if any.
+///
+/// Single shared encoder for per-connection streaming and global resume
+/// broadcasts so tool and delta frame shapes cannot drift between the two
+/// paths. Approval events return nil because they fan out via
+/// `broadcastApproval` instead of a text frame.
+/// - Parameters:
+///   - event: Orchestrator progress event to encode.
+///   - sessionID: Owning session for scoped frames.
+/// - Returns: Encoded JSON text, or nil for approval and unencodable events.
+func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
+    switch event {
+    case let .toolStarted(toolName, callID, argumentsJSON):
+        try? String(
+            data: JSONEncoder().encode(WSToolStartFrame(toolName: toolName, callID: callID, argumentsJSON: argumentsJSON, sessionID: sessionID)),
+            encoding: .utf8
+        )
+    case let .toolCompleted(toolName, callID, result):
+        try? String(
+            data: JSONEncoder().encode(WSToolEndFrame(toolName: toolName, callID: callID, result: result, sessionID: sessionID)),
+            encoding: .utf8
+        )
+    case let .textDelta(delta):
+        try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
+    case .approval:
+        nil
+    }
+}
+
 /// Dispatches an orchestrator event to a connected WebSocket client.
 ///
 /// Filed narrated approvals broadcast live to every connected socket so
@@ -112,24 +141,30 @@ func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID:
         await context.hub.broadcastApproval(request)
         return
     }
-    let frameText: String? = switch event {
-    case let .toolStarted(toolName, callID, argumentsJSON):
-        try? String(
-            data: JSONEncoder().encode(WSToolStartFrame(toolName: toolName, callID: callID, argumentsJSON: argumentsJSON, sessionID: sessionID)),
-            encoding: .utf8
-        )
-    case let .toolCompleted(toolName, callID, result):
-        try? String(
-            data: JSONEncoder().encode(WSToolEndFrame(toolName: toolName, callID: callID, result: result, sessionID: sessionID)),
-            encoding: .utf8
-        )
-    case let .textDelta(delta):
-        try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
-    case .approval:
-        nil
-    }
-    if let frameText {
+    if let frameText = wsEventFrameText(event, sessionID: sessionID) {
         await context.hub.send(id: connectionID, text: frameText)
+    }
+}
+
+/// Broadcasts an orchestrator event to every connected WebSocket client.
+///
+/// Resume path for parked narrated approvals: the resumed turn runs detached
+/// from any one socket (REST decide or another tab's decision), so its tool
+/// and delta frames broadcast globally instead of replying on the owning
+/// connection like live chat streaming does. Every frame stays tagged with
+/// its owning `sessionID` and multiplexed views ignore frames for other
+/// sessions, so the broadcast never leaks one session's resumed output into
+/// another view; untagged approval prompts fan out via `broadcastApproval`.
+func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
+    guard !Task.isCancelled else {
+        return
+    }
+    if case let .approval(request) = event {
+        await context.hub.broadcastApproval(request)
+        return
+    }
+    if let frameText = wsEventFrameText(event, sessionID: sessionID) {
+        await context.hub.broadcast(text: frameText)
     }
 }
 
@@ -273,13 +308,15 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
         return
     }
     if pending?.sessionID != nil {
-        await resumeNarratedApproval(
-            id: message.id,
-            approved: message.approved,
-            context: context,
-            sessionID: pending?.sessionID,
-            decidedCallID: pending?.input.callID
-        )
+        Task {
+            await resumeNarratedApproval(
+                id: message.id,
+                approved: message.approved,
+                context: context,
+                sessionID: pending?.sessionID,
+                decidedCallID: pending?.input.callID
+            )
+        }
     }
 }
 

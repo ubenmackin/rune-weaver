@@ -355,6 +355,39 @@ public struct WSApprovalPrompt: Codable, Sendable, Equatable {
     }
 }
 
+/// Approval decision broadcast sent by the engine over WebSocket.
+///
+/// Announces that one pending approval resolved so every connected view can
+/// evict it without polling. The inbox and chat badge both listen for this
+/// shape alongside the legacy `approval_resolved` alias, so the decision must
+/// stay in this shared file rather than scattering function-local copies that
+/// drift and cannot be reused by thin clients or decoded in tests.
+/// - Note: Carries the owning session when the approval was tagged so
+///   multiplexed views sharing one socket ignore decisions for other
+///   sessions; nil for untagged legacy approvals.
+public struct WSApprovalDecidedFrame: Codable, Sendable, Equatable {
+    /// Always `"approval_decided"`.
+    public let type: String
+    /// Resolved request identifier.
+    public let id: UUID
+    /// Whether the tool call may run.
+    public let approved: Bool
+    /// Owning session, when the approval was tagged.
+    public var sessionID: UUID?
+
+    /// Creates an approval decision broadcast.
+    /// - Parameters:
+    ///   - id: Resolved request identifier.
+    ///   - approved: Whether the call may run.
+    ///   - sessionID: Owning session, when known. Defaults to nil.
+    public init(id: UUID, approved: Bool, sessionID: UUID? = nil) {
+        self.type = "approval_decided"
+        self.id = id
+        self.approved = approved
+        self.sessionID = sessionID
+    }
+}
+
 /// Error frame sent by the engine over WebSocket.
 public struct WSErrorFrame: Codable, Sendable, Equatable {
     /// Always `"error"`.

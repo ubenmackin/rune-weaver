@@ -173,53 +173,93 @@ func resumeNarratedApproval(
     sessionID: UUID? = nil,
     decidedCallID: String? = nil
 ) async {
+    let targetSessionID: UUID? = if let sessionID {
+        sessionID
+    } else {
+        await context.approvals.request(id: id)?.sessionID
+    }
+
+    // Decision broadcasts use the shared `WSApprovalDecidedFrame` wire shape so
+    // REST, WebSocket, and dashboard inbox views stay in sync on one encoding.
+    if let data = try? JSONEncoder().encode(WSApprovalDecidedFrame(id: id, approved: approved, sessionID: targetSessionID)),
+       let text = String(data: data, encoding: .utf8)
+    {
+        await context.hub.broadcast(text: text)
+    }
+
     let resumed: OrchestratorResponse?
     do {
-        resumed = try await context.orchestrator.resumeNarratedApproval(id: id, approved: approved)
+        resumed = try await context.orchestrator.resumeNarratedApproval(
+            id: id,
+            approved: approved,
+            onEvent: { event in
+                if let targetSessionID {
+                    await broadcastWSEventFrame(event, sessionID: targetSessionID, context: context)
+                }
+            }
+        )
     } catch {
-        // Resume runs detached so the decide response already succeeded; a
-        // throw must still surface or the parked run waits as
-        // awaiting_approval with no further resume to resolve it.
-        let detail = error.localizedDescription
-        fputs("[ERROR] RuneWeaverServer resumeNarratedApproval \(id.uuidString) failed: \(detail)\n", stderr)
-        // Scope stranded cleanup to the failed session only. The inbox entry
-        // is already resolved by the decide path, so prefer the caller-tagged
-        // session and fall back to the approvals lookup; when neither yields
-        // a session, only log rather than flipping unrelated sessions' runs.
-        let failedSessionID: UUID? = if let sessionID {
-            sessionID
-        } else {
-            await context.approvals.request(id: id)?.sessionID
-        }
-        guard let failedSessionID else {
-            return
-        }
-        // Siblings still parked mean the turn is still awaiting decisions, so
-        // leave its run alone for the remaining resumes to resolve.
-        if await isParkedTurn(sessionID: failedSessionID, context: context) {
-            return
-        }
-        guard let stranded = await strandedParkedRun(
-            sessionID: failedSessionID,
+        await handleResumeFailure(
+            id: id,
+            detail: error.localizedDescription,
+            targetSessionID: targetSessionID,
             decidedCallID: decidedCallID,
             context: context
-        ) else {
-            return
-        }
-        let updated = await context.runs.update(
-            id: stranded.id,
-            status: "error",
-            response: "Resume failed for approval \(id.uuidString): \(detail)"
-        ) ?? stranded
-        await context.hub.broadcastRun(updated)
+        )
         return
     }
     guard let resumed else {
         return
     }
-    // Per-turn parked flag keeps separate batches in one session isolated:
-    // a finished batch finalizes its own run even while another batch stays
-    // parked, instead of inheriting the session-wide parked state.
+    let done = WSStreamDone(from: resumed)
+    if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
+        await context.hub.broadcast(text: frame)
+    }
+    await recordResumedRun(
+        resumed: resumed,
+        approved: approved,
+        decidedCallID: decidedCallID,
+        context: context
+    )
+}
+
+/// Handles cleanup and run log updates when resumeNarratedApproval throws.
+private func handleResumeFailure(
+    id: UUID,
+    detail: String,
+    targetSessionID: UUID?,
+    decidedCallID: String?,
+    context: ServerContext
+) async {
+    fputs("[ERROR] RuneWeaverServer resumeNarratedApproval \(id.uuidString) failed: \(detail)\n", stderr)
+    guard let failedSessionID = targetSessionID else {
+        return
+    }
+    if await isParkedTurn(sessionID: failedSessionID, context: context) {
+        return
+    }
+    guard let stranded = await strandedParkedRun(
+        sessionID: failedSessionID,
+        decidedCallID: decidedCallID,
+        context: context
+    ) else {
+        return
+    }
+    let updated = await context.runs.update(
+        id: stranded.id,
+        status: "error",
+        response: "Resume failed for approval \(id.uuidString): \(detail)"
+    ) ?? stranded
+    await context.hub.broadcastRun(updated)
+}
+
+/// Records or updates the run log entry after a parked narrated approval finishes.
+private func recordResumedRun(
+    resumed: OrchestratorResponse,
+    approved: Bool,
+    decidedCallID: String?,
+    context: ServerContext
+) async {
     let stillParked = resumed.isParked
     if stillParked {
         if let awaiting = await awaitingParkedRun(for: resumed, decidedCallID: decidedCallID, context: context) {
@@ -258,11 +298,7 @@ func resumeNarratedApproval(
         await context.hub.broadcastRun(updated)
         return
     }
-    let startLabel = if approved {
-        "Approved"
-    } else {
-        "Denied"
-    }
+    let startLabel = approved ? "Approved" : "Denied"
     let toolName = resumed.toolActions.first?.toolName ?? "tool"
     let entry = await context.runs.append(
         kind: "chat",
