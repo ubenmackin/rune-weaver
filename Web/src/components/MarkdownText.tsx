@@ -48,7 +48,7 @@ function MarkdownPre({ children, ...props }: PreProps) {
   let lang: string | undefined;
   if (React.isValidElement(children)) {
     const codeProps = children.props as { className?: string };
-    const match = /language-(\w+)/.exec(codeProps.className || "");
+    const match = /language-([\w#+\.-]+)/.exec(codeProps.className || "");
     if (match) {
       lang = match[1];
     }

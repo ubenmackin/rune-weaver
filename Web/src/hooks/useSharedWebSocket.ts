@@ -3,11 +3,13 @@
 
 import { useEffect, useRef } from "react";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
+import { isApprovalFrame, isRecord } from "../approvalsSession";
 
 // Typed inbound frames mirroring the engine wire shapes so dashboard views
-// narrow a parsed payload with a typed union. The generic member keeps
-// forward-compatible event types (run lifecycle) typed while run and request
-// nests stay explicit per view.
+// narrow a parsed payload with a typed union. The generic member stays
+// outside the union so literal narrowing (`data.type === "approval"`) keeps
+// working; forward-compatible event types (run lifecycle) are read through
+// an explicit `WSGenericFrame` cast at the call site instead.
 export interface WSStreamDelta {
   type: "delta";
   delta: string;
@@ -32,13 +34,20 @@ export interface WSToolEndFrame {
 
 export interface WSStreamDone {
   type: "done";
-  text: string;
+  // Terminal text may be omitted when streamed deltas already delivered the
+  // reply; views fall back to the accumulated snapshot instead of dropping
+  // the turn, so the field stays optional for back-compat.
+  text?: string;
   sessionID: string;
   toolActions?: ToolAction[];
   totalTokens?: number;
   modelName?: string;
   contextLength?: number;
   sessionTokens?: number;
+  // Per-turn parked flag mirroring the engine terminal frame: true when the
+  // turn filed gated approvals and waits on the inbox, absent on older
+  // engines where it defaults to not parked.
+  isParked?: boolean;
 }
 
 export interface WSCancelledFrame {
@@ -66,6 +75,9 @@ export interface WSGenericFrame {
   [key: string]: unknown;
 }
 
+// Kept outside the discriminated union on purpose: an index-signature member
+// would overlap every literal `type` and break narrowing, so unknown event
+// shapes are handled via an explicit `WSGenericFrame` cast instead.
 export type WSIncomingFrame =
   | WSStreamDelta
   | WSToolStartFrame
@@ -73,10 +85,55 @@ export type WSIncomingFrame =
   | WSStreamDone
   | WSCancelledFrame
   | WSErrorFrame
-  | WSApprovalFrame
-  | WSGenericFrame;
+  | WSApprovalFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
+
+// Validates an inbound payload before it reaches typed handlers so malformed
+// engine frames never enter view state. Known terminal shapes check their
+// required fields; forward-compatible broadcasts (run lifecycle,
+// approval_* removals) pass through on their string type for consumers to
+// narrow via record checks. Arrays, null, strings, and typeless records drop.
+function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
+  if (!isRecord(value)) return false;
+  if (typeof value.type !== "string") return false;
+  switch (value.type) {
+    case "delta":
+      return typeof value.delta === "string";
+    case "tool_start":
+      return (
+        typeof value.toolName === "string" &&
+        typeof value.callID === "string" &&
+        typeof value.argumentsJSON === "string"
+      );
+    case "tool_end":
+      return (
+        typeof value.toolName === "string" &&
+        typeof value.callID === "string" &&
+        (value.result == null || isRecord(value.result))
+      );
+    case "done":
+      // Text and the parked flag are both optional for back-compat: older
+      // engines omit them when streamed deltas already carry the reply or
+      // when the turn was never parked, and the view finalizes from its
+      // accumulated snapshot while treating a missing flag as not parked.
+      return (
+        (value.text === undefined || typeof value.text === "string") &&
+        typeof value.sessionID === "string" &&
+        (value.isParked === undefined || typeof value.isParked === "boolean")
+      );
+    case "cancelled":
+      return (
+        value.sessionID === undefined || typeof value.sessionID === "string"
+      );
+    case "error":
+      return typeof value.message === "string";
+    case "approval":
+      return isApprovalFrame(value);
+    default:
+      return true;
+  }
+}
 
 class SharedWebSocketClient {
   private ws: WebSocket | null = null;
@@ -111,7 +168,12 @@ class SharedWebSocketClient {
 
       ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data) as unknown as WSIncomingFrame;
+          // Parse as unknown first so arbitrary payloads stay untyped until
+          // the discriminated guard below proves the shape; malformed frames
+          // drop at the hub instead of flowing into typed view handlers.
+          const parsed: unknown = JSON.parse(event.data);
+          if (!isWSIncomingFrame(parsed)) return;
+          const data: WSIncomingFrame = parsed;
           for (const listener of this.listeners) {
             listener(data);
           }
@@ -160,7 +222,13 @@ class SharedWebSocketClient {
     if (onClose) {
       this.closeListeners.add(onClose);
     }
-    if (!this.ws || this.ws.readyState === WebSocket.CLOSED) {
+    // A new subscriber arriving while the socket is closing must not wait
+    // for the stale 3s reconnect: reconnect immediately so it joins live.
+    if (
+      !this.ws ||
+      this.ws.readyState === WebSocket.CLOSED ||
+      this.ws.readyState === WebSocket.CLOSING
+    ) {
       this.connect();
     }
     return () => {
@@ -182,9 +250,41 @@ class SharedWebSocketClient {
   public isOpen(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
+
+  // Test-only reset that clears subscribers and drops the cached socket so
+  // suites start from a detached singleton without reaching into privates.
+  // Gated to the test bundle so production never tears down the shared
+  // connection; outside tests this is a no-op. Listeners clear before the
+  // best-effort close so a stubbed close cannot notify a stale view; the
+  // reconnect timer clears after close because the close handler schedules it.
+  public resetForTesting(): void {
+    // Guard test-only surface: production must never reset the shared socket.
+    if (import.meta.env.MODE !== "test") return;
+    this.listeners.clear();
+    this.closeListeners.clear();
+    try {
+      this.ws?.close?.();
+    } catch {
+      // Teardown is best-effort; a stubbed socket may throw on close.
+    }
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.ws = null;
+    this.isConnecting = false;
+  }
 }
 
 export const sharedWebSocket = new SharedWebSocketClient();
+
+// Test-only reset owned by the shared client module so suites detach the
+// singleton without casting into its private fields. Gated to the test
+// bundle so production callers hit the early return with no side effects.
+export function resetSharedSocket(): void {
+  if (import.meta.env.MODE !== "test") return;
+  sharedWebSocket.resetForTesting();
+}
 
 export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => void) {
   const handlerRef = useRef<MessageHandler | undefined>(onMessage);

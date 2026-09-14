@@ -56,6 +56,10 @@ export interface OrchestratorResponse {
   modelName?: string | null;
   contextLength?: number | null;
   sessionTokens?: number | null;
+  // Per-turn parked flag mirroring the engine response: true when the turn
+  // filed gated approvals and waits on the inbox. Optional for back-compat
+  // with older engines; absent or null decodes to not parked.
+  isParked?: boolean | null;
 }
 
 export interface CancelChatResponse {
@@ -75,6 +79,10 @@ export interface PermissionRequest {
   description: string;
   input: ApprovalInput;
   suggestedDurations: TrustDuration[];
+  // Owning session when the engine tags the prompt; absent on older
+  // payloads, so session filtering must treat it as unattributed rather
+  // than guessing an owner.
+  sessionID?: string | null;
 }
 
 export interface ApprovalsResponse {
@@ -125,6 +133,9 @@ export interface FactsResponse {
 export interface RunLogEntry {
   id: string;
   jobID?: string | null;
+  // Owning chat session when the run came from an interactive turn;
+  // absent on older payloads, so callers must handle unattributed runs.
+  sessionID?: string | null;
   kind: string;
   status: string;
   message: string;
@@ -245,6 +256,26 @@ export class ApiError extends Error {
   }
 }
 
+// Narrows unknown wire values to plain records so engine payloads stay typed
+// without widening callers; arrays are excluded because `typeof []` would
+// otherwise pass as a map and let lists flow into typed state.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// Validates an orchestrator turn before it enters chat state: the engine
+// always emits text, session, and tool actions together, so a partial object
+// must never render as a completed reply. The parked flag stays optional for
+// back-compat and defaults to not parked when absent.
+function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
+  if (!isRecord(value)) return false;
+  if (typeof value.text !== "string") return false;
+  if (typeof value.sessionID !== "string") return false;
+  if (!Array.isArray(value.toolActions)) return false;
+  const parked = value.isParked;
+  return parked === undefined || parked === null || typeof parked === "boolean";
+}
+
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const hasBody = init?.body != null;
   let response: Response;
@@ -270,12 +301,13 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
         // Prefer a structured server reason (Vapor `{"reason": ...}`) over a
         // raw JSON blob so callers surface a human-readable message.
         try {
-          const parsed = JSON.parse(text) as unknown;
+          const parsed: unknown = JSON.parse(text);
+          // Guard with a record check so arrays and primitives cannot leak
+          // indexed fields into the error detail.
+          const record = isRecord(parsed) ? parsed : null;
           const reason =
-            typeof parsed === "object" && parsed !== null
-              ? (parsed as Record<string, unknown>).reason ??
-                (parsed as Record<string, unknown>).message ??
-                (parsed as Record<string, unknown>).error
+            record != null
+              ? (record.reason ?? record.message ?? record.error)
               : undefined;
           detail =
             typeof reason === "string" && reason.trim()
@@ -298,9 +330,14 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(`Expected JSON response: ${path}`, response.status);
   }
   try {
-    const data = (await response.json()) as unknown;
+    const data: unknown = await response.json();
     if (data === null || data === undefined) {
       throw new Error("Null response body");
+    }
+    // Reject malformed engine payloads before they enter typed state:
+    // primitives and arrays cannot satisfy any dashboard response shape.
+    if (!isRecord(data)) {
+      throw new Error("Non-record response body");
     }
     return data as T;
   } catch (err) {
@@ -334,6 +371,13 @@ export function postChat(
   return fetchJson<OrchestratorResponse>("/chat", {
     method: "POST",
     body: JSON.stringify({ text, sessionID, source }),
+  }).then((response) => {
+    // Validate required turn fields before typed state so a malformed engine
+    // payload surfaces as an error instead of rendering a partial reply.
+    if (!isOrchestratorResponse(response)) {
+      throw new ApiError("Invalid chat response", 0);
+    }
+    return response;
   });
 }
 
@@ -388,20 +432,33 @@ export function storeFact(
   });
 }
 
-export async function deleteFact(id: string): Promise<void> {
-  await fetchJson<void>(`/memory/facts/${encodeURIComponent(id)}`, {
+export function deleteFact(id: string): Promise<void> {
+  return fetchJson<void>(`/memory/facts/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
 
-export function listRuns(limit = 50, jobID?: string): Promise<RunLogsResponse> {
+export function listRuns(limit = 50, jobID?: string, sessionID?: string): Promise<RunLogsResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (jobID) params.set("jobID", jobID);
+  if (sessionID) params.set("sessionID", sessionID);
   return fetchJson<RunLogsResponse>(`/runs?${params.toString()}`);
 }
 
 export function getRun(id: string): Promise<RunLogEntry> {
   return fetchJson<RunLogEntry>(`/runs/${encodeURIComponent(id)}`);
+}
+
+export function clearRuns(): Promise<void> {
+  return fetchJson<void>("/runs", {
+    method: "DELETE",
+  });
+}
+
+export function deleteRun(id: string): Promise<void> {
+  return fetchJson<void>(`/runs/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function listSessions(): Promise<SessionsResponse> {
@@ -459,8 +516,8 @@ export function updateJob(
   });
 }
 
-export async function deleteJob(id: string): Promise<void> {
-  await fetchJson<void>(`/scheduler/jobs/${encodeURIComponent(id)}`, {
+export function deleteJob(id: string): Promise<void> {
+  return fetchJson<void>(`/scheduler/jobs/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
 }
@@ -469,7 +526,14 @@ export function runJobNow(id: string): Promise<OrchestratorResponse> {
   return fetchJson<OrchestratorResponse>(
     `/scheduler/jobs/${encodeURIComponent(id)}/run`,
     { method: "POST", body: JSON.stringify({}) },
-  );
+  ).then((response) => {
+    // Same turn contract as interactive chat: reject partial payloads before
+    // run history renders them as completed executions.
+    if (!isOrchestratorResponse(response)) {
+      throw new ApiError("Invalid job run response", 0);
+    }
+    return response;
+  });
 }
 
 export interface ProviderConfigData {

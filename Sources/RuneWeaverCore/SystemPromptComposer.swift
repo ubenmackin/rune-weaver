@@ -1,3 +1,11 @@
+// Rune Weaver Core — Dynamic system prompt composition from the live tool registry.
+//
+// Snapshots the tool bus at session start to catalog tool names, descriptions,
+// input schemas, and permission levels around fixed identity, tool-use, and
+// memory guidance. Provides the scheduled-run variant guiding background
+// persistence and recall plus the flag-override resolver so chat and scheduler
+// turns share one prompt contract through the orchestrator.
+
 import Foundation
 
 /// Builds the default chat system prompt from the live tool registry.
@@ -103,5 +111,30 @@ public enum SystemPromptComposer {
             return flag
         }
         return await compose(toolBus: toolBus)
+    }
+
+    /// Composes the system prompt customized for automated scheduled runs.
+    ///
+    /// Extends the catalog with instructions to record state and key outcomes
+    /// via `remember_fact` and recall past run context via `recall_memories`.
+    /// - Parameter tools: Tools to catalog in the prompt.
+    /// - Returns: Scheduled system prompt text.
+    public static func composeScheduled(tools: [any Tool]) -> String {
+        var base = compose(tools: tools)
+        base += "\n\n"
+        base += """
+        Scheduled task guidance:
+        - You are executing as an automated scheduled background task. There is no active human waiting in real time.
+        - Persist critical run outcomes, updates, timestamps, or state changes into memory via remember_fact so subsequent runs or user chats can recall them.
+        - Proactively query recall_memories to check prior run state, baselines, or preferences when relevant to the task.
+        """
+        return base
+    }
+
+    /// Composes the scheduled system prompt from the live tool registry.
+    /// - Parameter toolBus: Live registry owning the session's tools.
+    /// - Returns: Scheduled system prompt text.
+    public static func composeScheduled(toolBus: ToolBus) async -> String {
+        await composeScheduled(tools: toolBus.availableTools())
     }
 }

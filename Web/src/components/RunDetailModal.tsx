@@ -5,6 +5,7 @@ import type { RunLogEntry } from "../api";
 import { CloseIcon } from "./icons";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
+import Modal from "./Modal";
 
 interface RunDetailModalProps {
   run: RunLogEntry | null;
@@ -16,30 +17,43 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
 
   const isOk = run.status === "ok";
   const isSkipped = run.status === "skipped";
+  const isAwaitingApproval = run.status === "awaiting_approval";
+  const isRunning = run.status === "running";
+  // Debug identifiers stay visible even on older payloads: run and session
+  // IDs pin the audit trail to its conversation, while per-tool call IDs
+  // correlate gated approvals and history without guessing.
+  const sessionID = run.sessionID ?? null;
 
   return (
-    <div className="modal-backdrop" onClick={onClose} role="dialog" aria-label="Run details" aria-modal="true">
-      <div className="modal-container run-detail-modal" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-          <div className="run-header-title">
-            <span className={`status-pill ${run.status}`}>
-              {run.status === "running" ? "IN PROGRESS" : run.status.toUpperCase()}
-            </span>
-            <h3>
-              {run.kind === "scheduler" ? "Scheduled Run" : "Chat Turn"} Details
-            </h3>
-          </div>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={onClose}
-            aria-label="Dismiss"
-          >
-            <CloseIcon size={18} />
-          </button>
+    <Modal
+      label="Run details"
+      onClose={onClose}
+      containerClassName="modal-container run-detail-modal"
+    >
+      <div className="modal-header">
+        <div className="run-header-title">
+          <span className={`status-pill ${run.status}`}>
+            {run.status === "running"
+              ? "IN PROGRESS"
+              : run.status === "awaiting_approval"
+                ? "AWAITING APPROVAL"
+                : run.status.toUpperCase()}
+          </span>
+          <h3>
+            {run.kind === "scheduler" ? "Scheduled Run" : "Chat Turn"} Details
+          </h3>
         </div>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={onClose}
+          aria-label="Dismiss"
+        >
+          <CloseIcon size={18} />
+        </button>
+      </div>
 
-        <div className="modal-body">
+      <div className="modal-body">
           {/* Metadata Row */}
           <div className="run-meta-grid">
             <div className="meta-card">
@@ -66,11 +80,37 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
                 </span>
               </div>
             ) : null}
+            <div className="meta-card">
+              <span className="meta-label">Run ID</span>
+              <span
+                className="meta-value font-mono"
+                title={run.id}
+                style={{ wordBreak: "break-all" }}
+              >
+                {run.id}
+              </span>
+            </div>
+            {sessionID ? (
+              <div className="meta-card">
+                <span className="meta-label">Session ID</span>
+                <span
+                  className="meta-value font-mono"
+                  title={sessionID}
+                  style={{ wordBreak: "break-all" }}
+                >
+                  {sessionID}
+                </span>
+              </div>
+            ) : null}
             {run.jobID ? (
               <div className="meta-card">
                 <span className="meta-label">Job ID</span>
-                <span className="meta-value font-mono">
-                  {run.jobID.slice(0, 8)}
+                <span
+                  className="meta-value font-mono"
+                  title={run.jobID}
+                  style={{ wordBreak: "break-all" }}
+                >
+                  {run.jobID}
                 </span>
               </div>
             ) : null}
@@ -88,7 +128,7 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
               <h4>Tool Executions ({run.toolActions.length})</h4>
               <div className="tool-actions-list">
                 {run.toolActions.map((action, idx) => (
-                  <ToolActionRow key={action.callID || idx} action={action} variant="card" />
+                  <ToolActionRow key={action.callID || idx} action={action} variant="card" isLive={false} />
                 ))}
               </div>
             </div>
@@ -105,9 +145,13 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
               <div className="empty-response-note">
                 {isSkipped
                   ? "Execution was skipped (a run for this job was already active)."
-                  : !isOk
-                  ? "Execution terminated with error before generating an assistant response."
-                  : "No textual response generated."}
+                  : isAwaitingApproval
+                    ? "Awaiting approval — no output yet."
+                    : isRunning
+                      ? "In progress…"
+                      : !isOk
+                        ? "Execution terminated with error before generating an assistant response."
+                        : "No textual response generated."}
               </div>
             )}
           </div>
@@ -118,7 +162,6 @@ export default function RunDetailModal({ run, onClose }: RunDetailModalProps) {
             Close
           </button>
         </div>
-      </div>
-    </div>
+      </Modal>
   );
 }

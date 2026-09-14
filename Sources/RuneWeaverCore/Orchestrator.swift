@@ -1,3 +1,11 @@
+// Rune Weaver Core — Turn orchestration and tool execution loop.
+//
+// Receives user input, routes it through the LLM, executes requested tools
+// via the tool bus, and returns final responses with session memory
+// mirroring. Hosts the narration fallback for local models and the
+// file-and-park lifecycle for approval-gated narrations with same-session
+// resume.
+
 import Foundation
 
 /// Convenience alias for the conversation role.
@@ -15,16 +23,20 @@ public struct UserInput: Sendable, Codable, Equatable {
     public let sessionID: UUID
     /// Input origin (e.g. `"text"`, `"voice"`, `"dashboard"`).
     public let source: String
+    /// Optional turn-specific system prompt override.
+    public let systemPrompt: String?
 
     /// Creates user input.
     /// - Parameters:
     ///   - text: Raw user text.
     ///   - sessionID: Owning session. Defaults to a new UUID.
     ///   - source: Input origin. Defaults to `"text"`.
-    public init(text: String, sessionID: UUID = UUID(), source: String = "text") {
+    ///   - systemPrompt: Optional turn-specific system prompt override. Defaults to nil.
+    public init(text: String, sessionID: UUID = UUID(), source: String = "text", systemPrompt: String? = nil) {
         self.text = text
         self.sessionID = sessionID
         self.source = source
+        self.systemPrompt = systemPrompt
     }
 }
 
@@ -76,6 +88,32 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     public let contextLength: Int?
     /// Cumulative billed tokens for this session, if tracked.
     public let sessionTokens: Int?
+    /// Whether this turn parked waiting on approval.
+    ///
+    /// True only for the turn that filed gated narrations; stale parked
+    /// approvals from prior turns in the same session never flip a fresh
+    /// normal turn to parked.
+    public let isParked: Bool
+
+    /// Coding keys matching the JSON wire shape.
+    private enum CodingKeys: String, CodingKey {
+        /// Final assistant text.
+        case text
+        /// Owning session identifier.
+        case sessionID
+        /// Tool invocations performed.
+        case toolActions
+        /// Session-billed tokens.
+        case totalTokens
+        /// Serving model name.
+        case modelName
+        /// Context window limit.
+        case contextLength
+        /// Cumulative billed tokens.
+        case sessionTokens
+        /// Whether the turn parked waiting on approval.
+        case isParked
+    }
 
     /// Creates a response.
     /// - Parameters:
@@ -86,6 +124,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     ///   - modelName: Serving model name. Defaults to nil.
     ///   - contextLength: Context window limit. Defaults to nil.
     ///   - sessionTokens: Cumulative tokens for session. Defaults to nil.
+    ///   - isParked: Whether this turn parked waiting on approval. Defaults to false.
     public init(
         text: String,
         sessionID: UUID,
@@ -93,7 +132,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         totalTokens: Int? = nil,
         modelName: String? = nil,
         contextLength: Int? = nil,
-        sessionTokens: Int? = nil
+        sessionTokens: Int? = nil,
+        isParked: Bool = false
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -102,6 +142,35 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.modelName = modelName
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
+        self.isParked = isParked
+    }
+
+    /// Decodes a response, defaulting missing parked flags to not parked.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.text = try container.decode(String.self, forKey: .text)
+        self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions) ?? []
+        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
+        self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+        self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
+        self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
+    }
+
+    /// Encodes a response.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(toolActions, forKey: .toolActions)
+        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try container.encodeIfPresent(modelName, forKey: .modelName)
+        try container.encodeIfPresent(contextLength, forKey: .contextLength)
+        try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
+        try container.encode(isParked, forKey: .isParked)
     }
 }
 
@@ -126,6 +195,11 @@ public enum OrchestratorEvent: Sendable, Codable, Equatable {
     case toolCompleted(toolName: String, callID: String, result: ToolResult)
     /// Incremental assistant text delta generated by the model.
     case textDelta(String)
+    /// Filed narrated approval awaiting an inbox decision.
+    ///
+    /// Emitted once per gated narration filed while parking so service
+    /// layers can broadcast the live approval prompt without polling.
+    case approval(PermissionRequest)
 }
 
 /// Resolves model-requested tool calls for the current context.
@@ -235,6 +309,43 @@ public enum OrchestratorToolLoop {
     /// - Returns: Executable read-only calls in line order, or empty when
     ///   no narrated line qualifies.
     public static func narratedToolCalls(from text: String, tools: [any Tool]) -> [ToolInput] {
+        narratedCalls(from: text, tools: tools, where: { $0.permissionLevel == .readOnly })
+    }
+
+    /// Converts narrated placeholder lines into approval-gated tool calls.
+    ///
+    /// Companion to `narratedToolCalls(from:tools:)` for the parked-approval
+    /// path: each `Calling <name> <arguments> [<callID>]` line is parsed with
+    /// the same shared parser and kept only when the named tool is
+    /// registered, its permission level is `requiresApproval`, and its
+    /// arguments are a valid JSON object. Matches receive fresh call
+    /// identifiers so narrated identifiers never correlate with filed
+    /// requests. Read-only, trusted, unknown, and malformed lines yield no
+    /// calls here; read-only lines stay on the direct-execution path.
+    /// - Parameters:
+    ///   - text: Latest assistant text possibly containing placeholders.
+    ///   - tools: Available tools the model may call.
+    /// - Returns: Parkable gated calls in line order, or empty when no
+    ///   narrated line qualifies.
+    public static func narratedGatedCalls(from text: String, tools: [any Tool]) -> [ToolInput] {
+        narratedCalls(from: text, tools: tools, where: { $0.permissionLevel == .requiresApproval })
+    }
+
+    /// Converts narrated placeholder lines into tool calls matching a permission filter.
+    ///
+    /// Single shared parsing path for the read-only and gated narration
+    /// fallbacks so trim, line splitting, tool lookup, and JSON validation
+    /// cannot drift; callers differ only by which permission level they keep.
+    /// - Parameters:
+    ///   - text: Latest assistant text possibly containing placeholders.
+    ///   - tools: Available tools the model may call.
+    ///   - predicate: Keeps a resolved tool when true (one permission level per caller).
+    /// - Returns: Matching calls in line order, or empty when none qualifies.
+    private static func narratedCalls(
+        from text: String,
+        tools: [any Tool],
+        where predicate: (any Tool) -> Bool
+    ) -> [ToolInput] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let byName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
@@ -245,7 +356,7 @@ public enum OrchestratorToolLoop {
         for rawLine in normalized.components(separatedBy: "\n") {
             guard let parsed = ToolInput.parsePlaceholderLine(rawLine) else { continue }
             guard let tool = byName[parsed.toolName] else { continue }
-            guard tool.permissionLevel == .readOnly else { continue }
+            guard predicate(tool) else { continue }
             guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
             calls.append(ToolInput(
                 toolName: parsed.toolName,
@@ -254,6 +365,31 @@ public enum OrchestratorToolLoop {
             ))
         }
         return calls
+    }
+
+    /// Builds the parked-turn message ending a narration that needs approval.
+    ///
+    /// Names every gated tool so the waiting turn stays auditable without
+    /// leaking argument JSON, and points at the approvals inbox where the
+    /// decision resumes the same session.
+    /// - Parameter calls: Gated calls filed for this turn.
+    /// - Returns: User-visible waiting message.
+    public static func waitingOnApprovalMessage(for calls: [ToolInput]) -> String {
+        let names = Array(Set(calls.map(\.toolName))).sorted()
+        let joined = names.isEmpty ? "the requested tool" : names.joined(separator: ", ")
+        return "Waiting for approval to run \(joined). Approve in the approvals inbox to continue."
+    }
+
+    /// Builds the session notice recording a denied narrated approval.
+    ///
+    /// Keeps the denial in working memory so the next synthesis never
+    /// assumes the gated call ran, without echoing argument JSON.
+    /// - Parameter toolName: Name of the denied tool.
+    /// - Returns: User-visible denial notice.
+    public static func deniedApprovalMessage(for toolName: String) -> String {
+        let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = trimmed.isEmpty ? "the requested tool" : trimmed
+        return "Approval denied for \(name); not running it."
     }
 
     /// Whether raw narration arguments are a JSON object.
@@ -277,6 +413,92 @@ public enum OrchestratorToolLoop {
     }
 }
 
+/// Parked narrated approval awaiting a later decision.
+///
+/// Captures the owning session plus the gated invocation so an allow can
+/// execute the exact filed call and a deny can notify the same session,
+/// even after the approvals inbox entry is resolved.
+public struct ParkedNarratedApproval: Sendable, Equatable {
+    /// Owning session the narration parked in.
+    public let sessionID: UUID
+    /// Gated invocation filed for approval.
+    public let toolCall: ToolInput
+    /// Effective system prompt active when the turn parked.
+    ///
+    /// Preserves the turn's prompt so the resume synthesis continues with
+    /// the same instructions: scheduler turns keep their background
+    /// prompting and custom overrides survive the inbox round-trip instead
+    /// of falling back to the default prompt.
+    public let systemPrompt: String?
+    /// Per-turn batch identifier shared by siblings parked together.
+    ///
+    /// Minted once per parking turn so two gated turns parked in the same
+    /// session before either decides stay isolated instead of merging into
+    /// one batch that synthesizes once with mixed outcomes.
+    public let batchID: UUID
+
+    /// Creates a parked approval.
+    /// - Parameters:
+    ///   - sessionID: Owning session.
+    ///   - toolCall: Gated invocation.
+    ///   - systemPrompt: Effective prompt active when the turn parked.
+    ///     Defaults to nil (legacy untagged, falls back to the default).
+    ///   - batchID: Per-turn batch identifier. Defaults to a new UUID.
+    public init(sessionID: UUID, toolCall: ToolInput, systemPrompt: String? = nil, batchID: UUID = UUID()) {
+        self.sessionID = sessionID
+        self.toolCall = toolCall
+        self.systemPrompt = systemPrompt
+        self.batchID = batchID
+    }
+}
+
+/// Context grouping the inputs for one parked-approval filing path.
+///
+/// Groups the gated-narration inputs so the filing helper stays within the
+/// parameter budget without changing filing behavior.
+private struct ParkGatedCallsContext {
+    let gated: [ToolInput]
+    let narratedText: String
+    let tools: [any Tool]
+    let sessionID: UUID
+    let priorActions: [ToolAction]
+    let billedTokens: Int?
+    let systemPrompt: String?
+    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+}
+
+/// Inputs for one bounded tool-loop run.
+///
+/// Bundles working history plus turn context so the extracted loop helper
+/// stays within the parameter budget while sharing the same loop policy.
+private struct TurnLoopRequest {
+    let workingMessages: [Message]
+    let tools: [any Tool]
+    let recall: Message?
+    let sessionID: UUID
+    let systemPrompt: String?
+    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+}
+
+/// Outcome of one bounded tool-loop run.
+///
+/// Finished carries final text plus actions and billed tokens for the caller
+/// to store; parked carries the waiting response already flushed.
+private enum TurnLoopOutcome {
+    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?)
+    case parked(OrchestratorResponse)
+}
+
+/// Intermediate result of an LLM round.
+///
+/// Carries concatenated text plus billed tokens and streamed tool calls so
+/// the loop helper shares one collection shape with the synthesis path.
+private struct TurnDraft: Sendable {
+    let text: String
+    let billedTokens: Int?
+    let toolCalls: [ToolInput]
+}
+
 /// Core orchestration loop: input, context, LLM, tools, response.
 ///
 /// The orchestrator receives user input, loads session context,
@@ -290,6 +512,13 @@ public enum OrchestratorToolLoop {
 /// record with no placeholder lines, call identifiers, or call-argument
 /// JSON. The CLI chat loop delegates its per-round decisions to
 /// ``OrchestratorToolLoop`` so both entry points share one loop policy.
+///
+/// Narrated approval-gated calls never execute inline. When narration
+/// names a `requiresApproval` tool, the turn files one
+/// ``ApprovalQueue`` request per call tagged with the session, ends parked
+/// with a waiting message, and resumes on decision: an allow executes the
+/// filed call and runs a synthesis turn in the same session, while a deny
+/// records the denial in that session.
 public actor Orchestrator {
     /// Session and history owner.
     private let conversations: ConversationManager
@@ -305,6 +534,21 @@ public actor Orchestrator {
     private let toolResolver: OrchestratorToolResolver?
     /// Episodic mirror for every turn, when configured.
     private let memoryEngine: MemoryEngine?
+    /// Queue receiving narrated gated calls, when configured.
+    ///
+    /// Nil keeps the legacy drop behavior for callers without an approvals
+    /// inbox (CLI, scheduler headless); a queue enables file-and-park plus
+    /// later resume in the same session.
+    private let approvalQueue: ApprovalQueue?
+    /// Parked gated narrations indexed by approval request identifier.
+    private var parkedNarratedApprovals: [UUID: ParkedNarratedApproval] = [:]
+    /// Executed gated actions buffered per parked batch while siblings stay pending.
+    ///
+    /// One LLM round can park several gated narrations under one batch
+    /// identifier; each inbox decision executes its call immediately but
+    /// synthesis waits until the last sibling in that batch resolves so the
+    /// turn synthesizes once with every outcome.
+    private var parkedBatchExecutedActions: [UUID: [ToolAction]] = [:]
     /// Cumulative billed tokens tracked per session.
     private var sessionTokensBySession: [UUID: Int] = [:]
     /// Access order for token totals, oldest first.
@@ -333,6 +577,8 @@ public actor Orchestrator {
     ///     calls. Defaults to nil (text-only).
     ///   - memoryEngine: Episodic mirror receiving every turn
     ///     failure-isolated. Defaults to nil (no mirroring).
+    ///   - approvalQueue: Queue receiving narrated gated calls for
+    ///     file-and-park plus resume. Defaults to nil (drop gated narration).
     public init(
         conversations: ConversationManager,
         toolBus: ToolBus,
@@ -340,7 +586,8 @@ public actor Orchestrator {
         systemPrompt: String? = nil,
         maxToolIterations: Int = 8,
         toolResolver: OrchestratorToolResolver? = nil,
-        memoryEngine: MemoryEngine? = nil
+        memoryEngine: MemoryEngine? = nil,
+        approvalQueue: ApprovalQueue? = nil
     ) {
         self.conversations = conversations
         self.toolBus = toolBus
@@ -349,6 +596,7 @@ public actor Orchestrator {
         self.maxToolIterations = max(1, maxToolIterations)
         self.toolResolver = toolResolver
         self.memoryEngine = memoryEngine
+        self.approvalQueue = approvalQueue
     }
 
     /// Processes one user input through the full loop.
@@ -424,63 +672,50 @@ public actor Orchestrator {
                 return earlyResponse
             }
 
+            let effectiveSystemPrompt: String? = if let custom = input.systemPrompt {
+                custom
+            } else if input.source == "scheduler" {
+                await SystemPromptComposer.composeScheduled(tools: toolBus.availableTools())
+            } else {
+                systemPrompt
+            }
             let recall: Message? = if let memoryEngine {
                 await memoryEngine.recallMessage(for: text, sessionID: sessionID)
             } else {
                 nil
             }
-            var workingMessages = await MemoryEngine.historyWithRecall(
-                conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt),
+            let workingMessages = await MemoryEngine.historyWithRecall(
+                conversations.workingHistory(for: sessionID, systemPrompt: effectiveSystemPrompt),
                 recall: recall
             )
             let tools = await toolBus.availableTools()
-            var toolActions: [ToolAction] = []
-            var finalText = ""
-            var toolRounds = 0
-            var billedTokens: Int?
-
-            while true {
-                try Task.checkCancellation()
-                let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
-                    await onEvent?(.textDelta(delta))
-                })
-                if let billed = collected.billedTokens {
-                    billedTokens = (billedTokens ?? 0) + billed
-                }
-                finalText = collected.text
-                var calls = collected.toolCalls
-                if calls.isEmpty {
-                    calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
-                }
-                if calls.isEmpty {
-                    break
-                }
-                toolRounds += 1
-                if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxToolIterations) {
-                    throw OrchestratorError.toolLoopExceeded(iterations: maxToolIterations)
-                }
-                let assistantNote = assistantNoteMessage(text: finalText, calls: calls)
-                await conversations.append(assistantNote, to: sessionID)
-                let executed = try await executeToolCalls(calls, sessionID: sessionID, onEvent: onEvent, pendingEpisodic: &pendingEpisodic)
-                toolActions.append(contentsOf: executed)
-                workingMessages = await refreshedWorkingMessages(sessionID: sessionID, recall: recall)
-                finalText = ""
-            }
-
-            await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
-            try Task.checkCancellation()
-            await flushEpisodic(pendingEpisodic, sessionID: sessionID)
-            let cumulativeTokens = accumulateSessionTokens(billedTokens, for: sessionID)
-
-            return OrchestratorResponse(
-                text: finalText,
+            let request = TurnLoopRequest(
+                workingMessages: workingMessages,
+                tools: tools,
+                recall: recall,
                 sessionID: sessionID,
-                toolActions: toolActions,
-                totalTokens: billedTokens,
-                modelName: llm.modelInfo.name,
-                contextLength: llm.modelInfo.contextLength,
-                sessionTokens: cumulativeTokens
+                systemPrompt: effectiveSystemPrompt,
+                onEvent: onEvent
             )
+            let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
+            switch outcome {
+            case let .parked(parkedResponse):
+                return parkedResponse
+            case let .finished(finalText, toolActions, loopBilled):
+                await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
+                try Task.checkCancellation()
+                await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+                let cumulativeTokens = accumulateSessionTokens(loopBilled, for: sessionID)
+                return OrchestratorResponse(
+                    text: finalText,
+                    sessionID: sessionID,
+                    toolActions: toolActions,
+                    totalTokens: loopBilled,
+                    modelName: llm.modelInfo.name,
+                    contextLength: llm.modelInfo.contextLength,
+                    sessionTokens: cumulativeTokens
+                )
+            }
         } catch is CancellationError {
             // Executed tools already changed the world: keep working-memory
             // partials and mirror them so the audit trail survives the
@@ -505,7 +740,518 @@ public actor Orchestrator {
         llm.modelInfo
     }
 
+    /// Whether a session owns a parked narrated turn awaiting approval.
+    ///
+    /// Centralizes the parked check so chat, scheduler, and service entry
+    /// points share one lookup instead of re-filtering inbox identifiers at
+    /// each call site.
+    /// - Parameter sessionID: Owning session to inspect.
+    /// - Returns: True when the session owns at least one parked approval.
+    public func isSessionParked(_ sessionID: UUID) -> Bool {
+        for parked in parkedNarratedApprovals.values where parked.sessionID == sessionID {
+            return true
+        }
+        return false
+    }
+}
+
+// MARK: - Parked approvals and turn loop execution
+
+/// Holds the resume path plus the extracted tool-loop helpers so the main
+/// actor body stays within the length budget while sharing file-private state.
+extension Orchestrator {
+    /// Resumes a parked narrated approval after its inbox decision.
+    ///
+    /// An allow executes the filed call directly (honoring the explicit
+    /// decision without re-entering the bus gate, so one-shot approvals run
+    /// without a second prompt), appends the result, then runs one synthesis
+    /// turn in the same session. A deny appends the denial notice to the
+    /// same session without executing. Either path drains a parked early
+    /// queue decision left by the inbox so it cannot leak into a later wait.
+    /// Unknown identifiers yield nil so structured waits and headless
+    /// denials without a parked turn stay untouched.
+    /// - Parameters:
+    ///   - id: Approval request identifier filed when the turn parked.
+    ///   - approved: Whether the inbox allowed the call.
+    ///   - onEvent: Optional handler receiving tool and text streaming events.
+    /// - Returns: Resume response in the parked session, or nil when unknown.
+    public func resumeNarratedApproval(
+        id: UUID,
+        approved: Bool,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse? {
+        try Task.checkCancellation()
+        guard let parked = parkedNarratedApprovals.removeValue(forKey: id) else {
+            return nil
+        }
+        if let queue = approvalQueue {
+            _ = await queue.takeEarlyDecision(id: id)
+        }
+        _ = await conversations.ensureSession(id: parked.sessionID)
+        if approved {
+            return try await resumeAllowedParked(parked, onEvent: onEvent)
+        } else {
+            return try await resumeDeniedParked(parked, onEvent: onEvent)
+        }
+    }
+
+    /// Resumes a denied parked approval, deferring synthesis while siblings remain.
+    ///
+    /// Records the refusal then completes the batch through the shared
+    /// finalizer so intermediate denies keep the turn awaiting and the last
+    /// decision synthesizes once when prior allows executed.
+    /// - Parameters:
+    ///   - parked: Denied parked approval just removed from tracking.
+    ///   - onEvent: Optional handler receiving text streaming events.
+    /// - Returns: Progress while siblings remain, else final denial or synthesis.
+    private func resumeDeniedParked(
+        _ parked: ParkedNarratedApproval,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let denial = await recordParkedDenial(parked.toolCall, sessionID: parked.sessionID, onEvent: onEvent)
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: denial,
+            newAction: nil,
+            approved: false,
+            onEvent: onEvent
+        )
+    }
+
+    /// Resumes an allowed parked approval, executing then synthesizing once all siblings land.
+    ///
+    /// Executes immediately so side effects land in order, then completes
+    /// through the shared finalizer so intermediate allows keep the turn
+    /// awaiting and the last sibling synthesizes once atomically.
+    /// - Parameters:
+    ///   - parked: Allowed parked approval just removed from tracking.
+    ///   - onEvent: Optional handler receiving tool and text streaming events.
+    /// - Returns: Progress while siblings remain, else final synthesis or missing notice.
+    private func resumeAllowedParked(
+        _ parked: ParkedNarratedApproval,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
+    ) async throws -> OrchestratorResponse {
+        let sessionID = parked.sessionID
+        let call = parked.toolCall
+        guard let tool = await toolBus.tool(named: call.toolName) else {
+            let missing = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
+            return try await finishParkedBatch(
+                parked: parked,
+                baseText: missing,
+                newAction: nil,
+                approved: true,
+                onEvent: onEvent
+            )
+        }
+        let action = await executeParkedCall(call, tool: tool, sessionID: sessionID, onEvent: onEvent)
+        return try await finishParkedBatch(
+            parked: parked,
+            baseText: "",
+            newAction: action,
+            approved: true,
+            onEvent: onEvent
+        )
+    }
+
+    /// Completes one parked batch decision, deferring synthesis until the last sibling lands.
+    ///
+    /// Buffers the just-executed action when present, returns progress with
+    /// remaining pendings while siblings stay parked, and otherwise takes the
+    /// buffered batch for one synthesis turn (or the base notice when nothing
+    /// executed) so the run flips once with every outcome.
+    /// - Parameters:
+    ///   - parked: Just-decided parked approval, already removed from tracking.
+    ///   - baseText: Denial or missing notice, or empty when an action executed.
+    ///   - newAction: Executed action to buffer, or nil when nothing ran.
+    ///   - approved: Whether the just-decided call was allowed.
+    ///   - onEvent: Optional handler receiving progress and synthesis events.
+    /// - Returns: Progress while siblings remain, else final synthesis or base notice.
+    private func finishParkedBatch(
+        parked: ParkedNarratedApproval,
+        baseText: String,
+        newAction: ToolAction?,
+        approved: Bool,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async throws -> OrchestratorResponse {
+        let sessionID = parked.sessionID
+        let batchID = parked.batchID
+        if let newAction {
+            appendBufferedParkedAction(newAction, forBatch: batchID)
+        }
+        let remaining = remainingPendingActions(inBatch: batchID)
+        if !remaining.isEmpty {
+            let buffered = bufferedParkedActions(forBatch: batchID)
+            let noun = if remaining.count == 1 {
+                "approval"
+            } else {
+                "approvals"
+            }
+            let progress: String = if newAction != nil {
+                parkedBatchProgressMessage(
+                    toolName: parked.toolCall.toolName,
+                    remainingCount: remaining.count,
+                    approved: approved
+                )
+            } else {
+                "\(baseText) Waiting for \(remaining.count) more \(noun)."
+            }
+            await onEvent?(.textDelta(progress))
+            return OrchestratorResponse(
+                text: progress,
+                sessionID: sessionID,
+                toolActions: buffered + remaining,
+                modelName: llm.modelInfo.name,
+                contextLength: llm.modelInfo.contextLength,
+                sessionTokens: sessionTokensBySession[sessionID],
+                isParked: true
+            )
+        }
+        let buffered = takeBufferedParkedActions(forBatch: batchID)
+        if buffered.isEmpty {
+            return OrchestratorResponse(
+                text: baseText,
+                sessionID: sessionID,
+                toolActions: [],
+                modelName: llm.modelInfo.name,
+                contextLength: llm.modelInfo.contextLength,
+                sessionTokens: sessionTokensBySession[sessionID],
+                isParked: false
+            )
+        }
+        let prompt = await resolveParkedSynthesisPrompt(parked)
+        let synthesis = try await synthesizeParkedTurn(sessionID: sessionID, prompt: prompt, onEvent: onEvent)
+        let cumulative = accumulateSessionTokens(synthesis.billedTokens, for: sessionID)
+        return OrchestratorResponse(
+            text: synthesis.text,
+            sessionID: sessionID,
+            toolActions: buffered,
+            totalTokens: synthesis.billedTokens,
+            modelName: llm.modelInfo.name,
+            contextLength: llm.modelInfo.contextLength,
+            sessionTokens: cumulative,
+            isParked: false
+        )
+    }
+
+    /// Resolves the synthesis prompt for a parked turn.
+    ///
+    /// Parked scheduler and custom-prompt turns must resume with the same
+    /// instructions they parked with; falling back to the default prompt
+    /// would contradict scheduled background continuity. Stored effective
+    /// prompts win, while legacy untagged parks recompute the scheduled
+    /// prompt when their session still carries the scheduler source.
+    /// - Parameter parked: Parked approval carrying the turn's prompt, if stored.
+    /// - Returns: Prompt for the resume synthesis history.
+    private func resolveParkedSynthesisPrompt(_ parked: ParkedNarratedApproval) async -> String? {
+        if let stored = parked.systemPrompt {
+            return stored
+        }
+        let source = await conversations.session(id: parked.sessionID)?.source
+        if source == "scheduler" {
+            let tools = await toolBus.availableTools()
+            return SystemPromptComposer.composeScheduled(tools: tools)
+        }
+        return systemPrompt
+    }
+
+    /// Pending actions for siblings still awaiting inbox decisions.
+    ///
+    /// Keeps the awaiting run auditable while siblings resolve: decided
+    /// calls carry results while undecided siblings stay pending with no
+    /// result for detail views and call-ID fallback. Scoped to one parking
+    /// batch so separate turns in the same session never merge.
+    /// - Parameter batchID: Per-turn batch identifier to inspect.
+    /// - Returns: Pending actions for remaining siblings, sorted for stability.
+    private func remainingPendingActions(inBatch batchID: UUID) -> [ToolAction] {
+        parkedNarratedApprovals.values
+            .filter { $0.batchID == batchID }
+            .map {
+                ToolAction(
+                    toolName: $0.toolCall.toolName,
+                    callID: $0.toolCall.callID,
+                    argumentsJSON: $0.toolCall.argumentsJSON,
+                    result: nil
+                )
+            }
+            .sorted {
+                if $0.toolName != $1.toolName {
+                    return $0.toolName < $1.toolName
+                }
+                return $0.callID < $1.callID
+            }
+    }
+
+    /// Buffered executed actions for one parked batch.
+    /// - Parameter batchID: Per-turn batch identifier.
+    /// - Returns: Executed gated actions decided so far, in decision order.
+    private func bufferedParkedActions(forBatch batchID: UUID) -> [ToolAction] {
+        parkedBatchExecutedActions[batchID] ?? []
+    }
+
+    /// Buffers one executed gated action for a parked batch.
+    /// - Parameters:
+    ///   - action: Executed action to keep for the final synthesis response.
+    ///   - batchID: Per-turn batch identifier.
+    private func appendBufferedParkedAction(_ action: ToolAction, forBatch batchID: UUID) {
+        parkedBatchExecutedActions[batchID, default: []].append(action)
+    }
+
+    /// Takes and clears buffered executed actions for a parked batch.
+    /// - Parameter batchID: Per-turn batch identifier.
+    /// - Returns: Executed actions in decision order, possibly empty.
+    private func takeBufferedParkedActions(forBatch batchID: UUID) -> [ToolAction] {
+        let buffered = parkedBatchExecutedActions[batchID] ?? []
+        parkedBatchExecutedActions.removeValue(forKey: batchID)
+        return buffered
+    }
+
+    /// Progress text for a parked batch still awaiting sibling decisions.
+    ///
+    /// Keeps the awaiting run response informative while siblings resolve
+    /// without inventing a synthesis: names the just-decided tool and the
+    /// remaining count so dashboards show forward motion.
+    /// - Parameters:
+    ///   - toolName: Just-decided tool.
+    ///   - remainingCount: Siblings still pending.
+    ///   - approved: Whether the just-decided call was allowed.
+    /// - Returns: User-visible progress message.
+    private func parkedBatchProgressMessage(toolName: String, remainingCount: Int, approved: Bool) -> String {
+        let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name: String = if trimmed.isEmpty {
+            "the requested tool"
+        } else {
+            trimmed
+        }
+        let verb = if approved {
+            "Approved"
+        } else {
+            "Denied"
+        }
+        if remainingCount <= 0 {
+            return "\(verb) \(name)."
+        }
+        let noun = if remainingCount == 1 {
+            "approval"
+        } else {
+            "approvals"
+        }
+        return "\(verb) \(name); waiting for \(remainingCount) more \(noun)."
+    }
+
+    /// Records a denied parked call in its session.
+    ///
+    /// Keeps the denial in working memory so a later synthesis never assumes
+    /// the gated call ran, without echoing argument JSON.
+    /// - Parameters:
+    ///   - call: Denied invocation.
+    ///   - sessionID: Owning session.
+    ///   - onEvent: Optional handler receiving the denial delta.
+    /// - Returns: Denial notice text.
+    private func recordParkedDenial(
+        _ call: ToolInput,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> String {
+        let denial = OrchestratorToolLoop.deniedApprovalMessage(for: call.toolName)
+        await conversations.append(Message(role: .assistant, content: denial), to: sessionID)
+        await onEvent?(.textDelta(denial))
+        await flushEpisodic([(denial, .assistant)], sessionID: sessionID)
+        return denial
+    }
+
+    /// Records a missing-tool notice for an allowed parked call.
+    ///
+    /// The inbox allowed the call but the tool vanished before resume, so no
+    /// action exists to buffer; the notice keeps the session auditable.
+    /// - Parameters:
+    ///   - toolName: Missing tool name.
+    ///   - sessionID: Owning session.
+    ///   - onEvent: Optional handler receiving the notice delta.
+    /// - Returns: Missing-tool notice text.
+    private func recordParkedMissingTool(
+        _ toolName: String,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> String {
+        let missing = "Approval allowed for \(toolName), but the tool is no longer available."
+        await conversations.append(Message(role: .assistant, content: missing), to: sessionID)
+        await onEvent?(.textDelta(missing))
+        await flushEpisodic([(missing, .assistant)], sessionID: sessionID)
+        return missing
+    }
+
+    /// Executes one allowed parked call without re-entering the gate.
+    ///
+    /// Honors the explicit inbox decision with direct execution so one-shot
+    /// approvals run without a second prompt, publishing real-time events
+    /// and mirroring the compact tool record for resume.
+    /// - Parameters:
+    ///   - call: Filed gated invocation to run.
+    ///   - tool: Resolved tool to execute.
+    ///   - sessionID: Owning session.
+    ///   - onEvent: Optional handler receiving tool streaming events.
+    /// - Returns: Executed action carrying the tool result.
+    private func executeParkedCall(
+        _ call: ToolInput,
+        tool: any Tool,
+        sessionID: UUID,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> ToolAction {
+        await onEvent?(.toolStarted(
+            toolName: call.toolName,
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON
+        ))
+        let result: ToolResult
+        do {
+            let output = try await tool.execute(
+                input: call,
+                context: ToolContext(conversationID: sessionID)
+            )
+            result = ToolResult(output, toolCallID: call.callID)
+        } catch {
+            result = .failure(
+                toolCallID: call.callID,
+                content: "Tool '\(call.toolName)' failed: \(error.localizedDescription)"
+            )
+        }
+        let action = ToolAction(
+            toolName: call.toolName,
+            callID: call.callID,
+            argumentsJSON: call.argumentsJSON,
+            result: result
+        )
+        await onEvent?(.toolCompleted(
+            toolName: call.toolName,
+            callID: call.callID,
+            result: result
+        ))
+        await conversations.append(result.asMessage(), to: sessionID)
+        var pending: [(content: String, role: Message.Role)] = []
+        if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
+            pending.append((record, .tool))
+        }
+        await flushEpisodic(pending, sessionID: sessionID)
+        return action
+    }
+
+    /// Runs one synthesis turn for a parked batch in its session.
+    ///
+    /// Uses the turn's effective prompt so scheduler and custom-prompt parks
+    /// continue with the same instructions they parked with, then stores the
+    /// final text when it carries user-visible content.
+    /// - Parameters:
+    ///   - sessionID: Owning session.
+    ///   - prompt: Effective prompt active when the turn parked.
+    ///   - onEvent: Optional handler receiving text streaming events.
+    /// - Returns: Final text plus billed tokens, if reported.
+    private func synthesizeParkedTurn(
+        sessionID: UUID,
+        prompt: String?,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async throws -> (text: String, billedTokens: Int?) {
+        try Task.checkCancellation()
+        let tools = await toolBus.availableTools()
+        let workingMessages = await conversations.workingHistory(for: sessionID, systemPrompt: prompt)
+        let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
+            await onEvent?(.textDelta(delta))
+        })
+        var pending: [(content: String, role: Message.Role)] = []
+        await storeFinalAssistantText(collected.text, sessionID: sessionID, pendingEpisodic: &pending)
+        await flushEpisodic(pending, sessionID: sessionID)
+        return (collected.text, collected.billedTokens)
+    }
+
     // MARK: - Private helpers
+
+    /// Runs the bounded tool loop for one turn until final text or parking.
+    ///
+    /// Owns working-history refresh, round budgeting, and mixed
+    /// read-plus-gated handling so `process` stays within the body budget.
+    /// - Parameters:
+    ///   - request: Working history plus turn context for this run.
+    ///   - pendingEpisodic: In-out mirror buffer receiving tool records.
+    /// - Returns: Finished text plus actions, or a parked waiting response.
+    private func runTurnLoop(
+        _ request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> TurnLoopOutcome {
+        var workingMessages = request.workingMessages
+        let tools = request.tools
+        let recall = request.recall
+        let sessionID = request.sessionID
+        let onEvent = request.onEvent
+        var toolActions: [ToolAction] = []
+        var finalText = ""
+        var toolRounds = 0
+        var billedTokens: Int?
+        while true {
+            try Task.checkCancellation()
+            let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
+                await onEvent?(.textDelta(delta))
+            })
+            if let billed = collected.billedTokens {
+                billedTokens = (billedTokens ?? 0) + billed
+            }
+            finalText = collected.text
+            var calls = collected.toolCalls
+            if calls.isEmpty {
+                calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
+            }
+            // Narrated gated calls are always collected so mixed turns that
+            // pair structured calls with gated narration file approvals
+            // instead of dropping them.
+            let gated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: tools)
+            if calls.isEmpty, gated.isEmpty {
+                break
+            }
+            if !calls.isEmpty {
+                toolRounds += 1
+                if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxToolIterations) {
+                    throw OrchestratorError.toolLoopExceeded(iterations: maxToolIterations)
+                }
+                let assistantNote = assistantNoteMessage(text: finalText, calls: calls)
+                await conversations.append(assistantNote, to: sessionID)
+                let executed = try await executeToolCalls(calls, sessionID: sessionID, onEvent: onEvent, pendingEpisodic: &pendingEpisodic)
+                toolActions.append(contentsOf: executed)
+                if !gated.isEmpty, approvalQueue != nil {
+                    let context = ParkGatedCallsContext(
+                        gated: gated,
+                        narratedText: finalText,
+                        tools: tools,
+                        sessionID: sessionID,
+                        priorActions: toolActions,
+                        billedTokens: billedTokens,
+                        systemPrompt: request.systemPrompt,
+                        onEvent: onEvent
+                    )
+                    let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
+                    return .parked(parked)
+                }
+                workingMessages = await refreshedWorkingMessages(sessionID: sessionID, recall: recall, systemPrompt: request.systemPrompt)
+                finalText = ""
+                continue
+            }
+            if !gated.isEmpty {
+                if approvalQueue != nil {
+                    let context = ParkGatedCallsContext(
+                        gated: gated,
+                        narratedText: finalText,
+                        tools: tools,
+                        sessionID: sessionID,
+                        priorActions: toolActions,
+                        billedTokens: billedTokens,
+                        systemPrompt: request.systemPrompt,
+                        onEvent: onEvent
+                    )
+                    let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
+                    return .parked(parked)
+                }
+                break
+            }
+        }
+        return .finished(finalText: finalText, toolActions: toolActions, billedTokens: billedTokens)
+    }
 
     /// Builds the working-memory note recording one tool round's intent.
     ///
@@ -531,10 +1277,11 @@ public actor Orchestrator {
     /// - Parameters:
     ///   - sessionID: Owning session.
     ///   - recall: Bounded recall context for this turn, if any.
+    ///   - systemPrompt: Turn-specific system prompt override, if any.
     /// - Returns: History for the next LLM round.
-    private func refreshedWorkingMessages(sessionID: UUID, recall: Message?) async -> [Message] {
+    private func refreshedWorkingMessages(sessionID: UUID, recall: Message?, systemPrompt: String? = nil) async -> [Message] {
         await MemoryEngine.historyWithRecall(
-            conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt),
+            conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt ?? self.systemPrompt),
             recall: recall
         )
     }
@@ -601,6 +1348,70 @@ public actor Orchestrator {
         return actions
     }
 
+    /// Files gated narrations and ends the turn parked waiting on approval.
+    ///
+    /// Each gated call is filed through the shared queue path tagged with
+    /// the session, tracked for a later resume under one per-turn batch
+    /// identifier, and left unexecuted so prose can never bypass the gate.
+    /// Filed requests also emit live approval events so service layers can
+    /// broadcast the prompt without polling. Working memory keeps the
+    /// narrating note plus the waiting message for audit and replay, while
+    /// the episodic mirror keeps only the waiting message alongside prior
+    /// tool records.
+    /// - Parameters:
+    ///   - context: Grouped gated-narration inputs for this parked turn.
+    ///   - pendingEpisodic: In-out mirror buffer receiving the waiting message.
+    /// - Returns: Parked response carrying the waiting message.
+    private func parkGatedCalls(
+        _ context: ParkGatedCallsContext,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async -> OrchestratorResponse {
+        let byName = Dictionary(context.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        let batchID = UUID()
+        if let queue = approvalQueue {
+            for call in context.gated {
+                guard let tool = byName[call.toolName] else { continue }
+                let request = await queue.fileRequest(tool: tool, call: call, sessionID: context.sessionID)
+                parkedNarratedApprovals[request.id] = ParkedNarratedApproval(
+                    sessionID: context.sessionID,
+                    toolCall: call,
+                    systemPrompt: context.systemPrompt,
+                    batchID: batchID
+                )
+                await context.onEvent?(.approval(request))
+            }
+        }
+        let waiting = OrchestratorToolLoop.waitingOnApprovalMessage(for: context.gated)
+        await conversations.append(assistantNoteMessage(text: context.narratedText, calls: context.gated), to: context.sessionID)
+        await conversations.append(Message(role: .assistant, content: waiting), to: context.sessionID)
+        pendingEpisodic.append((waiting, .assistant))
+        await context.onEvent?(.textDelta(waiting))
+        await flushEpisodic(pendingEpisodic, sessionID: context.sessionID)
+        let cumulativeTokens = accumulateSessionTokens(context.billedTokens, for: context.sessionID)
+        // Parked gated calls stay pending with no result so the awaiting
+        // approval run entry keeps their names and call identifiers for
+        // detail views and call-ID fallback.
+        let pendingGatedActions = context.gated.map {
+            ToolAction(toolName: $0.toolName, callID: $0.callID, argumentsJSON: $0.argumentsJSON, result: nil)
+        }
+        return OrchestratorResponse(
+            text: waiting,
+            sessionID: context.sessionID,
+            toolActions: context.priorActions + pendingGatedActions,
+            totalTokens: context.billedTokens,
+            modelName: llm.modelInfo.name,
+            contextLength: llm.modelInfo.contextLength,
+            sessionTokens: cumulativeTokens,
+            isParked: true
+        )
+    }
+}
+
+// MARK: - Session tokens and memory mirroring
+
+/// Holds episodic flushing, remember handling, token totals, and LLM
+/// collection helpers so no single type body exceeds the length budget.
+extension Orchestrator {
     /// Flushes buffered episodic mirrors without throwing.
     ///
     /// Called once on commit (and on non-cancellation failures to match
@@ -718,11 +1529,17 @@ public actor Orchestrator {
     /// Drops the cached token total for one session.
     ///
     /// Call alongside conversation removal so deleted sessions never leave
-    /// stale totals behind.
+    /// stale totals behind. Parked narrated approvals for the session are
+    /// dropped as well so a deleted conversation cannot resume later.
     /// - Parameter id: Session whose total is discarded.
     public func forgetSession(id: UUID) {
         sessionTokensBySession.removeValue(forKey: id)
         sessionTokenOrder.removeAll(where: { $0 == id })
+        let removedBatchIDs = Set(parkedNarratedApprovals.values.filter { $0.sessionID == id }.map(\.batchID))
+        parkedNarratedApprovals = parkedNarratedApprovals.filter { $0.value.sessionID != id }
+        for batchID in removedBatchIDs {
+            parkedBatchExecutedActions.removeValue(forKey: batchID)
+        }
     }
 
     /// Removes one session from history and drops its billed total together.
@@ -736,9 +1553,14 @@ public actor Orchestrator {
     }
 
     /// Removes every session and drops every billed total together.
+    ///
+    /// Parked narrated approvals are dropped as well so no deleted session
+    /// can resume after the wipe.
     public func removeAllSessions() async {
         await conversations.removeAllSessions()
         clearSessionTokens()
+        parkedNarratedApprovals.removeAll()
+        parkedBatchExecutedActions.removeAll()
     }
 
     /// Clears one session's history and drops its billed total together.
@@ -752,6 +1574,10 @@ public actor Orchestrator {
     }
 
     /// Drops every cached session token total.
+    ///
+    /// Parked narrated approvals are kept: token totals are a billing cache
+    /// while parked approvals are pending user decisions that outlive a
+    /// billing reset.
     public func clearSessionTokens() {
         sessionTokensBySession.removeAll()
         sessionTokenOrder.removeAll()
@@ -794,13 +1620,6 @@ public actor Orchestrator {
     /// - Parameters:
     ///   - messages: Conversation history.
     ///   - tools: Tools the model may call.
-    /// Intermediate result of an LLM round.
-    private struct TurnDraft: Sendable {
-        let text: String
-        let billedTokens: Int?
-        let toolCalls: [ToolInput]
-    }
-
     /// - Returns: Concatenated response text, billed tokens if reported, and streamed tool calls.
     /// - Throws: `OrchestratorError.llmFailed` when the stream reports an error.
     private func collectTurn(

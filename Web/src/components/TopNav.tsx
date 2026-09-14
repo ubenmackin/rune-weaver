@@ -66,7 +66,15 @@ export default function TopNav({
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (profileRef.current && !profileRef.current.contains(event.target as Node)) {
+      // `event.target` can be null (or a non-Node in synthetic flows), so
+      // guard with `instanceof Node` before probing containment instead of
+      // an unchecked cast.
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        profileRef.current &&
+        !profileRef.current.contains(target)
+      ) {
         setProfileOpen(false);
       }
     };

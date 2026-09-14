@@ -98,14 +98,48 @@ public actor ApprovalQueue {
     /// scheduler handler and the service broadcast handler both file through
     /// here so field extraction (tool name, description, input) cannot drift.
     /// Service callers decorate the returned request (broadcast, timed wait);
-    /// headless callers deny the in-flight call immediately.
+    /// headless callers deny the in-flight call immediately. Narrated parked
+    /// turns file through here with their owning session so the later
+    /// decision can resume the same conversation.
     /// - Parameters:
     ///   - tool: Tool requesting approval.
     ///   - call: Original invocation arguments.
+    ///   - sessionID: Owning session for parked narration. Defaults to nil (untagged).
     /// - Returns: The tracked request.
     @discardableResult
-    public func fileRequest(tool: any Tool, call: ToolInput) -> PermissionRequest {
-        enqueue(toolName: tool.name, description: tool.description, input: call)
+    public func fileRequest(tool: any Tool, call: ToolInput, sessionID: UUID? = nil) -> PermissionRequest {
+        let request = PermissionRequest(
+            toolName: tool.name,
+            description: tool.description,
+            input: call,
+            sessionID: sessionID
+        )
+        enqueue(request)
+        return request
+    }
+
+    /// Lists pending requests for one session, in no guaranteed order.
+    ///
+    /// Lets the approvals inbox and the narrated resume path scope prompts
+    /// to their owning conversation without scanning every pending entry
+    /// at the call site.
+    /// - Parameter sessionID: Owning session to filter by.
+    /// - Returns: Pending requests tagged with `sessionID`.
+    public func requests(for sessionID: UUID) -> [PermissionRequest] {
+        pending.values.filter { $0.sessionID == sessionID }
+    }
+
+    /// Discards a parked early decision without suspending.
+    ///
+    /// Narrated parked turns never wait, so a decision that arrives after
+    /// filing parks an early entry nobody will consume. The resume path
+    /// drains it here so one parked approval cannot leak an entry that a
+    /// later unrelated wait would mistake for a live decision.
+    /// - Parameter id: Request identifier whose early decision is dropped.
+    /// - Returns: The discarded decision, or nil when none was parked.
+    @discardableResult
+    public func takeEarlyDecision(id: UUID) -> ApprovalQueueDecision? {
+        earlyDecisions.removeValue(forKey: id)
     }
 
     /// Lists pending requests in no guaranteed order.

@@ -1,5 +1,5 @@
-import RuneWeaverCore
-
+// Rune Weaver Tools — Built-in tool plugin registration surface.
+//
 // Built-in tool plugins live in this module; the bus itself does not.
 //
 // `ToolBus`, `ToolResult`, and the permission gate are owned by
@@ -12,3 +12,5 @@ import RuneWeaverCore
 //
 // To register a plugin tool, create a `RuneWeaverCore.Tool` and call
 // `await bus.register(tool:)` on the shared `RuneWeaverCore.ToolBus`.
+
+import RuneWeaverCore

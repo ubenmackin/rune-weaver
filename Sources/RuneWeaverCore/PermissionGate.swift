@@ -1,3 +1,10 @@
+// Rune Weaver Core — Graduated-trust permission gate and trust storage.
+//
+// Enforces the trust boundary between the agent and the real world:
+// read-only tools run freely, approval-gated tools require explicit
+// decisions with graduated-trust grants, and denied actions refuse with
+// reasons. Persists grants best-effort through a pluggable trust store.
+
 import Foundation
 
 /// How long a graduated-trust grant lasts.
@@ -156,6 +163,28 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     public let input: ToolInput
     /// Duration options offered to the user.
     public let suggestedDurations: [TrustDuration]
+    /// Owning session for narrated parked turns, if known.
+    ///
+    /// Structured gate checks leave this untagged while the narration
+    /// fallback stamps the session so the approvals inbox can resume the
+    /// same conversation on allow or notify it on deny.
+    public let sessionID: UUID?
+
+    /// Coding keys for the approval prompt.
+    private enum CodingKeys: String, CodingKey {
+        /// Stable request identifier.
+        case id
+        /// Name of the tool requesting approval.
+        case toolName
+        /// Human-readable summary.
+        case description
+        /// Original invocation arguments.
+        case input
+        /// Duration options offered to the user.
+        case suggestedDurations
+        /// Owning session, when tagged.
+        case sessionID
+    }
 
     /// Creates a permission request.
     /// - Parameters:
@@ -164,18 +193,45 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     ///   - description: Human-readable summary.
     ///   - input: Original invocation.
     ///   - suggestedDurations: Duration options. Defaults to all tiers.
+    ///   - sessionID: Owning session for parked narration. Defaults to nil (untagged).
     public init(
         id: UUID = UUID(),
         toolName: String,
         description: String,
         input: ToolInput,
-        suggestedDurations: [TrustDuration] = TrustDuration.allCases
+        suggestedDurations: [TrustDuration] = TrustDuration.allCases,
+        sessionID: UUID? = nil
     ) {
         self.id = id
         self.toolName = toolName
         self.description = description
         self.input = input
         self.suggestedDurations = suggestedDurations
+        self.sessionID = sessionID
+    }
+
+    /// Decodes a request, tolerating payloads written before session tagging.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.toolName = try container.decode(String.self, forKey: .toolName)
+        self.description = try container.decode(String.self, forKey: .description)
+        self.input = try container.decode(ToolInput.self, forKey: .input)
+        self.suggestedDurations = try container.decode([TrustDuration].self, forKey: .suggestedDurations)
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+    }
+
+    /// Encodes a request, omitting the session tag when untagged.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(toolName, forKey: .toolName)
+        try container.encode(description, forKey: .description)
+        try container.encode(input, forKey: .input)
+        try container.encode(suggestedDurations, forKey: .suggestedDurations)
+        try container.encodeIfPresent(sessionID, forKey: .sessionID)
     }
 }
 

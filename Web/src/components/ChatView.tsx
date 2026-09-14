@@ -7,18 +7,29 @@ import {
   cancelChat,
   getSession,
   getSessionToolActions,
+  listApprovals,
   newSessionId,
   postChat,
   updateSessionTitle,
   type HealthResponse,
+  type PermissionRequest,
   type SessionMessageToolActions,
   type ToolAction,
+  type ToolResult,
 } from "../api";
 import SessionSidebar from "./SessionSidebar";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
 import { WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import type { WSIncomingFrame } from "../hooks/useSharedWebSocket";
+import {
+  approvalSessionID,
+  isRecord,
+  isSameSession,
+  mergeApprovalFrame,
+  normalizeSessionID,
+} from "../approvalsSession";
 
 interface MessageItem {
   id: string;
@@ -51,10 +62,49 @@ function loadSessionTokens(id: string): number {
   }
 }
 
-// Bounds a WebSocket-started turn with no done/error frame: a socket
-// that drops after send but before the terminal frame must not strand
-// the input disabled forever.
-const TURN_TIMEOUT_MS = 120_000;
+// Validates a tool result before it enters turn state: the engine always
+// emits the call identifier, content, and error flag together, so a partial
+// object must never render as a completed execution.
+function isToolResult(value: unknown): value is ToolResult {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.toolCallID === "string" &&
+    typeof value.content === "string" &&
+    typeof value.isError === "boolean"
+  );
+}
+
+// Validates a tool action before it enters message or turn state, keeping
+// history rendering honest about which executions actually ran.
+function isToolAction(value: unknown): value is ToolAction {
+  if (!isRecord(value)) return false;
+  if (typeof value.toolName !== "string") return false;
+  if (typeof value.callID !== "string") return false;
+  if (typeof value.argumentsJSON !== "string") return false;
+  const result = value.result;
+  return result == null || isToolResult(result);
+}
+
+// Filters the approvals inbox to one session so the chat header badge only
+// reflects turns blocked on this conversation; unattributed entries stay in
+// the global inbox instead of alarming every session.
+export function approvalsForSession(
+  approvals: PermissionRequest[] | undefined | null,
+  sessionID: string | null | undefined,
+): PermissionRequest[] {
+  const target = normalizeSessionID(sessionID);
+  if (!target) return [];
+  return (approvals ?? []).filter((request) => {
+    const sid = approvalSessionID(request);
+    return isSameSession(sid, target);
+  });
+}
+
+// Bounds inactivity during a WebSocket-started turn: a socket
+// that drops with no subsequent activity must not strand the input
+// disabled forever. Reset on each tool execution, streaming delta,
+// or approval prompt so multi-turn tool chains never time out while active.
+const TURN_TIMEOUT_MS = 300_000;
 
 interface ChatViewProps {
   health?: HealthResponse | null;
@@ -197,6 +247,15 @@ export function reconstructMessages(
   );
 }
 
+// Single first-turn title policy: first line truncated to 40 characters,
+// mirroring ConversationSession.displayTitle so dashboard pre-names stay
+// consistent with engine titles without recreating the helper per render.
+export function autoTitleFromPrompt(text: string): string {
+  const firstLine = text.split("\n")[0].trim();
+  if (firstLine.length <= 40) return firstLine;
+  return firstLine.slice(0, 40) + "…";
+}
+
 export default function ChatView({ health }: ChatViewProps) {
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [input, setInput] = useState("");
@@ -206,6 +265,9 @@ export default function ChatView({ health }: ChatViewProps) {
   const [pending, setPending] = useState(false);
   const [inFlightTurn, setInFlightTurn] = useState<InFlightTurn | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Unresolved approvals for the inbox badge: filtered by session below so
+  // only this conversation's blocked tools raise the amber indicator.
+  const [pendingApprovals, setPendingApprovals] = useState<PermissionRequest[]>([]);
 
   // Status bar metrics
   const [lastTurnTokens, setLastTurnTokens] = useState<number | null>(null);
@@ -219,6 +281,7 @@ export default function ChatView({ health }: ChatViewProps) {
 
   // Sidebar toggle
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIDRef = useRef(sessionID);
@@ -271,7 +334,9 @@ export default function ChatView({ health }: ChatViewProps) {
       turnTimeoutRef.current = null;
       // Best-effort cancel the orphaned server turn so a retry does not
       // duplicate it, then release the input lock with a retry message.
-      void cancelChat(turnSID).catch(() => {});
+      void cancelChat(turnSID).catch(() => {
+        // Cancel is best-effort; timeout recovery proceeds even when it fails.
+      });
       turnSessionIDRef.current = null;
       setInFlightTurn(null);
       setPending(false);
@@ -287,7 +352,9 @@ export default function ChatView({ health }: ChatViewProps) {
     // Cancel the turn's owning session, not whatever session is active now,
     // so switching sessions mid-turn never cancels the new session.
     const turnSID = turnSessionIDRef.current ?? sessionIDRef.current;
-    void cancelChat(turnSID).catch(() => {});
+    void cancelChat(turnSID).catch(() => {
+      // Cancel is best-effort; close recovery releases the input even when it fails.
+    });
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
       turnTimeoutRef.current = null;
@@ -300,6 +367,22 @@ export default function ChatView({ health }: ChatViewProps) {
     );
   }, []);
 
+  // Reconciles the badge with the authoritative inbox so approvals decided
+  // in another tab do not linger as stale amber badges. Terminal turn
+  // frames and run lifecycle broadcasts trigger it; failures keep the
+  // prior inbox instead of flashing the badge off on errors.
+  const refreshApprovals = useCallback(() => {
+    void listApprovals()
+      .then((response) => {
+        if (response && Array.isArray(response.approvals)) {
+          setPendingApprovals(response.approvals);
+        }
+      })
+      .catch(() => {
+        // Keep prior inbox on transient failure.
+      });
+  }, []);
+
   useEffect(() => {
     if (health?.model) setActiveModel(health.model);
     if (health?.contextLength) setContextLimit(health.contextLength);
@@ -309,33 +392,58 @@ export default function ChatView({ health }: ChatViewProps) {
     localStorage.setItem("rw_active_session_id", sessionID);
   }, [sessionID]);
 
-  const handleWSMessage = useCallback((data: any) => {
-    if (!data || typeof data !== "object") return;
+  const handleWSMessage = useCallback((data: WSIncomingFrame) => {
+    if (!isRecord(data)) return;
+    // Read the wire envelope through the validated record so
+    // forward-compatible event shapes stay typed without widening the
+    // handler to `any`; malformed envelopes drop before touching state.
+    const frameSessionID =
+      typeof data.sessionID === "string" ? data.sessionID : undefined;
+    const frameType = typeof data.type === "string" ? data.type : undefined;
 
     // Ignore frames intended for another session to prevent cross-session pollution
-    if (data.sessionID && data.sessionID !== sessionIDRef.current) {
+    if (
+      frameSessionID &&
+      normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
+    ) {
       return;
     }
     // Untagged session frames carry no owner, so they must never touch the
     // current view; only global broadcasts (approval/run_*) bypass tagging.
     if (
-      !data.sessionID &&
-      (data.type === "delta" ||
-        data.type === "tool_start" ||
-        data.type === "tool_end" ||
-        data.type === "done")
+      !frameSessionID &&
+      (frameType === "delta" ||
+        frameType === "tool_start" ||
+        frameType === "tool_end" ||
+        frameType === "done")
     ) {
       return;
     }
 
-    if (data.type === "tool_start") {
+    if (frameType === "tool_start") {
+      armTurnTimeout();
       if (cancelledRef.current) return;
+      // Drop malformed starts: an action without identity cannot correlate
+      // with its end frame or approval, so it must never enter turn state.
+      const rawToolName: unknown = data.toolName;
+      const rawCallID: unknown = data.callID;
+      const rawArgumentsJSON: unknown = data.argumentsJSON;
+      if (
+        typeof rawToolName !== "string" ||
+        typeof rawCallID !== "string" ||
+        typeof rawArgumentsJSON !== "string"
+      ) {
+        return;
+      }
+      const toolName = rawToolName;
+      const callID = rawCallID;
+      const argumentsJSON = rawArgumentsJSON;
       setInFlightTurn((prev) => {
         const currentActions = prev ? [...prev.toolActions] : [];
         currentActions.push({
-          toolName: data.toolName,
-          callID: data.callID,
-          argumentsJSON: data.argumentsJSON,
+          toolName,
+          callID,
+          argumentsJSON,
           result: null,
         });
         return {
@@ -343,18 +451,33 @@ export default function ChatView({ health }: ChatViewProps) {
           text: prev ? prev.text : "",
         };
       });
-    } else if (data.type === "tool_end") {
+    } else if (frameType === "tool_end") {
+      armTurnTimeout();
       if (cancelledRef.current) return;
+      const rawEndCallID: unknown = data.callID;
+      const rawEndToolName: unknown = data.toolName;
+      const rawEndResult: unknown = data.result;
+      if (typeof rawEndCallID !== "string" || typeof rawEndToolName !== "string") {
+        return;
+      }
+      // A malformed result must never enter turn state: absent results stay
+      // null while a present-but-invalid payload drops the frame entirely.
+      if (rawEndResult != null && !isToolResult(rawEndResult)) {
+        return;
+      }
+      const endCallID = rawEndCallID;
+      const endToolName = rawEndToolName;
+      const endResult = isToolResult(rawEndResult) ? rawEndResult : null;
       setInFlightTurn((prev) => {
         if (!prev) return prev;
         const updated = prev.toolActions.map((action) => {
           if (
-            action.callID === data.callID ||
-            (!action.result && action.toolName === data.toolName)
+            action.callID === endCallID ||
+            (!action.result && action.toolName === endToolName)
           ) {
             return {
               ...action,
-              result: data.result,
+              result: endResult,
             };
           }
           return action;
@@ -364,13 +487,35 @@ export default function ChatView({ health }: ChatViewProps) {
           toolActions: updated,
         };
       });
-    } else if (data.type === "delta") {
+    } else if (frameType === "delta") {
+      armTurnTimeout();
       if (cancelledRef.current) return;
+      const rawDelta: unknown = data.delta;
+      const deltaText = typeof rawDelta === "string" ? rawDelta : "";
       setInFlightTurn((prev) => ({
         toolActions: prev ? prev.toolActions : [],
-        text: (prev ? prev.text : "") + (data.delta || ""),
+        text: (prev ? prev.text : "") + deltaText,
       }));
-    } else if (data.type === "done") {
+    } else if (frameType === "approval") {
+      // Live approval prompts join the inbox immediately so the session
+      // badge reflects blocked tools without waiting for the next poll.
+      // Malformed prompts drop instead of entering badge state.
+      const request = mergeApprovalFrame(data);
+      if (!request) {
+        return;
+      }
+      // Only extend the turn timeout while a turn is in flight; a parked
+      // approval arriving with no active turn must not re-arm the timer
+      // and later fire a spurious timeout cancel.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        armTurnTimeout();
+      }
+      setPendingApprovals((previous) =>
+        previous.some((item) => item.id === request.id)
+          ? previous
+          : [...previous, request],
+      );
+    } else if (frameType === "done") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       if (cancelledRef.current) {
@@ -378,28 +523,54 @@ export default function ChatView({ health }: ChatViewProps) {
         setPending(false);
         return;
       }
-      const currentSid = data.sessionID || sessionIDRef.current;
-      if (data.sessionID && data.sessionID !== sessionIDRef.current) {
-        setSessionID(data.sessionID);
+      const currentSid = frameSessionID || sessionIDRef.current;
+      if (
+        frameSessionID &&
+        normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
+      ) {
+        setSessionID(frameSessionID);
       }
-      if (data.modelName) setActiveModel(data.modelName);
-      if (data.contextLength) setContextLimit(data.contextLength);
-      if (typeof data.totalTokens === "number") {
-        setLastTurnTokens(data.totalTokens);
+      const rawModelName: unknown = data.modelName;
+      const rawContextLength: unknown = data.contextLength;
+      const rawTotalTokens: unknown = data.totalTokens;
+      const rawSessionTokens: unknown = data.sessionTokens;
+      const rawDoneText: unknown = data.text;
+      const rawToolActions: unknown = data.toolActions;
+      const rawIsParked: unknown = data.isParked;
+      // Validated per-turn parked flag: only an explicit true marks a waiting
+      // turn, so absent or malformed tags default to a normal completion.
+      const isParked = rawIsParked === true;
+      const modelName = typeof rawModelName === "string" ? rawModelName : undefined;
+      const contextLength =
+        typeof rawContextLength === "number" ? rawContextLength : undefined;
+      const totalTokens =
+        typeof rawTotalTokens === "number" ? rawTotalTokens : undefined;
+      const sessionTokensValue =
+        typeof rawSessionTokens === "number" ? rawSessionTokens : undefined;
+      const doneText = typeof rawDoneText === "string" ? rawDoneText : undefined;
+      // Drop malformed entries so only well-shaped actions enter history; a
+      // non-array tag defaults to absent like engines that omit it.
+      const doneToolActions = Array.isArray(rawToolActions)
+        ? rawToolActions.filter(isToolAction)
+        : undefined;
+      if (modelName) setActiveModel(modelName);
+      if (contextLength) setContextLimit(contextLength);
+      if (typeof totalTokens === "number") {
+        setLastTurnTokens(totalTokens);
       }
       // Authoritative cumulative total wins when present so reloads,
       // multi-client turns, and retries never drift from local sums.
-      if (typeof data.sessionTokens === "number") {
-        const cumulative = data.sessionTokens;
+      if (typeof sessionTokensValue === "number") {
+        const cumulative = sessionTokensValue;
         setSessionTokens(cumulative);
         try {
           localStorage.setItem(sessionTokensKey(currentSid), String(cumulative));
         } catch {
           // Storage is best-effort only.
         }
-      } else if (typeof data.totalTokens === "number") {
+      } else if (typeof totalTokens === "number") {
         setSessionTokens((prev) => {
-          const next = prev + (data.totalTokens as number);
+          const next = prev + totalTokens;
           try {
             localStorage.setItem(sessionTokensKey(currentSid), String(next));
           } catch {
@@ -411,7 +582,9 @@ export default function ChatView({ health }: ChatViewProps) {
 
       if (isFirstMessageRef.current) {
         const title = autoTitleFromPrompt(latestPromptRef.current);
-        void updateSessionTitle(currentSid, title);
+        void updateSessionTitle(currentSid, title).then(() => {
+          setSessionRefreshKey((k) => k + 1);
+        });
         isFirstMessageRef.current = false;
       }
 
@@ -420,34 +593,101 @@ export default function ChatView({ health }: ChatViewProps) {
       // run twice under double-invoke and duplicate the assistant message.
       const snapshot = inFlightTurnRef.current;
       const finalActions =
-        data.toolActions && data.toolActions.length > 0
-          ? data.toolActions
+        doneToolActions && doneToolActions.length > 0
+          ? doneToolActions
           : snapshot?.toolActions ?? [];
       const finalMsg: MessageItem = {
         id: newSessionId(),
         role: "assistant",
-        text: data.text ?? snapshot?.text ?? "",
+        text: doneText ?? snapshot?.text ?? "",
         toolActions: finalActions.length > 0 ? finalActions : undefined,
       };
       setMessages((prev) => [...prev, finalMsg].slice(-MAX_MESSAGES));
       setInFlightTurn(null);
       inFlightTurnRef.current = null;
       setPending(false);
-    } else if (data.type === "cancelled") {
+      if (isParked) {
+        // Parked WS turns wait on inbox approval, not completion: the waiting
+        // text above stays as the assistant reply while this refresh flips
+        // the header to the amber waiting state without waiting for a poll.
+        refreshApprovals();
+      } else {
+        // The finished turn may have consumed parked approvals decided here
+        // or in another tab; reconcile so decided identifiers evict promptly.
+        refreshApprovals();
+      }
+    } else if (frameType === "cancelled") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       setInFlightTurn(null);
       setPending(false);
-    } else if (data.type === "error") {
+    } else if (frameType === "error") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       if (!cancelledRef.current) {
-        setError(data.message || "Chat turn failed");
+        const rawMessage: unknown = data.message;
+        const message =
+          typeof rawMessage === "string" && rawMessage.length > 0
+            ? rawMessage
+            : "Chat turn failed";
+        setError(message);
       }
       setInFlightTurn(null);
       setPending(false);
+    } else if (frameType === "run_completed") {
+      // A parked run resuming in any tab means its approvals were decided;
+      // reconcile with the authoritative inbox so the badge evicts without
+      // waiting for a session switch.
+      refreshApprovals();
+    } else if (
+      frameType === "approval_decided" ||
+      frameType === "approval_resolved" ||
+      frameType === "approval_removed" ||
+      frameType === "approval_deleted" ||
+      frameType === "approval_completed" ||
+      frameType === "approval_cancelled"
+    ) {
+      // Forward-compatible eviction for explicit approval removal frames:
+      // drop the decided identifier locally and reconcile with the server
+      // when the frame carries no usable identifier.
+      const rawRemovalID: unknown = data.id;
+      const rawRemovalApprovalID: unknown = data.approvalID;
+      const rawRemovalApprovalId: unknown = data.approvalId;
+      const rawRemovalRequest: unknown = data.request;
+      const rawRemovalApproval: unknown = data.approval;
+      let removalID: string | undefined;
+      if (typeof rawRemovalID === "string" && rawRemovalID.length > 0) {
+        removalID = rawRemovalID;
+      } else if (
+        typeof rawRemovalApprovalID === "string" &&
+        rawRemovalApprovalID.length > 0
+      ) {
+        removalID = rawRemovalApprovalID;
+      } else if (
+        typeof rawRemovalApprovalId === "string" &&
+        rawRemovalApprovalId.length > 0
+      ) {
+        removalID = rawRemovalApprovalId;
+      } else if (isRecord(rawRemovalRequest)) {
+        const nestedID: unknown = rawRemovalRequest.id;
+        if (typeof nestedID === "string" && nestedID.length > 0) {
+          removalID = nestedID;
+        }
+      } else if (isRecord(rawRemovalApproval)) {
+        const nestedID: unknown = rawRemovalApproval.id;
+        if (typeof nestedID === "string" && nestedID.length > 0) {
+          removalID = nestedID;
+        }
+      }
+      if (removalID != null) {
+        const decidedID = removalID;
+        setPendingApprovals((previous) =>
+          previous.filter((item) => item.id !== decidedID),
+        );
+      }
+      refreshApprovals();
     }
-  }, [clearTurnTimeout]);
+  }, [armTurnTimeout, clearTurnTimeout, refreshApprovals]);
 
   const { sendMessage, isOpen } = useSharedWebSocket(handleWSMessage, handleWSClose);
 
@@ -506,15 +746,29 @@ export default function ChatView({ health }: ChatViewProps) {
     };
   }, []);
 
+  // Track unresolved approvals so sessions blocked on a gated tool show an
+  // honest amber badge; a single effect on the active session covers both
+  // mount and switches, so no double fetch fires on mount. Failures leave
+  // the prior inbox intact instead of flashing the badge off on errors.
+  useEffect(() => {
+    let cancelled = false;
+    listApprovals()
+      .then((response) => {
+        if (!cancelled && response && Array.isArray(response.approvals)) {
+          setPendingApprovals(response.approvals);
+        }
+      })
+      .catch(() => {
+        // Keep prior inbox on transient failure.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionID]);
+
   useEffect(() => {
     messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, pending, inFlightTurn]);
-
-  function autoTitleFromPrompt(text: string): string {
-    const firstLine = text.split("\n")[0].trim();
-    if (firstLine.length <= 40) return firstLine;
-    return firstLine.slice(0, 40) + "…";
-  }
 
   const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(event.target.value);
@@ -599,15 +853,22 @@ export default function ChatView({ health }: ChatViewProps) {
       // A cancel racing the REST round-trip must not append the late
       // reply, matching the WebSocket path that guards cancelledRef.
       if (cancelledRef.current) return;
+      // Validated per-turn parked flag: only an explicit true marks a waiting
+      // turn, so absent tags from older engines stay normal completions.
+      const isParked = response.isParked === true;
       const currentSid = response.sessionID || sessionID;
-      if (response.sessionID && response.sessionID !== sessionID) {
+      if (
+        response.sessionID &&
+        normalizeSessionID(response.sessionID) !== normalizeSessionID(sessionID)
+      ) {
         setSessionID(response.sessionID);
       }
 
       if (response.modelName) setActiveModel(response.modelName);
       if (response.contextLength) setContextLimit(response.contextLength);
-      if (typeof response.totalTokens === "number") {
-        setLastTurnTokens(response.totalTokens);
+      const total = response.totalTokens;
+      if (typeof total === "number") {
+        setLastTurnTokens(total);
       }
       if (typeof response.sessionTokens === "number") {
         setSessionTokens(response.sessionTokens);
@@ -616,9 +877,9 @@ export default function ChatView({ health }: ChatViewProps) {
         } catch {
           // Storage is best-effort only.
         }
-      } else if (typeof response.totalTokens === "number") {
+      } else if (typeof total === "number") {
         setSessionTokens((prev) => {
-          const next = prev + (response.totalTokens as number);
+          const next = prev + total;
           try {
             localStorage.setItem(sessionTokensKey(currentSid), String(next));
           } catch {
@@ -631,7 +892,9 @@ export default function ChatView({ health }: ChatViewProps) {
       // Pre-name session on first turn
       if (isFirst) {
         const title = autoTitleFromPrompt(text);
-        void updateSessionTitle(currentSid, title);
+        void updateSessionTitle(currentSid, title).then(() => {
+          setSessionRefreshKey((k) => k + 1);
+        });
         isFirstMessageRef.current = false;
       }
 
@@ -639,10 +902,18 @@ export default function ChatView({ health }: ChatViewProps) {
         id: newSessionId(),
         role: "assistant",
         text: response.text,
-        toolActions: response.toolActions,
+        toolActions:
+          response.toolActions.length > 0 ? response.toolActions : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
+      if (isParked) {
+        // Parked REST turns (WS closed) wait on inbox approval: refresh
+        // immediately so the header shows the amber waiting state instead of
+        // appearing completed, while the waiting text above keeps the pending
+        // UI honest without relying on an unrelated poll.
+        refreshApprovals();
+      }
     } catch (failure) {
       // Suppress the late failure when the turn was already cancelled.
       if (cancelledRef.current) return;
@@ -670,7 +941,7 @@ export default function ChatView({ health }: ChatViewProps) {
   }
 
   async function handleSelectSession(id: string) {
-    if (id === sessionID) return;
+    if (normalizeSessionID(id) === normalizeSessionID(sessionID)) return;
     if (pending) {
       void handleCancel();
     }
@@ -706,6 +977,12 @@ export default function ChatView({ health }: ChatViewProps) {
     contextLimit > 0
       ? Math.round((sessionTokens / contextLimit) * 100)
       : 0;
+  // Amber badge count for this session only; other sessions' approvals never
+  // leak into this header.
+  const sessionPendingCount = approvalsForSession(
+    pendingApprovals,
+    sessionID,
+  ).length;
 
   return (
     <div className="chat-layout">
@@ -716,6 +993,7 @@ export default function ChatView({ health }: ChatViewProps) {
         onNewSession={handleNewSession}
         isOpen={sidebarOpen}
         onToggleOpen={() => setSidebarOpen(!sidebarOpen)}
+        refreshTrigger={sessionRefreshKey}
       />
 
       {/* Main Chat Area */}
@@ -733,9 +1011,18 @@ export default function ChatView({ health }: ChatViewProps) {
               </button>
             )}
             <h2>Chat</h2>
-            <span className="session-id-tag font-mono">
+            <span className="session-id-tag font-mono" title={sessionID}>
               {sessionID.slice(0, 8)}
             </span>
+            {sessionPendingCount > 0 ? (
+              <span
+                className="pending-approval-badge"
+                data-testid="session-pending-badge"
+                title={`${sessionPendingCount} approval${sessionPendingCount > 1 ? "s" : ""} awaiting decision for this session`}
+              >
+                Pending approval ({sessionPendingCount})
+              </span>
+            ) : null}
           </div>
 
           <button
@@ -760,11 +1047,9 @@ export default function ChatView({ health }: ChatViewProps) {
           ) : null}
 
           {messages.map((message) => {
-            const hasTools = Boolean(
-              message.role === "assistant" &&
-              message.toolActions &&
-              message.toolActions.length > 0
-            );
+            const actions =
+              message.role === "assistant" ? (message.toolActions ?? []) : [];
+            const hasTools = actions.length > 0;
             const hasText = Boolean(message.text && message.text.trim().length > 0);
             if (!hasText && !hasTools) return null;
 
@@ -775,13 +1060,14 @@ export default function ChatView({ health }: ChatViewProps) {
                   <div className="chat-tool-container">
                     <div className="chat-tool-heading">
                       <WrenchIcon size={12} />
-                      <span>Tool Activity ({message.toolActions!.length})</span>
+                      <span>Tool Activity ({actions.length})</span>
                     </div>
                     <div className="chat-tool-list">
-                      {message.toolActions!.map((action, i) => (
+                      {actions.map((action, i) => (
                         <ToolActionRow
                           key={action.callID || i}
                           action={action}
+                          isLive={false}
                         />
                       ))}
                     </div>
@@ -816,6 +1102,7 @@ export default function ChatView({ health }: ChatViewProps) {
                       <ToolActionRow
                         key={action.callID || i}
                         action={action}
+                        isLive
                       />
                     ))}
                   </div>

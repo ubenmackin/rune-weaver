@@ -4,7 +4,13 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView from "./ChatView";
-import { sharedWebSocket } from "../hooks/useSharedWebSocket";
+import { resetSharedSocket } from "../hooks/useSharedWebSocket";
+import { jsonResponse } from "../test-utils/http";
+import {
+  createMockWebSocket,
+  createMockWebSocketCapture,
+  dispatchFrameOrThrow,
+} from "../test-utils/mockWebSocket";
 
 describe("ChatView", () => {
   beforeEach(() => {
@@ -12,26 +18,7 @@ describe("ChatView", () => {
     // Each test stubs WebSocket with its own capture closure, so drop the
     // shared singleton's lingering OPEN handle; otherwise a later test
     // would reuse the earlier socket and never attach its own onmessage.
-    const client = sharedWebSocket as unknown as {
-      ws: { close?: () => void } | null;
-      listeners: Set<unknown>;
-      closeListeners: Set<unknown>;
-      reconnectTimer: ReturnType<typeof setTimeout> | null;
-      isConnecting: boolean;
-    };
-    client.listeners.clear();
-    client.closeListeners.clear();
-    try {
-      client.ws?.close?.();
-    } catch {
-      // Teardown is best-effort; a stubbed socket may throw on close.
-    }
-    if (client.reconnectTimer) {
-      clearTimeout(client.reconnectTimer);
-      client.reconnectTimer = null;
-    }
-    client.ws = null;
-    client.isConnecting = false;
+    resetSharedSocket();
     localStorage.clear();
   });
 
@@ -40,10 +27,7 @@ describe("ChatView", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(
-          JSON.stringify({ text: "hello back", sessionID: "s1", toolActions: [] }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
+        jsonResponse({ text: "hello back", sessionID: "s1", toolActions: [] }),
       ),
     );
     render(<ChatView />);
@@ -60,10 +44,7 @@ describe("ChatView", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(
-          JSON.stringify({ text: "reply", sessionID: "s1", toolActions: [] }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
+        jsonResponse({ text: "reply", sessionID: "s1", toolActions: [] }),
       ),
     );
     render(<ChatView />);
@@ -82,15 +63,9 @@ describe("ChatView", () => {
       "fetch",
       vi.fn(async (url: string) => {
         if (typeof url === "string" && url.startsWith("/sessions/")) {
-          return new Response(JSON.stringify({ reason: "Unknown session" }), {
-            status: 404,
-            headers: { "Content-Type": "application/json" },
-          });
+          return jsonResponse({ reason: "Unknown session" }, 404);
         }
-        return new Response(JSON.stringify({ sessions: [], count: 0 }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse({ sessions: [], count: 0 });
       }),
     );
     render(<ChatView />);
@@ -108,10 +83,7 @@ describe("ChatView", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
-        new Response(
-          JSON.stringify({ text: "received", sessionID: "s1", toolActions: [] }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        ),
+        jsonResponse({ text: "received", sessionID: "s1", toolActions: [] }),
       ),
     );
     render(<ChatView />);
@@ -129,7 +101,7 @@ describe("ChatView", () => {
 
   it("shows Cancel button when turn is pending and cancels on click", async () => {
     const user = userEvent.setup();
-    let resolvePost: (value: Response) => void;
+    let resolvePost: ((value: Response) => void) | undefined;
     const pendingPromise = new Promise<Response>((resolve) => {
       resolvePost = resolve;
     });
@@ -141,15 +113,9 @@ describe("ChatView", () => {
           return pendingPromise;
         }
         if (input === "/chat/cancel") {
-          return new Response(JSON.stringify({ sessionID: "s1", cancelled: true }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          });
+          return jsonResponse({ sessionID: "s1", cancelled: true });
         }
-        return new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        });
+        return jsonResponse({});
       }),
     );
 
@@ -173,14 +139,11 @@ describe("ChatView", () => {
 
     // Cleanup promise
     await act(async () => {
-      resolvePost!(
-        new Response(
-          JSON.stringify({ text: "nevermind", sessionID: "s1", toolActions: [] }),
-          {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          },
-        ),
+      if (!resolvePost) {
+        throw new Error("Expected pending turn resolver");
+      }
+      resolvePost(
+        jsonResponse({ text: "nevermind", sessionID: "s1", toolActions: [] }),
       );
     });
   });
@@ -188,74 +151,35 @@ describe("ChatView", () => {
   it("prefers authoritative sessionTokens over local accumulation", async () => {
     const user = userEvent.setup();
 
-    let capturedOnMessage: ((e: MessageEvent) => void) | null = null;
-    const sentFrames: string[] = [];
+    const capture = createMockWebSocketCapture();
 
-    class MockWebSocket {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
-      readyState = 1;
-      onopen: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onmessage: ((e: MessageEvent) => void) | null = null;
-
-      constructor() {
-        setTimeout(() => {
-          capturedOnMessage = this.onmessage;
-          this.onopen?.();
-        }, 5);
-      }
-
-      send(data: string) {
-        sentFrames.push(data);
-      }
-
-      close() {
-        this.onclose?.();
-      }
-    }
-
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
 
     render(<ChatView />);
 
     await waitFor(() => {
-      expect(capturedOnMessage).not.toBeNull();
+      expect(capture.onMessage).not.toBeNull();
     });
 
     await user.type(screen.getByLabelText("Chat input"), "hello");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(sentFrames.length).toBe(1);
+      expect(capture.sentFrames.length).toBe(1);
     });
-    const turnSID = (JSON.parse(sentFrames[0]) as { sessionID?: string }).sessionID;
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
 
     // Authoritative cumulative total differs from the local sum on purpose:
     // the view must adopt it instead of adding the turn total.
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "done",
-          text: "hi",
-          sessionID: turnSID,
-          toolActions: [],
-          totalTokens: 150,
-          sessionTokens: 1000,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "hi",
+      sessionID: turnSID,
+      toolActions: [],
+      totalTokens: 150,
+      sessionTokens: 1000,
     });
 
     await waitFor(() => {
@@ -268,73 +192,34 @@ describe("ChatView", () => {
   it("ignores untagged session frames to prevent cross-session leakage", async () => {
     const user = userEvent.setup();
 
-    let capturedOnMessage: ((e: MessageEvent) => void) | null = null;
+    const capture = createMockWebSocketCapture();
 
-    class MockWebSocket {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
-      readyState = 1;
-      onopen: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onmessage: ((e: MessageEvent) => void) | null = null;
-
-      constructor() {
-        setTimeout(() => {
-          capturedOnMessage = this.onmessage;
-          this.onopen?.();
-        }, 5);
-      }
-
-      send() {}
-
-      close() {
-        this.onclose?.();
-      }
-    }
-
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
 
     render(<ChatView />);
 
     await waitFor(() => {
-      expect(capturedOnMessage).not.toBeNull();
+      expect(capture.onMessage).not.toBeNull();
     });
 
     await user.type(screen.getByLabelText("Chat input"), "hello");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     // Untagged tool and text frames must not touch the current view.
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "tool_start",
-          toolName: "email.search",
-          callID: "call-untagged",
-          argumentsJSON: "{}",
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-untagged",
+      argumentsJSON: "{}",
     });
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({ type: "delta", delta: "leaked text" }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "leaked text",
     });
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({ type: "done", text: "leaked done" }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "leaked done",
     });
 
     // The leaked text never renders and the turn stays pending.
@@ -345,73 +230,34 @@ describe("ChatView", () => {
   it("streams real-time tool events and text deltas over WebSocket", async () => {
     const user = userEvent.setup();
 
-    let capturedOnMessage: ((e: MessageEvent) => void) | null = null;
-    const sentFrames: string[] = [];
+    const capture = createMockWebSocketCapture();
 
-    class MockWebSocket {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
-      readyState = 1;
-      onopen: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onmessage: ((e: MessageEvent) => void) | null = null;
-
-      constructor() {
-        setTimeout(() => {
-          capturedOnMessage = this.onmessage;
-          this.onopen?.();
-        }, 5);
-      }
-
-      send(data: string) {
-        sentFrames.push(data);
-      }
-
-      close() {
-        this.onclose?.();
-      }
-    }
-
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
 
     render(<ChatView />);
 
     // Wait for WS to connect
     await waitFor(() => {
-      expect(capturedOnMessage).not.toBeNull();
+      expect(capture.onMessage).not.toBeNull();
     });
 
     await user.type(screen.getByLabelText("Chat input"), "check email");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
-    expect(sentFrames.length).toBe(1);
-    expect(JSON.parse(sentFrames[0])).toMatchObject({ text: "check email" });
+    expect(capture.sentFrames.length).toBe(1);
+    expect(JSON.parse(capture.sentFrames[0])).toMatchObject({ text: "check email" });
     // Tag every frame with the owning turn so session scoping accepts them.
-    const turnSID = (JSON.parse(sentFrames[0]) as { sessionID?: string }).sessionID;
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
 
     // 1. Tool starts
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "tool_start",
-          toolName: "email.search",
-          callID: "call-1",
-          argumentsJSON: '{"limit": 1}',
-          sessionID: turnSID,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-1",
+      argumentsJSON: '{"limit": 1}',
+      sessionID: turnSID,
     });
 
     await waitFor(() => {
@@ -420,20 +266,16 @@ describe("ChatView", () => {
     });
 
     // 2. Tool ends
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "tool_end",
-          toolName: "email.search",
-          callID: "call-1",
-          result: {
-            toolCallID: "call-1",
-            content: "1 email found",
-            isError: false,
-          },
-          sessionID: turnSID,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "email.search",
+      callID: "call-1",
+      result: {
+        toolCallID: "call-1",
+        content: "1 email found",
+        isError: false,
+      },
+      sessionID: turnSID,
     });
 
     await waitFor(() => {
@@ -441,28 +283,20 @@ describe("ChatView", () => {
     });
 
     // 3. Text delta streaming
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "delta",
-          delta: "You have one ",
-          sessionID: turnSID,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "You have one ",
+      sessionID: turnSID,
     });
 
     await waitFor(() => {
       expect(screen.getByText(/You have one/)).toBeInTheDocument();
     });
 
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "delta",
-          delta: "new email from Alice.",
-          sessionID: turnSID,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "new email from Alice.",
+      sessionID: turnSID,
     });
 
     await waitFor(() => {
@@ -472,27 +306,101 @@ describe("ChatView", () => {
     });
 
     // 4. Done frame completes turn
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "done",
-          text: "You have one new email from Alice.",
-          sessionID: turnSID,
-          toolActions: [
-            {
-              toolName: "email.search",
-              callID: "call-1",
-              argumentsJSON: '{"limit": 1}',
-              result: {
-                toolCallID: "call-1",
-                content: "1 email found",
-                isError: false,
-              },
-            },
-          ],
-          totalTokens: 150,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "You have one new email from Alice.",
+      sessionID: turnSID,
+      toolActions: [
+        {
+          toolName: "email.search",
+          callID: "call-1",
+          argumentsJSON: '{"limit": 1}',
+          result: {
+            toolCallID: "call-1",
+            content: "1 email found",
+            isError: false,
+          },
+        },
+      ],
+      totalTokens: 150,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+  });
+
+  it("processes tool_start, delta, and done when server returns uppercase UUID matching lowercase client session", async () => {
+    const user = userEvent.setup();
+
+    const capture = createMockWebSocketCapture();
+
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "check email");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    expect(capture.sentFrames.length).toBe(1);
+    const clientSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+    expect(clientSID).toBeDefined();
+    if (clientSID === undefined) {
+      throw new Error("Expected client session ID on the sent frame");
+    }
+    // Swift formats UUIDs as uppercase by default (e.g. 3ECB... vs 3ecb...)
+    const serverSID = clientSID.toUpperCase();
+    expect(serverSID).not.toBe(clientSID.toLowerCase());
+
+    // 1. Tool starts with uppercase server session ID
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-case-1",
+      argumentsJSON: '{"limit": 1}',
+      sessionID: serverSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("email.search")).toBeInTheDocument();
+      expect(screen.getByText("Running")).toBeInTheDocument();
+    });
+
+    // 2. Text delta streaming with uppercase server session ID
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "Found 1 matching email.",
+      sessionID: serverSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Found 1 matching email\./)).toBeInTheDocument();
+    });
+
+    // 3. Done frame completes turn with uppercase server session ID
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "Found 1 matching email.",
+      sessionID: serverSID,
+      toolActions: [
+        {
+          toolName: "email.search",
+          callID: "call-case-1",
+          argumentsJSON: '{"limit": 1}',
+          result: {
+            toolCallID: "call-case-1",
+            content: "1 email found",
+            isError: false,
+          },
+        },
+      ],
+      totalTokens: 120,
     });
 
     await waitFor(() => {
@@ -506,69 +414,30 @@ describe("ChatView", () => {
     // the streamed content instead of duplicating under double-invoke.
     const user = userEvent.setup();
 
-    let capturedOnMessage: ((e: MessageEvent) => void) | null = null;
-    const sentFrames: string[] = [];
+    const capture = createMockWebSocketCapture();
 
-    class MockWebSocket {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSING = 2;
-      static CLOSED = 3;
-      readyState = 1;
-      onopen: (() => void) | null = null;
-      onclose: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      onmessage: ((e: MessageEvent) => void) | null = null;
-
-      constructor() {
-        setTimeout(() => {
-          capturedOnMessage = this.onmessage;
-          this.onopen?.();
-        }, 5);
-      }
-
-      send(data: string) {
-        sentFrames.push(data);
-      }
-
-      close() {
-        this.onclose?.();
-      }
-    }
-
-    vi.stubGlobal("WebSocket", MockWebSocket);
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({}), {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
 
     render(<ChatView />);
 
     await waitFor(() => {
-      expect(capturedOnMessage).not.toBeNull();
+      expect(capture.onMessage).not.toBeNull();
     });
 
     await user.type(screen.getByLabelText("Chat input"), "stream me");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
-      expect(sentFrames.length).toBe(1);
+      expect(capture.sentFrames.length).toBe(1);
     });
-    const turnSID = (JSON.parse(sentFrames[0]) as { sessionID?: string }).sessionID;
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
 
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "delta",
-          delta: "streamed fallback text",
-          sessionID: turnSID,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "streamed fallback text",
+      sessionID: turnSID,
     });
 
     await waitFor(() => {
@@ -577,14 +446,10 @@ describe("ChatView", () => {
 
     // Done carries no text, so the finalized message must reuse the streamed
     // snapshot and appear exactly once.
-    await act(async () => {
-      capturedOnMessage!({
-        data: JSON.stringify({
-          type: "done",
-          sessionID: turnSID,
-          totalTokens: 10,
-        }),
-      } as MessageEvent);
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      sessionID: turnSID,
+      totalTokens: 10,
     });
 
     await waitFor(() => {
@@ -630,10 +495,11 @@ describe("reconstructMessages with structured tool actions", () => {
     ]);
     const result = reconstructMessages(raw, structured);
     const assistant = result.find((m) => m.role === "assistant");
-    expect(assistant?.toolActions).toHaveLength(1);
-    expect(assistant?.toolActions![0].toolName).toBe("email.search");
-    expect(assistant?.toolActions![0].argumentsJSON).toBe('{"filter":"a]b"}');
-    expect(assistant?.toolActions![0].result?.content).toBe("1 found");
+    const actions = assistant?.toolActions;
+    expect(actions).toHaveLength(1);
+    expect(actions?.[0]?.toolName).toBe("email.search");
+    expect(actions?.[0]?.argumentsJSON).toBe('{"filter":"a]b"}');
+    expect(actions?.[0]?.result?.content).toBe("1 found");
   });
 
   it("keeps uncovered lines visible without synthesizing tool actions", async () => {
@@ -709,8 +575,9 @@ describe("reconstructMessages with structured tool actions", () => {
         ],
       },
     ]);
-    expect(map.get("m1")).toHaveLength(1);
-    expect(map.get("m1")![0].toolName).toBe("a");
+    const actions = map.get("m1");
+    expect(actions).toHaveLength(1);
+    expect(actions?.[0]?.toolName).toBe("a");
     expect(map.get("missing")).toBeUndefined();
     expect(toolActionMap(undefined).size).toBe(0);
   });
@@ -761,10 +628,11 @@ describe("reconstructMessages", () => {
 
     expect(result[1].role).toBe("assistant");
     expect(result[1].text).toBe('Your most recent email has subject "Security alert".');
-    expect(result[1].toolActions).toHaveLength(1);
-    expect(result[1].toolActions![0].toolName).toBe("email.search");
-    expect(result[1].toolActions![0].callID).toBe("call_123");
-    expect(result[1].toolActions![0].result?.content).toContain("Security alert");
+    const toolActions = result[1].toolActions;
+    expect(toolActions).toHaveLength(1);
+    expect(toolActions?.[0]?.toolName).toBe("email.search");
+    expect(toolActions?.[0]?.callID).toBe("call_123");
+    expect(toolActions?.[0]?.result?.content).toContain("Security alert");
   });
 
   it("handles standalone conversational messages without tools", async () => {

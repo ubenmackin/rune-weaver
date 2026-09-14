@@ -399,6 +399,38 @@ struct RunLogStoreTests {
         #expect(listed.first?.message == "persisted turn 2")
         #expect(listed.last?.message == "persisted turn 1")
     }
+
+    @Test
+    func `Delete and clear remove entries from memory and SQLite`() async {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_runs_delete.db").path
+
+        let store = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        let entry1 = await store.append(kind: "chat", status: "ok", message: "first")
+        let entry2 = await store.append(kind: "scheduler", status: "ok", message: "second")
+        #expect(await store.count() == 2)
+
+        // Delete single entry
+        await store.delete(id: entry1.id)
+        #expect(await store.count() == 1)
+        #expect(await store.entry(id: entry1.id) == nil)
+        #expect(await store.entry(id: entry2.id) != nil)
+
+        // Verify deletion persists across reload
+        let reloaded = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        #expect(await reloaded.count() == 1)
+        #expect(await reloaded.entry(id: entry1.id) == nil)
+        #expect(await reloaded.entry(id: entry2.id) != nil)
+
+        // Clear all entries and verify across reload
+        await reloaded.clear()
+        #expect(await reloaded.count() == 0)
+
+        let reloadedEmpty = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        #expect(await reloadedEmpty.count() == 0)
+    }
 }
 
 @Suite("Approval Store")
