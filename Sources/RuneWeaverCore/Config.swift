@@ -67,11 +67,6 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var model: String?
     /// Server URL (MLX / llama.cpp / vLLM / OpenAI-compatible endpoint).
     public var serverURL: String?
-    /// Cloud base URL alias. Deprecated in favor of `serverURL`.
-    public var baseURL: String? {
-        get { serverURL }
-        set { serverURL = newValue }
-    }
 
     /// Environment variable holding the API key. Resolved via
     /// `SecretsManager` (env first, Keychain fallback). Never in TOML.
@@ -97,7 +92,6 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         enabled: Bool = true,
         model: String? = nil,
         serverURL: String? = nil,
-        baseURL: String? = nil,
         apiKeyEnv: String? = nil,
         providerType: String? = nil,
         apiStyle: APIStyle = .chatCompletions,
@@ -105,7 +99,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     ) {
         self.enabled = enabled
         self.model = model
-        self.serverURL = serverURL ?? baseURL
+        self.serverURL = serverURL
         self.apiKeyEnv = apiKeyEnv
         self.providerType = providerType
         self.apiStyle = apiStyle
@@ -116,7 +110,6 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case enabled
         case model
         case serverURL = "server_url"
-        case baseURL = "base_url"
         case apiKeyEnv = "api_key_env"
         case providerType = "provider_type"
         case apiStyle = "api_style"
@@ -127,9 +120,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         self.model = try container.decodeIfPresent(String.self, forKey: .model)
-        let server = try container.decodeIfPresent(String.self, forKey: .serverURL)
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        self.serverURL = server ?? base
+        self.serverURL = try container.decodeIfPresent(String.self, forKey: .serverURL)
         self.apiKeyEnv = try container.decodeIfPresent(String.self, forKey: .apiKeyEnv)
         self.providerType = try container.decodeIfPresent(String.self, forKey: .providerType)
         self.apiStyle = try container.decodeIfPresent(APIStyle.self, forKey: .apiStyle) ?? .chatCompletions
@@ -183,10 +174,12 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     public var vectorDBPath: String
     /// SQLite path for episodic memory.
     public var episodesDBPath: String
-    /// Embedding model identifier.
+    /// Embedding model identifier retained for forward compatibility.
     ///
-    /// Consumed by the `provider` backend; retained as informational for the
-    /// `apple` backend so switching back never loses the previous choice.
+    /// Reserved for future small/embedding-model support and ignored by the
+    /// `apple`, `provider`, and `none` backends today: `apple` uses the fixed
+    /// on-device model, `provider` reuses the active chat model, and `none`
+    /// stays keyword-only. Still required non-empty so older configs load.
     public var embeddingModel: String
     /// Embedding backend selector.
     ///
@@ -274,25 +267,20 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[sandbox]` — staging area and trust escalation policy.
+/// `[sandbox]` — staging area for file operations.
 public struct SandboxConfig: Sendable, Codable, Equatable {
     /// Staging directory for file writes awaiting approval.
     public var stagingPath: String
-    /// Successful executions before a write may auto-approve.
-    public var autoApproveAfter: Int
 
     /// Creates a sandbox config.
     public init(
-        stagingPath: String = "~/.runeweaver/sandbox",
-        autoApproveAfter: Int = 5
+        stagingPath: String = "~/.runeweaver/sandbox"
     ) {
         self.stagingPath = stagingPath
-        self.autoApproveAfter = autoApproveAfter
     }
 
     private enum CodingKeys: String, CodingKey {
         case stagingPath = "staging_path"
-        case autoApproveAfter = "auto_approve_after"
     }
 }
 
@@ -724,7 +712,6 @@ extension RuneWeaverConfig {
             "",
             "[sandbox]",
             "staging_path = \(Self.tomlQuoted(sandbox.stagingPath))",
-            "auto_approve_after = \(sandbox.autoApproveAfter)",
             ""
         ]
     }
@@ -973,11 +960,6 @@ extension RuneWeaverConfig {
         if sandbox.stagingPath.isEmpty {
             throw ConfigError.validationError(
                 field: "sandbox.staging_path", message: "must not be empty"
-            )
-        }
-        if sandbox.autoApproveAfter < 0 {
-            throw ConfigError.validationError(
-                field: "sandbox.auto_approve_after", message: "must be zero or positive"
             )
         }
     }

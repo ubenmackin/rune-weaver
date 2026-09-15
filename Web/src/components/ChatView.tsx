@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   cancelChat,
+  decideApproval,
   getSession,
   getSessionToolActions,
   listApprovals,
@@ -16,8 +17,10 @@ import {
   type SessionMessageToolActions,
   type ToolAction,
   type ToolResult,
+  type TrustDuration,
 } from "../api";
 import SessionSidebar from "./SessionSidebar";
+import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
 import { WrenchIcon } from "./icons";
@@ -295,6 +298,11 @@ export default function ChatView({ health }: ChatViewProps) {
   // Unresolved approvals for the inbox badge: filtered by session below so
   // only this conversation's blocked tools raise the amber indicator.
   const [pendingApprovals, setPendingApprovals] = useState<PermissionRequest[]>([]);
+  // Tracks in-flight inline decisions per approval ID so only deciding rows
+  // lock, mirroring the inbox per-row pattern while siblings stay actionable.
+  const [decidingApprovalIDs, setDecidingApprovalIDs] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
 
   // Status bar metrics
   const [lastTurnTokens, setLastTurnTokens] = useState<number | null>(null);
@@ -414,6 +422,36 @@ export default function ChatView({ health }: ChatViewProps) {
         // Keep prior inbox on transient failure.
       });
   }, []);
+
+  // Decides one inline approval without blocking the chat input or sibling
+  // rows: each row tracks its own in-flight decision so concurrent approvals
+  // stay actionable, matching the inbox per-row pattern. The row evicts
+  // locally on success for instant feedback, then reconciles with the server
+  // so cross-tab decisions converge instead of reappearing.
+  const handleDecideApproval = useCallback(
+    async (id: string, approved: boolean, duration: TrustDuration) => {
+      setDecidingApprovalIDs((previous) => new Set(previous).add(id));
+      try {
+        await decideApproval(id, approved, duration);
+        setPendingApprovals((previous) =>
+          previous.filter((item) => item.id !== id),
+        );
+      } catch (failure) {
+        setError(
+          failure instanceof ApiError ? failure.message : "Decision failed",
+        );
+      } finally {
+        setDecidingApprovalIDs((previous) => {
+          if (!previous.has(id)) return previous;
+          const next = new Set(previous);
+          next.delete(id);
+          return next;
+        });
+      }
+      refreshApprovals();
+    },
+    [refreshApprovals],
+  );
 
   useEffect(() => {
     if (health?.model) setActiveModel(health.model);
@@ -1085,10 +1123,8 @@ export default function ChatView({ health }: ChatViewProps) {
       : 0;
   // Amber badge count for this session only; other sessions' approvals never
   // leak into this header.
-  const sessionPendingCount = approvalsForSession(
-    pendingApprovals,
-    sessionID,
-  ).length;
+  const sessionApprovals = approvalsForSession(pendingApprovals, sessionID);
+  const sessionPendingCount = sessionApprovals.length;
 
   return (
     <div className="chat-layout">
@@ -1244,6 +1280,26 @@ export default function ChatView({ health }: ChatViewProps) {
         </div>
 
         {error ? <p className="error chat-error">{error}</p> : null}
+
+        {/* Inline session approvals sit between the parked waiting text and
+            the input as a non-modal list, so deciding never blocks typing. */}
+        {sessionApprovals.length > 0 ? (
+          <div
+            className="inline-approval-list"
+            aria-label="Session approvals awaiting decision"
+          >
+            {sessionApprovals.map((request) => (
+              <InlineApprovalBanner
+                key={request.id}
+                request={request}
+                deciding={decidingApprovalIDs.has(request.id)}
+                onDecide={(id, approved, duration) =>
+                  void handleDecideApproval(id, approved, duration)
+                }
+              />
+            ))}
+          </div>
+        ) : null}
 
         {/* Input & Status Bar Container */}
         <div className="chat-footer-box">

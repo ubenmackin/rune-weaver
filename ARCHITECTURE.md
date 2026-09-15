@@ -447,7 +447,7 @@ server_url = "http://localhost:8080"  # MLX server
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 # context_length = 1000000  # e.g. 1000000 for 1M-context endpoints
 
 [llm.providers.local]
@@ -468,7 +468,6 @@ tts_provider = "system"  # macOS say command
 
 [sandbox]
 staging_path = "~/.runeweaver/sandbox"
-auto_approve_after = 5  # Auto-approve after 5 successful executions
 
 [email]
 [[email.accounts]]

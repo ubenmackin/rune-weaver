@@ -6,6 +6,9 @@
 // reasons. Persists grants best-effort through a pluggable trust store.
 
 import Foundation
+#if canImport(SQLite3)
+    import SQLite3
+#endif
 
 /// How long a graduated-trust grant lasts.
 ///
@@ -256,12 +259,15 @@ public enum PermissionDecision: Sendable, Equatable {
 /// best-effort; a corrupt or missing store never blocks permission
 /// checks, it simply starts from an empty grant set.
 public protocol TrustStore: Sendable {
-    /// Loads all stored grants.
+    /// Loads all stored active grants.
     /// - Returns: Persisted grants, possibly empty.
-    func load() throws -> [TrustGrant]
+    func load() async throws -> [TrustGrant]
     /// Replaces the stored grants.
     /// - Parameter grants: Current grants to persist.
-    func save(_ grants: [TrustGrant]) throws
+    func save(_ grants: [TrustGrant]) async throws
+    /// Deletes expired grants from storage.
+    /// - Parameter date: Threshold date.
+    func pruneExpired(at date: Date) async throws
 }
 
 /// In-memory ``TrustStore`` for tests and ephemeral sessions.
@@ -277,18 +283,22 @@ public final class InMemoryTrustStore: TrustStore, @unchecked Sendable {
 
     /// Returns the in-memory grants.
     /// - Returns: Current grants.
-    public func load() throws -> [TrustGrant] {
-        lock.lock()
-        defer { lock.unlock() }
-        return grants
+    public func load() async throws -> [TrustGrant] {
+        lock.withLock { grants }
     }
 
     /// Replaces the in-memory grants.
     /// - Parameter grants: Grants to keep.
-    public func save(_ grants: [TrustGrant]) throws {
-        lock.lock()
-        defer { lock.unlock() }
-        self.grants = grants
+    public func save(_ grants: [TrustGrant]) async throws {
+        lock.withLock { self.grants = grants }
+    }
+
+    /// Prunes expired in-memory grants.
+    /// - Parameter date: Expiry threshold. Defaults to now.
+    public func pruneExpired(at date: Date = Date()) async throws {
+        lock.withLock {
+            grants.removeAll { $0.isExpired(at: date) }
+        }
     }
 }
 
@@ -308,7 +318,7 @@ public struct FileTrustStore: TrustStore, Sendable {
 
     /// Loads grants from disk, returning empty when absent.
     /// - Returns: Persisted grants.
-    public func load() throws -> [TrustGrant] {
+    public func load() async throws -> [TrustGrant] {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return [] }
         let data = try Data(contentsOf: fileURL)
         guard !data.isEmpty else { return [] }
@@ -317,11 +327,181 @@ public struct FileTrustStore: TrustStore, Sendable {
 
     /// Persists grants to disk atomically.
     /// - Parameter grants: Grants to persist.
-    public func save(_ grants: [TrustGrant]) throws {
+    public func save(_ grants: [TrustGrant]) async throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let data = try JSONEncoder().encode(grants)
         try data.write(to: fileURL, options: .atomic)
+    }
+
+    /// Prunes expired grants from disk.
+    /// - Parameter date: Expiry threshold.
+    public func pruneExpired(at date: Date = Date()) async throws {
+        var current = await ((try? load()) ?? [])
+        current.removeAll { $0.isExpired(at: date) }
+        try await save(current)
+    }
+}
+
+#if canImport(SQLite3)
+    /// Internal SQLite helper for durable trust grant persistence in `episodes.db`.
+    enum SQLiteTrustStorage {
+        private struct TrustStorageError: Error {
+            let message: String
+        }
+
+        private static func open(dbPath: String) throws -> OpaquePointer? {
+            let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { TrustStorageError(message: $0) })
+            try SQLiteHelpers.exec(
+                handle: handle,
+                sql: """
+                CREATE TABLE IF NOT EXISTS trust_grants (
+                    id TEXT PRIMARY KEY,
+                    tool_name TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    granted_at REAL NOT NULL,
+                    expires_at REAL,
+                    duration TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_trust_grants_tool_target ON trust_grants(tool_name, target);
+                CREATE INDEX IF NOT EXISTS idx_trust_grants_expires_at ON trust_grants(expires_at);
+                """,
+                failure: { TrustStorageError(message: $0) }
+            )
+            return handle
+        }
+
+        static func load(dbPath: String) -> [TrustGrant] {
+            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            defer { sqlite3_close(handle) }
+            let now = Date().timeIntervalSince1970
+            let sql = "SELECT id, tool_name, target, granted_at, expires_at, duration FROM trust_grants WHERE expires_at IS NULL OR expires_at > ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindDouble(statement, index: 1, value: now)
+            var results: [TrustGrant] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let idString = SQLiteHelpers.columnText(statement, index: 0),
+                      let id = UUID(uuidString: idString),
+                      let toolName = SQLiteHelpers.columnText(statement, index: 1),
+                      let durationRaw = SQLiteHelpers.columnText(statement, index: 5),
+                      let duration = TrustDuration(rawValue: durationRaw)
+                else { continue }
+                let target = SQLiteHelpers.columnText(statement, index: 2) ?? ""
+                let grantedAtSeconds = SQLiteHelpers.columnDouble(statement, index: 3)
+                let grantedAt = Date(timeIntervalSince1970: grantedAtSeconds)
+                var expiresAt: Date?
+                if sqlite3_column_type(statement, 4) != SQLITE_NULL {
+                    expiresAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 4))
+                }
+                results.append(TrustGrant(
+                    id: id,
+                    actionDescriptor: ActionDescriptor(toolName: toolName, target: target),
+                    grantedAt: grantedAt,
+                    expiresAt: expiresAt,
+                    duration: duration
+                ))
+            }
+            return results
+        }
+
+        static func pruneExpired(at date: Date, dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else { return }
+            defer { sqlite3_close(handle) }
+            let sql = "DELETE FROM trust_grants WHERE expires_at IS NOT NULL AND expires_at <= ?;"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindDouble(statement, index: 1, value: date.timeIntervalSince1970)
+            _ = sqlite3_step(statement)
+        }
+
+        static func save(grants: [TrustGrant], dbPath: String) {
+            guard let handle = try? open(dbPath: dbPath) else { return }
+            defer { sqlite3_close(handle) }
+            // Replace the table atomically: any prepare/step failure rolls
+            // back to the pre-save contents instead of committing an
+            // empty or partial grant set that would wipe live trust.
+            guard sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else { return }
+            guard sqlite3_exec(handle, "DELETE FROM trust_grants;", nil, nil, nil) == SQLITE_OK else {
+                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                return
+            }
+            let insertSQL = "INSERT INTO trust_grants (id, tool_name, target, granted_at, expires_at, duration) VALUES (?, ?, ?, ?, ?, ?);"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, insertSQL, -1, &stmt, nil) == SQLITE_OK else {
+                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                return
+            }
+            var succeeded = true
+            for grant in grants {
+                sqlite3_reset(stmt)
+                SQLiteHelpers.bindText(stmt, index: 1, value: grant.id.uuidString)
+                SQLiteHelpers.bindText(stmt, index: 2, value: grant.actionDescriptor.toolName)
+                SQLiteHelpers.bindText(stmt, index: 3, value: grant.actionDescriptor.target)
+                SQLiteHelpers.bindDouble(stmt, index: 4, value: grant.grantedAt.timeIntervalSince1970)
+                if let exp = grant.expiresAt {
+                    SQLiteHelpers.bindDouble(stmt, index: 5, value: exp.timeIntervalSince1970)
+                } else {
+                    sqlite3_bind_null(stmt, 5)
+                }
+                SQLiteHelpers.bindText(stmt, index: 6, value: grant.duration.rawValue)
+                guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    succeeded = false
+                    break
+                }
+            }
+            sqlite3_finalize(stmt)
+            if succeeded {
+                if sqlite3_exec(handle, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                    _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+                }
+            } else {
+                _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
+            }
+        }
+    }
+#endif
+
+/// SQLite-backed ``TrustStore`` persisted under `episodes.db` in table `trust_grants`.
+public struct SQLiteTrustStore: TrustStore, Sendable {
+    /// Filesystem path of the SQLite database (`episodes.db`).
+    public let dbPath: String
+
+    /// Creates an SQLite trust store.
+    /// - Parameter dbPath: SQLite database file path.
+    public init(dbPath: String) {
+        self.dbPath = dbPath
+    }
+
+    /// Loads active non-expired grants from SQLite.
+    public func load() async throws -> [TrustGrant] {
+        #if canImport(SQLite3)
+            return await SQLiteSerialIO.runUncancellable {
+                SQLiteTrustStorage.load(dbPath: dbPath)
+            }
+        #else
+            return []
+        #endif
+    }
+
+    /// Replaces the persisted grants in SQLite.
+    public func save(_ grants: [TrustGrant]) async throws {
+        #if canImport(SQLite3)
+            await SQLiteSerialIO.runUncancellable {
+                SQLiteTrustStorage.save(grants: grants, dbPath: dbPath)
+            }
+        #endif
+    }
+
+    /// Deletes expired grants from SQLite.
+    public func pruneExpired(at date: Date = Date()) async throws {
+        #if canImport(SQLite3)
+            await SQLiteSerialIO.runUncancellable {
+                SQLiteTrustStorage.pruneExpired(at: date, dbPath: dbPath)
+            }
+        #endif
     }
 }
 
@@ -344,17 +524,85 @@ public actor PermissionGate {
     private let store: (any TrustStore)?
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
+    /// Recurring task for pruning expired grants periodically.
+    ///
+    /// Owned by the actor and cancelled only via `stopPeriodicCleanup()`;
+    /// there is intentionally no `deinit` cancel because actor-isolated
+    /// state cannot be touched from a non-isolated `deinit`.
+    private var reaperTask: Task<Void, Never>?
 
     /// Creates a permission gate.
     /// - Parameters:
-    ///   - store: Persistence backend. Defaults to nil (memory only). Stored grants load best-effort.
+    ///   - store: Persistence backend. Defaults to nil (memory only).
     ///   - pluginsDir: Configured plugins directory. Defaults to nil (uses default path).
     public init(store: (any TrustStore)? = nil, pluginsDir: URL? = nil) {
         self.store = store
         self.pluginsDir = pluginsDir
+    }
+
+    /// Loads a permission gate hydrated from durable storage, pruning expired grants on startup.
+    /// - Parameters:
+    ///   - store: Persistence backend.
+    ///   - pluginsDir: Configured plugins directory.
+    /// - Returns: Hydrated permission gate.
+    public static func load(store: (any TrustStore)? = nil, pluginsDir: URL? = nil) async -> PermissionGate {
+        let gate = PermissionGate(store: store, pluginsDir: pluginsDir)
+        await gate.bootstrap()
+        return gate
+    }
+
+    /// Hydrates grants from storage, cleaning up expired records immediately.
+    public func bootstrap() async {
+        guard let store else { return }
+        let now = Date()
+        try? await store.pruneExpired(at: now)
+        grants = await ((try? store.load()) ?? [])
+        grants.removeAll { $0.isExpired(at: now) }
+    }
+
+    /// Starts a periodic background reaper that checks and cleans up expired grants.
+    ///
+    /// The reaper lives until `stopPeriodicCleanup()` cancels it; callers
+    /// own that shutdown pairing because the actor cannot cancel
+    /// isolated state from `deinit`.
+    /// - Parameter intervalSeconds: Cadence between checks. Defaults to 60.
+    ///   Clamped to a minimum of 0.01 seconds so sub-second test cadences
+    ///   tick as requested while guarding against zero or negative sleeps.
+    public func startPeriodicCleanup(intervalSeconds: TimeInterval = 60) {
+        stopPeriodicCleanup()
+        let interval = max(0.01, intervalSeconds)
+        reaperTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                } catch {
+                    break
+                }
+                guard !Task.isCancelled, let self else { break }
+                await self.pruneExpiredAndPersist()
+            }
+        }
+    }
+
+    /// Stops the periodic background cleanup reaper.
+    ///
+    /// Safe to call when no reaper is running; pair every
+    /// `startPeriodicCleanup()` with this on shutdown so the sleep
+    /// task does not outlive its owner.
+    public func stopPeriodicCleanup() {
+        reaperTask?.cancel()
+        reaperTask = nil
+    }
+
+    /// Prunes expired grants from memory and storage.
+    ///
+    /// Runs on the actor so overlapping grant and revoke calls serialize;
+    /// the store prune is awaited, preserving disk order with call order.
+    public func pruneExpiredAndPersist() async {
+        let now = Date()
+        grants.removeAll { $0.isExpired(at: now) }
         if let store {
-            grants = (try? store.load()) ?? []
-            grants.removeAll { $0.isExpired() }
+            try? await store.pruneExpired(at: now)
         }
     }
 
@@ -429,11 +677,12 @@ public actor PermissionGate {
     ///
     /// `thisTime` approvals are one-shot and intentionally not stored.
     /// Any existing grant for the same descriptor is replaced, then
-    /// the grant set is persisted best-effort.
+    /// the full grant set is awaited to storage so rapid
+    /// grant and revoke sequences commit in actor order instead of racing.
     /// - Parameters:
     ///   - descriptor: The action to trust.
     ///   - duration: How long the trust lasts.
-    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) {
+    public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
         guard duration != .thisTime else { return }
         pruneExpired()
         grants.removeAll { $0.actionDescriptor == descriptor }
@@ -446,22 +695,22 @@ public actor PermissionGate {
         )
         grants.append(grant)
         denials.removeValue(forKey: descriptor)
-        persistBestEffort()
+        await persist()
     }
 
     /// Removes trust for an action.
     ///
     /// Drops every grant matching the descriptor exactly, plus
-    /// tool-wide grants when `descriptor.target` is empty, then
-    /// persists best-effort. Missing grants are a no-op.
+    /// tool-wide grants when `descriptor.target` is empty, then awaits
+    /// the pruned set to storage in actor order. Missing grants are a no-op.
     /// - Parameter descriptor: The action to distrust.
-    public func revokeTrust(for descriptor: ActionDescriptor) {
+    public func revokeTrust(for descriptor: ActionDescriptor) async {
         if descriptor.target.isEmpty {
             grants.removeAll { $0.actionDescriptor.toolName == descriptor.toolName }
         } else {
             grants.removeAll { $0.actionDescriptor == descriptor }
         }
-        persistBestEffort()
+        await persist()
     }
 
     /// Explicitly refuses an action with a reason.
@@ -509,16 +758,25 @@ public actor PermissionGate {
         }
     }
 
-    /// Drops expired grants.
+    /// Drops expired grants from memory only, without touching storage.
+    ///
+    /// Synchronous checks prune here so they never fire unordered
+    /// background saves; durability for expiries comes from the awaited
+    /// paths (`grantTrust`, `revokeTrust`, `pruneExpiredAndPersist`)
+    /// and startup `bootstrap`, keeping disk order tied to actor order.
     private func pruneExpired() {
         let now = Date()
         grants.removeAll { $0.isExpired(at: now) }
     }
 
-    /// Mirrors grants to the store, swallowing errors so permission
-    /// checks never fail on persistence issues.
-    private func persistBestEffort() {
+    /// Mirrors the current grants to the store in actor order.
+    ///
+    /// Awaited by every mutating path so the actor serializes saves;
+    /// errors stay best-effort so permission checks never fail on
+    /// persistence issues.
+    private func persist() async {
         guard let store else { return }
-        try? store.save(grants)
+        let snapshot = grants
+        try? await store.save(snapshot)
     }
 }

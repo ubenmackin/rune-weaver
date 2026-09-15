@@ -618,7 +618,8 @@ final class TurnTaskBox: @unchecked Sendable {
 ///
 /// Bundles every subsystem actor (`ConversationManager`, `ToolBus`,
 /// `MemoryEngine`, `PermissionGate`, `ApprovalQueue`, `SchedulerStore`,
-/// `RunLogStore`, `WSHub`, `SchedulerRunLock`, `ActiveTurnTracker`) plus the `Sendable`
+/// `RunLogStore`, `WSHub`, `SchedulerRunLock`, `ActiveTurnTracker`,
+/// `ToolStateStore`) plus the `Sendable`
 /// `ServerConfig` value, all held in immutable `let`s, so no field forces
 /// unchecked sharing.
 public final class ServerContext: Sendable {
@@ -661,6 +662,8 @@ public final class ServerContext: Sendable {
     public let pluginStore: ToolRegistryStore
     /// Service discovering and syncing plugins from disk.
     public let pluginDiscovery: PluginDiscoveryService
+    /// Durable per-tool enable/disable toggles for every registered tool.
+    public let toolStates: ToolStateStore
 
     /// Creates a server context.
     public init(
@@ -679,7 +682,8 @@ public final class ServerContext: Sendable {
         activeTurns: ActiveTurnTracker = ActiveTurnTracker(),
         schedulerWorker: ServerSchedulerWorker? = nil,
         pluginStore: ToolRegistryStore? = nil,
-        pluginDiscovery: PluginDiscoveryService? = nil
+        pluginDiscovery: PluginDiscoveryService? = nil,
+        toolStates: ToolStateStore? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -706,6 +710,26 @@ public final class ServerContext: Sendable {
         let pStore = pluginStore ?? ToolRegistryStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
         self.pluginStore = pStore
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
+        self.toolStates = toolStates ?? ToolStateStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+    }
+
+    /// Reapplies every persisted tool toggle onto the live bus.
+    ///
+    /// Stored rows win over registration defaults so restarts restore operator
+    /// intent: each persisted flag flows through the existing enable/disable
+    /// calls, and names with no live registration are skipped harmlessly so
+    /// stale rows never fail boot. Call again after registering builtin tools
+    /// that arrived after `make`, since those registrations reset to enabled.
+    /// - Parameter forceReload: When true, re-reads SQLite before applying.
+    public func restoreToolStates(forceReload: Bool = false) async {
+        let stored = await toolStates.loadAll(forceReload: forceReload)
+        for (name, enabled) in stored {
+            if enabled {
+                await toolBus.enableTool(named: name)
+            } else {
+                await toolBus.disableTool(named: name)
+            }
+        }
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -755,6 +779,7 @@ public final class ServerContext: Sendable {
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
         let pStore = ToolRegistryStore(dbPath: episodesDBPath ?? ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        let tStates = ToolStateStore(dbPath: episodesDBPath ?? ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
         let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
         let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
         if pluginConfig.autoRescan {
@@ -797,7 +822,8 @@ public final class ServerContext: Sendable {
             runLock: runLock,
             schedulerWorker: schedulerWorker,
             pluginStore: pStore,
-            pluginDiscovery: pDiscovery
+            pluginDiscovery: pDiscovery,
+            toolStates: tStates
         )
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
@@ -816,6 +842,10 @@ public final class ServerContext: Sendable {
             )
             return decision.approved
         }
+        // Stored toggles win over fresh registration defaults so restarts
+        // restore operator intent; tools registered after `make` (builtin
+        // plugins in the serve path) re-apply via `restoreToolStates`.
+        await context.restoreToolStates()
         return context
     }
 }
@@ -1147,93 +1177,6 @@ private func registerChatRoute(_ app: Application) {
         let body = try req.content.decode(CancelChatRequest.self)
         let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
         return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
-    }
-}
-
-/// Registers tool listing plus direct tool-call routes.
-/// - Parameter app: Application receiving the routes.
-private func registerToolRoutes(_ app: Application) {
-    app.get(PathComponent.constant(ServerPaths.tools)) { req async throws -> ToolsResponse in
-        let context = req.application.runeWeaver
-        let tools = await context.toolBus.allTools()
-        let records = await context.pluginStore.loadAll()
-        let recordByPluginID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-
-        var toolInfos: [ToolInfo] = []
-        for tool in tools {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            var pluginID: String?
-            var isBuiltIn = true
-            var source = "builtin"
-            var integrityStatus = "valid"
-
-            if let bridge = tool as? SubprocessToolBridge {
-                pluginID = bridge.pluginID
-                isBuiltIn = false
-                // Surface durable provenance so marketplace runes stay
-                // distinguishable from local disk in the dashboard; unknown
-                // tools keep the generic plugin label with unverified status.
-                if let record = recordByPluginID[bridge.pluginID] {
-                    source = record.source
-                    switch record.status {
-                    case .tampered:
-                        integrityStatus = "tampered"
-                    case .discovered, .enabled, .disabled:
-                        integrityStatus = "valid"
-                    }
-                } else {
-                    source = "plugin"
-                    integrityStatus = "unverified"
-                }
-            }
-
-            toolInfos.append(ToolInfo(
-                tool,
-                isEnabled: isEnabled,
-                isBuiltIn: isBuiltIn,
-                pluginID: pluginID,
-                source: source,
-                integrityStatus: integrityStatus
-            ))
-        }
-        toolInfos.sort { $0.name < $1.name }
-        return ToolsResponse(tools: toolInfos)
-    }
-
-    app.post(PathComponent.constant(ServerPaths.tools), PathComponent.constant(ServerPaths.toolCall)) { req async throws -> ToolResult in
-        let body = try req.content.decode(ToolCallRequest.self)
-        guard !body.toolName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw Abort(.badRequest, reason: "toolName must not be empty")
-        }
-        let context = req.application.runeWeaver
-        let call = ToolInput(
-            toolName: body.toolName,
-            argumentsJSON: body.resolvedArgumentsJSON,
-            callID: body.resolvedCallID
-        )
-        let startTime = Date()
-        let result = await context.toolBus.execute(
-            toolCall: call,
-            context: ToolContext(conversationID: UUID())
-        )
-        // Direct tool calls are service-triggered writes, so they join the
-        // same local audit trail as chat and scheduler runs instead of
-        // returning silently.
-        let action = ToolAction(
-            toolName: call.toolName,
-            callID: call.callID,
-            argumentsJSON: call.argumentsJSON,
-            result: result
-        )
-        await context.runs.append(
-            kind: "tool",
-            status: result.isError ? "error" : "ok",
-            message: call.toolName,
-            response: result.content,
-            toolActions: [action],
-            durationMs: Int(Date().timeIntervalSince(startTime) * 1000)
-        )
-        return result
     }
 }
 

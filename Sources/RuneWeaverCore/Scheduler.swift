@@ -962,17 +962,6 @@ public func normalizedSchedulerJobName(_ name: String) -> String {
 /// session) so episodic memory, run logs, and notifications stay
 /// consistent between the CLI foreground runner and the engine API.
 public actor SchedulerEngine {
-    /// Deprecated alias for the canonical ``normalizedSchedulerJobName(_:)``.
-    ///
-    /// Retained for source compatibility; new code must call the global
-    /// helper directly so normalization stays single-sourced.
-    /// - Parameter name: Raw job name.
-    /// - Returns: Trimmed name.
-    @available(*, deprecated, renamed: "normalizedSchedulerJobName")
-    public static func normalizedJobName(_ name: String) -> String {
-        normalizedSchedulerJobName(name)
-    }
-
     /// Jobs indexed by name.
     private var jobs: [String: SchedulerJobConfig] = [:]
     /// Job names with an in-flight turn.

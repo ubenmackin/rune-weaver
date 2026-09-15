@@ -36,7 +36,7 @@ struct ConfigFallbackTests {
 
         [llm.providers.openrouter]
         enabled = true
-        base_url = "https://openrouter.ai/api/v1"
+        server_url = "https://openrouter.ai/api/v1"
         api_key_env = "OPENROUTER_API_KEY"
         """
         let root = try TOMLParser.parse(text)

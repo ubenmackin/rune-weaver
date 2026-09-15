@@ -38,7 +38,7 @@ struct CoreProtocolsTests {
 
         [llm.providers.custom]
         enabled = true
-        base_url = "https://example.com/v1"
+        server_url = "https://example.com/v1"
         api_style = "chat-completions"
         """
         let root = try TOMLParser.parse(text)
@@ -54,7 +54,7 @@ struct CoreProtocolsTests {
 
         [llm.providers.custom]
         enabled = true
-        base_url = "https://example.com/v1"
+        server_url = "https://example.com/v1"
         api_style = "responses"
         """
         let root = try TOMLParser.parse(text)
@@ -70,7 +70,7 @@ struct CoreProtocolsTests {
 
         [llm.providers.custom]
         enabled = true
-        base_url = "https://example.com/v1"
+        server_url = "https://example.com/v1"
         """
         let root = try TOMLParser.parse(text)
         let config = try RuneWeaverConfig(decoding: root)
@@ -85,7 +85,7 @@ struct CoreProtocolsTests {
 
         [llm.providers.custom]
         enabled = true
-        base_url = "https://example.com/v1"
+        server_url = "https://example.com/v1"
         api_style = "carrier-pigeon"
         """
         let root = try TOMLParser.parse(text)

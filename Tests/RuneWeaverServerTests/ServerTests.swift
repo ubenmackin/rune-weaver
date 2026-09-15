@@ -7,6 +7,7 @@ import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
+import Vapor
 
 /// Stub LLM replaying one canned answer without the network.
 private final class ServerStubProvider: LLMProvider, @unchecked Sendable {
@@ -433,11 +434,11 @@ struct RunLogStoreTests {
     }
 }
 
-@Suite("Approval Store")
-struct ApprovalStoreTests {
+@Suite("Approval Queue")
+struct ApprovalQueueTests {
     @Test
     func `Enqueue lists pending`() async {
-        let store = ApprovalStore()
+        let store = ApprovalQueue()
         let request = await store.enqueue(
             toolName: "stub.write",
             description: "Write stub.",
@@ -451,7 +452,7 @@ struct ApprovalStoreTests {
     @Test
     func `Decide resolves waiter approved`() async {
         let gate = PermissionGate()
-        let store = ApprovalStore(permissionGate: gate)
+        let store = ApprovalQueue(permissionGate: gate)
         let request = await store.enqueue(
             toolName: "stub.write",
             description: "Write stub.",
@@ -470,7 +471,7 @@ struct ApprovalStoreTests {
     @Test
     func `ThisTime approval records no trust`() async {
         let gate = PermissionGate()
-        let store = ApprovalStore(permissionGate: gate)
+        let store = ApprovalQueue(permissionGate: gate)
         let request = await store.enqueue(
             toolName: "stub.write",
             description: "Write stub.",
@@ -483,7 +484,7 @@ struct ApprovalStoreTests {
 
     @Test
     func `Decide denied resolves waiter denied`() async {
-        let store = ApprovalStore()
+        let store = ApprovalQueue()
         let request = await store.enqueue(
             toolName: "stub.write",
             description: "Write stub.",
@@ -496,14 +497,14 @@ struct ApprovalStoreTests {
 
     @Test
     func `Unknown decide and wait deny without suspending`() async {
-        let store = ApprovalStore()
+        let store = ApprovalQueue()
         #expect(await store.decide(id: UUID(), approved: true) == false)
         #expect(await store.waitForDecision(id: UUID()).approved == false)
     }
 
     @Test
     func `Early decision parks for later waiter`() async {
-        let store = ApprovalStore()
+        let store = ApprovalQueue()
         let request = await store.enqueue(
             toolName: "stub.write",
             description: "Write stub.",
@@ -953,5 +954,176 @@ struct ServerEngineFlowTests {
         let freshSummary = freshSessions.first { $0.id == sessionID }
         #expect(freshSummary?.source == "scheduler")
         #expect(freshSummary?.title == "Daily Digest")
+    }
+}
+
+@Suite("Tool State Store")
+struct ToolStateStoreTests {
+    @Test
+    func `Persist and restore across store reload`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("episodes.db").path
+
+        let writer = ToolStateStore(dbPath: dbPath)
+        await writer.setEnabled(toolName: "stub.read", enabled: false)
+        // The store stays name-agnostic on purpose: memory tools toggle
+        // through the same rows as every other registered tool.
+        await writer.setEnabled(toolName: "remember_fact", enabled: false)
+        await writer.setEnabled(toolName: "stub.write", enabled: true)
+        let first = await writer.loadAll()
+        #expect(first["stub.read"] == false)
+        #expect(first["remember_fact"] == false)
+        #expect(first["stub.write"] == true)
+        #expect(await writer.isEnabled(toolName: "stub.read") == false)
+        #expect(await writer.isEnabled(toolName: "never.toggled") == nil)
+
+        // A fresh store on the same file observes the same rows, proving
+        // restarts restore operator intent instead of resetting to enabled.
+        let reloaded = ToolStateStore(dbPath: dbPath)
+        let second = await reloaded.loadAll()
+        #expect(second == first)
+        #expect(await reloaded.isEnabled(toolName: "stub.read") == false)
+        #expect(await reloaded.isEnabled(toolName: "remember_fact") == false)
+        #expect(await reloaded.isEnabled(toolName: "stub.write") == true)
+
+        // Overwrites win and survive a third reload.
+        await reloaded.setEnabled(toolName: "stub.read", enabled: true)
+        let reread = ToolStateStore(dbPath: dbPath)
+        #expect(await reread.isEnabled(toolName: "stub.read") == true)
+        #expect(await reread.isEnabled(toolName: "remember_fact") == false)
+    }
+
+    @Test
+    func `Disabled tool rejected by ToolBus execute`() async {
+        let bus = ToolBus(permissionGate: PermissionGate())
+        await bus.register(tool: ServerReadStub())
+        let ok = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(ok.isError == false)
+        #expect(ok.content == "read-ok")
+
+        // Disabling rejects without invoking the tool, so callers can feed
+        // the denial back to the model like any other bus-level failure.
+        await bus.disableTool(named: "stub.read")
+        #expect(await bus.isToolEnabled(named: "stub.read") == false)
+        let denied = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(denied.isError == true)
+        #expect(denied.content.contains("currently disabled") == true)
+
+        await bus.enableTool(named: "stub.read")
+        #expect(await bus.isToolEnabled(named: "stub.read") == true)
+        let restored = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(restored.isError == false)
+    }
+
+    @Test
+    func `Unknown tool state update reports notFound`() async throws {
+        let (engine, base) = try makeIsolatedEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let approvals = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: ServerReadStub())
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: ServerStubProvider(),
+            memoryEngine: engine
+        )
+        let toolStates = ToolStateStore(dbPath: dbPath)
+        let context = ServerContext(
+            conversations: conversations,
+            toolBus: bus,
+            orchestrator: orchestrator,
+            memoryEngine: engine,
+            permissionGate: gate,
+            approvals: approvals,
+            toolStates: toolStates
+        )
+
+        // Unknown registered names 404 without persisting a dead row.
+        do {
+            _ = try await updateToolState(toolName: "does.not.exist", enabled: false, context: context)
+            Issue.record("Expected notFound for unknown tool")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        }
+        #expect(await toolStates.isEnabled(toolName: "does.not.exist") == nil)
+
+        // Blank names are a rejected request, not an unknown tool.
+        do {
+            _ = try await updateToolState(toolName: "   ", enabled: true, context: context)
+            Issue.record("Expected badRequest for blank name")
+        } catch let abort as Abort {
+            #expect(abort.status == .badRequest)
+        }
+
+        // Known tools persist before responding and return the updated row.
+        let disabled = try await updateToolState(toolName: "stub.read", enabled: false, context: context)
+        #expect(disabled.name == "stub.read")
+        #expect(disabled.isEnabled == false)
+        #expect(await toolStates.isEnabled(toolName: "stub.read") == false)
+        #expect(await bus.isToolEnabled(named: "stub.read") == false)
+
+        let enabled = try await updateToolState(toolName: "stub.read", enabled: true, context: context)
+        #expect(enabled.name == "stub.read")
+        #expect(enabled.isEnabled == true)
+        #expect(await toolStates.isEnabled(toolName: "stub.read") == true)
+    }
+
+    @Test
+    func `ServerContext restores persisted states onto fresh bus`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("episodes.db").path
+
+        let writer = ToolStateStore(dbPath: dbPath)
+        await writer.setEnabled(toolName: "stub.read", enabled: false)
+
+        // A fresh bus starts enabled; restore must flip it from disk.
+        let (engine, base) = try makeIsolatedEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let approvals = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: ServerReadStub())
+        #expect(await bus.isToolEnabled(named: "stub.read") == true)
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: ServerStubProvider(),
+            memoryEngine: engine
+        )
+        let context = ServerContext(
+            conversations: conversations,
+            toolBus: bus,
+            orchestrator: orchestrator,
+            memoryEngine: engine,
+            permissionGate: gate,
+            approvals: approvals,
+            toolStates: ToolStateStore(dbPath: dbPath)
+        )
+        await context.restoreToolStates()
+        #expect(await bus.isToolEnabled(named: "stub.read") == false)
+        let denied = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(denied.isError == true)
+        #expect(denied.content.contains("currently disabled") == true)
     }
 }

@@ -327,9 +327,15 @@ struct ChatCommand: AsyncParsableCommand {
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: providers)
         )
-        let permissionGate = PermissionGate(
+        let episodesDB = (loaded.config.memory.episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let permissionGate = await PermissionGate.load(
+            store: trustStore,
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
+        // Prune expired trust grants during the session so expired rows do
+        // not linger for the life of the REPL; stopped explicitly on exit.
+        await permissionGate.startPeriodicCleanup()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             memoryEngine: memoryEngine,
@@ -390,6 +396,7 @@ struct ChatCommand: AsyncParsableCommand {
             provider: active,
             context: context
         )
+        await permissionGate.stopPeriodicCleanup()
     }
 
     /// Parses `--session` into a UUID, starting fresh when omitted.

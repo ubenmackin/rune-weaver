@@ -11,6 +11,7 @@ import {
   updatePluginState,
   uninstallPlugin,
   getTools,
+  updateToolState,
   type EmailAccountData,
   type ProviderConfigData,
   type SettingsResponse,
@@ -65,7 +66,6 @@ export default function SettingsManager() {
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
   const [sandboxStagingPath, setSandboxStagingPath] = useState("");
-  const [sandboxAutoApproveAfter, setSandboxAutoApproveAfter] = useState(0);
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
@@ -86,6 +86,9 @@ export default function SettingsManager() {
   const [rescanLoading, setRescanLoading] = useState(false);
   const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [updatingPluginId, setUpdatingPluginId] = useState<string | null>(null);
+  // Tracks the single builtin tool row with an in-flight toggle so sibling
+  // rows stay interactive while one request is pending.
+  const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
   const [pluginActionError, setPluginActionError] = useState<string | null>(null);
   const [pluginActionSuccess, setPluginActionSuccess] = useState<string | null>(null);
 
@@ -192,6 +195,30 @@ export default function SettingsManager() {
     }
   };
 
+  // Flips one builtin engine tool without a protected list: every builtin
+  // toggles independently so closely related tools (email.read vs
+  // email.attachment) never change together. Only the acted-on row disables
+  // while its request is in flight, and the list refreshes from the server so
+  // the switch always reflects the persisted bus state.
+  const handleToggleTool = async (tool: ToolInfo) => {
+    const nextEnabled = !tool.isEnabled;
+    setTogglingToolName(tool.name);
+    setPluginActionError(null);
+    setPluginActionSuccess(null);
+    try {
+      await updateToolState(tool.name, nextEnabled);
+      const toolsRes = await getTools();
+      setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
+      setPluginActionSuccess(
+        nextEnabled ? `Enabled tool '${tool.name}'.` : `Disabled tool '${tool.name}'.`
+      );
+    } catch (err) {
+      setPluginActionError(err instanceof Error ? err.message : `Failed to update tool '${tool.name}'.`);
+    } finally {
+      setTogglingToolName(null);
+    }
+  };
+
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
     setEngineName(data.engineName);
@@ -223,7 +250,6 @@ export default function SettingsManager() {
     setProvidersList(pList);
 
     setSandboxStagingPath(data.sandboxStagingPath);
-    setSandboxAutoApproveAfter(data.sandboxAutoApproveAfter);
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
@@ -335,6 +361,11 @@ export default function SettingsManager() {
       .filter((acc) => acc.name && acc.host && acc.username);
 
     try {
+      // The embedding model has no editable input: provider reuses the active
+      // chat model and apple uses its fixed on-device model, so resend the
+      // loaded value untouched to keep older configs valid (never blank it).
+      const preservedEmbeddingModel =
+        memoryEmbeddingModel || settings?.memoryEmbeddingModel || "";
       const updated = await updateSettings({
         engineName,
         logLevel,
@@ -344,10 +375,9 @@ export default function SettingsManager() {
         fallbackProvider: fallbackProvider,
         providers: providersMap,
         sandboxStagingPath,
-        sandboxAutoApproveAfter: Number(sandboxAutoApproveAfter),
         memoryVectorDBPath,
         memoryEpisodesDBPath,
-        memoryEmbeddingModel,
+        memoryEmbeddingModel: preservedEmbeddingModel,
         memoryEmbeddingBackend,
         voiceSTTProvider,
         voiceWhisperModel,
@@ -949,6 +979,9 @@ export default function SettingsManager() {
                 </p>
               </div>
               <div style={{ display: "flex", gap: "8px" }}>
+                {/* Marketplace entry points stay hidden while the catalog UX is
+                    deferred; the modal remains mounted below so re-enabling is
+                    UI-only and server routes stay untouched. */}
                 <button
                   type="button"
                   className="secondary-button"
@@ -958,15 +991,6 @@ export default function SettingsManager() {
                 >
                   <RefreshIcon size={14} className={rescanLoading ? "spin" : ""} />
                   <span>{rescanLoading ? "Scanning..." : "Rescan Plugins"}</span>
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => setMarketplaceOpen(true)}
-                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
-                >
-                  <PlusIcon size={14} />
-                  <span>Browse Marketplace</span>
                 </button>
               </div>
             </div>
@@ -1073,15 +1097,10 @@ export default function SettingsManager() {
               <div className="empty-state-box" style={{ padding: "28px", textAlign: "center" }}>
                 <WrenchIcon size={32} />
                 <p>No external runes discovered in plugins directory.</p>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => setMarketplaceOpen(true)}
-                  style={{ display: "inline-flex", alignItems: "center", gap: "6px", marginTop: "8px" }}
-                >
-                  <PlusIcon size={14} />
-                  <span>Browse Marketplace</span>
-                </button>
+                <p className="muted text-sm" style={{ marginTop: "8px" }}>
+                  Add rune packages to the plugins directory below, then use
+                  Rescan Plugins to discover them.
+                </p>
               </div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
@@ -1259,28 +1278,51 @@ export default function SettingsManager() {
               <span className="settings-tab-badge">{safeTools.filter((t) => t.isBuiltIn).length}</span>
             </h4>
 
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "10px" }}>
-              {safeTools.filter((t) => t.isBuiltIn).map((tool) => (
-                <div
-                  key={tool.name}
-                  style={{
-                    padding: "10px 12px",
-                    borderRadius: "6px",
-                    backgroundColor: "var(--bg-card, #1e2533)",
-                    border: "1px solid var(--border-color, #2d3748)",
-                  }}
-                >
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
-                    <code style={{ fontWeight: 600, fontSize: "0.85rem", color: "#48bb78" }}>{tool.name}</code>
-                    <span style={{ fontSize: "0.7rem", padding: "1px 5px", borderRadius: "3px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
-                      {tool.permissionLevel}
-                    </span>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {safeTools.filter((t) => t.isBuiltIn).map((tool) => {
+                const isToggling = togglingToolName === tool.name;
+                return (
+                  <div
+                    key={tool.name}
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      padding: "10px 12px",
+                      borderRadius: "6px",
+                      backgroundColor: "var(--bg-card, #1e2533)",
+                      border: "1px solid var(--border-color, #2d3748)",
+                      gap: "12px",
+                    }}
+                  >
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                        <code style={{ fontWeight: 600, fontSize: "0.85rem", color: "#48bb78" }}>{tool.name}</code>
+                        <span style={{ fontSize: "0.7rem", padding: "1px 5px", borderRadius: "3px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
+                          {tool.permissionLevel}
+                        </span>
+                      </div>
+                      <p style={{ margin: "4px 0 0 0", fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)", lineHeight: "1.3" }}>
+                        {tool.description}
+                      </p>
+                    </div>
+                    <label
+                      className="toggle-label"
+                      style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
+                    >
+                      <input
+                        type="checkbox"
+                        role="switch"
+                        aria-label={`${tool.isEnabled ? "Disable" : "Enable"} ${tool.name}`}
+                        checked={tool.isEnabled}
+                        onChange={() => void handleToggleTool(tool)}
+                        disabled={isToggling}
+                      />
+                      <span>{isToggling ? "Updating…" : tool.isEnabled ? "Disable" : "Enable"}</span>
+                    </label>
                   </div>
-                  <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)", lineHeight: "1.3" }}>
-                    {tool.description}
-                  </p>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Plugin Configuration */}
@@ -1347,39 +1389,19 @@ export default function SettingsManager() {
                 Controls where tool side-effects take place and when actions require user approval.
               </p>
             </div>
-            <div className="form-row">
-              <div className="form-group flex-2">
-                <label htmlFor="staging-path">Sandbox Staging Path</label>
-                <input
-                  id="staging-path"
-                  type="text"
-                  className="input-field"
-                  value={sandboxStagingPath}
-                  onChange={(e) => setSandboxStagingPath(e.target.value)}
-                  required
-                />
-                <span className="form-group-hint">
-                  Directory where modified files are staged before being committed.
-                </span>
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="auto-approve">Auto-Approve After (Executions)</label>
-                <input
-                  id="auto-approve"
-                  type="number"
-                  min="0"
-                  className="input-field"
-                  value={sandboxAutoApproveAfter}
-                  onChange={(e) =>
-                    setSandboxAutoApproveAfter(
-                      Math.max(0, parseInt(e.target.value, 10) || 0)
-                    )
-                  }
-                />
-                <span className="form-group-hint">
-                  Successful executions before writes may auto-approve (0 to require confirmation every time).
-                </span>
-              </div>
+            <div className="form-group">
+              <label htmlFor="staging-path">Sandbox Staging Path</label>
+              <input
+                id="staging-path"
+                type="text"
+                className="input-field"
+                value={sandboxStagingPath}
+                onChange={(e) => setSandboxStagingPath(e.target.value)}
+                required
+              />
+              <span className="form-group-hint">
+                Directory where modified files are staged before being committed.
+              </span>
             </div>
           </div>
         )}
@@ -1390,44 +1412,12 @@ export default function SettingsManager() {
             <div className="settings-section-title-group">
               <h3>Memory & Persistence</h3>
               <p className="settings-section-hint">
-                Paths to long-term memory, episode history databases, and embedding models.
+                Paths to long-term memory, episode history databases, and embedding backend.
               </p>
             </div>
-            <div className="form-group">
-              <label htmlFor="episodes-path">Episodes SQLite Database Path</label>
-              <input
-                id="episodes-path"
-                type="text"
-                className="input-field"
-                value={memoryEpisodesDBPath}
-                onChange={(e) => setMemoryEpisodesDBPath(e.target.value)}
-                required
-              />
-            </div>
-            <div className="form-row">
-              <div className="form-group flex-1">
-                <label htmlFor="vector-path">Vector Storage Path</label>
-                <input
-                  id="vector-path"
-                  type="text"
-                  className="input-field"
-                  value={memoryVectorDBPath}
-                  onChange={(e) => setMemoryVectorDBPath(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="embedding-model">Embedding Model</label>
-                <input
-                  id="embedding-model"
-                  type="text"
-                  className="input-field"
-                  value={memoryEmbeddingModel}
-                  onChange={(e) => setMemoryEmbeddingModel(e.target.value)}
-                  required
-                />
-              </div>
-            </div>
+            {/* Backend leads because it decides whether any model choice
+                applies: apple is fixed on-device, provider follows the chat
+                model, and none disables vectors entirely. */}
             <div className="form-group">
               <label htmlFor="embedding-backend">Embedding Backend</label>
               <select
@@ -1441,10 +1431,34 @@ export default function SettingsManager() {
                 <option value="none">none</option>
               </select>
               <span className="form-group-hint">
-                Apple keeps vectors on-device by default (local-first). Provider
-                opts in to LLM embeddings via the embedding model above, while
-                none stays keyword-only with no vectors.
+                Apple keeps vectors on-device with no model config, provider
+                uses the active chat model for embeddings via /v1/embeddings,
+                and none stays keyword-only with no vectors. Switching chat
+                models under provider may require a vector reset due to width
+                pinning.
               </span>
+            </div>
+            <div className="form-group">
+              <label htmlFor="episodes-path">Episodes SQLite Database Path</label>
+              <input
+                id="episodes-path"
+                type="text"
+                className="input-field"
+                value={memoryEpisodesDBPath}
+                onChange={(e) => setMemoryEpisodesDBPath(e.target.value)}
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="vector-path">Vector Storage Path</label>
+              <input
+                id="vector-path"
+                type="text"
+                className="input-field"
+                value={memoryVectorDBPath}
+                onChange={(e) => setMemoryVectorDBPath(e.target.value)}
+                required
+              />
             </div>
           </div>
         )}

@@ -307,17 +307,6 @@ public actor ConversationManager {
         return session
     }
 
-    /// All tracked session identifiers in memory.
-    ///
-    /// Memory-only view: disk-only sessions (after restart, scheduler
-    /// deterministic sessions, or cross-process writes) stay invisible
-    /// until hydrated. Prefer `listSessions()` for the durable listing,
-    /// which merges disk state the same way single-session readers do.
-    @available(*, deprecated, message: "Use listSessions() for the durable listing; sessionIDs omits disk-only sessions.")
-    public var sessionIDs: [UUID] {
-        Array(sessions.keys)
-    }
-
     /// Returns summaries of all tracked sessions, sorted by last update date descending.
     public func listSessions() async -> [SessionSummary] {
         if let path = episodesDBPath {

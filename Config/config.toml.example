@@ -20,7 +20,7 @@ server_url = "http://localhost:8080"  # MLX server (engine API binds 127.0.0.1:8
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"  # Reads from env or Keychain
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 # api_style = "chat-completions"  # chat-completions (default) | responses
 # context_length = 128000  # Context window in tokens (e.g. 1000000 for 1M-context endpoints)
 
@@ -34,8 +34,13 @@ server_url = "http://localhost:8081"
 vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 embedding_model = "all-MiniLM-L6-v2"
+# embedding_model is retained for forward compatibility but currently unused:
+# "apple" uses the fixed on-device model with no model config, "provider"
+# reuses the active chat model via /v1/embeddings, and "none" stays
+# keyword-only with no vectors.
 # embedding_backend selects the vector backend: "apple" (on-device, local-first default),
-# "provider" (LLM embeddings via embedding_model), or "none" (keyword-only, no vectors).
+# "provider" (active chat model embeddings), or "none" (keyword-only, no vectors).
+# Switching chat models under "provider" may require a vector reset due to width pinning.
 embedding_backend = "apple"
 
 [voice]
@@ -45,7 +50,6 @@ tts_provider = "system"  # macOS say command
 
 [sandbox]
 staging_path = "~/.runeweaver/sandbox"
-auto_approve_after = 5  # Auto-approve after 5 successful executions
 
 [email]
 [[email.accounts]]

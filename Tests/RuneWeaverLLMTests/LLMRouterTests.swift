@@ -20,7 +20,7 @@ struct LLMRouterTests {
     func `Generic entry with responses style maps to responses provider`() {
         let entry = ProviderConfig(
             enabled: true,
-            baseURL: "https://example.com/v1",
+            serverURL: "https://example.com/v1",
             apiKeyEnv: "EXAMPLE_API_KEY",
             apiStyle: .responses
         )

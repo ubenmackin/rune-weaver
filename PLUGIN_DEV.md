@@ -89,7 +89,7 @@ Declared per tool via `permissionLevel` (`Sources/RuneWeaverCore/PermissionLevel
 |-------|---------|----------------|
 | `readOnly` | Always allowed. No approval needed. | Search, read, summarize, list, query state. Anything that cannot change the world (e.g. `email.search`, `files.read`, `clock.now`). Default for new tools unless you have a reason otherwise. |
 | `requiresApproval` | Must be approved per-invocation, unless covered by a graduated-trust grant (allow this time / 5 min / 1 hour / 1 day / forever, scoped per action-type per target). | Anything that mutates state or talks to the outside world: sending email, writing files to the real filesystem, clicking submit in a browser, toggling a light. Prefer this for all writers. |
-| `trusted` | Auto-approved per trust policy (earned through repeated safe execution, `sandbox.auto_approve_after` successes); single-user owner `remember_fact`/`recall_memories` are always `trusted`, run without approval prompts, and every memory write is audit-logged. | High-frequency, low-risk writes the user has explicitly blessed (e.g. appending to a daily log) plus owner memory writes. Rare except owner memory — needs a clear justification in review. |
+| `trusted` | Auto-approved per trust policy; single-user owner `remember_fact`/`recall_memories` are always `trusted`, run without approval prompts, and every memory write is audit-logged. | High-frequency, low-risk writes the user has explicitly blessed (e.g. appending to a daily log) plus owner memory writes. Rare except owner memory — needs a clear justification in review. |
 
 Rules of thumb:
 

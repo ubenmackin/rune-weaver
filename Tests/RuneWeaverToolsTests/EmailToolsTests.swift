@@ -643,7 +643,7 @@ struct EmailToolsTests {
         let config = ToolsTestSupport.testEmailConfig()
         let staging = FileManager.default.temporaryDirectory
             .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
-        let sandbox = SandboxConfig(stagingPath: staging.path, autoApproveAfter: 5)
+        let sandbox = SandboxConfig(stagingPath: staging.path)
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, sandboxConfig: sandbox)
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
