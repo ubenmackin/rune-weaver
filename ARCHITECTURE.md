@@ -210,7 +210,7 @@ Three tiers of memory, each backed by different storage:
 2. Context fills → oldest working turns fold into the rolling session summary, keeping recent turns intact
 3. Deterministic remember capture → `remember` / `remember that` / `/remember` parsed by `rememberFactText` and stored via `storeProfileFact` (`storeRememberedFact`), acknowledged without touching the LLM path
 4. Key facts persist → stored in Semantic Memory with vectors from the configured embeddings backend (`apple` on-device default, `provider` opt-in, `none` keyword-only), mirrored into the JSON profile
-5. On future queries → `recall` merges episodic, semantic, and profile hits, ranking semantic hits by cosine similarity when the query is embedded and falling back to keyword overlap otherwise
+5. On future queries → `recall` merges episodic, semantic, and profile hits on one calibrated scale, sorted descending: episodic FTS rank (`1/(index+1)`, ×0.25), semantic cosine similarity (×1.0; keyword overlap ÷10 when the query has no embedding), profile token overlap (÷10 × confidence, ×1.0). Score ties break profile > semantic > episodic.
 
 Summarization helper `summarizeSessions` (non-destructive per-session summaries) exists on the episode store; `compactSessions` (replace old rows with a summary episode) is called automatically by `MemoryEngine` when episodic storage exceeds `maxEpisodicCount` (10,000 records) to prune sessions older than 30 days.
 

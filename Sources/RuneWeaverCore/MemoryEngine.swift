@@ -786,16 +786,26 @@ public actor MemoryEngine {
     /// Recalls across episodic, semantic, and profile tiers.
     ///
     /// Episodic FTS hits, semantic hits, and profile keyword hits are
-    /// always merged and sorted by score descending so memory search
-    /// works with zero ML dependencies. When `embedding` holds a query
+    /// always merged and sorted by calibrated score descending so memory search
+    /// works with zero ML dependencies. The tiers arrive on incomparable native
+    /// scales — episodic rank order (`1/(index+1)`), semantic cosine similarity,
+    /// and keyword overlap — so a direct sort lets episodic rank noise dominate:
+    /// a paraphrase query scoring the true semantic fact at cosine `~0.25-0.4`
+    /// always loses to the top episodic FTS rows at `1.0` and `0.5` even when
+    /// those rows share only a surface keyword and miss the meaning entirely.
+    /// Each tier is therefore scaled by its documented tier weight before
+    /// sorting, mapping episodic rank 1 to the floor of the observed paraphrase
+    /// band so genuine semantic matches outrank episodic keyword noise while
+    /// exact episodic hits still compete. When `embedding` holds a query
     /// vector, semantic hits use vector similarity; when nil or empty,
     /// semantic hits fall back to keyword overlap via `querySemantic`
     /// so keyword-only rows (including orphaned vector rows whose
     /// profile fact was removed) stay recallable. Keyword semantic
-    /// scores are normalized to `[0, 1]` before merging so tiers share
-    /// one scale, and merged hits are deduped by identifier (with content
-    /// matches scoped to semantic and profile mirrors, keeping episodic
-    /// turns) keeping the best score because profile facts mirror vector rows.
+    /// scores are normalized to `[0, 1]` before calibration so keyword-only
+    /// stores merge on the same shared scale, and merged hits are deduped
+    /// by identifier (with content matches scoped to semantic and profile
+    /// mirrors, keeping episodic turns) keeping the best calibrated score
+    /// because profile facts mirror vector rows.
     /// - Parameters:
     ///   - query: Query text.
     ///   - embedding: Optional query vector. When nil or empty,
@@ -816,7 +826,8 @@ public actor MemoryEngine {
         }
         let profile = profileResults(query: query, limit: perTier)
         let merged = episodic + semantic + profile
-        let sorted = merged.sorted {
+        let calibrated = merged.map { Self.calibrated($0) }
+        let sorted = calibrated.sorted {
             if $0.score != $1.score {
                 return $0.score > $1.score
             }
@@ -930,12 +941,74 @@ extension MemoryEngine {
         return Array(results.sorted { $0.score > $1.score }.prefix(limit))
     }
 
+    /// Weight mapping episodic rank scores onto the shared recall scale.
+    ///
+    /// Episodic FTS rank (`1.0`, `0.5`, `0.33`, ...) carries no notion of meaning:
+    /// rank 1 only means the FTS query matched first, not that the turn answers
+    /// the query. Left unscaled, those ranks always outscore the cosine band where
+    /// true paraphrase matches land (`~0.25-0.4`), so a paraphrase with no shared
+    /// tokens loses to any episodic row sharing one keyword. Scaling rank 1 to
+    /// `0.25` puts the best episodic hit at the floor of that band: mid-to-strong
+    /// semantic matches outrank episodic noise outright, borderline matches win
+    /// the tie-break below, and multi-token keyword hits (which score above `0.25`
+    /// on the shared scale) still compete. Rank 2 lands at `0.125`, just above the
+    /// automatic-recall noise floor, so only the top episodic hits inject as chat
+    /// context instead of every FTS match.
+    private static let episodicTierWeight = 0.25
+
+    /// Weight for semantic hits on the shared recall scale.
+    ///
+    /// Unity: cosine similarity already spans a meaning-calibrated `[0, 1]` range
+    /// (vector search filters non-positive scores), and keyword-fallback hits reach
+    /// calibration pre-normalized to `[0, 1]` by `normalizedSemantic`, so no further
+    /// scaling is needed to keep vector and keyword semantic hits comparable with
+    /// each other and with profile hits.
+    private static let semanticTierWeight = 1.0
+
+    /// Weight for profile hits on the shared recall scale.
+    ///
+    /// Unity: profile scoring (`overlap/10 * confidence`, clamped) already shares
+    /// the `[0, 1]` keyword scale with normalized semantic hits, so profile facts
+    /// keep full value and multi-token profile matches naturally outrank a lone
+    /// episodic rank-1 hit (`0.25`) while single-token matches do not.
+    private static let profileTierWeight = 1.0
+
+    /// Applies the tier weight for a recall hit's source.
+    ///
+    /// Runs after per-tier fetching and keyword normalization, so every tier enters
+    /// the merge on one comparable scale and sorting reflects meaning rather than
+    /// native rank magnitudes. Scores stay within `[0, 1]` because each tier's input
+    /// is already bounded there (episodic rank, filtered cosine, clamped keyword
+    /// scores) and every weight is within `[0, 1]`; the result is clamped
+    /// defensively so a future tier widening its range cannot leak an out-of-band
+    /// score into threshold checks downstream.
+    /// - Parameter result: Merged hit with its native-scale score.
+    /// - Returns: Hit with the calibrated score, source and metadata unchanged.
+    private static func calibrated(_ result: MemoryResult) -> MemoryResult {
+        let weight: Double = switch result.source {
+        case .episodic: Self.episodicTierWeight
+        case .semantic: Self.semanticTierWeight
+        case .profile: Self.profileTierWeight
+        }
+        return MemoryResult(
+            content: result.content,
+            score: min(max(result.score * weight, 0.0), 1.0),
+            source: result.source,
+            metadata: result.metadata
+        )
+    }
+
     /// Normalizes a keyword semantic hit to the shared `[0, 1]` recall scale.
     ///
     /// Keyword overlap scores (`overlap * 2 + substring`) grow unbounded
-    /// and would always outrank episodic (`1/(index+1)`) and profile
-    /// (`overlap/10 * confidence`) hits. Dividing by `10` aligns keyword
-    /// semantic hits with profile scoring.
+    /// and would always outrank episodic ranks and profile hits without
+    /// normalization. Dividing by `10` aligns keyword semantic hits with
+    /// profile scoring (`overlap/10 * confidence`) so keyword-only stores —
+    /// where no cosine exists and every semantic hit arrives through this
+    /// path — merge sensibly with profile mirrors instead of dominating
+    /// them. The result feeds the tier calibration, where the unity semantic
+    /// weight keeps this normalized value as-is alongside cosine scores, so
+    /// vector and keyword semantic hits stay comparable with each other.
     /// - Parameter result: Raw semantic hit.
     /// - Returns: Hit with a clamped `[0, 1]` score.
     private static func normalizedSemantic(_ result: MemoryResult) -> MemoryResult {
@@ -950,7 +1023,10 @@ extension MemoryEngine {
     /// Priority for tie-breaking merged recall hits.
     ///
     /// Profile hits carry confidence and survive over mirrored vector rows
-    /// when scores tie.
+    /// when scores tie. The ordering also resolves the calibration boundary:
+    /// a borderline semantic cosine at `0.25` ties the best episodic hit
+    /// (`1.0 * 0.25`) and wins here, so the full observed paraphrase band
+    /// outranks episodic keyword noise rather than just the middle of it.
     /// - Parameter source: Hit source.
     /// - Returns: Higher wins ties.
     private static func sourcePriority(_ source: MemorySource) -> Int {
@@ -1429,16 +1505,16 @@ public extension MemoryEngine {
 
     /// Maximum memories injected as system context on one chat turn.
     ///
-    /// Top-N bound for the keyword `recall` fan-out so every turn issues
+    /// Top-N bound for the per-tier `recall` fan-out so every turn issues
     /// one bounded per-tier read; context size never grows with store size.
     static let automaticRecallLimit = 5
 
-    /// Minimum score for an injected recall hit.
+    /// Minimum calibrated score for an injected recall hit.
     ///
-    /// Recall merges episodic rank scores (`1/(index+1)`) with normalized
-    /// keyword scores (overlap scaled to `[0, 1]`, profile further scaled
-    /// by confidence). Hits below this threshold are treated as noise and
-    /// the turn runs with no injected context.
+    /// Recall merges tiers on one calibrated scale (episodic rank ×0.25,
+    /// semantic cosine or normalized keyword ×1.0, profile overlap
+    /// × confidence ×1.0). Hits below this threshold are treated as noise
+    /// and the turn runs with no injected context.
     static let automaticRecallThreshold = 0.1
 
     /// Maximum characters for the injected recall block, header included.

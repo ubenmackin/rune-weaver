@@ -215,7 +215,7 @@ Verified live against both Volcrypt and iCloud mailboxes read-only. Attachments 
 
 Every chat turn runs automatic recall before the LLM call, so the assistant remembers across sessions without being asked to look anything up:
 
-- The current user message is the query to `MemoryEngine.recall(query:embedding:limit:)` with nil embeddings (keyword path), merging episodic turns (SQLite + FTS5) plus semantic and profile facts by token overlap.
+- The current user message is the query to `MemoryEngine.recall(query:embedding:limit:)`, embedded best-effort so semantic hits rank by cosine similarity (keyword overlap when no embedding is available), merging episodic turns (SQLite + FTS5) plus semantic and profile facts on the calibrated scale (episodic ×0.25, semantic ×1.0, profile ×1.0; ties break profile > semantic > episodic).
 - The top 5 hits inject as one ephemeral `system` message right after the system prompt and rolling summary, ahead of the live conversation. Each line is source-labeled (`[episodic]`, `[semantic]`, `[profile]`) under a `Relevant memories ...` header, so the model can attribute context.
 - Injection is token-bounded (2000 characters including the header, roughly 500 tokens) with ellipsis truncation; turns with nothing scoring at or above threshold (0.1) send no recall block. Recall failures never fail the turn, the just-mirrored user turn is filtered as self-echo, and the recall block is never stored in working memory.
 - Explicit writes stay on the `/remember <fact>` path and on-demand reads stay on the `recall_memories` tool; automatic recall is the unprompted read path between them.
