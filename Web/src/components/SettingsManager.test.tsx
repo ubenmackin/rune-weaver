@@ -521,21 +521,43 @@ describe("SettingsManager", () => {
       expect(screen.getByText("email.attachment")).toBeDefined();
     });
 
-    // Both rows render their own permission badge and an enabled switch.
+    // Both rows render their own permission badge and a state switch whose
+    // checked value mirrors the persisted bus flag (not the next action).
     expect(screen.getByText("readOnly")).toBeDefined();
     expect(screen.getByText("requiresApproval")).toBeDefined();
-    const readToggle = screen.getByRole("switch", { name: "Disable email.read" });
+    const readToggle = screen.getByRole("switch", { name: "email.read Enabled" });
+    const attachmentToggle = screen.getByRole("switch", {
+      name: "email.attachment Enabled",
+    });
     expect((readToggle as HTMLInputElement).checked).toBe(true);
+    expect((attachmentToggle as HTMLInputElement).checked).toBe(true);
+    expect(readToggle.getAttribute("aria-checked")).toBe("true");
+    expect(attachmentToggle.getAttribute("aria-checked")).toBe("true");
+    // State text reports the current value; action phrasing must be gone.
+    expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
     expect(
-      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement).checked
-    ).toBe(true);
+      screen.queryByRole("switch", { name: "Disable email.read" })
+    ).toBeNull();
+    expect(
+      screen.queryByRole("switch", { name: "Enable email.read" })
+    ).toBeNull();
+    // Visual switch affordance renders a track/knob per row driven by the
+    // persisted state so on/off is visible without reading the text.
+    const tracks = document.querySelectorAll(".tool-switch-track");
+    expect(tracks.length).toBe(2);
+    tracks.forEach((track) => {
+      expect(track.getAttribute("data-on")).toBe("true");
+      expect(track.querySelector(".tool-switch-thumb")).not.toBeNull();
+    });
 
     const clickPromise = user.click(readToggle);
 
     // The pending gate stays closed until the test releases it, so only the
-    // acted-on row may disable while its sibling stays interactive.
+    // acted-on row may disable while its sibling stays interactive. The
+    // acted-on row announces the in-flight request with Updating… text.
     await waitFor(() => {
       expect(gate.release).not.toBeNull();
+      expect(screen.getByText("Updating…")).toBeDefined();
       expect(
         (screen.getByRole("switch", { name: /email\.read/i }) as HTMLInputElement).disabled
       ).toBe(true);
@@ -543,6 +565,9 @@ describe("SettingsManager", () => {
     expect(
       (screen.getByRole("switch", { name: /email\.attachment/i }) as HTMLInputElement).disabled
     ).toBe(false);
+    expect(
+      (screen.getByRole("switch", { name: /email\.attachment/i }) as HTMLInputElement).checked
+    ).toBe(true);
     const release = gate.release;
     if (release) release();
     await clickPromise;
@@ -557,15 +582,26 @@ describe("SettingsManager", () => {
     expect(JSON.parse(stateCall?.body ?? "{}")).toEqual({ enabled: false });
 
     // Refreshed list flips only the toggled switch; the sibling stays on.
+    // Checked, accessible name, and visible state text all follow the
+    // refreshed bus value together.
     await waitFor(() => {
-      expect(screen.getByRole("switch", { name: "Enable email.read" })).toBeDefined();
+      expect(screen.getByRole("switch", { name: "email.read Disabled" })).toBeDefined();
     });
-    expect(
-      (screen.getByRole("switch", { name: "Enable email.read" }) as HTMLInputElement).checked
-    ).toBe(false);
-    expect(
-      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement).checked
-    ).toBe(true);
+    const refreshedRead = screen.getByRole("switch", { name: "email.read Disabled" });
+    const refreshedAttachment = screen.getByRole("switch", {
+      name: "email.attachment Enabled",
+    });
+    expect((refreshedRead as HTMLInputElement).checked).toBe(false);
+    expect(refreshedRead.getAttribute("aria-checked")).toBe("false");
+    expect((refreshedAttachment as HTMLInputElement).checked).toBe(true);
+    expect(screen.getAllByText("Disabled").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Enabled").length).toBeGreaterThan(0);
+    const refreshedTracks = document.querySelectorAll(".tool-switch-track");
+    const readRow = refreshedRead.closest("label");
+    expect(readRow?.querySelector(".tool-switch-track")?.getAttribute("data-on")).toBe(
+      "false"
+    );
+    expect(refreshedTracks.length).toBe(2);
   });
 
   it("enables a disabled builtin tool via the tool state endpoint", async () => {
@@ -627,10 +663,24 @@ describe("SettingsManager", () => {
     await user.click(toolsTabBtn);
 
     await waitFor(() => {
-      expect(screen.getByRole("switch", { name: "Enable email.attachment" })).toBeDefined();
+      expect(screen.getByRole("switch", { name: "email.attachment Disabled" })).toBeDefined();
     });
 
-    await user.click(screen.getByRole("switch", { name: "Enable email.attachment" }));
+    // Disabled rows report state text with an unchecked switch; the checked
+    // flag and aria-checked stay in sync with the persisted bus value.
+    const attachmentToggle = screen.getByRole("switch", {
+      name: "email.attachment Disabled",
+    });
+    const readToggle = screen.getByRole("switch", { name: "email.read Disabled" });
+    expect((attachmentToggle as HTMLInputElement).checked).toBe(false);
+    expect(attachmentToggle.getAttribute("aria-checked")).toBe("false");
+    expect((readToggle as HTMLInputElement).checked).toBe(false);
+    expect(screen.getAllByText("Disabled").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("switch", { name: "Enable email.attachment" })
+    ).toBeNull();
+
+    await user.click(attachmentToggle);
 
     await waitFor(() => {
       expect(screen.getByText(/Enabled tool 'email\.attachment'/i)).toBeDefined();
@@ -646,15 +696,29 @@ describe("SettingsManager", () => {
     // Refreshed list flips only the toggled switch; the untouched sibling
     // proves the endpoint never bulk-enables related tools.
     await waitFor(() => {
-      expect(screen.getByRole("switch", { name: "Disable email.attachment" })).toBeDefined();
+      expect(
+        screen.getByRole("switch", { name: "email.attachment Enabled" })
+      ).toBeDefined();
     });
+    const refreshedAttachment = screen.getByRole("switch", {
+      name: "email.attachment Enabled",
+    });
+    const refreshedRead = screen.getByRole("switch", { name: "email.read Disabled" });
+    expect((refreshedAttachment as HTMLInputElement).checked).toBe(true);
+    expect(refreshedAttachment.getAttribute("aria-checked")).toBe("true");
+    expect((refreshedRead as HTMLInputElement).checked).toBe(false);
     expect(
-      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement)
-        .checked
-    ).toBe(true);
+      refreshedAttachment
+        .closest("label")
+        ?.querySelector(".tool-switch-track")
+        ?.getAttribute("data-on")
+    ).toBe("true");
     expect(
-      (screen.getByRole("switch", { name: "Enable email.read" }) as HTMLInputElement).checked
-    ).toBe(false);
+      refreshedRead
+        .closest("label")
+        ?.querySelector(".tool-switch-track")
+        ?.getAttribute("data-on")
+    ).toBe("false");
   });
 });
 

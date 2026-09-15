@@ -1307,18 +1307,54 @@ export default function SettingsManager() {
                       </p>
                     </div>
                     <label
-                      className="toggle-label"
+                      className="toggle-label tool-switch"
                       style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
                     >
                       <input
                         type="checkbox"
                         role="switch"
-                        aria-label={`${tool.isEnabled ? "Disable" : "Enable"} ${tool.name}`}
+                        className="tool-switch-input"
+                        aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
+                        aria-checked={tool.isEnabled}
                         checked={tool.isEnabled}
                         onChange={() => void handleToggleTool(tool)}
                         disabled={isToggling}
                       />
-                      <span>{isToggling ? "Updating…" : tool.isEnabled ? "Disable" : "Enable"}</span>
+                      {/* Visual switch affordance: data-on drives the accent/muted
+                          fill and knob side in CSS while the native checkbox keeps
+                          keyboard and screen-reader semantics. */}
+                      <span
+                        className="tool-switch-track"
+                        data-on={tool.isEnabled ? "true" : "false"}
+                        aria-hidden="true"
+                      >
+                        <span className="tool-switch-thumb" />
+                      </span>
+                      {/* State-first text reports the persisted bus state instead of
+                          the next action so the row reads like a mobile setting. */}
+                      <span className="tool-switch-state">
+                        {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
+                      </span>
+                      {/* Redundant status pill mirrors the switch for at-a-glance
+                          scanning; colors reuse the rune status tokens (green for
+                          on, muted for off). */}
+                      <span
+                        className="tool-status-pill"
+                        data-state={tool.isEnabled ? "enabled" : "disabled"}
+                        style={
+                          tool.isEnabled
+                            ? {
+                                backgroundColor: "rgba(72, 187, 120, 0.2)",
+                                color: "#48bb78",
+                              }
+                            : {
+                                backgroundColor: "rgba(160, 174, 192, 0.2)",
+                                color: "#a0aec0",
+                              }
+                        }
+                      >
+                        {tool.isEnabled ? "Enabled" : "Disabled"}
+                      </span>
                     </label>
                   </div>
                 );

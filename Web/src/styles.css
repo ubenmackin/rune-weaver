@@ -2874,3 +2874,117 @@ button.danger:hover:not(:disabled) {
   color: #ffffff;
 }
 
+/* ==========================================================================
+   Built-in Tool State Switch (mobile-style)
+   ========================================================================== */
+
+/* Label wrapper keeps the native checkbox in the tab order while the
+ * track/thumb render the visual switch, so keyboard and screen-reader users
+ * keep real checkbox semantics with a mobile toggle affordance. */
+.tool-switch {
+  position: relative;
+}
+
+/* Visually hidden but focusable: transparent overlay over the track so
+ * pointer and keyboard interaction still land on the native control. */
+.tool-switch-input {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 22px;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.tool-switch-input:disabled {
+  cursor: wait;
+}
+
+.tool-switch-track {
+  width: 40px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(160, 174, 192, 0.35);
+  border: 1px solid var(--border-color);
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.tool-switch-track[data-on="true"] {
+  background: var(--accent-purple);
+  border-color: var(--accent-purple);
+}
+
+.tool-switch-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform 0.15s ease;
+  transform: translateX(0);
+}
+
+.tool-switch-track[data-on="true"] .tool-switch-thumb {
+  transform: translateX(18px);
+}
+
+.tool-switch-input:focus-visible + .tool-switch-track {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+.tool-switch-state {
+  font-size: 0.85rem;
+  min-width: 62px;
+}
+
+.tool-status-pill {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.02em;
+}
+
+.tool-status-pill[data-state="enabled"] {
+  background: rgba(72, 187, 120, 0.2);
+  color: #48bb78;
+}
+
+.tool-status-pill[data-state="disabled"] {
+  background: rgba(160, 174, 192, 0.2);
+  color: #a0aec0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-switch-track,
+  .tool-switch-thumb {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .tool-switch-track {
+    border: 1px solid ButtonText;
+  }
+  .tool-switch-track[data-on="true"] {
+    background: Highlight;
+    border-color: Highlight;
+  }
+  .tool-switch-thumb {
+    background: ButtonFace;
+    border: 1px solid ButtonText;
+  }
+  .tool-switch-input:focus-visible + .tool-switch-track {
+    outline: 2px solid Highlight;
+  }
+}
+
