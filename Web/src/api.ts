@@ -608,7 +608,6 @@ export interface SettingsResponse {
   voiceWhisperModel: string;
   voiceTTSProvider: string;
   sandboxStagingPath: string;
-  sandboxAutoApproveAfter: number;
   emailAccounts: EmailAccountData[];
   pluginsDir: string;
   pluginsMarketplaceIndexURL: string;
@@ -630,7 +629,6 @@ export interface UpdateSettingsInput {
   voiceWhisperModel?: string;
   voiceTTSProvider?: string;
   sandboxStagingPath?: string;
-  sandboxAutoApproveAfter?: number;
   emailAccounts?: EmailAccountData[];
   pluginsDir?: string;
   pluginsMarketplaceIndexURL?: string;
@@ -668,6 +666,17 @@ export interface ToolsResponse {
 
 export function getTools(): Promise<ToolsResponse> {
   return fetchJson<ToolsResponse>("/tools");
+}
+
+// Toggles one registered tool without touching siblings: the engine persists
+// the flag before mutating the live bus, so a builtin and a plugin tool with
+// similar prefixes never share fate and per-tool granularity (email.read vs
+// email.attachment) stays intact across restarts.
+export function updateToolState(name: string, enabled: boolean): Promise<ToolInfo> {
+  return fetchJson<ToolInfo>(`/tools/${encodeURIComponent(name)}/state`, {
+    method: "POST",
+    body: JSON.stringify({ enabled }),
+  });
 }
 
 export interface PluginSummary {

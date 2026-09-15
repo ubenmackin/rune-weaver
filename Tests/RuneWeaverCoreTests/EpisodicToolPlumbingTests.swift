@@ -108,6 +108,8 @@ private struct SlowPlumbingTool: Tool, Sendable {
     let name: String
     /// Canned outcome text.
     let output: String
+    /// Optional notification callback when execution starts.
+    var onStart: (@Sendable () -> Void)?
     /// Human-readable description.
     var description: String {
         "Slow fixture stub for \(name)."
@@ -124,6 +126,7 @@ private struct SlowPlumbingTool: Tool, Sendable {
     ///   - context: Ambient execution context.
     /// - Returns: Canned success output echoing the call identifier.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        onStart?()
         try? await Task.sleep(nanoseconds: 500_000_000)
         return .success(output, callID: input.callID)
     }
@@ -273,7 +276,10 @@ struct EpisodicToolPlumbingTests {
         defer { try? FileManager.default.removeItem(at: base) }
         let conversations = ConversationManager()
         let bus = ToolBus()
-        await bus.register(tool: SlowPlumbingTool(name: "email.search", output: "Found 1 email"))
+        let (stream, continuation) = AsyncStream.makeStream(of: Void.self)
+        await bus.register(tool: SlowPlumbingTool(name: "email.search", output: "Found 1 email", onStart: {
+            continuation.yield()
+        }))
         let llm = ScriptedPlumbingLLM(texts: ["checking", "final"])
         let callID = "call_audit_cancel_1"
         let resolver: OrchestratorToolResolver = { messages, _ in
@@ -295,8 +301,10 @@ struct EpisodicToolPlumbingTests {
         }
         // Cancel while the slow tool runs so the side effect has already
         // happened when cancellation lands.
-        try? await Task.sleep(nanoseconds: 100_000_000)
-        task.cancel()
+        for await _ in stream {
+            task.cancel()
+            break
+        }
         let result = await task.result
         guard case let .failure(error) = result, error is CancellationError else {
             Issue.record("Expected CancellationError, got \(result)")

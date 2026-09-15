@@ -146,14 +146,6 @@ public enum SessionTokenDisplay: Sendable {
     }
 }
 
-/// Backwards-compatible alias for ``SessionTokenDisplay``.
-///
-/// The old name implied the session sum measures live context-window
-/// fill; it actually accumulates billed tokens across turns. Use
-/// ``SessionTokenDisplay`` in new code.
-@available(*, deprecated, renamed: "SessionTokenDisplay")
-public typealias ContextUsageDisplay = SessionTokenDisplay
-
 /// One streamed event from a chat completion.
 ///
 /// Providers that speak OpenAI-compatible SSE map each server event to

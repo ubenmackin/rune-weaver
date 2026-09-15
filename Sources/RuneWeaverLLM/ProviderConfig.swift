@@ -216,8 +216,6 @@ public enum LLMProviderFactory: Sendable {
                 contextLength: config.contextLength ?? LlamaCppProvider.defaultContextLength
             )
         default:
-            // `baseURL` aliases `serverURL`, so read the canonical value
-            // directly instead of OR-ing the alias against itself.
             return OpenAICompatibleProvider(
                 baseURL: config.serverURL ?? OpenAICompatibleProvider.defaultBaseURL,
                 apiKey: apiKey,

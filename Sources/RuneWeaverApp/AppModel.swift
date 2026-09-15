@@ -71,9 +71,13 @@ public final class AppModel: ObservableObject {
         plugins: [any Tool],
         config: RuneWeaverConfig
     ) async -> (PermissionGate, String) {
-        let permissionGate = PermissionGate(
+        let episodesDB = (config.memory.episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let permissionGate = await PermissionGate.load(
+            store: trustStore,
             pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
+        await permissionGate.startPeriodicCleanup()
         let previewBus = ToolBus(permissionGate: permissionGate)
         for tool in plugins {
             await previewBus.register(tool: tool)
@@ -86,23 +90,75 @@ public final class AppModel: ObservableObject {
         return (permissionGate, effectiveSystemPrompt)
     }
 
-    private func bootServer() async {
-        // Snapshot the published bind values so a later edit cannot change the
-        // address halfway through startup; loopback stays the only permitted
-        // interface until authentication exists.
+    /// Snapshots the published bind values so a later edit cannot change the
+    /// address halfway through startup; loopback stays the only permitted
+    /// interface until authentication exists.
+    private func validatedBootBind() -> ServerConfig? {
         let bindHost = hostname
         let bindPort = port
         guard ServerConfig.validPortRange.contains(bindPort) else {
             self.serverStatus = "Failed: port \(bindPort) is out of range."
             self.hasStartedBoot = false
-            return
+            return nil
         }
         let bindConfig = ServerConfig(hostname: bindHost, port: bindPort)
         guard bindConfig.isLoopbackOnly else {
             self.serverStatus = "Failed: refusing non-loopback bind without authentication."
             self.hasStartedBoot = false
-            return
+            return nil
         }
+        return bindConfig
+    }
+
+    /// Starts the Vapor application for an already-wired context and marks
+    /// the menu bar live, keeping serve ownership in one place so boot and
+    /// retry share the same startup sequence.
+    private func launchBootServer(context: ServerContext, serverConfig: ServerConfig) async throws {
+        let env = Environment(name: "production", arguments: ["vapor"])
+        let app = try await Application.make(env)
+        self.vaporApp = app
+
+        try configureRuneWeaver(app, context: context)
+
+        serverTask = Task.detached {
+            do {
+                try await app.execute()
+            } catch {
+                print("[RuneWeaverApp] Server terminated: \(error)")
+            }
+        }
+
+        self.isRunning = true
+        self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
+
+        startPolling()
+    }
+
+    /// Stops the trust reaper started during gate build so a boot failure
+    /// never leaks its sleep task, then drops half-wired state so a later
+    /// retry boots clean instead of reusing a stopped gate.
+    private func cleanupBootFailure(bootGate: PermissionGate?, error: Error) async {
+        if let gate = bootGate {
+            await gate.stopPeriodicCleanup()
+            if serverContext?.permissionGate === gate {
+                self.serverContext = nil
+            }
+        }
+        if let app = vaporApp {
+            try? await app.asyncShutdown()
+            self.vaporApp = nil
+        }
+        self.serverStatus = "Failed: \(error.localizedDescription)"
+        // Allow a later appearance to retry after a startup failure
+        // instead of leaving the menu permanently failed.
+        self.hasStartedBoot = false
+    }
+
+    private func bootServer() async {
+        guard let bindConfig = validatedBootBind() else { return }
+        // Retained outside the do so the catch can stop the trust reaper
+        // when Application.make or configure throws after the gate started it.
+        var bootGate: PermissionGate?
         do {
             let config: RuneWeaverConfig
             do {
@@ -164,10 +220,10 @@ public final class AppModel: ObservableObject {
                 plugins: plugins,
                 config: config
             )
-            let serverConfig = bindConfig
+            bootGate = permissionGate
 
             let context = await ServerContext.make(
-                config: serverConfig,
+                config: bindConfig,
                 conversations: conversations,
                 memoryEngine: memoryEngine,
                 embedder: embedder,
@@ -187,32 +243,16 @@ public final class AppModel: ObservableObject {
             for tool in plugins {
                 await context.toolBus.register(tool: tool)
             }
+            // Registration resets each tool to enabled, so re-apply persisted
+            // toggles after late builtin registration; the cached load makes
+            // this a memory-only pass after the boot hydration in `make`.
+            await context.restoreToolStates(forceReload: false)
 
             self.serverContext = context
 
-            let env = Environment(name: "production", arguments: ["vapor"])
-            let app = try await Application.make(env)
-            self.vaporApp = app
-
-            try configureRuneWeaver(app, context: context)
-
-            serverTask = Task.detached {
-                do {
-                    try await app.execute()
-                } catch {
-                    print("[RuneWeaverApp] Server terminated: \(error)")
-                }
-            }
-
-            self.isRunning = true
-            self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
-
-            startPolling()
+            try await launchBootServer(context: context, serverConfig: bindConfig)
         } catch {
-            self.serverStatus = "Failed: \(error.localizedDescription)"
-            // Allow a later appearance to retry after a startup failure
-            // instead of leaving the menu permanently failed.
-            self.hasStartedBoot = false
+            await cleanupBootFailure(bootGate: bootGate, error: error)
         }
     }
 
@@ -317,6 +357,9 @@ public final class AppModel: ObservableObject {
         serverTask = nil
         Task.detached(priority: .userInitiated) {
             if let context {
+                // Stop the trust reaper explicitly; nothing else owns its
+                // lifetime past shutdown.
+                await context.permissionGate.stopPeriodicCleanup()
                 await context.hub.closeAll()
             }
             if let app {

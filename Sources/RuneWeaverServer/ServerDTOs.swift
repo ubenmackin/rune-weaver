@@ -454,6 +454,22 @@ public struct ToolCallRequest: Content, Equatable {
     }
 }
 
+/// Tool enable/disable request for `POST /tools/:name/state`.
+///
+/// Carries only the desired flag so any registered tool — builtin or plugin,
+/// including memory tools — toggles through one shape. Unknown names surface
+/// as 404 at the route layer while the durable store itself stays name-agnostic.
+public struct UpdateToolStateRequest: Content, Equatable {
+    /// Whether the named tool should be enabled on the live bus.
+    public let enabled: Bool
+
+    /// Creates a tool state request.
+    /// - Parameter enabled: Desired enabled flag.
+    public init(enabled: Bool) {
+        self.enabled = enabled
+    }
+}
+
 /// Memory search response for `GET /memory/search`.
 public struct MemorySearchResponse: Content, Equatable {
     /// Query that was run.
@@ -874,7 +890,6 @@ public struct SettingsResponse: Content, Equatable {
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
     public let sandboxStagingPath: String
-    public let sandboxAutoApproveAfter: Int
     public let emailAccounts: [EmailAccount]
     public let pluginsDir: String
     public let pluginsMarketplaceIndexURL: String
@@ -895,7 +910,6 @@ public struct SettingsResponse: Content, Equatable {
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
         self.sandboxStagingPath = config.sandbox.stagingPath
-        self.sandboxAutoApproveAfter = config.sandbox.autoApproveAfter
         self.emailAccounts = config.email.accounts
         self.pluginsDir = config.plugins.pluginsDir
         self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
@@ -924,7 +938,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
     public let sandboxStagingPath: String?
-    public let sandboxAutoApproveAfter: Int?
     public let emailAccounts: [EmailAccount]?
     public let pluginsDir: String?
     public let pluginsMarketplaceIndexURL: String?
@@ -944,7 +957,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
         sandboxStagingPath: String? = nil,
-        sandboxAutoApproveAfter: Int? = nil,
         emailAccounts: [EmailAccount]? = nil,
         pluginsDir: String? = nil,
         pluginsMarketplaceIndexURL: String? = nil,
@@ -963,7 +975,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
         self.sandboxStagingPath = sandboxStagingPath
-        self.sandboxAutoApproveAfter = sandboxAutoApproveAfter
         self.emailAccounts = emailAccounts
         self.pluginsDir = pluginsDir
         self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
@@ -1027,9 +1038,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let sandboxStagingPath {
             config.sandbox.stagingPath = sandboxStagingPath
-        }
-        if let sandboxAutoApproveAfter {
-            config.sandbox.autoApproveAfter = sandboxAutoApproveAfter
         }
         if let emailAccounts {
             config.email.accounts = emailAccounts

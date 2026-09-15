@@ -2728,3 +2728,149 @@ button:disabled {
   gap: 10px;
 }
 
+/* ==========================================================================
+   Inline Session Approval Banner (Chat)
+   ========================================================================== */
+
+/* Non-modal list pinned between the parked waiting text and the chat input:
+ * shares the inbox card tokens so session decisions look identical inline
+ * and in the global queue, while staying compact enough for the footer. */
+.inline-approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 16px 0;
+  background: #141419;
+  border-top: 1px solid var(--border-color);
+}
+
+.inline-approval-banner {
+  padding: 12px 14px;
+  background: #181822;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.inline-approval-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.inline-approval-args {
+  margin: 0;
+  padding: 8px 10px;
+  background: #121218;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inline-approval-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Split Allow control: the main face takes ~80% for one-click grants while
+ * the chevron takes ~20% to expose graduated trust, joined as one control
+ * with a shared menu anchor. */
+.split-allow-group {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  min-width: 220px;
+  flex: 1 1 auto;
+  max-width: 340px;
+}
+
+.split-allow-main {
+  flex: 4 1 80%;
+  border-top-right-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+  border-right: 1px solid rgba(255, 255, 255, 0.25) !important;
+}
+
+.split-allow-chevron {
+  flex: 1 1 20%;
+  min-width: 40px;
+  max-width: 56px;
+  border-top-left-radius: 0 !important;
+  border-bottom-left-radius: 0 !important;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
+
+.split-allow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  background: #14141d;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.split-allow-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: #d1d5db;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.split-allow-menu-item:hover,
+.split-allow-menu-item:focus-visible {
+  background: rgba(139, 92, 246, 0.15);
+  color: #ffffff;
+  outline: none;
+}
+
+.inline-approval-deciding {
+  display: inline-flex;
+  align-items: center;
+}
+
+button.danger {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: rgba(239, 68, 68, 0.15);
+  color: #fca5a5;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+

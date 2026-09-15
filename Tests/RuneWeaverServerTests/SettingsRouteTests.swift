@@ -32,13 +32,13 @@ struct SettingsRouteTests {
         let update = UpdateSettingsRequest(
             engineName: "Custom Engine",
             logLevel: "debug",
-            sandboxAutoApproveAfter: 42
+            sandboxStagingPath: "/tmp/custom-staging"
         )
 
         try update.apply(to: &config)
         #expect(config.engine.name == "Custom Engine")
         #expect(config.engine.logLevel == "debug")
-        #expect(config.sandbox.autoApproveAfter == 42)
+        #expect(config.sandbox.stagingPath == "/tmp/custom-staging")
         // Preserved defaults
         #expect(config.llm.defaultProvider == RuneWeaverConfig.default.llm.defaultProvider)
     }

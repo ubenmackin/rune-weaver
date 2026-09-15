@@ -9,7 +9,7 @@ struct ContextLengthTests {
     func `Nil context length resolves to 128000 for generic entries`() {
         let entry = ProviderConfig(
             enabled: true,
-            baseURL: "https://example.com/v1",
+            serverURL: "https://example.com/v1",
             apiKeyEnv: "EXAMPLE_API_KEY"
         )
         #expect(entry.contextLength == nil)
@@ -70,7 +70,7 @@ struct ContextLengthTests {
     func `Explicit override threads into provider and model info`() {
         let entry = ProviderConfig(
             enabled: true,
-            baseURL: "https://example.com/v1",
+            serverURL: "https://example.com/v1",
             apiKeyEnv: "EXAMPLE_API_KEY",
             contextLength: 1_000_000
         )

@@ -153,11 +153,13 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         )
         let engine = runtime.engine
         let approvalQueue = runtime.approvalQueue
+        let permissionGate = runtime.permissionGate
         print(TerminalStyle.dim("Scheduler running \(schedulerJobs.count) job(s) every \(interval)s. Ctrl+C to stop."))
         var lastCheck = Date().addingTimeInterval(TimeInterval(-interval))
         if once {
             let results = await engine.runAllDue(at: Date(), lastCheck: lastCheck)
             await report(results: results, queue: approvalQueue)
+            await permissionGate.stopPeriodicCleanup()
             return
         }
         while true {
@@ -171,19 +173,24 @@ struct SchedulerRunCommand: AsyncParsableCommand {
                 break
             }
         }
+        // Stop the trust reaper explicitly; nothing else owns its lifetime
+        // past the foreground loop.
+        await permissionGate.stopPeriodicCleanup()
         print(TerminalStyle.dim("Scheduler stopped."))
     }
 
     /// Headless collaborators for one foreground-loop invocation.
     ///
-    /// Bundles the single-flight engine with its headless approval queue so
-    /// `run()` stays within style budgets while the wiring below stays in
-    /// one place.
+    /// Bundles the single-flight engine with its headless approval queue and
+    /// trust gate so `run()` stays within style budgets while the wiring
+    /// below stays in one place.
     private struct HeadlessRuntime {
         /// Engine firing due jobs headless.
         let engine: SchedulerEngine
         /// Queue holding gated writes filed without prompting.
         let approvalQueue: ApprovalQueue
+        /// Trust gate owning the periodic cleanup reaper for this run.
+        let permissionGate: PermissionGate
     }
 
     /// Wires headless collaborators for the foreground loop.
@@ -214,9 +221,13 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         } catch {
             cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
         }
-        let permissionGate = PermissionGate(
+        let episodesDB = (loaded.config.memory.episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let permissionGate = await PermissionGate.load(
+            store: trustStore,
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
+        await permissionGate.startPeriodicCleanup()
         let approvalQueue = ApprovalQueue(permissionGate: permissionGate)
         let headlessHandler = await approvalQueue.headlessApprovalHandler()
         let embedder = EmbeddingsBackendFactory.makeBackend(
@@ -261,7 +272,7 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             },
             notifier: MacOSSchedulerNotifier()
         )
-        return HeadlessRuntime(engine: engine, approvalQueue: approvalQueue)
+        return HeadlessRuntime(engine: engine, approvalQueue: approvalQueue, permissionGate: permissionGate)
     }
 
     /// Reports one check batch: per-job outcomes plus pending approvals.

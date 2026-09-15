@@ -85,7 +85,10 @@ struct ServeCommand: AsyncParsableCommand {
         } catch {
             cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
         }
-        let permissionGate = PermissionGate(
+        let episodesDB = (loaded.config.memory.episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let permissionGate = await PermissionGate.load(
+            store: trustStore,
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
         let serverConfig = ServerConfig(hostname: hostname, port: port)
@@ -136,6 +139,10 @@ struct ServeCommand: AsyncParsableCommand {
         for tool in plugins {
             await context.toolBus.register(tool: tool)
         }
+        // Registration resets each tool to enabled, so re-apply persisted
+        // toggles after late builtin registration; the cached load makes
+        // this a memory-only pass after the boot hydration in `make`.
+        await context.restoreToolStates(forceReload: false)
         // Re-snapshot the live service registry so drift between the startup
         // preview and the serving bus surfaces instead of silently omitting
         // a rune from the prompt.
@@ -146,13 +153,19 @@ struct ServeCommand: AsyncParsableCommand {
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)
         let app = try await Application.make(env)
+        // Start the trust reaper only after validation and bootstrap succeed
+        // so early throws never leak its sleep task; the do/catch below
+        // always stops it alongside the server shutdown.
+        await permissionGate.startPeriodicCleanup()
         do {
             try configureRuneWeaver(app, context: context)
             print(TerminalStyle.dim("Serving engine API on \(serverConfig.hostname):\(serverConfig.port) (\(selected.name)). Ctrl+C to stop."))
             try await app.execute()
+            await permissionGate.stopPeriodicCleanup()
             await context.hub.closeAll()
             try await app.asyncShutdown()
         } catch {
+            await permissionGate.stopPeriodicCleanup()
             await context.hub.closeAll()
             try? await app.asyncShutdown()
             throw error

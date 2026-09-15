@@ -36,7 +36,6 @@ const mockSettings = {
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
   sandboxStagingPath: "sandbox/staging",
-  sandboxAutoApproveAfter: 5,
   emailAccounts: [
     {
       name: "icloud",
@@ -82,7 +81,6 @@ describe("SettingsManager", () => {
     const sandboxTabBtn = screen.getByRole("button", { name: /Sandbox & Trust/i });
     await user.click(sandboxTabBtn);
     expect(screen.getByDisplayValue("sandbox/staging")).toBeDefined();
-    expect(screen.getByText(/Auto-Approve After \(Executions\)/i)).toBeDefined();
 
     // Switch to Email Accounts tab
     const emailTabBtn = screen.getByRole("button", { name: /Email Accounts/i });
@@ -184,10 +182,36 @@ describe("SettingsManager", () => {
     const memoryTabBtn = screen.getByRole("button", { name: /Memory & Storage/i });
     await user.click(memoryTabBtn);
 
-    // Backend select reflects the loaded value with local-first guidance.
+    // Backend select reflects the loaded value.
     const backendSelect = screen.getByLabelText(/Embedding Backend/i) as HTMLSelectElement;
     expect(backendSelect.value).toBe("apple");
-    expect(screen.getByText(/local-first/i)).toBeDefined();
+
+    // No editable model input: provider follows the chat model and apple is
+    // fixed on-device, so the prior value stays hidden but persisted.
+    expect(screen.queryByLabelText(/Embedding Model/i)).toBeNull();
+    expect(screen.queryByDisplayValue("bge-small-en-v1.5")).toBeNull();
+
+    // Backend leads the section because it decides whether any model applies.
+    const vectorInput = screen.getByLabelText(/Vector Storage Path/i);
+    const episodesInput = screen.getByLabelText(/Episodes SQLite Database Path/i);
+    expect(
+      Boolean(
+        backendSelect.compareDocumentPosition(vectorInput) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ).toBe(true);
+    expect(
+      Boolean(
+        backendSelect.compareDocumentPosition(episodesInput) &
+          Node.DOCUMENT_POSITION_FOLLOWING
+      )
+    ).toBe(true);
+
+    // Help text explains each backend without an editable model field.
+    expect(screen.getByText(/no model config/i)).toBeDefined();
+    expect(screen.getByText(/active chat model/i)).toBeDefined();
+    expect(screen.getByText(/keyword-only/i)).toBeDefined();
+    expect(screen.getByText(/vector reset/i)).toBeDefined();
 
     await user.selectOptions(backendSelect, "provider");
     expect(backendSelect.value).toBe("provider");
@@ -203,6 +227,10 @@ describe("SettingsManager", () => {
     expect(sentPayload).toBeDefined();
     expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingBackend"]).toBe(
       "provider"
+    );
+    // Prior model value persists untouched for forward compatibility.
+    expect((sentPayload as unknown as Record<string, unknown>)["memoryEmbeddingModel"]).toBe(
+      "bge-small-en-v1.5"
     );
   });
 
@@ -314,6 +342,319 @@ describe("SettingsManager", () => {
       expect(enableCalled).toBe(true);
       expect(screen.getByText(/Enabled rune 'Weather Reporter'/i)).toBeDefined();
     });
+  });
+
+  it("hides marketplace entry points while keeping plugin rescan functional", async () => {
+    const user = userEvent.setup();
+    const discoveredRune = {
+      id: "community.weather",
+      name: "Weather Reporter",
+      version: "1.0.0",
+      description: "Fetches current weather.",
+      runtime: "python",
+      source: "local_disk",
+      status: "discovered",
+      isEnabled: false,
+      integrityHash: null,
+      tools: [
+        {
+          name: "weather.get",
+          description: "Get weather",
+          permissionLevel: "readOnly",
+          inputSchema: "{}",
+          isEnabled: false,
+          isBuiltIn: false,
+          pluginID: "community.weather",
+          source: "plugin",
+          integrityStatus: "valid",
+        },
+      ],
+      permissionOverrides: {},
+      discoveredAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    const mockTools = [
+      {
+        name: "remember_fact",
+        description: "Store persistent fact",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+
+    // Empty initial registry proves the empty state; rescan returning a rune
+    // proves local discovery still works without any marketplace interaction.
+    // The second fetch parameter stays unused here because this path only
+    // serves GET fixtures and never inspects request bodies.
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/plugins/rescan")) {
+        return jsonResponse({ plugins: [discoveredRune] });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("button", { name: /Tools & Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Empty state guides toward local discovery instead of a remote catalog.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/No external runes discovered in plugins directory/i)
+      ).toBeDefined();
+    });
+    expect(screen.getByText(/Rescan Plugins to discover them/i)).toBeDefined();
+
+    // Neither the header action nor the empty-state action exposes the catalog.
+    expect(
+      screen.queryByRole("button", { name: /Browse Marketplace/i })
+    ).toBeNull();
+
+    // Plugin Configuration stays editable so local paths keep working.
+    expect(screen.getByLabelText(/^Plugins Directory$/i)).toBeDefined();
+    expect(screen.getByLabelText(/Marketplace Index URL/i)).toBeDefined();
+
+    const rescanBtn = screen.getByRole("button", { name: /Rescan Plugins/i });
+    await user.click(rescanBtn);
+
+    // Rescan populates the list, confirming local discovery is unaffected.
+    await waitFor(() => {
+      expect(screen.getByText("Weather Reporter")).toBeDefined();
+    });
+    expect(
+      screen.queryByRole("button", { name: /Browse Marketplace/i })
+    ).toBeNull();
+    expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/plugins/rescan"))).toBe(
+      true
+    );
+  });
+
+  it("disables an enabled builtin tool via the tool state endpoint with per-row pending", async () => {
+    const user = userEvent.setup();
+    // Two sibling email tools prove per-tool granularity: toggling one must
+    // leave the other untouched in both the request payload and the UI.
+    let builtinTools = [
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+      {
+        name: "email.attachment",
+        description: "Download email attachments",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    // Hold the state POST open so the test can observe the pending row
+    // before the refreshed list resolves. A mutable holder keeps the
+    // resolver visible across the fetch closure without narrowing the
+    // local to null at the release site.
+    const gate: { release: (() => void) | null } = { release: null };
+    const stateGate = new Promise<void>((resolve) => {
+      gate.release = resolve;
+    });
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const method = init?.method;
+      calls.push({ url: urlStr, method, body: init?.body as string | undefined });
+      if (urlStr.includes("/tools/") && urlStr.includes("/state") && method === "POST") {
+        await stateGate;
+        const payload = JSON.parse(init?.body as string) as { enabled: boolean };
+        const name = decodeURIComponent(urlStr.split("/tools/")[1].split("/state")[0]);
+        builtinTools = builtinTools.map((tool) =>
+          tool.name === name ? { ...tool, isEnabled: payload.enabled } : tool
+        );
+        return jsonResponse(builtinTools.find((tool) => tool.name === name));
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: builtinTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("button", { name: /Tools & Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("email.read")).toBeDefined();
+      expect(screen.getByText("email.attachment")).toBeDefined();
+    });
+
+    // Both rows render their own permission badge and an enabled switch.
+    expect(screen.getByText("readOnly")).toBeDefined();
+    expect(screen.getByText("requiresApproval")).toBeDefined();
+    const readToggle = screen.getByRole("switch", { name: "Disable email.read" });
+    expect((readToggle as HTMLInputElement).checked).toBe(true);
+    expect(
+      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement).checked
+    ).toBe(true);
+
+    const clickPromise = user.click(readToggle);
+
+    // The pending gate stays closed until the test releases it, so only the
+    // acted-on row may disable while its sibling stays interactive.
+    await waitFor(() => {
+      expect(gate.release).not.toBeNull();
+      expect(
+        (screen.getByRole("switch", { name: /email\.read/i }) as HTMLInputElement).disabled
+      ).toBe(true);
+    });
+    expect(
+      (screen.getByRole("switch", { name: /email\.attachment/i }) as HTMLInputElement).disabled
+    ).toBe(false);
+    const release = gate.release;
+    if (release) release();
+    await clickPromise;
+
+    await waitFor(() => {
+      expect(screen.getByText(/Disabled tool 'email\.read'/i)).toBeDefined();
+    });
+
+    const stateCall = calls.find((call) => call.url.includes("/tools/email.read/state"));
+    expect(stateCall).toBeDefined();
+    expect(stateCall?.method).toBe("POST");
+    expect(JSON.parse(stateCall?.body ?? "{}")).toEqual({ enabled: false });
+
+    // Refreshed list flips only the toggled switch; the sibling stays on.
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Enable email.read" })).toBeDefined();
+    });
+    expect(
+      (screen.getByRole("switch", { name: "Enable email.read" }) as HTMLInputElement).checked
+    ).toBe(false);
+    expect(
+      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement).checked
+    ).toBe(true);
+  });
+
+  it("enables a disabled builtin tool via the tool state endpoint", async () => {
+    const user = userEvent.setup();
+    let builtinTools = [
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+      {
+        name: "email.attachment",
+        description: "Download email attachments",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    const calls: Array<{ url: string; method?: string; body?: string }> = [];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      const method = init?.method;
+      calls.push({ url: urlStr, method, body: init?.body as string | undefined });
+      if (urlStr.includes("/tools/") && urlStr.includes("/state") && method === "POST") {
+        const payload = JSON.parse(init?.body as string) as { enabled: boolean };
+        const name = decodeURIComponent(urlStr.split("/tools/")[1].split("/state")[0]);
+        builtinTools = builtinTools.map((tool) =>
+          tool.name === name ? { ...tool, isEnabled: payload.enabled } : tool
+        );
+        return jsonResponse(builtinTools.find((tool) => tool.name === name));
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: builtinTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("button", { name: /Tools & Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Enable email.attachment" })).toBeDefined();
+    });
+
+    await user.click(screen.getByRole("switch", { name: "Enable email.attachment" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Enabled tool 'email\.attachment'/i)).toBeDefined();
+    });
+
+    const stateCall = calls.find((call) =>
+      call.url.includes("/tools/email.attachment/state")
+    );
+    expect(stateCall).toBeDefined();
+    expect(stateCall?.method).toBe("POST");
+    expect(JSON.parse(stateCall?.body ?? "{}")).toEqual({ enabled: true });
+
+    // Refreshed list flips only the toggled switch; the untouched sibling
+    // proves the endpoint never bulk-enables related tools.
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "Disable email.attachment" })).toBeDefined();
+    });
+    expect(
+      (screen.getByRole("switch", { name: "Disable email.attachment" }) as HTMLInputElement)
+        .checked
+    ).toBe(true);
+    expect(
+      (screen.getByRole("switch", { name: "Enable email.read" }) as HTMLInputElement).checked
+    ).toBe(false);
   });
 });
 

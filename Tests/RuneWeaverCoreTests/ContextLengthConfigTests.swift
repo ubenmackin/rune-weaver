@@ -35,7 +35,7 @@ struct ContextLengthConfigTests {
 
         [llm.providers.openrouter]
         enabled = true
-        base_url = "https://openrouter.ai/api/v1"
+        server_url = "https://openrouter.ai/api/v1"
         api_key_env = "OPENROUTER_API_KEY"
         context_length = 1000000
         """

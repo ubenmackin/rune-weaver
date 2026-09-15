@@ -59,9 +59,6 @@ struct ConfigShowCommand: AsyncParsableCommand {
             if let serverURL = entry.serverURL {
                 print("server_url = \(serverURL)")
             }
-            if let baseURL = entry.baseURL {
-                print("base_url = \(baseURL)")
-            }
             if let apiKeyEnv = entry.apiKeyEnv {
                 print("api_key_env = \(apiKeyEnv)")
             }
@@ -84,7 +81,6 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("")
         print("[sandbox]")
         print("staging_path = \(config.sandbox.stagingPath)")
-        print("auto_approve_after = \(config.sandbox.autoApproveAfter)")
         print("")
         print("[scheduler] (\(config.scheduler.jobs.count) jobs)")
         if config.scheduler.jobs.isEmpty {
@@ -259,14 +255,9 @@ private func voiceTOMLAssignment(key lower: String, value: String) -> TOMLAssign
 private func sandboxTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
     switch lower {
     case "sandbox.staging_path":
-        return TOMLAssignment(section: "sandbox", key: "staging_path", rendered: tomlQuoted(value))
-    case "sandbox.auto_approve_after":
-        guard Int(value) != nil else {
-            throw ValidationError("'sandbox.auto_approve_after' must be an integer (got '\(value)').")
-        }
-        return TOMLAssignment(section: "sandbox", key: "auto_approve_after", rendered: value)
+        TOMLAssignment(section: "sandbox", key: "staging_path", rendered: tomlQuoted(value))
     default:
-        return nil
+        nil
     }
 }
 
@@ -276,13 +267,13 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
                 + "llm.fallback_provider, memory.*, voice.*, sandbox.*, "
-                + "llm.providers.<name>.(enabled|model|server_url|base_url|api_key_env|provider_type|api_style)."
+                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style)."
         )
     }
     let section = "llm.providers.\(parts[2])"
     guard let field = try providerFieldAssignment(section: section, field: parts[3], key: key, value: value) else {
         throw ValidationError(
-            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, base_url, api_key_env, provider_type, api_style."
+            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style."
         )
     }
     return field
@@ -296,8 +287,6 @@ private func providerFieldAssignment(section: String, field: String, key: String
         return TOMLAssignment(section: section, key: "model", rendered: tomlQuoted(value))
     case "server_url":
         return TOMLAssignment(section: section, key: "server_url", rendered: tomlQuoted(value))
-    case "base_url":
-        return TOMLAssignment(section: section, key: "base_url", rendered: tomlQuoted(value))
     case "api_key_env":
         return TOMLAssignment(section: section, key: "api_key_env", rendered: tomlQuoted(value))
     case "provider_type":
@@ -406,12 +395,6 @@ private func applySandboxValue(key lower: String, value: String, config: inout R
     case "sandbox.staging_path":
         config.sandbox.stagingPath = value
         return true
-    case "sandbox.auto_approve_after":
-        guard let number = Int(value) else {
-            throw ValidationError("'sandbox.auto_approve_after' must be an integer (got '\(value)').")
-        }
-        config.sandbox.autoApproveAfter = number
-        return true
     default:
         return false
     }
@@ -430,8 +413,6 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
         entry.model = value
     case "server_url":
         entry.serverURL = value
-    case "base_url":
-        entry.baseURL = value
     case "api_key_env":
         entry.apiKeyEnv = value
     case "provider_type":
@@ -444,7 +425,7 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
         }
         entry.apiStyle = style
     default:
-        throw ValidationError("Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, base_url, api_key_env, provider_type, api_style.")
+        throw ValidationError("Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style.")
     }
     config.llm.providers[parts[2]] = entry
 }
@@ -565,9 +546,6 @@ private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
         if let serverURL = entry.serverURL {
             lines.append("server_url = \(tomlQuoted(serverURL))")
         }
-        if let baseURL = entry.baseURL {
-            lines.append("base_url = \(tomlQuoted(baseURL))")
-        }
         if let apiKeyEnv = entry.apiKeyEnv {
             lines.append("api_key_env = \(tomlQuoted(apiKeyEnv))")
         }
@@ -591,7 +569,6 @@ private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
         "",
         "[sandbox]",
         "staging_path = \(tomlQuoted(config.sandbox.stagingPath))",
-        "auto_approve_after = \(config.sandbox.autoApproveAfter)",
         ""
     ]
     return lines.joined(separator: "\n")

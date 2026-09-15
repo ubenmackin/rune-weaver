@@ -35,8 +35,7 @@ Each provider entry supports the same keys. Only set what that backend needs.
 |-----|------|---------|-------------|
 | `enabled` | bool | `true` | Whether the router may select this provider. |
 | `model` | string \| unset | unset | Model identifier sent with requests (e.g. `"gemma-4-9b"`). Local servers only; must not be empty when set. |
-| `server_url` | string \| unset | unset | Local server URL (MLX / llama.cpp / vLLM). Must be an absolute URL (e.g. `http://localhost:8080`) when set. |
-| `base_url` | string \| unset | unset | Cloud base URL for OpenAI-compatible endpoints. Must be an absolute URL when set. |
+| `server_url` | string \| unset | unset | Server URL (MLX / llama.cpp / vLLM / OpenAI-compatible endpoint). Must be an absolute URL when set. |
 | `api_key_env` | string \| unset | unset | Environment variable (and Keychain key) holding the API key. Resolved via `SecretsManager`; never put the key itself in TOML. |
 | `provider_type` | string \| unset | unset | Backend type for generic local entries (e.g. `"llamacpp"`). |
 | `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family; use `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models requiring Anthropic-style messages input are unsupported. |
@@ -54,7 +53,7 @@ server_url = "http://localhost:8080"
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 # context_length = 1000000  # e.g. 1000000 for 1M-context endpoints
 
 [llm.providers.local]
@@ -69,7 +68,7 @@ server_url = "http://localhost:8081"
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 api_style = "responses"  # muse-spark family; omit or use "chat-completions" for glm, kimi, deepseek, mimo, hy, longcat
 ```
 
@@ -79,10 +78,10 @@ api_style = "responses"  # muse-spark family; omit or use "chat-completions" for
 |-----|------|---------|-------------|
 | `vector_db_path` | string | `"~/.runeweaver/memory/vectors"` | JSON store path for semantic memory (LanceDB-compatible shape) holding keyword-only rows plus optional embedding vectors written through `embedding_backend`. Must not be empty. |
 | `episodes_db_path` | string | `"~/.runeweaver/memory/episodes.db"` | SQLite path for episodic memory (conversation history). Must not be empty. |
-| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Embedding model identifier used by the `provider` backend; informational for the `apple` backend. Must not be empty. |
-| `embedding_backend` | string | `"apple"` | Embedding backend: `"apple"` (on-device), `"provider"` (LLM embeddings), or `"none"` (keyword-only). Must be one of the three. |
+| `embedding_model` | string | `"all-MiniLM-L6-v2"` | Retained for forward compatibility but currently unused; reserved for future small/embedding-model support. `apple` uses the fixed on-device model with no model config, `provider` reuses the active chat model via `/v1/embeddings`, and `none` stays keyword-only. Must not be empty. |
+| `embedding_backend` | string | `"apple"` | Embedding backend: `"apple"` (on-device), `"provider"` (active chat model embeddings), or `"none"` (keyword-only). Must be one of the three. |
 
-Semantic memory selects its vector backend via `embedding_backend` (default `"apple"`). `apple` embeds on-device and keeps data local-first, `provider` opts into LLM embeddings using `embedding_model`, and `none` stays keyword-only with no vectors. `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-scored vector rows — so `memory facts` lists them in every mode.
+Semantic memory selects its vector backend via `embedding_backend` (default `"apple"`). `apple` keeps vectors on-device with the fixed on-device model and no model config, `provider` reuses the active chat model for embeddings via `/v1/embeddings`, and `none` stays keyword-only with no vectors. `embedding_model` is retained but unused today. Switching chat models under `provider` may require a vector reset due to width pinning. `remember` in chat (`remember <fact>`, `remember that <fact>`, `/remember <fact>`) stores facts in structured stores — profile facts plus keyword-scored vector rows — so `memory facts` lists them in every mode.
 
 ### `[voice]`
 
@@ -97,7 +96,6 @@ Semantic memory selects its vector backend via `embedding_backend` (default `"ap
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `staging_path` | string | `"~/.runeweaver/sandbox"` | Staging directory for file writes awaiting approval (`pending/` vs `approved/`). Must not be empty. |
-| `auto_approve_after` | integer | `5` | Successful executions before a write may auto-approve. Must be zero or positive. |
 
 ### `[email]` — `[[email.accounts]]`
 
@@ -208,10 +206,10 @@ fallback_provider = "openrouter"
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 ```
 
-The router tries `default_provider` first and falls through to `fallback_provider` on failure. Any OpenAI-compatible endpoint works the same way — point `base_url` at it and set `api_key_env`.
+The router tries `default_provider` first and falls through to `fallback_provider` on failure. Any OpenAI-compatible endpoint works the same way — point `server_url` at it and set `api_key_env`.
 
 Every OpenAI-compatible request sends `User-Agent: rune-weaver/0.1.0` (matching the CLI version). Chat sessions also send `x-opencode-session: <session-UUID>` on chat, embeddings, and `GET /models` probes so a gateway can correlate turns; local providers (MLX, llama.cpp) never send the session header.
 
@@ -276,7 +274,7 @@ default_provider = "openrouter"
 [llm.providers.openrouter]
 enabled = true
 api_key_env = "OPENROUTER_API_KEY"
-base_url = "https://openrouter.ai/api/v1"
+server_url = "https://openrouter.ai/api/v1"
 ```
 
 **Quiet logging + custom paths:**
@@ -291,5 +289,4 @@ episodes_db_path = "~/.runeweaver/memory/episodes.db"
 
 [sandbox]
 staging_path = "~/.runeweaver/sandbox"
-auto_approve_after = 0  # never auto-approve; always ask
 ```

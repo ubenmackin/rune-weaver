@@ -415,11 +415,10 @@ extension RuneWeaverConfig {
             apiStyle = .chatCompletions
         }
         let serverURL = try node.strictString("server_url", field: "\(prefix).server_url")
-        let baseURL = try node.strictString("base_url", field: "\(prefix).base_url")
         return try ProviderConfig(
             enabled: node.strictBool("enabled", field: "\(prefix).enabled") ?? true,
             model: node.strictString("model", field: "\(prefix).model"),
-            serverURL: serverURL ?? baseURL,
+            serverURL: serverURL,
             apiKeyEnv: node.strictString("api_key_env", field: "\(prefix).api_key_env"),
             providerType: node.strictString("provider_type", field: "\(prefix).provider_type"),
             apiStyle: apiStyle,
@@ -462,9 +461,6 @@ extension RuneWeaverConfig {
         guard let sandbox = root.tables["sandbox"] else { return }
         if let path = try sandbox.strictString("staging_path", field: "sandbox.staging_path") {
             config.sandbox.stagingPath = path
-        }
-        if let count = try sandbox.strictInt("auto_approve_after", field: "sandbox.auto_approve_after") {
-            config.sandbox.autoApproveAfter = count
         }
     }
 

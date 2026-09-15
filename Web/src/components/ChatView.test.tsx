@@ -862,3 +862,160 @@ describe("reconstructMessages", () => {
   });
 });
 
+describe("Inline session approval banner", () => {
+  const sessionID = "inline-session-1";
+
+  function approval(
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    return {
+      id: "approval-inline-1",
+      toolName: "email.send",
+      description: "Send email to ops",
+      input: {
+        toolName: "email.send",
+        argumentsJSON: '{"to":"ops@example.com"}',
+        callID: "call-inline-1",
+      },
+      suggestedDurations: ["thisTime"],
+      sessionID,
+      ...overrides,
+    };
+  }
+
+  function stubApprovalsFetch(
+    approvals: Array<Record<string, unknown>>,
+    onDecide?: (path: string, body: string) => void,
+  ): { decideCalls: Array<{ path: string; body: string }>; decided: { value: boolean } } {
+    // After a successful decision the server inbox empties, so later polls
+    // must return no rows; otherwise the locally evicted banner would
+    // reappear and the test could not observe the instant removal.
+    const decideCalls: Array<{ path: string; body: string }> = [];
+    const decided = { value: false };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (typeof input === "string" && input.includes("/decide")) {
+          const body = String(init?.body ?? "");
+          decideCalls.push({ path: input, body });
+          onDecide?.(input, body);
+          decided.value = true;
+          let parsed: { approved?: boolean; duration?: string } = {};
+          try {
+            parsed = JSON.parse(body) as {
+              approved?: boolean;
+              duration?: string;
+            };
+          } catch {
+            parsed = {};
+          }
+          return jsonResponse({
+            id: "approval-inline-1",
+            approved: parsed.approved ?? true,
+            duration: parsed.duration ?? "thisTime",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          if (decided.value) {
+            return jsonResponse({ approvals: [], count: 0 });
+          }
+          return jsonResponse({ approvals, count: approvals.length });
+        }
+        return jsonResponse({});
+      }),
+    );
+    return { decideCalls, decided };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    localStorage.clear();
+    localStorage.setItem("rw_active_session_id", sessionID);
+  });
+
+  it("shows only same-session approvals inline and keeps input usable", async () => {
+    stubApprovalsFetch([
+      approval(),
+      approval({
+        id: "approval-other",
+        toolName: "files.write",
+        description: "Other session write",
+        sessionID: "other-session",
+      }),
+      approval({
+        id: "approval-unattributed",
+        toolName: "browser.click",
+        description: "Unattributed click",
+        sessionID: undefined,
+      }),
+    ]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Send email to ops")).toBeInTheDocument();
+    // Foreign and unattributed entries stay in the global inbox only.
+    expect(screen.queryByText("files.write")).not.toBeInTheDocument();
+    expect(screen.queryByText("browser.click")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+  });
+
+  it("one-click Allow defaults to thisTime and evicts the row", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApprovalsFetch([approval()]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.queryByText("email.send")).not.toBeInTheDocument();
+    });
+    expect(decideCalls).toHaveLength(1);
+    expect(JSON.parse(decideCalls[0].body)).toMatchObject({
+      approved: true,
+      duration: "thisTime",
+    });
+  });
+
+  it("chevron menu Allow passes the chosen duration", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApprovalsFetch([approval()]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Allow options for email.send" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Next hour" }));
+    await waitFor(() => {
+      expect(screen.queryByText("email.send")).not.toBeInTheDocument();
+    });
+    expect(decideCalls).toHaveLength(1);
+    expect(JSON.parse(decideCalls[0].body)).toMatchObject({
+      approved: true,
+      duration: "oneHour",
+    });
+  });
+
+  it("Deny decides with thisTime and evicts the row", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApprovalsFetch([approval()]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "Deny" }));
+    await waitFor(() => {
+      expect(screen.queryByText("email.send")).not.toBeInTheDocument();
+    });
+    expect(decideCalls).toHaveLength(1);
+    expect(JSON.parse(decideCalls[0].body)).toMatchObject({
+      approved: false,
+      duration: "thisTime",
+    });
+  });
+});
+
