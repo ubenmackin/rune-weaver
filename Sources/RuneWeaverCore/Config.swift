@@ -455,6 +455,33 @@ public struct HomeConfig: Sendable, Codable, Equatable {
     }
 }
 
+/// `[plugins]` — plugin discovery and marketplace configuration.
+public struct PluginConfig: Sendable, Codable, Equatable {
+    /// Directory where installed and discovered plugins reside (defaults to `~/.runeweaver/plugins`).
+    public var pluginsDir: String
+    /// Remote marketplace index URL for browsing and downloading runes.
+    public var marketplaceIndexURL: String
+    /// Whether to automatically scan the plugins directory on server startup.
+    public var autoRescan: Bool
+
+    /// Creates a plugin configuration.
+    public init(
+        pluginsDir: String = "~/.runeweaver/plugins",
+        marketplaceIndexURL: String = "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json",
+        autoRescan: Bool = true
+    ) {
+        self.pluginsDir = pluginsDir
+        self.marketplaceIndexURL = marketplaceIndexURL
+        self.autoRescan = autoRescan
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case pluginsDir = "plugins_dir"
+        case marketplaceIndexURL = "marketplace_index_url"
+        case autoRescan = "auto_rescan"
+    }
+}
+
 // MARK: - Root config
 
 /// Root configuration mirroring `~/.runeweaver/config.toml`.
@@ -480,6 +507,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var home: HomeConfig
     /// Scheduled jobs (cron and email-arrival triggers).
     public var scheduler: SchedulerConfig
+    /// Plugin discovery and marketplace settings.
+    public var plugins: PluginConfig
 
     /// Creates a root config from section configs.
     public init(
@@ -490,7 +519,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         sandbox: SandboxConfig = SandboxConfig(),
         email: EmailConfig = EmailConfig(),
         home: HomeConfig = HomeConfig(),
-        scheduler: SchedulerConfig = SchedulerConfig()
+        scheduler: SchedulerConfig = SchedulerConfig(),
+        plugins: PluginConfig = PluginConfig()
     ) {
         self.engine = engine
         self.llm = llm
@@ -500,6 +530,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.email = email
         self.home = home
         self.scheduler = scheduler
+        self.plugins = plugins
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -625,13 +656,27 @@ extension RuneWeaverConfig {
     /// home integrations persist with `token_env` names only.
     public func renderTOML() -> String {
         var lines: [String] = ["# Rune Weaver configuration", ""]
-        lines += [
+        lines += renderEngineTOML()
+        lines += renderLLMTOML()
+        lines += renderServicesTOML()
+        lines += renderEmailTOML()
+        lines += renderHomeTOML()
+        lines += renderSchedulerTOML()
+        lines += renderPluginsTOML()
+        return lines.joined(separator: "\n")
+    }
+
+    private func renderEngineTOML() -> [String] {
+        [
             "[engine]",
             "name = \(Self.tomlQuoted(engine.name))",
             "log_level = \(Self.tomlQuoted(engine.logLevel))",
             ""
         ]
-        lines += [
+    }
+
+    private func renderLLMTOML() -> [String] {
+        var lines: [String] = [
             "[llm]",
             "default_provider = \(Self.tomlQuoted(llm.defaultProvider))"
         ]
@@ -661,7 +706,11 @@ extension RuneWeaverConfig {
             }
             lines.append("")
         }
-        lines += [
+        return lines
+    }
+
+    private func renderServicesTOML() -> [String] {
+        [
             "[memory]",
             "vector_db_path = \(Self.tomlQuoted(memory.vectorDBPath))",
             "episodes_db_path = \(Self.tomlQuoted(memory.episodesDBPath))",
@@ -678,6 +727,10 @@ extension RuneWeaverConfig {
             "auto_approve_after = \(sandbox.autoApproveAfter)",
             ""
         ]
+    }
+
+    private func renderEmailTOML() -> [String] {
+        var lines: [String] = []
         for account in email.accounts {
             lines.append("[[email.accounts]]")
             lines.append("name = \(Self.tomlQuoted(account.name))")
@@ -687,9 +740,14 @@ extension RuneWeaverConfig {
             lines.append("username = \(Self.tomlQuoted(account.username))")
             lines.append("")
         }
+        return lines
+    }
+
+    private func renderHomeTOML() -> [String] {
         // Home integrations persist in array order (order is user intent,
         // not a map, so no sorting). Only `token_env` names persist; token
         // values resolve at runtime via `SecretsManager` and never touch TOML.
+        var lines: [String] = []
         for entry in home.homekit {
             lines.append("[[home.homekit]]")
             lines.append("enabled = \(entry.enabled ? "true" : "false")")
@@ -706,6 +764,11 @@ extension RuneWeaverConfig {
             }
             lines.append("")
         }
+        return lines
+    }
+
+    private func renderSchedulerTOML() -> [String] {
+        var lines: [String] = []
         for job in scheduler.jobs {
             lines.append("[[scheduler.jobs]]")
             lines.append("name = \(Self.tomlQuoted(job.name))")
@@ -725,7 +788,17 @@ extension RuneWeaverConfig {
             }
             lines.append("")
         }
-        return lines.joined(separator: "\n")
+        return lines
+    }
+
+    private func renderPluginsTOML() -> [String] {
+        [
+            "[plugins]",
+            "plugins_dir = \(Self.tomlQuoted(plugins.pluginsDir))",
+            "marketplace_index_url = \(Self.tomlQuoted(plugins.marketplaceIndexURL))",
+            "auto_rescan = \(plugins.autoRescan ? "true" : "false")",
+            ""
+        ]
     }
 
     /// Saves and validates the configuration to a file URL.
@@ -769,6 +842,7 @@ extension RuneWeaverConfig {
         try validateEmailSection()
         try validateHomeSection()
         try validateSchedulerSection()
+        try validatePluginsSection()
     }
 
     private func validateEngineSection() throws {
@@ -957,6 +1031,12 @@ extension RuneWeaverConfig {
             try scheduler.validate()
         } catch let error as SchedulerConfigError {
             throw Self.mapSchedulerConfigError(error)
+        }
+    }
+
+    private func validatePluginsSection() throws {
+        if plugins.pluginsDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(field: "plugins.plugins_dir", message: "must not be empty")
         }
     }
 

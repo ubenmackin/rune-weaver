@@ -23,6 +23,7 @@ struct RuneWeaverCommand: AsyncParsableCommand {
             ChatCommand.self,
             ConfigCommand.self,
             MemoryCommand.self,
+            PluginCommand.self,
             SchedulerCommand.self,
             ServeCommand.self,
             StatusCommand.self

@@ -214,7 +214,9 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         } catch {
             cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
         }
-        let permissionGate = PermissionGate()
+        let permissionGate = PermissionGate(
+            pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        )
         let approvalQueue = ApprovalQueue(permissionGate: permissionGate)
         let headlessHandler = await approvalQueue.headlessApprovalHandler()
         let embedder = EmbeddingsBackendFactory.makeBackend(
@@ -227,7 +229,9 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             permissionGate: permissionGate,
             approvalHandler: headlessHandler,
             sandboxConfig: loaded.config.sandbox,
-            embedder: embedder
+            embedder: embedder,
+            pluginConfig: loaded.config.plugins,
+            episodesDBPath: loaded.config.memory.episodesDBPath
         )
         let orchestrator = Orchestrator(
             conversations: conversations,

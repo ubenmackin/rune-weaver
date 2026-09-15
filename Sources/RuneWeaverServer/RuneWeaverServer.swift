@@ -657,24 +657,12 @@ public final class ServerContext: Sendable {
     public let activeTurns: ActiveTurnTracker
     /// In-process background scheduler worker.
     public let schedulerWorker: ServerSchedulerWorker
+    /// Durable plugin registry store tracking discovered runes.
+    public let pluginStore: ToolRegistryStore
+    /// Service discovering and syncing plugins from disk.
+    public let pluginDiscovery: PluginDiscoveryService
 
     /// Creates a server context.
-    /// - Parameters:
-    ///   - config: Loopback binding. Defaults to `.default`.
-    ///   - conversations: Session owner.
-    ///   - toolBus: Tool registry.
-    ///   - orchestrator: Orchestration loop.
-    ///   - memoryEngine: Memory tiers.
-    ///   - embedder: Optional embeddings producer for memory routes.
-    ///     Defaults to nil (keyword-only).
-    ///   - permissionGate: Trust gate.
-    ///   - approvals: Pending approvals.
-    ///   - scheduler: Job registry. Defaults to empty.
-    ///   - runs: Run audit trail. Defaults to empty.
-    ///   - hub: Live sockets. Defaults to empty.
-    ///   - runLock: Single-flight lock for service runs (manual plus auto-fire). Defaults to empty.
-    ///   - activeTurns: Active chat turn tracker. Defaults to empty.
-    ///   - schedulerWorker: In-process scheduler worker. Defaults to nil (constructed from collaborators).
     public init(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -689,7 +677,9 @@ public final class ServerContext: Sendable {
         hub: WSHub = WSHub(),
         runLock: SchedulerRunLock = SchedulerRunLock(),
         activeTurns: ActiveTurnTracker = ActiveTurnTracker(),
-        schedulerWorker: ServerSchedulerWorker? = nil
+        schedulerWorker: ServerSchedulerWorker? = nil,
+        pluginStore: ToolRegistryStore? = nil,
+        pluginDiscovery: PluginDiscoveryService? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -713,6 +703,9 @@ public final class ServerContext: Sendable {
             conversations: conversations,
             toolBus: toolBus
         )
+        let pStore = pluginStore ?? ToolRegistryStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        self.pluginStore = pStore
+        self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -734,6 +727,7 @@ public final class ServerContext: Sendable {
     ///   - schedulerConfig: Durable `config.toml [[scheduler.jobs]]` used
     ///     to seed the runtime scheduler registry. Defaults to empty.
     ///   - episodesDBPath: SQLite file path for durable run log and schedule persistence. Defaults to nil.
+    ///   - pluginConfig: Plugin configuration defining directory and options. Defaults to `.init()`.
     ///   - notifier: Optional notifier for completed scheduler jobs. Defaults to nil.
     ///   - onApprovalRequested: Optional async callback invoked when a tool call requires approval. Defaults to nil.
     /// - Returns: Context with an approval-broadcasting bus.
@@ -747,6 +741,7 @@ public final class ServerContext: Sendable {
         systemPrompt: String? = nil,
         schedulerConfig: SchedulerConfig = .empty,
         episodesDBPath: String? = nil,
+        pluginConfig: PluginConfig = PluginConfig(),
         notifier: (any SchedulerNotifier)? = nil,
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil
     ) async -> ServerContext {
@@ -759,6 +754,12 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
+        let pStore = ToolRegistryStore(dbPath: episodesDBPath ?? ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
+        let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
+        if pluginConfig.autoRescan {
+            _ = await pDiscovery.discoverAndSync(toolBus: bus)
+        }
         // The orchestrator shares the approvals queue so narrated gated
         // calls file parked requests tagged with their session instead of
         // dropping, with resume continuing the same session on decision.
@@ -794,7 +795,9 @@ public final class ServerContext: Sendable {
             runs: runs,
             hub: hub,
             runLock: runLock,
-            schedulerWorker: schedulerWorker
+            schedulerWorker: schedulerWorker,
+            pluginStore: pStore,
+            pluginDiscovery: pDiscovery
         )
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
@@ -898,6 +901,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerChatRoute(app)
     registerSessionRoutes(app)
     registerToolRoutes(app)
+    registerPluginRoutes(app)
     registerMemoryRoutes(app)
     registerApprovalRoutes(app)
     registerSchedulerCRUDRoutes(app)
@@ -1150,8 +1154,50 @@ private func registerChatRoute(_ app: Application) {
 /// - Parameter app: Application receiving the routes.
 private func registerToolRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.tools)) { req async throws -> ToolsResponse in
-        let tools = await req.application.runeWeaver.toolBus.availableTools()
-        return ToolsResponse(tools: tools.map(ToolInfo.init).sorted { $0.name < $1.name })
+        let context = req.application.runeWeaver
+        let tools = await context.toolBus.allTools()
+        let records = await context.pluginStore.loadAll()
+        let recordByPluginID = Dictionary(records.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+
+        var toolInfos: [ToolInfo] = []
+        for tool in tools {
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            var pluginID: String?
+            var isBuiltIn = true
+            var source = "builtin"
+            var integrityStatus = "valid"
+
+            if let bridge = tool as? SubprocessToolBridge {
+                pluginID = bridge.pluginID
+                isBuiltIn = false
+                // Surface durable provenance so marketplace runes stay
+                // distinguishable from local disk in the dashboard; unknown
+                // tools keep the generic plugin label with unverified status.
+                if let record = recordByPluginID[bridge.pluginID] {
+                    source = record.source
+                    switch record.status {
+                    case .tampered:
+                        integrityStatus = "tampered"
+                    case .discovered, .enabled, .disabled:
+                        integrityStatus = "valid"
+                    }
+                } else {
+                    source = "plugin"
+                    integrityStatus = "unverified"
+                }
+            }
+
+            toolInfos.append(ToolInfo(
+                tool,
+                isEnabled: isEnabled,
+                isBuiltIn: isBuiltIn,
+                pluginID: pluginID,
+                source: source,
+                integrityStatus: integrityStatus
+            ))
+        }
+        toolInfos.sort { $0.name < $1.name }
+        return ToolsResponse(tools: toolInfos)
     }
 
     app.post(PathComponent.constant(ServerPaths.tools), PathComponent.constant(ServerPaths.toolCall)) { req async throws -> ToolResult in

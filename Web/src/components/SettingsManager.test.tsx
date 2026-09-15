@@ -46,6 +46,9 @@ const mockSettings = {
       username: "test@icloud.com",
     },
   ],
+  pluginsDir: "~/.runeweaver/plugins",
+  pluginsMarketplaceIndexURL: "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json",
+  pluginsAutoRescan: true,
   configPath: "/Users/test/.runeweaver/config.toml",
 };
 
@@ -202,4 +205,115 @@ describe("SettingsManager", () => {
       "provider"
     );
   });
+
+  it("renders Tools & Runes tab with disabled-by-default warning and enables discovered rune", async () => {
+    const user = userEvent.setup();
+    const mockPlugins = [
+      {
+        id: "community.weather",
+        name: "Weather Reporter",
+        version: "1.0.0",
+        description: "Fetches current weather.",
+        runtime: "python",
+        source: "local_disk",
+        status: "discovered",
+        isEnabled: false,
+        integrityHash: null,
+        tools: [
+          {
+            name: "weather.get",
+            description: "Get weather",
+            permissionLevel: "readOnly",
+            inputSchema: "{}",
+            isEnabled: false,
+            isBuiltIn: false,
+            pluginID: "community.weather",
+            source: "plugin",
+            integrityStatus: "valid",
+          },
+        ],
+        permissionOverrides: {},
+        discoveredAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+
+    const mockTools = [
+      {
+        name: "remember_fact",
+        description: "Store persistent fact",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+      {
+        name: "weather.get",
+        description: "Get weather",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: false,
+        pluginID: "community.weather",
+        source: "plugin",
+        integrityStatus: "valid",
+      },
+    ];
+
+    let enableCalled = false;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/plugins/community.weather/state") && init?.method === "POST") {
+        enableCalled = true;
+        return jsonResponse({
+          ...mockPlugins[0],
+          status: "enabled",
+          isEnabled: true,
+          integrityHash: "abcdef1234567890",
+        });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: mockPlugins });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Switch to Tools & Runes tab
+    const toolsTabBtn = screen.getByRole("button", { name: /Tools & Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Verify warning banner for disabled-by-default discovered runes
+    await waitFor(() => {
+      expect(screen.getByText(/awaiting review/i)).toBeDefined();
+      expect(screen.getByText("Weather Reporter")).toBeDefined();
+      expect(screen.getAllByText(/PENDING REVIEW/i).length).toBeGreaterThan(0);
+    });
+
+    // Verify enable button is present
+    const enableBtn = screen.getByRole("button", { name: /Approve & Enable/i });
+    expect(enableBtn).toBeDefined();
+
+    // Click enable
+    await user.click(enableBtn);
+
+    await waitFor(() => {
+      expect(enableCalled).toBe(true);
+      expect(screen.getByText(/Enabled rune 'Weather Reporter'/i)).toBeDefined();
+    });
+  });
 });
+

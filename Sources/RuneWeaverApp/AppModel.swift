@@ -61,6 +61,31 @@ public final class AppModel: ObservableObject {
         }
     }
 
+    /// Builds the permission gate and served prompt from the live registry so
+    /// served turns see every registered tool including discovered runes.
+    /// The preview bus snapshots external runes before the service owns the
+    /// registry; the service syncs the same directory again on boot, keeping
+    /// both views consistent. Forwards the configured plugins directory so
+    /// custom locations get the same protected-path enforcement.
+    private func buildGateAndSystemPrompt(
+        plugins: [any Tool],
+        config: RuneWeaverConfig
+    ) async -> (PermissionGate, String) {
+        let permissionGate = PermissionGate(
+            pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        )
+        let previewBus = ToolBus(permissionGate: permissionGate)
+        for tool in plugins {
+            await previewBus.register(tool: tool)
+        }
+        let previewPluginsURL = URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        let previewStore = ToolRegistryStore(dbPath: (config.memory.episodesDBPath as NSString).expandingTildeInPath)
+        let previewDiscovery = PluginDiscoveryService(pluginsDirectory: previewPluginsURL, store: previewStore)
+        await previewDiscovery.discoverAndSync(toolBus: previewBus)
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: nil, toolBus: previewBus)
+        return (permissionGate, effectiveSystemPrompt)
+    }
+
     private func bootServer() async {
         // Snapshot the published bind values so a later edit cannot change the
         // address halfway through startup; loopback stays the only permitted
@@ -135,9 +160,11 @@ public final class AppModel: ObservableObject {
             plugins += EmailTools.makeTools(emailConfig: config.email, sandboxConfig: config.sandbox)
             plugins += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
 
-            let effectiveSystemPrompt = SystemPromptComposer.resolve(flag: nil, tools: plugins)
+            let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
+                plugins: plugins,
+                config: config
+            )
             let serverConfig = bindConfig
-            let permissionGate = PermissionGate()
 
             let context = await ServerContext.make(
                 config: serverConfig,
@@ -149,6 +176,7 @@ public final class AppModel: ObservableObject {
                 systemPrompt: effectiveSystemPrompt,
                 schedulerConfig: config.scheduler,
                 episodesDBPath: config.memory.episodesDBPath,
+                pluginConfig: config.plugins,
                 notifier: notificationManager,
                 onApprovalRequested: { [weak self] req in
                     await self?.notificationManager.postApprovalNotification(req)

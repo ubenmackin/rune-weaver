@@ -346,6 +346,7 @@ extension RuneWeaverConfig {
         try Self.decodeEmail(root, into: &config)
         try Self.decodeHome(root, into: &config)
         try Self.decodeScheduler(root, into: &config)
+        try Self.decodePlugins(root, into: &config)
         self = config
     }
 
@@ -568,6 +569,19 @@ extension RuneWeaverConfig {
             poll = nil
         }
         return SchedulerJobConfig(name: name, prompt: prompt, enabled: enabled, schedule: schedule, poll: poll)
+    }
+
+    private static func decodePlugins(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let plugins = root.tables["plugins"] else { return }
+        if let dir = try plugins.strictString("plugins_dir", field: "plugins.plugins_dir") {
+            config.plugins.pluginsDir = dir
+        }
+        if let url = try plugins.strictString("marketplace_index_url", field: "plugins.marketplace_index_url") {
+            config.plugins.marketplaceIndexURL = url
+        }
+        if let autoRescan = try plugins.strictBool("auto_rescan", field: "plugins.auto_rescan") {
+            config.plugins.autoRescan = autoRescan
+        }
     }
 }
 

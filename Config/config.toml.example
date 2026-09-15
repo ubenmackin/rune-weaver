@@ -98,3 +98,16 @@ enabled = true
 # poll_query = "invoice"
 # # poll_mailbox = "INBOX"  # omitted means every selectable mailbox
 # poll_interval_seconds = 300
+
+# -----------------------------------------------------------------------------
+# Plugins & Runes
+# -----------------------------------------------------------------------------
+# External tool discovery and community marketplace configuration.
+# Discovered runes enter the system in a disabled state awaiting user approval.
+# Runes execute as sandboxed subprocesses via JSON-RPC 2.0 over stdin/stdout.
+
+[plugins]
+plugins_dir = "~/.runeweaver/plugins"
+marketplace_index_url = "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+auto_rescan = true
+

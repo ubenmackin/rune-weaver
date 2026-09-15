@@ -6,22 +6,33 @@ import {
   ApiError,
   getSettings,
   updateSettings,
+  getPlugins,
+  rescanPlugins,
+  updatePluginState,
+  uninstallPlugin,
+  getTools,
   type EmailAccountData,
   type ProviderConfigData,
   type SettingsResponse,
+  type PluginSummary,
+  type ToolInfo,
 } from "../api";
 import {
+  AlertTriangleIcon,
   ApprovalsIcon,
   ChatIcon,
+  CheckIcon,
   MailIcon,
   MemoryIcon,
   PlusIcon,
   RefreshIcon,
   SettingsIcon,
   TrashIcon,
+  WrenchIcon,
 } from "./icons";
+import RuneMarketplaceModal from "./RuneMarketplaceModal";
 
-type SettingsTab = "providers" | "engine" | "sandbox" | "memory" | "voice" | "email";
+type SettingsTab = "providers" | "engine" | "tools" | "sandbox" | "memory" | "voice" | "email";
 
 interface ProviderEntry {
   id: string;
@@ -63,6 +74,123 @@ export default function SettingsManager() {
   const [voiceWhisperModel, setVoiceWhisperModel] = useState("");
   const [voiceTTSProvider, setVoiceTTSProvider] = useState("");
   const [emailAccountsList, setEmailAccountsList] = useState<EmailEntry[]>([]);
+  const [pluginsDir, setPluginsDir] = useState("~/.runeweaver/plugins");
+  const [pluginsMarketplaceIndexURL, setPluginsMarketplaceIndexURL] = useState(
+    "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+  );
+  const [pluginsAutoRescan, setPluginsAutoRescan] = useState(true);
+
+  // Plugins & Tools state
+  const [pluginsList, setPluginsList] = useState<PluginSummary[]>([]);
+  const [allTools, setAllTools] = useState<ToolInfo[]>([]);
+  const [rescanLoading, setRescanLoading] = useState(false);
+  const [marketplaceOpen, setMarketplaceOpen] = useState(false);
+  const [updatingPluginId, setUpdatingPluginId] = useState<string | null>(null);
+  const [pluginActionError, setPluginActionError] = useState<string | null>(null);
+  const [pluginActionSuccess, setPluginActionSuccess] = useState<string | null>(null);
+
+  const loadPluginsData = useCallback(async () => {
+    try {
+      const [pluginsRes, toolsRes] = await Promise.all([
+        getPlugins(),
+        getTools(),
+      ]);
+      setPluginsList(Array.isArray(pluginsRes?.plugins) ? pluginsRes.plugins : []);
+      setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
+    } catch {
+      setPluginsList([]);
+      setAllTools([]);
+    }
+  }, []);
+
+  const handleRescanPlugins = async () => {
+    setRescanLoading(true);
+    setPluginActionError(null);
+    setPluginActionSuccess(null);
+    try {
+      const res = await rescanPlugins();
+      setPluginsList(Array.isArray(res?.plugins) ? res.plugins : []);
+      const toolsRes = await getTools();
+      setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
+      setPluginActionSuccess(`Discovered ${res.plugins?.length ?? 0} external runes.`);
+    } catch (err) {
+      setPluginActionError(err instanceof Error ? err.message : "Failed to rescan plugins.");
+    } finally {
+      setRescanLoading(false);
+    }
+  };
+
+  const handleToggleEnable = async (plugin: PluginSummary) => {
+    setUpdatingPluginId(plugin.id);
+    setPluginActionError(null);
+    setPluginActionSuccess(null);
+    try {
+      const action = plugin.isEnabled ? "disable" : "enable";
+      const updated = await updatePluginState(plugin.id, { action });
+      setPluginsList((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      const toolsRes = await getTools();
+      setAllTools(toolsRes.tools);
+      setPluginActionSuccess(
+        updated.isEnabled
+          ? `Enabled rune '${updated.name}' (integrity hash verified).`
+          : `Disabled rune '${updated.name}'.`
+      );
+    } catch (err) {
+      setPluginActionError(err instanceof Error ? err.message : "Failed to update plugin state.");
+    } finally {
+      setUpdatingPluginId(null);
+    }
+  };
+
+  const handlePermissionChange = async (
+    pluginId: string,
+    toolName: string,
+    value: string
+  ) => {
+    setUpdatingPluginId(pluginId);
+    setPluginActionError(null);
+    setPluginActionSuccess(null);
+    try {
+      let updated: PluginSummary;
+      if (value === "default") {
+        updated = await updatePluginState(pluginId, { action: "clear_override", toolName });
+      } else {
+        updated = await updatePluginState(pluginId, {
+          action: "override_permission",
+          toolName,
+          permissionLevel: value as "readOnly" | "requiresApproval",
+        });
+      }
+      setPluginsList((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+      const toolsRes = await getTools();
+      setAllTools(toolsRes.tools);
+      setPluginActionSuccess(`Updated permission for '${toolName}' to ${value}.`);
+    } catch (err) {
+      setPluginActionError(err instanceof Error ? err.message : "Failed to override permission.");
+    } finally {
+      setUpdatingPluginId(null);
+    }
+  };
+
+  const handleUninstall = async (pluginId: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to uninstall and remove '${name}'?`)) {
+      return;
+    }
+    setUpdatingPluginId(pluginId);
+    setPluginActionError(null);
+    setPluginActionSuccess(null);
+    try {
+      await uninstallPlugin(pluginId);
+      setPluginsList((prev) => prev.filter((p) => p.id !== pluginId));
+      const toolsRes = await getTools();
+      setAllTools(toolsRes.tools);
+      setPluginActionSuccess(`Uninstalled '${name}'.`);
+    } catch (err) {
+      setPluginActionError(err instanceof Error ? err.message : "Failed to uninstall plugin.");
+    } finally {
+      setUpdatingPluginId(null);
+    }
+  };
 
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
@@ -103,6 +231,12 @@ export default function SettingsManager() {
     setVoiceSTTProvider(data.voiceSTTProvider);
     setVoiceWhisperModel(data.voiceWhisperModel);
     setVoiceTTSProvider(data.voiceTTSProvider);
+    setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
+    setPluginsMarketplaceIndexURL(
+      data.pluginsMarketplaceIndexURL ??
+        "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
+    );
+    setPluginsAutoRescan(data.pluginsAutoRescan ?? true);
 
     // Transform email accounts into editable list
     const eList: EmailEntry[] = (data.emailAccounts || []).map((acc, idx) => ({
@@ -118,12 +252,13 @@ export default function SettingsManager() {
     try {
       const data = await getSettings();
       populateForm(data);
+      void loadPluginsData();
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to load settings");
     } finally {
       setLoading(false);
     }
-  }, [populateForm]);
+  }, [populateForm, loadPluginsData]);
 
   useEffect(() => {
     void refresh();
@@ -218,6 +353,9 @@ export default function SettingsManager() {
         voiceWhisperModel,
         voiceTTSProvider,
         emailAccounts,
+        pluginsDir,
+        pluginsMarketplaceIndexURL,
+        pluginsAutoRescan,
       });
       populateForm(updated);
       // Settings persist to the config file only; live providers, system
@@ -382,6 +520,10 @@ export default function SettingsManager() {
   }
 
   const providerNames = providersList.map((p) => p.name).filter(Boolean);
+  const safePlugins = Array.isArray(pluginsList) ? pluginsList : [];
+  const safeTools = Array.isArray(allTools) ? allTools : [];
+  const pendingCount = safePlugins.filter((p) => p?.status === "discovered").length;
+  const tamperedCount = safePlugins.filter((p) => p?.status === "tampered").length;
 
   return (
     <section className="panel settings-panel" aria-label="Settings and configuration">
@@ -435,6 +577,26 @@ export default function SettingsManager() {
         >
           <SettingsIcon size={16} />
           <span>Engine & Logs</span>
+        </button>
+
+        <button
+          type="button"
+          className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
+          onClick={() => setActiveTab("tools")}
+        >
+          <WrenchIcon size={16} />
+          <span>Tools & Runes</span>
+          {pendingCount > 0 ? (
+            <span
+              className="settings-tab-badge"
+              style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+              title={`${pendingCount} runes pending human review`}
+            >
+              {pendingCount}
+            </span>
+          ) : (
+            <span className="settings-tab-badge">{pluginsList.length}</span>
+          )}
         </button>
 
         <button
@@ -776,6 +938,406 @@ export default function SettingsManager() {
           </div>
         )}
 
+        {/* TAB 3: Tools & Runes */}
+        {activeTab === "tools" && (
+          <div className="settings-section card">
+            <div className="settings-section-title-group" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
+              <div>
+                <h3>Tools & Runes</h3>
+                <p className="settings-section-hint">
+                  Manage internal and external tools. Discovered and newly installed runes remain disabled by default until reviewed and approved.
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleRescanPlugins}
+                  disabled={rescanLoading}
+                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                >
+                  <RefreshIcon size={14} className={rescanLoading ? "spin" : ""} />
+                  <span>{rescanLoading ? "Scanning..." : "Rescan Plugins"}</span>
+                </button>
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => setMarketplaceOpen(true)}
+                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
+                >
+                  <PlusIcon size={14} />
+                  <span>Browse Marketplace</span>
+                </button>
+              </div>
+            </div>
+
+            {pluginActionError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{pluginActionError}</span>
+              </div>
+            )}
+            {pluginActionSuccess && (
+              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <CheckIcon size={16} />
+                <span>{pluginActionSuccess}</span>
+              </div>
+            )}
+
+            {/* Metrics cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "12px", margin: "16px 0" }}>
+              <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>Active Tools</div>
+                <div style={{ fontSize: "1.4rem", fontWeight: 700, color: "#48bb78", marginTop: "4px" }}>
+                  {safeTools.filter((t) => t.isEnabled).length}
+                </div>
+              </div>
+              <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>External Runes</div>
+                <div style={{ fontSize: "1.4rem", fontWeight: 700, marginTop: "4px" }}>
+                  {pluginsList.length}
+                </div>
+              </div>
+              <div style={{ padding: "12px", background: "var(--bg-secondary, #141822)", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)" }}>
+                <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", textTransform: "uppercase", fontWeight: 600 }}>Pending Review</div>
+                <div style={{ fontSize: "1.4rem", fontWeight: 700, color: pendingCount > 0 ? "#ed8936" : "inherit", marginTop: "4px" }}>
+                  {pendingCount}
+                </div>
+              </div>
+              {tamperedCount > 0 && (
+                <div style={{ padding: "12px", background: "rgba(245, 101, 101, 0.1)", borderRadius: "8px", border: "1px solid rgba(245, 101, 101, 0.3)" }}>
+                  <div style={{ fontSize: "0.75rem", color: "#f56565", textTransform: "uppercase", fontWeight: 600 }}>Tampered</div>
+                  <div style={{ fontSize: "1.4rem", fontWeight: 700, color: "#f56565", marginTop: "4px" }}>
+                    {tamperedCount}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Warning banners */}
+            {pendingCount > 0 && (
+              <div
+                style={{
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(237, 137, 54, 0.15)",
+                  border: "1px solid rgba(237, 137, 54, 0.4)",
+                  marginBottom: "16px",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "12px",
+                  color: "#ed8936",
+                }}
+              >
+                <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
+                <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
+                  <strong>{pendingCount} newly discovered rune(s) awaiting review.</strong>
+                  <div style={{ marginTop: "2px", color: "var(--text-primary, #e2e8f0)" }}>
+                    In accordance with security policy, new tools start disabled by default. Review their code and permissions below before enabling.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {tamperedCount > 0 && (
+              <div
+                style={{
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  backgroundColor: "rgba(245, 101, 101, 0.15)",
+                  border: "1px solid rgba(245, 101, 101, 0.4)",
+                  marginBottom: "16px",
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: "12px",
+                  color: "#f56565",
+                }}
+              >
+                <AlertTriangleIcon size={20} style={{ flexShrink: 0, marginTop: "2px" }} />
+                <div style={{ fontSize: "0.88rem", lineHeight: "1.4" }}>
+                  <strong>Security Alert: {tamperedCount} plugin(s) have been modified on disk since approval!</strong>
+                  <div style={{ marginTop: "2px", color: "var(--text-primary, #e2e8f0)" }}>
+                    Cryptographic tree hash does not match the approved signature. They have been quarantined and disabled.
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* External Runes List */}
+            <h4 style={{ margin: "20px 0 12px 0", display: "flex", alignItems: "center", gap: "8px" }}>
+              <span>Installed Runes & Plugins</span>
+              <span className="settings-tab-badge">{pluginsList.length}</span>
+            </h4>
+
+            {pluginsList.length === 0 ? (
+              <div className="empty-state-box" style={{ padding: "28px", textAlign: "center" }}>
+                <WrenchIcon size={32} />
+                <p>No external runes discovered in plugins directory.</p>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setMarketplaceOpen(true)}
+                  style={{ display: "inline-flex", alignItems: "center", gap: "6px", marginTop: "8px" }}
+                >
+                  <PlusIcon size={14} />
+                  <span>Browse Marketplace</span>
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+                {pluginsList.map((plugin) => {
+                  const isPending = plugin.status === "discovered";
+                  const isTampered = plugin.status === "tampered";
+                  return (
+                    <div
+                      key={plugin.id}
+                      style={{
+                        padding: "16px",
+                        borderRadius: "8px",
+                        backgroundColor: "var(--bg-card, #1e2533)",
+                        border: isTampered
+                          ? "1px solid rgba(245, 101, 101, 0.5)"
+                          : isPending
+                          ? "1px solid rgba(237, 137, 54, 0.5)"
+                          : "1px solid var(--border-color, #2d3748)",
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "8px", flexWrap: "wrap", gap: "8px" }}>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                            <span style={{ fontWeight: 600, fontSize: "1.02rem" }}>{plugin.name}</span>
+                            <span style={{ fontSize: "0.75rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
+                              v{plugin.version}
+                            </span>
+                            <span style={{ fontSize: "0.75rem", padding: "2px 6px", borderRadius: "4px", backgroundColor: "#2c3e50", color: "#63b3ed" }}>
+                              {plugin.runtime}
+                            </span>
+
+                            {plugin.isEnabled ? (
+                              <span style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: "rgba(72, 187, 120, 0.2)", color: "#48bb78", fontWeight: 600 }}>
+                                ENABLED
+                              </span>
+                            ) : isPending ? (
+                              <span style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: "rgba(237, 137, 54, 0.2)", color: "#ed8936", fontWeight: 600 }}>
+                                PENDING REVIEW
+                              </span>
+                            ) : isTampered ? (
+                              <span style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: "rgba(245, 101, 101, 0.2)", color: "#f56565", fontWeight: 600 }}>
+                                TAMPERED
+                              </span>
+                            ) : (
+                              <span style={{ fontSize: "0.75rem", padding: "2px 8px", borderRadius: "4px", backgroundColor: "rgba(160, 174, 192, 0.2)", color: "#a0aec0" }}>
+                                DISABLED
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: "0.8rem", color: "var(--text-secondary, #a0aec0)", marginTop: "3px" }}>
+                            <code>{plugin.id}</code> {plugin.author ? `• by ${plugin.author}` : ""}
+                          </div>
+                        </div>
+
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          <button
+                            type="button"
+                            className={plugin.isEnabled ? "secondary-button" : "primary-button"}
+                            onClick={() => handleToggleEnable(plugin)}
+                            disabled={updatingPluginId === plugin.id}
+                            style={{
+                              padding: "5px 12px",
+                              fontSize: "0.85rem",
+                            }}
+                          >
+                            {updatingPluginId === plugin.id
+                              ? "Updating..."
+                              : plugin.isEnabled
+                              ? "Disable"
+                              : isPending
+                              ? "Approve & Enable"
+                              : isTampered
+                              ? "Re-verify & Enable"
+                              : "Enable"}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="icon-button danger"
+                            onClick={() => handleUninstall(plugin.id, plugin.name)}
+                            disabled={updatingPluginId === plugin.id}
+                            title={`Uninstall ${plugin.name}`}
+                            aria-label={`Uninstall ${plugin.name}`}
+                          >
+                            <TrashIcon size={14} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {plugin.description && (
+                        <p style={{ margin: "4px 0 10px 0", fontSize: "0.88rem", color: "var(--text-secondary, #cbd5e0)" }}>
+                          {plugin.description}
+                        </p>
+                      )}
+
+                      {plugin.integrityHash && (
+                        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", marginBottom: "10px", display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span>SHA-256 Hash:</span>
+                          <code style={{ fontSize: "0.72rem" }}>{plugin.integrityHash.substring(0, 16)}...</code>
+                          {isTampered ? (
+                            <span style={{ color: "#f56565" }}>(MISMATCH DETECTED)</span>
+                          ) : (
+                            <span style={{ color: "#48bb78" }}>✓ Verified</span>
+                          )}
+                        </div>
+                      )}
+
+                      <div style={{ borderTop: "1px solid var(--border-color, #2d3748)", paddingTop: "8px" }}>
+                        <div style={{ fontSize: "0.75rem", fontWeight: 600, color: "var(--text-secondary, #a0aec0)", marginBottom: "6px", textTransform: "uppercase" }}>
+                          Declared Tools ({plugin.tools.length})
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                          {plugin.tools.map((tool) => {
+                            const override = plugin.permissionOverrides[tool.name];
+                            return (
+                              <div
+                                key={tool.name}
+                                style={{
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  padding: "6px 10px",
+                                  borderRadius: "6px",
+                                  backgroundColor: "var(--bg-secondary, #141822)",
+                                  fontSize: "0.85rem",
+                                  flexWrap: "wrap",
+                                  gap: "8px",
+                                }}
+                              >
+                                <div>
+                                  <code style={{ fontWeight: 600, color: "#63b3ed" }}>{tool.name}</code>
+                                  {tool.description && (
+                                    <span style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)", marginLeft: "6px" }}>
+                                      ({tool.description})
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                                  <span style={{ fontSize: "0.75rem", color: "var(--text-secondary, #a0aec0)" }}>
+                                    Permission:
+                                  </span>
+                                  <select
+                                    value={override || "default"}
+                                    onChange={(e) => handlePermissionChange(plugin.id, tool.name, e.target.value)}
+                                    disabled={updatingPluginId === plugin.id}
+                                    style={{
+                                      fontSize: "0.78rem",
+                                      padding: "2px 6px",
+                                      borderRadius: "4px",
+                                      backgroundColor: "var(--bg-card, #1e2533)",
+                                      color: "inherit",
+                                      border: "1px solid var(--border-color, #2d3748)",
+                                    }}
+                                  >
+                                    <option value="default">Default ({tool.permissionLevel})</option>
+                                    <option value="readOnly">readOnly</option>
+                                    <option value="requiresApproval">requiresApproval</option>
+                                  </select>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Built-in Core Tools Section */}
+            <h4 style={{ margin: "28px 0 12px 0", display: "flex", alignItems: "center", gap: "8px" }}>
+              <span>Built-in Engine Tools</span>
+              <span className="settings-tab-badge">{safeTools.filter((t) => t.isBuiltIn).length}</span>
+            </h4>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "10px" }}>
+              {safeTools.filter((t) => t.isBuiltIn).map((tool) => (
+                <div
+                  key={tool.name}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: "6px",
+                    backgroundColor: "var(--bg-card, #1e2533)",
+                    border: "1px solid var(--border-color, #2d3748)",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "4px" }}>
+                    <code style={{ fontWeight: 600, fontSize: "0.85rem", color: "#48bb78" }}>{tool.name}</code>
+                    <span style={{ fontSize: "0.7rem", padding: "1px 5px", borderRadius: "3px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
+                      {tool.permissionLevel}
+                    </span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)", lineHeight: "1.3" }}>
+                    {tool.description}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {/* Plugin Configuration */}
+            <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+              <div className="settings-section-title-group">
+                <h4 style={{ margin: "0 0 4px 0" }}>Plugin Configuration</h4>
+                <p className="settings-section-hint">
+                  Configure directory location, remote marketplace index, and startup scanning behavior.
+                </p>
+              </div>
+              <div className="form-row">
+                <div className="form-group flex-2">
+                  <label htmlFor="plugins-dir">Plugins Directory</label>
+                  <input
+                    id="plugins-dir"
+                    type="text"
+                    className="input-field"
+                    value={pluginsDir}
+                    onChange={(e) => setPluginsDir(e.target.value)}
+                    required
+                  />
+                  <span className="form-group-hint">
+                    Directory scanned for external rune packages (defaults to ~/.runeweaver/plugins).
+                  </span>
+                </div>
+                <div className="form-group flex-2">
+                  <label htmlFor="marketplace-url">Marketplace Index URL</label>
+                  <input
+                    id="marketplace-url"
+                    type="url"
+                    className="input-field"
+                    value={pluginsMarketplaceIndexURL}
+                    onChange={(e) => setPluginsMarketplaceIndexURL(e.target.value)}
+                    required
+                  />
+                  <span className="form-group-hint">
+                    Remote catalog URL for community runes.
+                  </span>
+                </div>
+              </div>
+              <div className="form-row" style={{ marginTop: "12px" }}>
+                <div className="form-group checkbox-group">
+                  <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                    <input
+                      id="plugins-autorescan"
+                      type="checkbox"
+                      checked={pluginsAutoRescan}
+                      onChange={(e) => setPluginsAutoRescan(e.target.checked)}
+                    />
+                    <span>Automatically scan plugins directory on startup</span>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* TAB 3: Sandbox & Trust */}
         {activeTab === "sandbox" && (
           <div className="settings-section card">
@@ -1087,6 +1649,14 @@ export default function SettingsManager() {
           </button>
         </div>
       </form>
+
+      <RuneMarketplaceModal
+        isOpen={marketplaceOpen}
+        onClose={() => setMarketplaceOpen(false)}
+        onPluginInstalled={() => {
+          void loadPluginsData();
+        }}
+      />
     </section>
   );
 }
