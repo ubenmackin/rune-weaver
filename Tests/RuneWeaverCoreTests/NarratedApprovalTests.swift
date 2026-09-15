@@ -7,6 +7,7 @@
 // without executing, and read-only narration still runs directly.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 import Testing
 
@@ -45,20 +46,21 @@ private struct ParkedApprovalTool: Tool, Sendable {
 /// Each `chat` call consumes the next entry so the orchestrator observes a
 /// narrated turn followed by a synthesis turn without inference. Lock-guarded
 /// for Swift 6 data-race safety across the parked turn and its resume.
-private final class ParkedApprovalLLM: LLMProvider, @unchecked Sendable {
+private final class ParkedApprovalLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    private struct ScriptState: Sendable {
+        var texts: [String]
+        var index: Int
+    }
+
     /// Guards script state below.
-    private let lock = NSLock()
-    /// Canned texts in call order.
-    private var texts: [String]
-    /// Next script index.
-    private var index = 0
+    private let state: OSAllocatedUnfairLock<ScriptState>
 
     /// Creates a scripted provider.
     /// - Parameter texts: Canned texts in call order.
     init(texts: [String]) {
-        self.texts = texts
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(texts: texts, index: 0))
     }
 
     /// Replays the next canned text as a finished stream.
@@ -67,13 +69,11 @@ private final class ParkedApprovalLLM: LLMProvider, @unchecked Sendable {
     ///   - tools: Ignored available tools.
     /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        let text: String = {
-            lock.lock()
-            defer { lock.unlock() }
-            let next = index < texts.count ? texts[index] : texts.last ?? ""
-            index += 1
+        let text: String = state.withLock { s in
+            let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
+            s.index += 1
             return next
-        }()
+        }
         return AsyncStream { continuation in
             continuation.yield(LLMResponse(delta: text, isFinished: true))
             continuation.finish()

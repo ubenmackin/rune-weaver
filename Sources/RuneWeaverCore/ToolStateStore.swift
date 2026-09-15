@@ -164,7 +164,14 @@ private enum SQLiteToolStateStore {
 
     static func upsert(state: ToolState, dbPath: String) {
         #if canImport(SQLite3)
-            guard let handle = try? open(dbPath: dbPath) else { return }
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
+                fputs("[ERROR] ToolStateStore: failed opening store at \(dbPath): \(error)\n", stderr)
+                return
+            }
+            guard let handle else { return }
             defer { sqlite3_close(handle) }
 
             let sql = """

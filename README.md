@@ -18,7 +18,7 @@ The name comes from JRPG lore: a Rune Weaver is a mage who inscribes and channel
 
 ## Quick Start
 
-Prerequisites: macOS 14+ (Sequoia or later for full framework access), Apple Silicon recommended for MLX, Swift 6.0 toolchain, Xcode 16+, plus Node.js 20+ with npm (build time only, to compile the Web dashboard in `Web/` to static files in `Web/dist/`).
+Prerequisites: macOS 26+, Apple Silicon recommended for MLX, Swift 6.4 toolchain, Xcode 26+, plus Node.js 20+ with npm (build time only, to compile the Web dashboard in `Web/` to static files in `Web/dist/`).
 
 The `Makefile` is the canonical entrypoint for build, test, and lint for both the Swift engine and the web dashboard. Use `make` targets below instead of invoking `swift` or `npm` directly.
 

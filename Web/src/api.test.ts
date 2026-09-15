@@ -6,6 +6,11 @@ import {
   cancelChat,
   createJob,
   decideApproval,
+  DEFAULT_FILES_ALLOW_ROOTS,
+  DEFAULT_FILES_DENY_PATTERNS,
+  DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS,
+  DEFAULT_SANDBOX_MAX_TOTAL_BYTES,
+  DEFAULT_SANDBOX_RETENTION_DAYS,
   deleteFact,
   deleteJob,
   getFacts,
@@ -257,5 +262,27 @@ describe("dashboard api client", () => {
     const failure = await getHealth().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(404);
+  });
+
+  it("keeps web default mirrors pinned to the Swift single source", () => {
+    // Manual cross-language pin: the dashboard cannot import Swift, so these
+    // literals must match FilesConfig/SandboxConfig defaults in
+    // Sources/RuneWeaverCore/Config.swift. Update both sides together.
+    expect(DEFAULT_SANDBOX_RETENTION_DAYS).toBe(14);
+    expect(DEFAULT_SANDBOX_MAX_TOTAL_BYTES).toBe(524288000);
+    expect(DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS).toBe(3600);
+    expect(DEFAULT_FILES_ALLOW_ROOTS).toEqual(["~"]);
+    expect(DEFAULT_FILES_DENY_PATTERNS).toEqual([
+      ".env*",
+      ".netrc",
+      "secrets.json",
+      "config.toml",
+      "*.pem",
+      "*.key",
+      "*keychain*",
+      ".ssh/*",
+      ".aws/*",
+      ".runeweaver/memory/vectors/*",
+    ]);
   });
 });

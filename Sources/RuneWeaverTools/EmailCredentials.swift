@@ -1,3 +1,10 @@
+// Rune Weaver Tools — Execution-time email credential resolution.
+//
+// Resolves per-account IMAP/SMTP passwords at execution time from the
+// environment-first `SecretsManager` lookup with a Keychain fallback, so
+// `config.toml` never stores secrets. Bundles connection fields with the
+// resolved password in memory only, redacting secrets from logs and errors.
+
 import Foundation
 import RuneWeaverCore
 
@@ -18,6 +25,12 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
     public let username: String
     /// Runtime-resolved password. Never log or print.
     public let password: String
+    /// Optional SMTP hostname override (nil means derive from the IMAP host).
+    public let smtpHost: String?
+    /// Optional SMTP submission port override (nil means 587/465 fallback).
+    public let smtpPort: Int?
+    /// SMTP transport security (defaults to `auto`).
+    public let smtpSecurity: EmailSMTPSecurity
 
     /// Creates resolved credentials from explicit fields.
     /// - Parameters:
@@ -26,17 +39,33 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
     ///   - port: IMAP port.
     ///   - username: Login username.
     ///   - password: Runtime-resolved password. Never logged.
-    public init(accountName: String, host: String, port: Int, username: String, password: String) {
+    ///   - smtpHost: Optional SMTP hostname override.
+    ///   - smtpPort: Optional SMTP submission port override.
+    ///   - smtpSecurity: SMTP transport security. Defaults to `auto`.
+    public init(
+        accountName: String,
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        smtpHost: String? = nil,
+        smtpPort: Int? = nil,
+        smtpSecurity: EmailSMTPSecurity = .auto
+    ) {
         self.accountName = accountName
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        let trimmedHost = smtpHost?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.smtpHost = (trimmedHost?.isEmpty == false) ? trimmedHost : nil
+        self.smtpPort = smtpPort
+        self.smtpSecurity = smtpSecurity
     }
 
     /// Creates credentials from an account plus a resolved password.
     /// - Parameters:
-    ///   - account: Configured account (host, port, username).
+    ///   - account: Configured account (host, port, username, plus SMTP overrides).
     ///   - password: Runtime-resolved password. Never logged.
     public init(account: EmailAccount, password: String) {
         self.init(
@@ -44,7 +73,10 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
             host: account.host,
             port: account.port,
             username: account.username,
-            password: password
+            password: password,
+            smtpHost: account.smtpHost,
+            smtpPort: account.smtpPort,
+            smtpSecurity: account.smtpSecurity
         )
     }
 }

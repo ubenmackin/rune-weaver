@@ -1,3 +1,11 @@
+// Rune Weaver Core — Configuration types and loader for config.toml.
+//
+// Defines the `RuneWeaverConfig` section model (engine, LLM providers,
+// memory, voice, sandbox, files policy, email, home, scheduler, plugins)
+// plus `ConfigError`, built-in defaults, and the load-and-validate entry
+// points. TOML parsing lives in `ConfigTOML`, validation in
+// `Config+Validation`, and serialization in `Config+Serialization`; this
+// file owns the schema those stages map onto.
 import Foundation
 
 /// Errors thrown while loading or validating `config.toml`.
@@ -268,19 +276,197 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
 }
 
 /// `[sandbox]` — staging area for file operations.
-public struct SandboxConfig: Sendable, Codable, Equatable {
+///
+/// Staged downloads (for example `email.attachment` files under
+/// `attachments/`) are retained for `retentionDays` days before the
+/// sweeper may reclaim them; the tool surfaces the resulting expiry in
+/// its success envelope so callers know how long the staged path stays
+/// valid. The defaults keep two weeks of staging under a bounded total
+/// size with hourly reclamation so long-lived approvals stay reachable
+/// without unbounded disk growth.
+public struct SandboxConfig: Sendable, Equatable {
     /// Staging directory for file writes awaiting approval.
     public var stagingPath: String
+    /// Days a staged file remains valid before reclamation. Defaults to 14.
+    public var retentionDays: Int
+    /// Total size cap in bytes across the managed staging subdirectories.
+    /// Oldest files are evicted first once the cap is exceeded. Defaults to 500 MiB.
+    public var maxTotalBytes: Int
+    /// Seconds between periodic cleanup passes. Defaults to 3600 (hourly).
+    public var cleanupIntervalSeconds: Int
+
+    /// Default staged-file retention in days.
+    ///
+    /// Mirrored by `DEFAULT_SANDBOX_RETENTION_DAYS` in `Web/src/api.ts`;
+    /// keep the two pinned equal.
+    public static let defaultRetentionDays = 14
+    /// Default total staging size cap (500 MiB) bounding disk growth.
+    ///
+    /// Mirrored by `DEFAULT_SANDBOX_MAX_TOTAL_BYTES` in `Web/src/api.ts`;
+    /// keep the two pinned equal.
+    public static let defaultMaxTotalBytes = 500 * 1024 * 1024
+    /// Default interval between cleanup passes (hourly).
+    ///
+    /// Mirrored by `DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS` in
+    /// `Web/src/api.ts`; keep the two pinned equal.
+    public static let defaultCleanupIntervalSeconds = 3600
 
     /// Creates a sandbox config.
+    /// - Parameters:
+    ///   - stagingPath: Staging directory for file writes awaiting approval.
+    ///   - retentionDays: Days a staged file remains valid. Rejected by validation unless 1...365.
+    ///   - maxTotalBytes: Total byte cap across managed subdirectories. Must be positive.
+    ///   - cleanupIntervalSeconds: Seconds between cleanup passes. Must be positive.
     public init(
-        stagingPath: String = "~/.runeweaver/sandbox"
+        stagingPath: String = "~/.runeweaver/sandbox",
+        retentionDays: Int = defaultRetentionDays,
+        maxTotalBytes: Int = defaultMaxTotalBytes,
+        cleanupIntervalSeconds: Int = defaultCleanupIntervalSeconds
     ) {
         self.stagingPath = stagingPath
+        self.retentionDays = retentionDays
+        self.maxTotalBytes = maxTotalBytes
+        self.cleanupIntervalSeconds = cleanupIntervalSeconds
     }
 
     private enum CodingKeys: String, CodingKey {
         case stagingPath = "staging_path"
+        case retentionDays = "retention_days"
+        case maxTotalBytes = "max_total_bytes"
+        case cleanupIntervalSeconds = "cleanup_interval_seconds"
+    }
+}
+
+extension SandboxConfig: Codable {
+    /// Decodes a sandbox config, defaulting legacy payloads without the newer keys.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        stagingPath = try container.decodeIfPresent(String.self, forKey: .stagingPath) ?? "~/.runeweaver/sandbox"
+        retentionDays = try container.decodeIfPresent(Int.self, forKey: .retentionDays) ?? Self.defaultRetentionDays
+        maxTotalBytes = try container.decodeIfPresent(Int.self, forKey: .maxTotalBytes) ?? Self.defaultMaxTotalBytes
+        cleanupIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .cleanupIntervalSeconds) ?? Self.defaultCleanupIntervalSeconds
+    }
+
+    /// Encodes a sandbox config including its retention window and caps.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(stagingPath, forKey: .stagingPath)
+        try container.encode(retentionDays, forKey: .retentionDays)
+        try container.encode(maxTotalBytes, forKey: .maxTotalBytes)
+        try container.encode(cleanupIntervalSeconds, forKey: .cleanupIntervalSeconds)
+    }
+}
+
+/// `[files]` — file-tool access policy.
+///
+/// The deny list is enforced by the shared file access guard (dot-env
+/// family, known secret filenames, private-key suffixes, keychain names,
+/// SSH/AWS directories, and the vector store) so the dashboard shows the
+/// same boundary the tools enforce. `allowRoots` pins the containment
+/// boundary (`~` by default); paths resolving outside these roots are
+/// denied. `requireApprovalOnDeny` keeps denials approval-gated instead of
+/// silently dropping them. Changes apply on restart so running tools never
+/// see a half-written policy.
+public struct FilesConfig: Sendable, Equatable {
+    /// Glob deny patterns enforced by the shared file access guard.
+    public var denyPatterns: [String]
+    /// Allowed root directories for file reads (`~` expands to home).
+    public var allowRoots: [String]
+    /// Whether deny hits escalate to approval instead of hard denial.
+    public var requireApprovalOnDeny: Bool
+
+    /// Default deny patterns enforced by the shared file access guard.
+    ///
+    /// Single source of the default boundary: the guard consumes these
+    /// (via its `FilesConfig` parameter) instead of keeping a parallel
+    /// hardcoded list, so config edits and code defaults cannot drift.
+    /// Mirrored by `DEFAULT_FILES_DENY_PATTERNS` in `Web/src/api.ts`;
+    /// keep the two pinned equal.
+    public static let defaultDenyPatterns = [
+        ".env*",
+        ".netrc",
+        "secrets.json",
+        "config.toml",
+        "*.pem",
+        "*.key",
+        "*keychain*",
+        ".ssh/*",
+        ".aws/*",
+        ".runeweaver/memory/vectors/*"
+    ]
+    /// Default allowed roots (home directory).
+    ///
+    /// Mirrored by `DEFAULT_FILES_ALLOW_ROOTS` in `Web/src/api.ts`; keep
+    /// the two pinned equal.
+    public static let defaultAllowRoots = ["~"]
+    /// Default escalation for deny hits.
+    public static let defaultRequireApprovalOnDeny = true
+
+    /// Creates a files config.
+    /// - Parameters:
+    ///   - denyPatterns: Deny patterns enforced by the guard. Defaults to the shared default list.
+    ///   - allowRoots: Allowed roots. Defaults to home (`~`).
+    ///   - requireApprovalOnDeny: Whether denials escalate. Defaults to true.
+    public init(
+        denyPatterns: [String] = defaultDenyPatterns,
+        allowRoots: [String] = defaultAllowRoots,
+        requireApprovalOnDeny: Bool = defaultRequireApprovalOnDeny
+    ) {
+        self.denyPatterns = denyPatterns
+        self.allowRoots = allowRoots
+        self.requireApprovalOnDeny = requireApprovalOnDeny
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case denyPatterns = "deny_patterns"
+        case allowRoots = "allow_roots"
+        case requireApprovalOnDeny = "require_approval_on_deny"
+    }
+}
+
+extension FilesConfig: Codable {
+    /// Decodes a files config, defaulting legacy payloads without the newer keys.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        denyPatterns = try container.decodeIfPresent([String].self, forKey: .denyPatterns) ?? Self.defaultDenyPatterns
+        allowRoots = try container.decodeIfPresent([String].self, forKey: .allowRoots) ?? Self.defaultAllowRoots
+        requireApprovalOnDeny = try container.decodeIfPresent(Bool.self, forKey: .requireApprovalOnDeny) ?? Self.defaultRequireApprovalOnDeny
+    }
+
+    /// Encodes a files config including deny patterns and roots.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(denyPatterns, forKey: .denyPatterns)
+        try container.encode(allowRoots, forKey: .allowRoots)
+        try container.encode(requireApprovalOnDeny, forKey: .requireApprovalOnDeny)
+    }
+}
+
+/// SMTP transport security for an `[[email.accounts]]` entry.
+///
+/// `auto` tries STARTTLS on submission first and falls back to implicit
+/// TLS so unset accounts keep working without manual tuning; `starttls`
+/// pins STARTTLS and `ssl` pins implicit TLS. Unknown strings fail closed
+/// at decode and validation time instead of silently picking a mode.
+public enum EmailSMTPSecurity: String, Sendable, Codable, Equatable, CaseIterable {
+    /// Implicit TLS (typically port 465).
+    case ssl
+    /// STARTTLS upgrade (typically port 587).
+    case starttls
+    /// Try STARTTLS first, then implicit TLS. Default for unset accounts.
+    case auto
+
+    /// Whether this mode expects implicit TLS on connect.
+    ///
+    /// Only `ssl` dials TLS immediately; `starttls` and `auto` start
+    /// cleartext and upgrade, with `auto` retrying the alternate port on
+    /// failure.
+    public var usesImplicitTLS: Bool {
+        self == .ssl
     }
 }
 
@@ -292,7 +478,10 @@ public struct SandboxConfig: Sendable, Codable, Equatable {
 /// `com.runeweaver.secrets` second), mirroring
 /// `ProviderConfig.apiKeyEnv`. Only host, port, username, and the
 /// variable name are ever echoed; the secret value is never logged.
-public struct EmailAccount: Sendable, Codable, Equatable {
+/// Optional `smtp_host`, `smtp_port`, and `smtp_security` override the
+/// derived submission endpoint; when absent the sender falls back to the
+/// IMAP host on 587 STARTTLS then 465 SSL with verified TLS only.
+public struct EmailAccount: Sendable, Equatable {
     /// Account nickname (e.g. `icloud`).
     public var name: String
     /// Account type (e.g. `imap`).
@@ -303,6 +492,12 @@ public struct EmailAccount: Sendable, Codable, Equatable {
     public var port: Int
     /// Login username.
     public var username: String
+    /// Optional SMTP hostname override (nil means derive from the IMAP host).
+    public var smtpHost: String?
+    /// Optional SMTP submission port override (nil means 587/465 fallback).
+    public var smtpPort: Int?
+    /// SMTP transport security. Defaults to `auto` for unset accounts.
+    public var smtpSecurity: EmailSMTPSecurity
 
     /// Creates an email account entry.
     public init(
@@ -310,13 +505,20 @@ public struct EmailAccount: Sendable, Codable, Equatable {
         type: String = "imap",
         host: String,
         port: Int = 993,
-        username: String
+        username: String,
+        smtpHost: String? = nil,
+        smtpPort: Int? = nil,
+        smtpSecurity: EmailSMTPSecurity = .auto
     ) {
         self.name = name
         self.type = type
         self.host = host
         self.port = port
         self.username = username
+        let trimmedHost = smtpHost?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.smtpHost = (trimmedHost?.isEmpty == false) ? trimmedHost : nil
+        self.smtpPort = smtpPort
+        self.smtpSecurity = smtpSecurity
     }
 
     /// Environment variable holding this account's password.
@@ -345,6 +547,51 @@ public struct EmailAccount: Sendable, Codable, Equatable {
         case host
         case port
         case username
+        case smtpHost = "smtp_host"
+        case smtpPort = "smtp_port"
+        case smtpSecurity = "smtp_security"
+    }
+}
+
+extension EmailAccount: Codable {
+    /// Decodes an account, defaulting legacy payloads without SMTP overrides.
+    ///
+    /// Absent `smtp_host`/`smtp_port` stay nil (derived fallback) and an
+    /// absent `smtp_security` stays `auto`; blank `smtp_host` collapses to
+    /// nil so empty dashboard rows never persist a meaningless override.
+    /// - Parameter decoder: Decoder for the account document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        type = try container.decodeIfPresent(String.self, forKey: .type) ?? "imap"
+        host = try container.decode(String.self, forKey: .host)
+        port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 993
+        username = try container.decode(String.self, forKey: .username)
+        let rawHost = try container.decodeIfPresent(String.self, forKey: .smtpHost)
+        let trimmedHost = rawHost?.trimmingCharacters(in: .whitespacesAndNewlines)
+        smtpHost = (trimmedHost?.isEmpty == false) ? trimmedHost : nil
+        smtpPort = try container.decodeIfPresent(Int.self, forKey: .smtpPort)
+        smtpSecurity = try container.decodeIfPresent(EmailSMTPSecurity.self, forKey: .smtpSecurity) ?? .auto
+    }
+
+    /// Encodes an account, omitting unset SMTP overrides.
+    ///
+    /// `smtp_host`/`smtp_port` encode only when set and `smtp_security`
+    /// only when non-`auto` so legacy payloads round-trip without new keys
+    /// while explicit overrides survive.
+    /// - Parameter encoder: Encoder for the account document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(type, forKey: .type)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encode(username, forKey: .username)
+        try container.encodeIfPresent(smtpHost, forKey: .smtpHost)
+        try container.encodeIfPresent(smtpPort, forKey: .smtpPort)
+        if smtpSecurity != .auto {
+            try container.encode(smtpSecurity, forKey: .smtpSecurity)
+        }
     }
 }
 
@@ -355,6 +602,15 @@ public struct EmailAccount: Sendable, Codable, Equatable {
 public struct EmailConfig: Sendable, Codable, Equatable {
     /// Configured mail accounts.
     public var accounts: [EmailAccount]
+
+    /// SMTP submission ports honored across validation and sending.
+    ///
+    /// Single source for `RuneWeaverConfig` validation (`Config+Validation`)
+    /// and `EmailSMTPBridge.submissionPorts` (RuneWeaverTools), which aliases
+    /// this set so the two Swift copies cannot drift. The embedded Python
+    /// SMTP helper (`EmailSMTPBridgeScript.source`) mirrors the same four
+    /// ports; keep all three equal when changing this list.
+    public static let allowedSubmissionPorts: Set<Int> = [25, 465, 587, 2525]
 
     /// Creates an email config.
     public init(accounts: [EmailAccount] = []) {
@@ -489,6 +745,12 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var voice: VoiceConfig
     /// Sandbox staging and trust policy.
     public var sandbox: SandboxConfig
+    /// File-tool access policy (deny list plus allowed roots).
+    ///
+    /// Declared with a default so JSON payloads predating the `[files]`
+    /// section still decode; TOML decoding applies the same default when
+    /// the table is absent.
+    public var files = FilesConfig()
     /// Mail accounts.
     public var email: EmailConfig
     /// Home automation.
@@ -505,6 +767,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         memory: MemoryConfig = MemoryConfig(),
         voice: VoiceConfig = VoiceConfig(),
         sandbox: SandboxConfig = SandboxConfig(),
+        files: FilesConfig = FilesConfig(),
         email: EmailConfig = EmailConfig(),
         home: HomeConfig = HomeConfig(),
         scheduler: SchedulerConfig = SchedulerConfig(),
@@ -515,6 +778,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.memory = memory
         self.voice = voice
         self.sandbox = sandbox
+        self.files = files
         self.email = email
         self.home = home
         self.scheduler = scheduler
@@ -601,646 +865,10 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     }
 }
 
-// MARK: - RuneWeaverConfig TOML Serialization
+// MARK: - TOML serialization lives in Config+Serialization.swift
 
-// swiftformat:disable extensionAccessControl
+// MARK: - Validation lives in Config+Validation.swift
 
-extension RuneWeaverConfig {
-    /// Quotes a string for TOML output.
-    ///
-    /// Control characters use spec-valid basic-string escapes so rendered
-    /// values always reparse instead of emitting raw control bytes.
-    public static func tomlQuoted(_ value: String) -> String {
-        var out = "\""
-        for character in value {
-            switch character {
-            case "\\": out += "\\\\"
-            case "\"": out += "\\\""
-            case "\n": out += "\\n"
-            case "\r": out += "\\r"
-            case "\t": out += "\\t"
-            case "\u{08}": out += "\\b"
-            case "\u{0C}": out += "\\f"
-            default:
-                if character.unicodeScalars.count == 1,
-                   let scalar = character.unicodeScalars.first,
-                   scalar.value < 0x20
-                {
-                    out += String(format: "\\u%04X", scalar.value)
-                } else {
-                    out.append(character)
-                }
-            }
-        }
-        out += "\""
-        return out
-    }
-
-    /// Renders this configuration as canonical TOML.
-    ///
-    /// Providers sort by name so repeated saves stay diff-stable; only
-    /// `api_key_env` names persist (secret values resolve at runtime via
-    /// `SecretsManager`), email accounts persist identity fields only, and
-    /// home integrations persist with `token_env` names only.
-    public func renderTOML() -> String {
-        var lines: [String] = ["# Rune Weaver configuration", ""]
-        lines += renderEngineTOML()
-        lines += renderLLMTOML()
-        lines += renderServicesTOML()
-        lines += renderEmailTOML()
-        lines += renderHomeTOML()
-        lines += renderSchedulerTOML()
-        lines += renderPluginsTOML()
-        return lines.joined(separator: "\n")
-    }
-
-    private func renderEngineTOML() -> [String] {
-        [
-            "[engine]",
-            "name = \(Self.tomlQuoted(engine.name))",
-            "log_level = \(Self.tomlQuoted(engine.logLevel))",
-            ""
-        ]
-    }
-
-    private func renderLLMTOML() -> [String] {
-        var lines: [String] = [
-            "[llm]",
-            "default_provider = \(Self.tomlQuoted(llm.defaultProvider))"
-        ]
-        if let fallback = llm.fallbackProvider, !fallback.isEmpty {
-            lines.append("fallback_provider = \(Self.tomlQuoted(fallback))")
-        }
-        lines.append("")
-        for name in llm.providers.keys.sorted() {
-            guard let entry = llm.providers[name] else { continue }
-            lines.append("[llm.providers.\(name)]")
-            lines.append("enabled = \(entry.enabled ? "true" : "false")")
-            if let model = entry.model, !model.isEmpty {
-                lines.append("model = \(Self.tomlQuoted(model))")
-            }
-            if let serverURL = entry.serverURL, !serverURL.isEmpty {
-                lines.append("server_url = \(Self.tomlQuoted(serverURL))")
-            }
-            if let apiKeyEnv = entry.apiKeyEnv, !apiKeyEnv.isEmpty {
-                lines.append("api_key_env = \(Self.tomlQuoted(apiKeyEnv))")
-            }
-            if let providerType = entry.providerType, !providerType.isEmpty {
-                lines.append("provider_type = \(Self.tomlQuoted(providerType))")
-            }
-            lines.append("api_style = \(Self.tomlQuoted(entry.apiStyle.rawValue))")
-            if let contextLength = entry.contextLength {
-                lines.append("context_length = \(contextLength)")
-            }
-            lines.append("")
-        }
-        return lines
-    }
-
-    private func renderServicesTOML() -> [String] {
-        [
-            "[memory]",
-            "vector_db_path = \(Self.tomlQuoted(memory.vectorDBPath))",
-            "episodes_db_path = \(Self.tomlQuoted(memory.episodesDBPath))",
-            "embedding_model = \(Self.tomlQuoted(memory.embeddingModel))",
-            "embedding_backend = \(Self.tomlQuoted(memory.embeddingBackend))",
-            "",
-            "[voice]",
-            "stt_provider = \(Self.tomlQuoted(voice.sttProvider))",
-            "whisper_model = \(Self.tomlQuoted(voice.whisperModel))",
-            "tts_provider = \(Self.tomlQuoted(voice.ttsProvider))",
-            "",
-            "[sandbox]",
-            "staging_path = \(Self.tomlQuoted(sandbox.stagingPath))",
-            ""
-        ]
-    }
-
-    private func renderEmailTOML() -> [String] {
-        var lines: [String] = []
-        for account in email.accounts {
-            lines.append("[[email.accounts]]")
-            lines.append("name = \(Self.tomlQuoted(account.name))")
-            lines.append("type = \(Self.tomlQuoted(account.type))")
-            lines.append("host = \(Self.tomlQuoted(account.host))")
-            lines.append("port = \(account.port)")
-            lines.append("username = \(Self.tomlQuoted(account.username))")
-            lines.append("")
-        }
-        return lines
-    }
-
-    private func renderHomeTOML() -> [String] {
-        // Home integrations persist in array order (order is user intent,
-        // not a map, so no sorting). Only `token_env` names persist; token
-        // values resolve at runtime via `SecretsManager` and never touch TOML.
-        var lines: [String] = []
-        for entry in home.homekit {
-            lines.append("[[home.homekit]]")
-            lines.append("enabled = \(entry.enabled ? "true" : "false")")
-            lines.append("")
-        }
-        for entry in home.homeAssistant {
-            lines.append("[[home.home_assistant]]")
-            lines.append("enabled = \(entry.enabled ? "true" : "false")")
-            if let url = entry.url, !url.isEmpty {
-                lines.append("url = \(Self.tomlQuoted(url))")
-            }
-            if let tokenEnv = entry.tokenEnv, !tokenEnv.isEmpty {
-                lines.append("token_env = \(Self.tomlQuoted(tokenEnv))")
-            }
-            lines.append("")
-        }
-        return lines
-    }
-
-    private func renderSchedulerTOML() -> [String] {
-        var lines: [String] = []
-        for job in scheduler.jobs {
-            lines.append("[[scheduler.jobs]]")
-            lines.append("name = \(Self.tomlQuoted(job.name))")
-            lines.append("prompt = \(Self.tomlQuoted(job.prompt))")
-            lines.append("enabled = \(job.enabled ? "true" : "false")")
-            if let schedule = job.schedule, !schedule.isEmpty {
-                lines.append("schedule = \(Self.tomlQuoted(schedule))")
-            }
-            if let poll = job.poll {
-                lines.append("poll_account = \(Self.tomlQuoted(poll.account))")
-                lines.append("poll_query = \(Self.tomlQuoted(poll.query))")
-                if let mailbox = poll.mailbox, !mailbox.isEmpty {
-                    lines.append("poll_mailbox = \(Self.tomlQuoted(mailbox))")
-                }
-                lines.append("poll_interval_seconds = \(poll.pollIntervalSeconds)")
-                lines.append("poll_limit = \(poll.limit)")
-            }
-            lines.append("")
-        }
-        return lines
-    }
-
-    private func renderPluginsTOML() -> [String] {
-        [
-            "[plugins]",
-            "plugins_dir = \(Self.tomlQuoted(plugins.pluginsDir))",
-            "marketplace_index_url = \(Self.tomlQuoted(plugins.marketplaceIndexURL))",
-            "auto_rescan = \(plugins.autoRescan ? "true" : "false")",
-            ""
-        ]
-    }
-
-    /// Saves and validates the configuration to a file URL.
-    /// Creates a `.bak` backup file if the target already exists,
-    /// and atomically replaces the file.
-    public func save(to fileURL: URL? = nil) throws {
-        let url = fileURL ?? Self.defaultConfigFileURL()
-        try validate()
-        let tomlText = renderTOML()
-        let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: url.path) {
-            let backupURL = url.appendingPathExtension("bak")
-            // Stale backup removal is best-effort; a missing backup is
-            // expected on first save so its failure never blocks the write.
-            try? FileManager.default.removeItem(at: backupURL)
-            // The backup must succeed before overwriting so a copy failure
-            // never leaves the config replaced without a recovery copy.
-            try FileManager.default.copyItem(at: url, to: backupURL)
-        }
-        try tomlText.write(to: url, atomically: true, encoding: .utf8)
-    }
-}
-
-// swiftformat:enable extensionAccessControl
-
-// MARK: - RuneWeaverConfig Validation
-
-// swiftformat:disable extensionAccessControl
-
-extension RuneWeaverConfig {
-    /// Validates every section, throwing a descriptive error on failure.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` or
-    ///   ``ConfigError/missingRequired(field:)``.
-    public func validate() throws {
-        try validateEngineSection()
-        try validateLLMSection()
-        try validateMemorySection()
-        try validateVoiceSection()
-        try validateSandboxSection()
-        try validateEmailSection()
-        try validateHomeSection()
-        try validateSchedulerSection()
-        try validatePluginsSection()
-    }
-
-    private func validateEngineSection() throws {
-        if engine.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(field: "engine.name", message: "must not be empty")
-        }
-        let allowedLevels = ["trace", "debug", "info", "notice", "warning", "error", "critical"]
-        if !allowedLevels.contains(engine.logLevel.lowercased()) {
-            throw ConfigError.validationError(
-                field: "engine.log_level",
-                message: "must be one of \(allowedLevels.joined(separator: ", "))"
-            )
-        }
-    }
-
-    private func validateLLMSection() throws {
-        if llm.defaultProvider.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.missingRequired(field: "llm.default_provider")
-        }
-        if let fallback = llm.fallbackProvider,
-           fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            throw ConfigError.validationError(
-                field: "llm.fallback_provider", message: "must not be empty when set"
-            )
-        }
-        guard llm.providers[llm.defaultProvider] != nil else {
-            throw ConfigError.validationError(
-                field: "llm.default_provider",
-                message: "unknown provider '\(llm.defaultProvider)' (missing [llm.providers.\(llm.defaultProvider)])"
-            )
-        }
-        if let fallback = llm.fallbackProvider {
-            guard llm.providers[fallback] != nil else {
-                throw ConfigError.validationError(
-                    field: "llm.fallback_provider",
-                    message: "unknown provider '\(fallback)' (missing [llm.providers.\(fallback)])"
-                )
-            }
-        }
-        for (name, provider) in llm.providers {
-            try validateProvider(provider, name: name)
-        }
-    }
-
-    private func validateProvider(_ provider: ProviderConfig, name: String) throws {
-        // Provider names render as bare `[llm.providers.<name>]` segments
-        // where dots or whitespace would fork the table path, so only
-        // TOML bare-key characters are accepted.
-        guard name.range(of: "^[A-Za-z0-9_-]+$", options: .regularExpression) != nil else {
-            throw ConfigError.validationError(
-                field: "llm.providers.\(name)", message: "must match [A-Za-z0-9_-]+ (got '\(name)')"
-            )
-        }
-        let prefix = "llm.providers.\(name)"
-        if let model = provider.model, model.isEmpty {
-            throw ConfigError.validationError(
-                field: "\(prefix).model", message: "must not be empty when set"
-            )
-        }
-        if let length = provider.contextLength, length <= 0 {
-            throw ConfigError.validationError(
-                field: "\(prefix).context_length", message: "must be positive"
-            )
-        }
-        if let serverURL = provider.serverURL {
-            try Self.validateURLField(serverURL, field: "\(prefix).server_url")
-        }
-        if let env = provider.apiKeyEnv, env.isEmpty {
-            throw ConfigError.validationError(
-                field: "\(prefix).api_key_env", message: "must not be empty when set"
-            )
-        }
-        if let type = provider.providerType, type.isEmpty {
-            throw ConfigError.validationError(
-                field: "\(prefix).provider_type", message: "must not be empty when set"
-            )
-        }
-    }
-
-    private func validateMemorySection() throws {
-        if memory.vectorDBPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(
-                field: "memory.vector_db_path", message: "must not be empty"
-            )
-        }
-        if memory.episodesDBPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(
-                field: "memory.episodes_db_path", message: "must not be empty"
-            )
-        }
-        if memory.embeddingModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(
-                field: "memory.embedding_model", message: "must not be empty"
-            )
-        }
-        // Closed backend set keeps recall behavior predictable: unknown
-        // strings would silently pick a path, so they fail with the field
-        // name just like the neighboring `embedding_model` check.
-        let allowedBackends = MemoryConfig.allowedEmbeddingBackends
-        if !allowedBackends.contains(memory.embeddingBackend) {
-            throw ConfigError.validationError(
-                field: "memory.embedding_backend",
-                message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memory.embeddingBackend)')"
-            )
-        }
-    }
-
-    private func validateVoiceSection() throws {
-        if voice.sttProvider.isEmpty {
-            throw ConfigError.validationError(
-                field: "voice.stt_provider", message: "must not be empty"
-            )
-        }
-        if voice.whisperModel.isEmpty {
-            throw ConfigError.validationError(
-                field: "voice.whisper_model", message: "must not be empty"
-            )
-        }
-        if voice.ttsProvider.isEmpty {
-            throw ConfigError.validationError(
-                field: "voice.tts_provider", message: "must not be empty"
-            )
-        }
-    }
-
-    private func validateSandboxSection() throws {
-        if sandbox.stagingPath.isEmpty {
-            throw ConfigError.validationError(
-                field: "sandbox.staging_path", message: "must not be empty"
-            )
-        }
-    }
-
-    private func validateEmailSection() throws {
-        for account in email.accounts {
-            try validateEmailAccount(account)
-        }
-    }
-
-    private func validateEmailAccount(_ account: EmailAccount) throws {
-        let prefix = "email.accounts[\(account.name)]"
-        if account.name.isEmpty {
-            throw ConfigError.validationError(
-                field: "email.accounts.name", message: "must not be empty"
-            )
-        }
-        if account.host.isEmpty {
-            throw ConfigError.validationError(
-                field: "\(prefix).host", message: "must not be empty"
-            )
-        }
-        if account.username.isEmpty {
-            throw ConfigError.validationError(
-                field: "\(prefix).username", message: "must not be empty"
-            )
-        }
-        if account.port < 1 || account.port > 65535 {
-            throw ConfigError.validationError(
-                field: "\(prefix).port", message: "must be between 1 and 65535"
-            )
-        }
-    }
-
-    private func validateHomeSection() throws {
-        for entry in home.homeAssistant {
-            if let url = entry.url {
-                try Self.validateURLField(url, field: "home.home_assistant.url")
-            }
-            if let env = entry.tokenEnv, env.isEmpty {
-                throw ConfigError.validationError(
-                    field: "home.home_assistant.token_env",
-                    message: "must not be empty when set"
-                )
-            }
-        }
-    }
-
-    private func validateSchedulerSection() throws {
-        do {
-            try scheduler.validate()
-        } catch let error as SchedulerConfigError {
-            throw Self.mapSchedulerConfigError(error)
-        }
-    }
-
-    private func validatePluginsSection() throws {
-        if plugins.pluginsDir.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(field: "plugins.plugins_dir", message: "must not be empty")
-        }
-    }
-
-    private static func mapSchedulerConfigError(_ error: SchedulerConfigError) -> ConfigError {
-        // Single-sourced via `SchedulerConfigError/displayDetail` and
-        // `fieldSuffix` so config and store messages/fields cannot drift.
-        if error.jobName == nil {
-            return ConfigError.validationError(
-                field: "scheduler.jobs.name", message: error.displayDetail
-            )
-        }
-        if case .duplicateName = error {
-            return ConfigError.validationError(
-                field: "scheduler.jobs.name", message: error.displayDetail
-            )
-        }
-        guard let job = error.jobName else {
-            return ConfigError.validationError(
-                field: "scheduler.jobs.name", message: error.displayDetail
-            )
-        }
-        let prefix = "scheduler.jobs[\(normalizedSchedulerJobName(job))]"
-        if let suffix = error.fieldSuffix {
-            return ConfigError.validationError(
-                field: "\(prefix).\(suffix)", message: error.displayDetail
-            )
-        }
-        return ConfigError.validationError(field: prefix, message: error.displayDetail)
-    }
-
-    private static func validateURLField(_ value: String, field: String) throws {
-        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(field: field, message: "must not be empty when set")
-        }
-        guard let url = URL(string: value), url.scheme != nil, url.host != nil else {
-            throw ConfigError.validationError(
-                field: field, message: "must be an absolute URL (e.g. http://localhost:8080)"
-            )
-        }
-    }
-}
-
-// swiftformat:enable extensionAccessControl
-
-// MARK: - Hot-reloading loader
-
-/// Loads `config.toml` and keeps the snapshot fresh via a file watcher.
-///
-/// The loader holds the last validated snapshot. Call ``ConfigLoader/load()``
-/// to re-read on demand, or ``ConfigLoader/startWatching()`` to reload
-/// automatically when the file changes. Invalid reloads keep the previous
-/// good snapshot and report the error through `onError` instead of
-/// replacing working config with a broken one.
-public final class ConfigLoader: @unchecked Sendable {
-    /// File being watched.
-    public let fileURL: URL
-    /// Last validated snapshot. Thread-safe via an internal lock.
-    public var config: RuneWeaverConfig {
-        lock.lock()
-        defer { lock.unlock() }
-        return snapshot
-    }
-
-    /// Called on the watcher queue after a successful reload.
-    /// Set before calling `startWatching()`.
-    public var onChange: (@Sendable (RuneWeaverConfig) -> Void)? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return changeHandler
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            changeHandler = newValue
-        }
-    }
-
-    /// Called on the watcher queue when a reload fails. The previous
-    /// snapshot stays in effect. Set before calling `startWatching()`.
-    public var onError: (@Sendable (Error) -> Void)? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return errorHandler
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            errorHandler = newValue
-        }
-    }
-
-    private let lock = NSLock()
-    private var snapshot: RuneWeaverConfig
-    private var changeHandler: (@Sendable (RuneWeaverConfig) -> Void)?
-    private var errorHandler: (@Sendable (Error) -> Void)?
-    private var source: DispatchSourceFileSystemObject?
-    private var fileDescriptor: CInt = -1
-    private var isStartingWatch = false
-    private let queue = DispatchQueue(label: "com.runeweaver.config-watcher")
-
-    /// Creates a loader and performs the initial load.
-    ///
-    /// A missing file yields ``RuneWeaverConfig/default``; an existing
-    /// but invalid file throws.
-    /// - Parameter fileURL: Config file. Defaults to
-    ///   `~/.runeweaver/config.toml`.
-    public init(fileURL: URL? = nil) throws {
-        let resolved = fileURL ?? RuneWeaverConfig.defaultConfigFileURL()
-        self.fileURL = resolved
-        if FileManager.default.fileExists(atPath: resolved.path) {
-            self.snapshot = try RuneWeaverConfig.load(from: resolved)
-        } else {
-            self.snapshot = .default
-        }
-    }
-
-    deinit {
-        stopWatching()
-    }
-
-    /// Re-reads the file, validates, and replaces the snapshot.
-    /// - Returns: The new snapshot.
-    /// - Throws: ``ConfigError`` on failure. The old snapshot is kept.
-    @discardableResult
-    public func load() throws -> RuneWeaverConfig {
-        let fresh: RuneWeaverConfig = if FileManager.default.fileExists(atPath: fileURL.path) {
-            try RuneWeaverConfig.load(from: fileURL)
-        } else {
-            .default
-        }
-        lock.lock()
-        snapshot = fresh
-        lock.unlock()
-        return fresh
-    }
-
-    /// Starts hot-reloading. Safe to call repeatedly; the second call
-    /// is a no-op. Set `onChange`/`onError` before calling.
-    ///
-    /// Creation is serialized: a lock-guarded `isStartingWatch` flag is
-    /// set synchronously so concurrent callers collapse into one watcher
-    /// instead of each passing the `source == nil` check and leaking a
-    /// `DispatchSource` plus file descriptor. All `source` /
-    /// `fileDescriptor` mutations happen under the lock on the watcher
-    /// queue.
-    public func startWatching() {
-        lock.lock()
-        guard source == nil, !isStartingWatch else {
-            lock.unlock()
-            return
-        }
-        isStartingWatch = true
-        lock.unlock()
-        queue.async { [weak self] in
-            guard let self else { return }
-            let path = self.fileURL.path
-            guard FileManager.default.fileExists(atPath: path) else {
-                self.lock.lock()
-                self.isStartingWatch = false
-                self.lock.unlock()
-                return
-            }
-            let fd = open(path, O_EVTONLY)
-            guard fd >= 0 else {
-                self.lock.lock()
-                self.isStartingWatch = false
-                self.lock.unlock()
-                return
-            }
-            self.lock.lock()
-            // A concurrent stopWatching() may have run while we opened
-            // the file descriptor; do not leak it.
-            if self.source != nil {
-                self.lock.unlock()
-                close(fd)
-                self.lock.lock()
-                self.isStartingWatch = false
-                self.lock.unlock()
-                return
-            }
-            let watcher = DispatchSource.makeFileSystemObjectSource(
-                fileDescriptor: fd,
-                eventMask: [.write, .extend, .attrib, .rename, .revoke, .delete],
-                queue: self.queue
-            )
-            watcher.setEventHandler { [weak self] in
-                guard let self else { return }
-                do {
-                    let fresh = try self.load()
-                    self.onChange?(fresh)
-                } catch {
-                    self.onError?(error)
-                }
-            }
-            watcher.setCancelHandler { [fd] in
-                close(fd)
-            }
-            watcher.resume()
-            self.source = watcher
-            self.fileDescriptor = fd
-            self.isStartingWatch = false
-            self.lock.unlock()
-        }
-    }
-
-    /// Stops hot-reloading. Safe to call when not watching.
-    public func stopWatching() {
-        // Cancel off the watcher queue to avoid a sync deadlock when
-        // invoked from deinit or from within the event handler.
-        let watcher: DispatchSourceFileSystemObject? = {
-            lock.lock()
-            defer { lock.unlock() }
-            let existing = source
-            source = nil
-            fileDescriptor = -1
-            isStartingWatch = false
-            return existing
-        }()
-        watcher?.cancel()
-    }
-}
+// MARK: - Hot-reloading loader lives in ConfigLoader.swift
 
 // MARK: - TOML decoding lives in ConfigTOML.swift

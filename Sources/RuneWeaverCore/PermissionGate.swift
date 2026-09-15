@@ -89,18 +89,71 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Extracts a target string from raw tool arguments.
+    ///
+    /// Email recipients are case-insensitive and may arrive as a single
+    /// string or an array, so `to` (plus the `recipient`/`email` aliases)
+    /// normalizes to a lowercased comma-joined list. A grant for one
+    /// address then bypasses only that address while a different recipient
+    /// re-prompts. All other tools fall back to the first non-empty string
+    /// among the remaining target keys.
     /// - Parameter toolCall: Invocation carrying `argumentsJSON`.
     /// - Returns: The extracted target, or `""` when absent.
     public static func target(from toolCall: ToolInput) -> String {
         guard let data = toolCall.argumentsJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return "" }
-        for key in ["to", "recipient", "target", "path", "url", "email", "address", "destination"] {
-            if let value = object[key] as? String, !value.isEmpty {
-                return value
+        for key in ["to", "recipient", "email"] {
+            if let joined = normalizedEmailTarget(object[key]) {
+                return joined
+            }
+        }
+        for key in ["target", "path", "url", "address", "destination"] {
+            if let value = object[key] as? String {
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    return trimmed
+                }
             }
         }
         return ""
+    }
+
+    /// Normalizes an email recipient value to a lowercased target.
+    ///
+    /// Accepts a bare string (`"Dr.Smith@Clinic.com"` trims and lowercases)
+    /// or an array of strings (trims, drops blanks, lowercases, and joins
+    /// with commas). Non-string elements are ignored so a malformed array
+    /// never produces a grant-bypassing target. Returns nil when no usable
+    /// address remains so callers fall through to the next alias.
+    /// - Parameter value: Raw JSON value for `to`/`recipient`/`email`.
+    /// - Returns: Lowercased target, or nil when absent.
+    private static func normalizedEmailTarget(_ value: Any?) -> String? {
+        if let text = value as? String {
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            // Split comma-separated strings so `"a@x.com, B@x.com"` matches
+            // the array-joined form instead of a spacing variant.
+            let parts = trimmed.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }.filter { !$0.isEmpty }
+            guard !parts.isEmpty else { return nil }
+            return parts.joined(separator: ",")
+        }
+        if let list = value as? [String] {
+            let parts = list.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }.filter { !$0.isEmpty }
+            guard !parts.isEmpty else { return nil }
+            return parts.joined(separator: ",")
+        }
+        if let list = value as? [Any] {
+            let parts = list.compactMap { $0 as? String }.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            }.filter { !$0.isEmpty }
+            guard !parts.isEmpty else { return nil }
+            return parts.joined(separator: ",")
+        }
+        return nil
     }
 }
 
@@ -271,8 +324,7 @@ public protocol TrustStore: Sendable {
 }
 
 /// In-memory ``TrustStore`` for tests and ephemeral sessions.
-public final class InMemoryTrustStore: TrustStore, @unchecked Sendable {
-    private let lock = NSLock()
+public actor InMemoryTrustStore: TrustStore {
     private var grants: [TrustGrant]
 
     /// Creates an empty in-memory store.
@@ -284,21 +336,19 @@ public final class InMemoryTrustStore: TrustStore, @unchecked Sendable {
     /// Returns the in-memory grants.
     /// - Returns: Current grants.
     public func load() async throws -> [TrustGrant] {
-        lock.withLock { grants }
+        grants
     }
 
     /// Replaces the in-memory grants.
     /// - Parameter grants: Grants to keep.
     public func save(_ grants: [TrustGrant]) async throws {
-        lock.withLock { self.grants = grants }
+        self.grants = grants
     }
 
     /// Prunes expired in-memory grants.
     /// - Parameter date: Expiry threshold. Defaults to now.
     public func pruneExpired(at date: Date = Date()) async throws {
-        lock.withLock {
-            grants.removeAll { $0.isExpired(at: date) }
-        }
+        grants.removeAll { $0.isExpired(at: date) }
     }
 }
 
@@ -337,7 +387,12 @@ public struct FileTrustStore: TrustStore, Sendable {
     /// Prunes expired grants from disk.
     /// - Parameter date: Expiry threshold.
     public func pruneExpired(at date: Date = Date()) async throws {
-        var current = await ((try? load()) ?? [])
+        var current: [TrustGrant]
+        do {
+            current = try await load()
+        } catch {
+            current = []
+        }
         current.removeAll { $0.isExpired(at: date) }
         try await save(current)
     }
@@ -556,7 +611,11 @@ public actor PermissionGate {
         guard let store else { return }
         let now = Date()
         try? await store.pruneExpired(at: now)
-        grants = await ((try? store.load()) ?? [])
+        do {
+            grants = try await store.load()
+        } catch {
+            grants = []
+        }
         grants.removeAll { $0.isExpired(at: now) }
     }
 
@@ -617,7 +676,10 @@ public actor PermissionGate {
             return PluginSecurity.isProtectedPath(targetURL: url, pluginsDir: pluginsDir)
         }
 
-        let candidateKeys = ["path", "file_path", "filePath", "target", "destination", "directory", "dir", "to"]
+        // Path-only keys: `to` is intentionally excluded because `email.send`
+        // carries recipients under `to` as `[String]`, not a filesystem path;
+        // scanning it would risk false protected-path denials on addresses.
+        let candidateKeys = ["path", "file_path", "filePath", "target", "destination", "directory", "dir"]
         for key in candidateKeys {
             if let str = object[key] as? String, !str.isEmpty {
                 let url = URL(fileURLWithPath: (str as NSString).expandingTildeInPath)
@@ -777,6 +839,10 @@ public actor PermissionGate {
     private func persist() async {
         guard let store else { return }
         let snapshot = grants
-        try? await store.save(snapshot)
+        do {
+            try await store.save(snapshot)
+        } catch {
+            fputs("[ERROR] PermissionGate: Failed to persist trust grants: \(error)\n", stderr)
+        }
     }
 }

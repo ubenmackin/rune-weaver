@@ -1,8 +1,15 @@
-// RuneWeaver - CLI - Chat line editing and prompt history.
+// Rune Weaver CLI — Interactive line editing and prompt history for chat.
+//
+// Wraps terminal line editing with persistent per-prompt history under
+// `~/.runeweaver/history/`, separate from episodic memory. Keeps editing and
+// TTY interaction isolated from history persistence so recall stays testable
+// without a terminal attached.
+
 #if canImport(Bestline)
     import Bestline
 #endif
 import Foundation
+import os
 
 // MARK: - ChatHistoryStore
 
@@ -247,13 +254,13 @@ struct ChatHistoryStore: Sendable {
 /// Single shared type for every CLI blocking read (REPL input via
 /// `ChatLineEditing.readLine(prompt:)` and plain standard-input reads)
 /// so the two paths never drift.
-final class CLIExactlyOnceReadState: @unchecked Sendable {
-    /// Guards resume state below.
-    private let lock = NSLock()
-    /// Whether the continuation has resumed.
-    private var didResume = false
-    /// Pending continuation awaiting the background read.
-    private var continuation: CheckedContinuation<String?, Never>?
+final class CLIExactlyOnceReadState: Sendable {
+    private struct State: Sendable {
+        var didResume = false
+        var continuation: CheckedContinuation<String?, Never>?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Stores the continuation awaiting the background read.
     ///
@@ -261,15 +268,13 @@ final class CLIExactlyOnceReadState: @unchecked Sendable {
     /// so the waiter never hangs on a stored-but-never-resumed continuation.
     /// - Parameter continuation: Continuation to resume exactly once.
     func set(_ continuation: CheckedContinuation<String?, Never>) {
-        let alreadyResumed: Bool = {
-            lock.lock()
-            defer { lock.unlock() }
-            if didResume {
+        let alreadyResumed = state.withLock { lockState -> Bool in
+            if lockState.didResume {
                 return true
             }
-            self.continuation = continuation
+            lockState.continuation = continuation
             return false
-        }()
+        }
         if alreadyResumed {
             continuation.resume(returning: nil)
         }
@@ -278,12 +283,14 @@ final class CLIExactlyOnceReadState: @unchecked Sendable {
     /// Resumes exactly once, ignoring late racers.
     /// - Parameter value: Line without the newline, or nil on EOF or cancellation.
     func resume(returning value: String?) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
-        didResume = true
-        continuation?.resume(returning: value)
-        continuation = nil
+        let pending = state.withLock { lockState -> CheckedContinuation<String?, Never>? in
+            guard !lockState.didResume else { return nil }
+            lockState.didResume = true
+            let cont = lockState.continuation
+            lockState.continuation = nil
+            return cont
+        }
+        pending?.resume(returning: value)
     }
 }
 

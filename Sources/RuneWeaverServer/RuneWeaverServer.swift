@@ -6,6 +6,8 @@
 // binding and single-user trust.
 
 import Foundation
+import NIOWebSocket
+import os
 import RuneWeaverCore
 import Vapor
 
@@ -24,19 +26,11 @@ extension NewSchedulerJob: Content {}
 extension UpdateSchedulerJob: Content {}
 extension RunLogEntry: Content {}
 
-/// Sendable-safe box for a non-Sendable Vapor `WebSocket`.
+/// Actor box for Vapor `WebSocket`.
 ///
-/// `WebSocket` is not `Sendable`, so it cannot be stored directly in the
-/// `Sendable` actor `WSHub` under Swift 6. The box is `@unchecked Sendable`
-/// with an audited contract: it is immutable after init, only `WSHub`
-/// touches `socket`, and every send (chat deltas, errors, approval
-/// broadcasts) funnels through the per-connection `WSSendQueue` plus
-/// `wsSendWithTimeout` so sends to the same connection serialize and
-/// preserve per-connection frame order. The socket still crosses threads
-/// transitively (race tasks capture the box); safety rests on single-owner
-/// hub routing plus serialized per-connection sends, not on thread
-/// confinement. Never call `box.socket.send` outside `WSHub`.
-public final class WSSocketBox: @unchecked Sendable {
+/// Wraps `WebSocket` inside an actor so all access to `socket` is isolated
+/// and thread-safe under Swift 6 strict concurrency.
+public actor WSSocketBox {
     /// Wrapped socket.
     public let socket: WebSocket
 
@@ -45,41 +39,46 @@ public final class WSSocketBox: @unchecked Sendable {
     public init(_ socket: WebSocket) {
         self.socket = socket
     }
+
+    /// Sends a text frame.
+    public func send(_ text: String) async throws {
+        try await socket.send(text)
+    }
+
+    /// Closes the socket cleanly.
+    public func close(code: WebSocketErrorCode = .goingAway) async throws {
+        try await socket.close(code: code)
+    }
 }
 
 /// One-shot gate ensuring a WebSocket send continuation resumes exactly once.
 ///
 /// The timeout race resumes from two unstructured tasks (the socket send
 /// and the sleep); whichever finishes first wins and the loser is cancelled.
-/// Audit note: the gate holds a non-`Sendable` `CheckedContinuation`, so the
-/// continuation crosses threads transitively wherever the gate does. Safety
-/// rests on the lock-guarded single-resume contract below, not on staying on
-/// one thread: `NSLock` serializes `didResume` plus `continuation`, `resume`
-/// is idempotent, and the continuation is resumed at most once then released.
-/// Racing tasks capture the `Sendable` gate and resume through it; they never
-/// resume a captured continuation directly.
-private final class WSResumeOnce: @unchecked Sendable {
-    /// Guards `didResume` and `continuation`.
-    private let lock = NSLock()
-    /// Continuation to resume once (nil after resume).
-    private var continuation: CheckedContinuation<Void, Never>?
-    /// Whether the continuation already resumed.
-    private var didResume = false
+private final class WSResumeOnce: Sendable {
+    private struct State: Sendable {
+        var continuation: CheckedContinuation<Void, Never>?
+        var didResume = false
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Creates a gate holding a continuation.
     /// - Parameter continuation: Continuation to resume once.
     init(_ continuation: CheckedContinuation<Void, Never>) {
-        self.continuation = continuation
+        state.withLock { $0.continuation = continuation }
     }
 
     /// Resumes the held continuation unless already resumed.
     func resume() {
-        lock.lock()
-        defer { lock.unlock() }
-        guard !didResume else { return }
-        didResume = true
-        continuation?.resume()
-        continuation = nil
+        let cont = state.withLock { lockState -> CheckedContinuation<Void, Never>? in
+            guard !lockState.didResume else { return nil }
+            lockState.didResume = true
+            let continuation = lockState.continuation
+            lockState.continuation = nil
+            return continuation
+        }
+        cont?.resume()
     }
 }
 
@@ -148,7 +147,7 @@ public actor WSHub {
         sockets.removeAll()
         queues.removeAll()
         for box in targets {
-            _ = try? await box.socket.close(code: .goingAway)
+            _ = try? await box.close(code: .goingAway)
         }
     }
 
@@ -250,71 +249,37 @@ public actor WSHub {
 /// always cancel the sleeper; the timeout loser looks the send task up at
 /// fire time (long after the synchronous assignment), so neither direction
 /// has a forward-reference race. One holder tracks each side so outer
-/// task cancellation can cancel both. Audit note: the holder stores a
-/// non-`Sendable` `Task` handle behind `@unchecked Sendable`; all access to
-/// `task` is serialized by `NSLock`, `cancel` copies the handle under lock
+/// task cancellation can cancel both. Audit note: the holder stores an optional
+/// `Task` handle synchronized via `OSAllocatedUnfairLock`; all access to
+/// `task` is serialized by the lock, `cancel` clears the handle under lock
 /// and cancels outside it, and tasks are cancelled at most (best-effort
 /// hang mitigation) rather than awaited, so no data race on the handle.
-private final class WSSendTaskHolder: @unchecked Sendable {
-    /// Guards `task`.
-    private let lock = NSLock()
-    /// Held race task, if assigned.
-    private var task: Task<Void, Never>?
+private final class WSSendTaskHolder: Sendable {
+    private let task = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
 
-    /// Creates an empty holder.
     init() {}
 
-    /// Assigns the race task.
-    /// - Parameter task: In-flight race task.
-    func set(_ task: Task<Void, Never>) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.task = task
+    func set(_ newTask: Task<Void, Never>) {
+        task.withLock { $0 = newTask }
     }
 
-    /// Cancels the held task, if assigned.
     func cancel() {
-        lock.lock()
-        let current = task
-        lock.unlock()
+        let current = task.withLock { $0 }
         current?.cancel()
     }
 }
 
-/// Holds the one-shot resume gate for the timeout race.
-///
-/// The gate is created inside the `withCheckedContinuation` closure, so
-/// the outer `withTaskCancellationHandler` cancellation path cannot
-/// capture it directly. The box publishes it once assigned so
-/// cancellation resumes the suspended send immediately instead of
-/// waiting out the timeout. Audit note: the box holds a `WSResumeOnce`
-/// (which transitively holds the continuation) behind `@unchecked
-/// Sendable`; all access to `gate` is serialized by `NSLock`, `resume`
-/// copies the gate under lock and resumes outside it, and the gate's own
-/// single-resume lock makes a concurrent publish-plus-cancel race safe
-/// (at most one resume wins).
-private final class WSResumeOnceBox: @unchecked Sendable {
-    /// Guards `gate`.
-    private let lock = NSLock()
-    /// Published gate, if assigned.
-    private var gate: WSResumeOnce?
+private final class WSResumeOnceBox: Sendable {
+    private let gate = OSAllocatedUnfairLock<WSResumeOnce?>(initialState: nil)
 
-    /// Creates an empty box.
     init() {}
 
-    /// Publishes the gate.
-    /// - Parameter gate: Gate guarding the send continuation.
-    func set(_ gate: WSResumeOnce) {
-        lock.lock()
-        defer { lock.unlock() }
-        self.gate = gate
+    func set(_ newGate: WSResumeOnce) {
+        gate.withLock { $0 = newGate }
     }
 
-    /// Resumes the published gate, if assigned.
     func resume() {
-        lock.lock()
-        let current = gate
-        lock.unlock()
+        let current = gate.withLock { $0 }
         current?.resume()
     }
 }
@@ -358,7 +323,7 @@ private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanos
             }
             timeoutHolder.set(timeoutTask)
             let sendTask = Task { [once, box, text, timeoutHolder] in
-                try? await box.socket.send(text)
+                try? await box.send(text)
                 timeoutHolder.cancel()
                 once.resume()
             }
@@ -575,13 +540,13 @@ public actor ActiveTurnTracker {
 /// guards `cancelAction`/`cancelled` only, and the stored cancel action is
 /// copied under lock then invoked after unlock so cancellation never runs
 /// while holding the lock and cannot deadlock.
-final class TurnTaskBox: @unchecked Sendable {
-    /// Guards `cancelAction` and `cancelled`.
-    private let lock = NSLock()
-    /// Cancel action for the chat task, once created.
-    private var cancelAction: (@Sendable () -> Void)?
-    /// Whether cancel arrived before the task was set.
-    private var cancelled = false
+final class TurnTaskBox: Sendable {
+    private struct State: Sendable {
+        var cancelAction: (@Sendable () -> Void)?
+        var cancelled = false
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Creates an empty box.
     init() {}
@@ -589,12 +554,9 @@ final class TurnTaskBox: @unchecked Sendable {
     /// Publishes the chat task, cancelling it when a cancel already arrived.
     /// - Parameter task: In-flight chat turn task.
     func set(_ task: Task<some Sendable, some Error>) {
-        let shouldCancel: Bool
-        do {
-            lock.lock()
-            defer { lock.unlock() }
-            cancelAction = { task.cancel() }
-            shouldCancel = cancelled
+        let shouldCancel = state.withLock { boxState -> Bool in
+            boxState.cancelAction = { task.cancel() }
+            return boxState.cancelled
         }
         if shouldCancel {
             task.cancel()
@@ -603,14 +565,11 @@ final class TurnTaskBox: @unchecked Sendable {
 
     /// Cancels the chat task, or flags the box when it is not set yet.
     func cancel() {
-        let current: (@Sendable () -> Void)?
-        do {
-            lock.lock()
-            defer { lock.unlock() }
-            cancelled = true
-            current = cancelAction
+        let action = state.withLock { boxState -> (@Sendable () -> Void)? in
+            boxState.cancelled = true
+            return boxState.cancelAction
         }
-        current?()
+        action?()
     }
 }
 
@@ -664,6 +623,10 @@ public final class ServerContext: Sendable {
     public let pluginDiscovery: PluginDiscoveryService
     /// Durable per-tool enable/disable toggles for every registered tool.
     public let toolStates: ToolStateStore
+    /// Sandbox staging retention configuration bounding `pending/`, `approved/`, and `attachments/`.
+    public let sandboxConfig: SandboxConfig
+    /// Periodic scheduler reclaiming expired and over-cap staged files.
+    public let sandboxCleanup: SandboxCleanupScheduler
 
     /// Creates a server context.
     public init(
@@ -683,7 +646,9 @@ public final class ServerContext: Sendable {
         schedulerWorker: ServerSchedulerWorker? = nil,
         pluginStore: ToolRegistryStore? = nil,
         pluginDiscovery: PluginDiscoveryService? = nil,
-        toolStates: ToolStateStore? = nil
+        toolStates: ToolStateStore? = nil,
+        sandboxConfig: SandboxConfig = SandboxConfig(),
+        sandboxCleanup: SandboxCleanupScheduler? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -711,6 +676,8 @@ public final class ServerContext: Sendable {
         self.pluginStore = pStore
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
         self.toolStates = toolStates ?? ToolStateStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        self.sandboxConfig = sandboxConfig
+        self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
     }
 
     /// Reapplies every persisted tool toggle onto the live bus.
@@ -754,6 +721,7 @@ public final class ServerContext: Sendable {
     ///   - pluginConfig: Plugin configuration defining directory and options. Defaults to `.init()`.
     ///   - notifier: Optional notifier for completed scheduler jobs. Defaults to nil.
     ///   - onApprovalRequested: Optional async callback invoked when a tool call requires approval. Defaults to nil.
+    ///   - sandboxConfig: Sandbox staging retention configuration. Defaults to built-in staging defaults.
     /// - Returns: Context with an approval-broadcasting bus.
     public static func make(
         config: ServerConfig = .default,
@@ -767,7 +735,8 @@ public final class ServerContext: Sendable {
         episodesDBPath: String? = nil,
         pluginConfig: PluginConfig = PluginConfig(),
         notifier: (any SchedulerNotifier)? = nil,
-        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil
+        onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
+        sandboxConfig: SandboxConfig = SandboxConfig()
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -823,8 +792,14 @@ public final class ServerContext: Sendable {
             schedulerWorker: schedulerWorker,
             pluginStore: pStore,
             pluginDiscovery: pDiscovery,
-            toolStates: tStates
+            toolStates: tStates,
+            sandboxConfig: sandboxConfig
         )
+        // Reclaim expired and over-cap staged files once at boot so restarts
+        // never inherit unbounded staging; the periodic lifecycle below keeps
+        // it bounded afterwards. Only aggregate counts reach the audit trail.
+        let bootSummary = SandboxCleaner.cleanup(config: sandboxConfig)
+        FileSandboxAuditLog.append(bootSummary, stagingPath: sandboxConfig.stagingPath)
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
         await bus.setApprovalHandler { tool, call in
@@ -848,6 +823,34 @@ public final class ServerContext: Sendable {
         await context.restoreToolStates()
         return context
     }
+
+    /// Ephemeral fallback context used if Application.runeWeaver is queried before configuration.
+    public static let fallbackUnconfigured: ServerContext = {
+        let gate = PermissionGate(store: InMemoryTrustStore())
+        let bus = ToolBus(permissionGate: gate)
+        let conv = ConversationManager()
+        let mem = MemoryEngine(config: MemoryConfig())
+        struct FallbackDummyLLM: LLMProvider {
+            let modelInfo = ModelInfo(name: "dummy", provider: "dummy", contextLength: 2048)
+            func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+                AsyncStream { $0.finish() }
+            }
+
+            func embeddings(text _: [String]) async throws -> [[Float]] {
+                []
+            }
+        }
+        let orch = Orchestrator(conversations: conv, toolBus: bus, llm: FallbackDummyLLM())
+        let appq = ApprovalQueue(permissionGate: gate)
+        return ServerContext(
+            conversations: conv,
+            toolBus: bus,
+            orchestrator: orch,
+            memoryEngine: mem,
+            permissionGate: gate,
+            approvals: appq
+        )
+    }()
 }
 
 /// Storage key for the shared ``ServerContext``.
@@ -858,9 +861,13 @@ private struct ServerContextKey: StorageKey {
 
 extension Application {
     /// Shared engine context for every route.
+    ///
+    /// Fails closed when queried before `configureRuneWeaver(_:context:)`
+    /// so an unconfigured service never serves empty turns from a dummy.
     var runeWeaver: ServerContext {
         get {
             guard let context = storage[ServerContextKey.self] else {
+                fputs("[ERROR] Application.runeWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.\n", stderr)
                 fatalError("ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
             }
             return context
@@ -893,6 +900,25 @@ struct ServerSchedulerLifecycle: LifecycleHandler {
     }
 }
 
+/// Lifecycle hook running sandbox staging reclamation on a cadence.
+///
+/// Runs one audited pass at boot (covering restarts that skipped `make`)
+/// then on the configured interval; shutdown stops the sleep task so it
+/// never outlives the service. Audit entries carry only aggregate counts.
+struct SandboxCleanupLifecycle: LifecycleHandler {
+    let scheduler: SandboxCleanupScheduler
+    let config: SandboxConfig
+
+    func didBootAsync(_: Application) async throws {
+        await scheduler.runOnce(config: config)
+        await scheduler.start(config: config)
+    }
+
+    func shutdownAsync(_: Application) async {
+        await scheduler.stop()
+    }
+}
+
 /// Configures loopback binding plus every engine route.
 ///
 /// Binds `127.0.0.1:8082` by default with no auth (single-user,
@@ -908,12 +934,13 @@ struct ServerSchedulerLifecycle: LifecycleHandler {
 ///   - context: Shared engine collaborators.
 /// - Throws: Never; kept throwing for Vapor `configure` conventions.
 public func configureRuneWeaver(_ app: Application, context: ServerContext) throws {
-    context.config.requireLoopback()
+    try context.config.requireLoopback()
     app.http.server.configuration.hostname = context.config.hostname
     app.http.server.configuration.port = context.config.port
     app.http.server.configuration.shutdownTimeout = .seconds(2)
     app.lifecycle.use(WSHubShutdownLifecycle(hub: context.hub))
     app.lifecycle.use(ServerSchedulerLifecycle(worker: context.schedulerWorker))
+    app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.sandboxConfig))
     app.runeWeaver = context
     registerRuneWeaverRoutes(app)
 }

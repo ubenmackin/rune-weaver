@@ -613,15 +613,19 @@ public actor RunLogStore {
         }
 
         static func write(entry: RunLogEntry, dbPath: String, pruneCapacity: Int) {
-            guard let handle = try? open(dbPath: dbPath) else {
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
                 fputs(
                     "[ERROR] SQLiteRunLogStore: failed opening store"
-                        + " at \(dbPath); run \(entry.id) kept"
+                        + " at \(dbPath): \(error); run \(entry.id) kept"
                         + " in memory only and will not survive restart.\n",
                     stderr
                 )
                 return
             }
+            guard let handle else { return }
             defer { sqlite3_close(handle) }
 
             let sql = """

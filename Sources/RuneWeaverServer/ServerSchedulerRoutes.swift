@@ -312,52 +312,21 @@ private func recordResumedRun(
     await context.hub.broadcastRun(entry)
 }
 
-/// Lock-guarded cache for scheduler run title formatting.
-///
-/// `DateFormatter` is neither `Sendable` nor thread-safe, so the single
-/// short-style instance lives in this `@unchecked Sendable` box and every
-/// title renders while holding the lock. The fixed `en_US_POSIX` locale
-/// keeps per-fire titles stable across user locales without paying a fresh
-/// formatter per job fire.
-private final class SchedulerRunTitleCache: @unchecked Sendable {
-    /// Guards the shared formatter.
-    private let lock = NSLock()
-    /// Cached short-style formatter with a fixed locale, built once.
-    private let formatter: DateFormatter
-
-    /// Builds the cached formatter once.
-    init() {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        self.formatter = formatter
-    }
-
-    /// Renders the timestamp portion of a run title under the lock.
-    /// - Parameter date: Fire time to format.
-    /// - Returns: Locale-stable timestamp text.
-    func string(from date: Date) -> String {
-        lock.lock()
-        defer { lock.unlock() }
-        return formatter.string(from: date)
-    }
-}
-
-/// Shared cached title formatter for scheduler run sessions.
-private let sharedSchedulerRunTitleCache = SchedulerRunTitleCache()
-
 /// Builds a locale-stable per-run title for a scheduler job.
 ///
 /// Combines the job name with the fire timestamp so each independent run
 /// session stays human-scannable in history while remaining deterministic
-/// across locales via the shared cached formatter.
+/// across locales.
 /// - Parameters:
 ///   - job: Job being executed.
 ///   - startTime: Fire time used for the timestamp.
 /// - Returns: Run title for the session.
 func schedulerRunTitle(for job: SchedulerJob, at startTime: Date) -> String {
-    "\(job.name) (\(sharedSchedulerRunTitleCache.string(from: startTime)))"
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateStyle = .short
+    formatter.timeStyle = .short
+    return "\(job.name) (\(formatter.string(from: startTime)))"
 }
 
 /// Creates an isolated per-run scheduler session for a job fire.

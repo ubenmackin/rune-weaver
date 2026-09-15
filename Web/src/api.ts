@@ -4,6 +4,8 @@
 // "/chat", ...) so the dashboard bundle served by the engine needs no
 // CORS and no runtime Node server. Do not introduce absolute hosts here.
 
+import { isRecord } from "./typeGuards";
+
 export type TrustDuration =
   | "thisTime"
   | "fiveMinutes"
@@ -289,13 +291,6 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
   }
-}
-
-// Narrows unknown wire values to plain records so engine payloads stay typed
-// without widening callers; arrays are excluded because `typeof []` would
-// otherwise pass as a map and let lists flow into typed state.
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // Validates an orchestrator turn before it enters chat state: the engine
@@ -592,6 +587,15 @@ export interface EmailAccountData {
   host: string;
   port: number;
   username: string;
+  // Optional SMTP overrides persisted as smtp_host/smtp_port/smtp_security.
+  // Camel-case aliases mirror the provider pattern so older dashboards keep
+  // round-tripping without dropping overrides.
+  smtp_host?: string;
+  smtpHost?: string;
+  smtp_port?: number;
+  smtpPort?: number;
+  smtp_security?: string;
+  smtpSecurity?: string;
 }
 
 export interface SettingsResponse {
@@ -608,6 +612,16 @@ export interface SettingsResponse {
   voiceWhisperModel: string;
   voiceTTSProvider: string;
   sandboxStagingPath: string;
+  // Sandbox retention caps persisted under [sandbox]; optional for
+  // back-compat with older engines that only send the staging path.
+  sandboxRetentionDays?: number;
+  sandboxMaxTotalBytes?: number;
+  sandboxCleanupIntervalSeconds?: number;
+  // File access policy persisted under [files]; optional for back-compat
+  // with older engines that predate the deny list.
+  filesDenyPatterns?: string[];
+  filesAllowRoots?: string[];
+  filesRequireApprovalOnDeny?: boolean;
   emailAccounts: EmailAccountData[];
   pluginsDir: string;
   pluginsMarketplaceIndexURL: string;
@@ -629,11 +643,48 @@ export interface UpdateSettingsInput {
   voiceWhisperModel?: string;
   voiceTTSProvider?: string;
   sandboxStagingPath?: string;
+  sandboxRetentionDays?: number;
+  sandboxMaxTotalBytes?: number;
+  sandboxCleanupIntervalSeconds?: number;
+  filesDenyPatterns?: string[];
+  filesAllowRoots?: string[];
+  filesRequireApprovalOnDeny?: boolean;
   emailAccounts?: EmailAccountData[];
   pluginsDir?: string;
   pluginsMarketplaceIndexURL?: string;
   pluginsAutoRescan?: boolean;
 }
+
+// Manual mirror of FilesConfig.defaultDenyPatterns in
+// Sources/RuneWeaverCore/Config.swift. The dashboard cannot import Swift, so
+// this hardcoded fallback is updated by hand alongside the Swift default
+// when the guard boundary changes, and shows the guard boundary before the
+// first settings fetch.
+export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
+  ".env*",
+  ".netrc",
+  "secrets.json",
+  "config.toml",
+  "*.pem",
+  "*.key",
+  "*keychain*",
+  ".ssh/*",
+  ".aws/*",
+  ".runeweaver/memory/vectors/*",
+];
+
+// Manual mirror of FilesConfig.defaultAllowRoots (`~` = home); update by
+// hand alongside the Swift default.
+export const DEFAULT_FILES_ALLOW_ROOTS: string[] = ["~"];
+
+// Manual mirrors of SandboxConfig defaults in
+// Sources/RuneWeaverCore/Config.swift (14 days, 500 MiB, hourly sweep). The
+// dashboard cannot import Swift, so these are updated by hand alongside the
+// Swift defaults and provide the single web source for sandbox fallbacks;
+// component state must import these instead of hardcoding magic numbers.
+export const DEFAULT_SANDBOX_RETENTION_DAYS = 14;
+export const DEFAULT_SANDBOX_MAX_TOTAL_BYTES = 524288000;
+export const DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS = 3600;
 
 export function getSettings(): Promise<SettingsResponse> {
   return fetchJson<SettingsResponse>("/settings");

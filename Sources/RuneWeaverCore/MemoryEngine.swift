@@ -1,3 +1,10 @@
+// Rune Weaver Core — Three-tier memory orchestration across working and durable stores.
+//
+// Coordinates episodic turns, semantic facts with pluggable embeddings, and
+// long-lived profile attributes behind one recall surface. Mirrors turns cleanly,
+// folds context overflow into summaries, and compacts aged episodes so recall
+// stays calibrated without losing durable history.
+
 import Foundation
 
 /// Where a memory result came from.
@@ -1460,6 +1467,7 @@ public extension MemoryEngine {
                 } catch let error as CancellationError {
                     throw error
                 } catch {
+                    fputs("[INFO] MemoryEngine: Semantic store failed, falling back to keyword storage: \(error)\n", stderr)
                     // Fall through to keyword-only storage below.
                 }
             }

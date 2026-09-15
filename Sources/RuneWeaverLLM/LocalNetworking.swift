@@ -8,6 +8,7 @@
 
 import Darwin
 import Foundation
+import os
 
 /// Helpers for resolving private local network endpoints under Apple App Transport Security (ATS).
 ///
@@ -74,8 +75,12 @@ public enum LocalNetworking {
             return true
         }
         // ::1 (Loopback)
-        let bytes = Mirror(reflecting: addr.__u6_addr.__u6_addr8).children.compactMap { $0.value as? UInt8 }
-        if bytes.count == 16, bytes.prefix(15).allSatisfy({ $0 == 0 }), bytes.last == 1 {
+        var octets = addr.__u6_addr.__u6_addr8
+        let isLoopback = withUnsafeBytes(of: &octets) { rawBuffer -> Bool in
+            guard rawBuffer.count == 16 else { return false }
+            return rawBuffer.prefix(15).allSatisfy { $0 == 0 } && rawBuffer.last == 1
+        }
+        if isLoopback {
             return true
         }
         return false
@@ -88,15 +93,19 @@ public enum LocalNetworking {
         isPrivateIPv4Address(ipAddress) || isPrivateIPv6Address(ipAddress)
     }
 
+    private struct DNSCacheEntry: Sendable {
+        let resolvedIP: String?
+        let timestamp: Date
+    }
+
     /// Thread-safe in-memory cache for resolved private IP addresses.
     ///
     /// Caches resolution results across the process lifetime to eliminate blocking DNS latency
     /// on repeated HTTP client instantiations. Cached entries expire after the configured TTL
     /// (default 300 seconds), ensuring IP migrations or DNS updates take effect without requiring
     /// process restarts.
-    private final class DNSCache: @unchecked Sendable {
-        private let lock = NSLock()
-        private var entries: [String: (resolvedIP: String?, timestamp: Date)] = [:]
+    private final class DNSCache: Sendable {
+        private let entries = OSAllocatedUnfairLock(initialState: [String: DNSCacheEntry]())
         let defaultTTL: TimeInterval
 
         init(defaultTTL: TimeInterval = 300) {
@@ -104,26 +113,26 @@ public enum LocalNetworking {
         }
 
         func get(_ host: String, ttl: TimeInterval) -> (found: Bool, resolvedIP: String?) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard let entry = entries[host] else { return (false, nil) }
-            if Date().timeIntervalSince(entry.timestamp) < ttl {
-                return (true, entry.resolvedIP)
+            entries.withLock { dict in
+                guard let entry = dict[host] else { return (false, nil) }
+                if Date().timeIntervalSince(entry.timestamp) < ttl {
+                    return (true, entry.resolvedIP)
+                }
+                dict.removeValue(forKey: host)
+                return (false, nil)
             }
-            entries.removeValue(forKey: host)
-            return (false, nil)
         }
 
         func set(_ host: String, resolvedIP: String?) {
-            lock.lock()
-            defer { lock.unlock() }
-            entries[host] = (resolvedIP: resolvedIP, timestamp: Date())
+            entries.withLock { dict in
+                dict[host] = DNSCacheEntry(resolvedIP: resolvedIP, timestamp: Date())
+            }
         }
 
         func clear() {
-            lock.lock()
-            defer { lock.unlock() }
-            entries.removeAll()
+            entries.withLock { dict in
+                dict.removeAll()
+            }
         }
     }
 
@@ -136,7 +145,7 @@ public enum LocalNetworking {
 
     /// Resolves a hostname to a private IP address if it points to an RFC 1918 / RFC 4193 host.
     ///
-    /// Results are memoized in an `NSLock`-guarded cache for the specified TTL (default 300 seconds)
+    /// Results are memoized in an `OSAllocatedUnfairLock`-guarded cache for the specified TTL (default 300 seconds)
     /// to eliminate blocking DNS queries on repeated HTTP client creations.
     /// - Parameters:
     ///   - host: Hostname to resolve (e.g. "nas.int.example.com").

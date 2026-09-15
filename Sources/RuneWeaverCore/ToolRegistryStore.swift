@@ -330,7 +330,14 @@ private enum SQLitePluginRegistryStore {
     }
 
     static func upsert(record: PluginRecord, dbPath: String) {
-        guard let handle = try? open(dbPath: dbPath) else { return }
+        let handle: OpaquePointer?
+        do {
+            handle = try open(dbPath: dbPath)
+        } catch {
+            fputs("[ERROR] ToolRegistryStore: failed opening store at \(dbPath): \(error)\n", stderr)
+            return
+        }
+        guard let handle else { return }
         defer { sqlite3_close(handle) }
 
         let sql = """
@@ -366,7 +373,14 @@ private enum SQLitePluginRegistryStore {
     }
 
     static func delete(id: String, dbPath: String) {
-        guard let handle = try? open(dbPath: dbPath) else { return }
+        let handle: OpaquePointer?
+        do {
+            handle = try open(dbPath: dbPath)
+        } catch {
+            fputs("[ERROR] ToolRegistryStore: failed opening store at \(dbPath): \(error)\n", stderr)
+            return
+        }
+        guard let handle else { return }
         defer { sqlite3_close(handle) }
 
         let sql = "DELETE FROM plugin_registry WHERE id = ?;"

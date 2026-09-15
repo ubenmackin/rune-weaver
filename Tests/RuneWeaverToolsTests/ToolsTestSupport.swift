@@ -1,5 +1,11 @@
-// RuneWeaver - Tests - Shared email/memory fixtures
+// Rune Weaver Tools Tests — Shared email and memory fixtures for tool suites.
+//
+// Centralizes canned bridge payloads, test account configs, and stub gateways
+// so email, memory, and smoke suites parse the same fixtures. Keeps the test
+// target namespace clean while surfacing wire-format drift without live services.
+
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 
@@ -127,49 +133,37 @@ enum ToolsTestSupport {
     }
 
     /// Box capturing the normalized query seen by the gateway without touching the network.
-    final class QueryCapture: @unchecked Sendable {
+    final class QueryCapture: Sendable {
         /// Guard for the captured query.
-        private let lock = NSLock()
-        /// Last query passed to `search`, if any.
-        private var stored: String?
+        private let stored = OSAllocatedUnfairLock<String?>(initialState: nil)
 
         /// Records the query.
         /// - Parameter value: Normalized query from the tool.
         func set(_ value: String) {
-            lock.lock()
-            defer { lock.unlock() }
-            stored = value
+            stored.withLock { $0 = value }
         }
 
         /// Returns the last recorded query.
         var value: String? {
-            lock.lock()
-            defer { lock.unlock() }
-            return stored
+            stored.withLock { $0 }
         }
     }
 
     /// Locked box capturing memory audit events across concurrency domains.
-    final class AuditCapture: @unchecked Sendable {
+    final class AuditCapture: Sendable {
         /// Guarded events.
-        private var events: [MemoryAuditEvent] = []
-        /// Guards `events`.
-        private let lock = NSLock()
+        private let events = OSAllocatedUnfairLock<[MemoryAuditEvent]>(initialState: [])
 
         /// Records an event.
         /// - Parameter event: Audit event to keep.
         func record(_ event: MemoryAuditEvent) {
-            lock.lock()
-            defer { lock.unlock() }
-            events.append(event)
+            events.withLock { $0.append(event) }
         }
 
         /// Returns captured events.
         /// - Returns: Events in capture order.
         func captured() -> [MemoryAuditEvent] {
-            lock.lock()
-            defer { lock.unlock() }
-            return events
+            events.withLock { $0 }
         }
     }
 

@@ -5,7 +5,7 @@ import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
 
-private final class SchedulerStubLLM: LLMProvider, @unchecked Sendable {
+private final class SchedulerStubLLM: LLMProvider, Sendable {
     let modelInfo = ModelInfo(name: "stub", provider: "stub", contextLength: 8192)
     private let answer: String
 

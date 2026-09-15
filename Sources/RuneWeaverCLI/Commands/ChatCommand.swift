@@ -1,5 +1,13 @@
+// Rune Weaver CLI — Interactive chat session and REPL command.
+//
+// Hosts the terminal conversation loop linking the LLM router, tool bus,
+// conversation persistence, and memory mirroring. Streams assistant turns,
+// executes tool calls under the permission gate, and handles session resume
+// plus cooperative SIGINT cancellation so turns park cleanly at the prompt.
+
 import ArgumentParser
 import Foundation
+import os
 import RuneWeaverCore
 import RuneWeaverLLM
 
@@ -93,24 +101,18 @@ enum ChatTurnInterrupt {
 /// the prior handler when the last session exits, so concurrent REPLs
 /// never race on the global signal disposition. Every registered state
 /// is tripped on SIGINT; sessions unregister on exit.
-/// - Note: All mutable state below is guarded by `lock`, and every
-///   critical section uses `defer`-guarded unlock, which justifies
-///   `@unchecked Sendable`: no mutable state is ever accessed without
-///   holding the lock.
-private final class ChatSignalManager: @unchecked Sendable {
+private final class ChatSignalManager: Sendable {
     /// Shared installation for the process.
     static let shared = ChatSignalManager()
 
-    /// Guards installation state below.
-    private let lock = NSLock()
-    /// Prior handler to restore when the last session exits.
-    private var previousHandler: (@convention(c) (Int32) -> Void)?
-    /// Whether a prior handler is stored.
-    private var hasPreviousHandler = false
-    /// Active dispatch source while installed.
-    private var source: DispatchSourceSignal?
-    /// States tripped on SIGINT.
-    private var states: [ChatInterruptState] = []
+    private struct State: Sendable {
+        var previousHandler: (@convention(c) (Int32) -> Void)?
+        var hasPreviousHandler = false
+        var source: (any DispatchSourceSignal)?
+        var states: [ChatInterruptState] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
     /// Serial queue owning the signal source.
     private let queue = DispatchQueue(label: "com.runeweaver.chat-sigint")
 
@@ -129,45 +131,45 @@ private final class ChatSignalManager: @unchecked Sendable {
     }
 
     /// Registers a REPL state, installing the handler on first use.
-    /// - Parameter state: REPL interrupt flag to trip on SIGINT.
-    func install(_ state: ChatInterruptState) {
-        let shouldInstall: Bool = {
-            lock.lock()
-            defer { lock.unlock() }
-            states.append(state)
-            return source == nil
-        }()
+    /// - Parameter interruptState: REPL interrupt flag to trip on SIGINT.
+    func install(_ interruptState: ChatInterruptState) {
+        let shouldInstall = state.withLock { managerState -> Bool in
+            managerState.states.append(interruptState)
+            return managerState.source == nil
+        }
         guard shouldInstall else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        // Re-check under the lock so two concurrent installs only install once.
-        guard source == nil else { return }
-        previousHandler = signal(SIGINT, SIG_IGN)
-        hasPreviousHandler = true
-        let created = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
-        created.setEventHandler { [weak self] in self?.tripAll() }
-        created.resume()
-        source = created
+
+        let createdSource = state.withLock { managerState -> (any DispatchSourceSignal)? in
+            guard managerState.source == nil else { return nil }
+            managerState.previousHandler = signal(SIGINT, SIG_IGN)
+            managerState.hasPreviousHandler = true
+            let created = DispatchSource.makeSignalSource(signal: SIGINT, queue: queue)
+            managerState.source = created
+            return created
+        }
+        if let created = createdSource {
+            created.setEventHandler { [weak self] in self?.tripAll() }
+            created.resume()
+        }
     }
 
     /// Unregisters a REPL state, restoring the prior handler when last exits.
-    /// - Parameter state: REPL interrupt flag to remove.
-    func uninstall(_ state: ChatInterruptState) {
-        let plan: SignalRestorePlan = {
-            lock.lock()
-            defer { lock.unlock() }
-            states.removeAll { $0 === state }
-            let shouldRestore = states.isEmpty && source != nil
-            let previous = previousHandler
-            let hadPrevious = hasPreviousHandler
+    /// - Parameter interruptState: REPL interrupt flag to remove.
+    func uninstall(_ interruptState: ChatInterruptState) {
+        let (plan, sourceToCancel) = state.withLock { managerState -> (SignalRestorePlan, (any DispatchSourceSignal)?) in
+            managerState.states.removeAll { $0 === interruptState }
+            let shouldRestore = managerState.states.isEmpty && managerState.source != nil
+            let previous = managerState.previousHandler
+            let hadPrevious = managerState.hasPreviousHandler
+            let src = managerState.source
             if shouldRestore {
-                source?.cancel()
-                source = nil
-                previousHandler = nil
-                hasPreviousHandler = false
+                managerState.source = nil
+                managerState.previousHandler = nil
+                managerState.hasPreviousHandler = false
             }
-            return SignalRestorePlan(shouldRestore: shouldRestore, previous: previous, hadPrevious: hadPrevious)
-        }()
+            return (SignalRestorePlan(shouldRestore: shouldRestore, previous: previous, hadPrevious: hadPrevious), shouldRestore ? src : nil)
+        }
+        sourceToCancel?.cancel()
         if plan.shouldRestore, plan.hadPrevious {
             signal(SIGINT, plan.previous ?? SIG_DFL)
         }
@@ -175,13 +177,9 @@ private final class ChatSignalManager: @unchecked Sendable {
 
     /// Trips every registered REPL state.
     private func tripAll() {
-        let snapshot: [ChatInterruptState] = {
-            lock.lock()
-            defer { lock.unlock() }
-            return states
-        }()
-        for state in snapshot {
-            state.trip()
+        let snapshot = state.withLock { $0.states }
+        for interruptState in snapshot {
+            interruptState.trip()
         }
     }
 }

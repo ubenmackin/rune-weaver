@@ -4,13 +4,14 @@
 // approval queue resolution, scheduler job CRUD, and run log recording.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
 import Vapor
 
 /// Stub LLM replaying one canned answer without the network.
-private final class ServerStubProvider: LLMProvider, @unchecked Sendable {
+private final class ServerStubProvider: LLMProvider, Sendable {
     /// Canned model metadata.
     let modelInfo = ModelInfo(name: "server-stub", provider: "stub", contextLength: 8192)
     /// Canned answer text.
@@ -91,24 +92,18 @@ private struct ServerWriteStub: Tool, Sendable {
 /// Cancel closures run on whatever task the tracker cancels, so the test
 /// cannot capture a mutable local. The box keeps one immutable handle while
 /// guarding the single bit behind a lock.
-private final class CancelFlag: @unchecked Sendable {
+private final class CancelFlag: Sendable {
     /// Guards the observed bit.
-    private let lock = NSLock()
-    /// Whether the cancel closure has fired.
-    private var stored = false
+    private let stored = OSAllocatedUnfairLock(initialState: false)
 
     /// Marks the flag as fired.
     func set() {
-        lock.lock()
-        defer { lock.unlock() }
-        stored = true
+        stored.withLock { $0 = true }
     }
 
     /// Whether the flag has been marked.
     var value: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return stored
+        stored.withLock { $0 }
     }
 }
 

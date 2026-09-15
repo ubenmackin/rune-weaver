@@ -21,24 +21,24 @@ struct AppleNLEmbeddingsTests {
     @Test
     func `Embed produces non-empty vectors and learns dimension`() async throws {
         let backend = AppleNLEmbeddingsBackend(lookup: { _ in [0.5, -0.25, 0.75] })
-        #expect(backend.dimension == nil)
+        #expect(await backend.dimension == nil)
         let vectors = try await backend.embed(["hello world"])
         #expect(vectors.count == 1)
         #expect(vectors[0].count == 3)
         for value in vectors[0] {
             #expect(value.isFinite)
         }
-        #expect(backend.dimension == 3)
+        #expect(await backend.dimension == 3)
     }
 
     @Test
     func `Dimension stays stable across calls`() async throws {
         let backend = AppleNLEmbeddingsBackend(lookup: { text in [Double(text.count), 2.0] })
         let first = try await backend.embed(["alpha"])
-        #expect(backend.dimension == 2)
+        #expect(await backend.dimension == 2)
         let second = try await backend.embed(["a much longer sentence here"])
         #expect(second[0].count == 2)
-        #expect(backend.dimension == 2)
+        #expect(await backend.dimension == 2)
         #expect(first[0].count == second[0].count)
     }
 

@@ -1,5 +1,11 @@
-// RuneWeaver - Tests - Smoke harness
+// Rune Weaver Tools Tests — End-to-end smoke coverage over the scripted harness.
+//
+// Replays canned model turns through the orchestrator, tool bus, and memory
+// stores to verify streaming, tool execution, and persistence compose. Catches
+// cross-component regressions without network or live provider access.
+
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM
 @testable import RuneWeaverTools
@@ -31,20 +37,21 @@ private struct SmokeTurn: Sendable {
 /// Each `chat` call consumes the next turn so orchestration loops observe
 /// plain answers and multi-round tool loops without real inference. Access
 /// is lock-guarded for Swift 6 data-race safety.
-private final class SmokeScriptedProvider: LLMProvider, @unchecked Sendable {
+private final class SmokeScriptedProvider: LLMProvider, Sendable {
     /// Stable smoke model metadata.
     let modelInfo = ModelInfo(name: "smoke-model", provider: "smoke", contextLength: 8192)
-    /// Guards script state below.
-    private let lock = NSLock()
-    /// Canned turns in call order.
-    private let turns: [SmokeTurn]
-    /// Next script index.
-    private var index = 0
+    /// Script state guarded by lock.
+    private struct ScriptState: Sendable {
+        var turns: [SmokeTurn]
+        var index: Int
+    }
+
+    private let state: OSAllocatedUnfairLock<ScriptState>
 
     /// Creates a scripted provider.
     /// - Parameter turns: Canned turns in call order.
     init(turns: [SmokeTurn]) {
-        self.turns = turns
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(turns: turns, index: 0))
     }
 
     /// Replays the next canned turn as chunked deltas plus terminal usage.
@@ -58,17 +65,15 @@ private final class SmokeScriptedProvider: LLMProvider, @unchecked Sendable {
     ///   - tools: Ignored available tools.
     /// - Returns: Stream yielding one delta per fragment plus a finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        let turn: SmokeTurn? = {
-            lock.lock()
-            defer { lock.unlock() }
-            guard index < turns.count else {
-                Issue.record("SmokeScriptedProvider exhausted \(turns.count) scripted turn(s)")
+        let turn: SmokeTurn? = state.withLock { s in
+            guard s.index < s.turns.count else {
+                Issue.record("SmokeScriptedProvider exhausted \(s.turns.count) scripted turn(s)")
                 return nil
             }
-            let next = turns[index]
-            index += 1
+            let next = s.turns[s.index]
+            s.index += 1
             return next
-        }()
+        }
         guard let turn else {
             return AsyncStream { continuation in
                 continuation.yield(LLMResponse(delta: "", isFinished: true))
@@ -99,18 +104,19 @@ private final class SmokeScriptedProvider: LLMProvider, @unchecked Sendable {
 ///
 /// Each resolver invocation consumes the next batch so multi-turn tool
 /// loops stay deterministic without inspecting message history.
-private final class SmokeBatchCursor: @unchecked Sendable {
+private final class SmokeBatchCursor: Sendable {
+    private struct CursorState: Sendable {
+        var batches: [[ToolInput]]
+        var index: Int
+    }
+
     /// Guards batch state below.
-    private let lock = NSLock()
-    /// Canned batches in resolver-call order.
-    private let batches: [[ToolInput]]
-    /// Next batch index.
-    private var index = 0
+    private let state: OSAllocatedUnfairLock<CursorState>
 
     /// Creates a batch cursor.
     /// - Parameter batches: Canned batches in resolver-call order.
     init(batches: [[ToolInput]]) {
-        self.batches = batches
+        self.state = OSAllocatedUnfairLock(initialState: CursorState(batches: batches, index: 0))
     }
 
     /// Returns the next canned batch, recording an issue when exhausted.
@@ -120,15 +126,15 @@ private final class SmokeBatchCursor: @unchecked Sendable {
     /// resolver calls surface without aborting the suite.
     /// - Returns: Tool calls for this resolver invocation.
     func next() -> [ToolInput] {
-        lock.lock()
-        defer { lock.unlock() }
-        guard index < batches.count else {
-            Issue.record("SmokeBatchCursor consumed all \(batches.count) batch(es)")
-            return []
+        state.withLock { s in
+            guard s.index < s.batches.count else {
+                Issue.record("SmokeBatchCursor consumed all \(s.batches.count) batch(es)")
+                return []
+            }
+            let batch = s.batches[s.index]
+            s.index += 1
+            return batch
         }
-        let batch = batches[index]
-        index += 1
-        return batch
     }
 }
 

@@ -5,6 +5,7 @@
 // caps maximum output size, and terminates orphaned child processes on turn cancellation.
 
 import Foundation
+import os
 
 /// A `Tool` implementation that forwards invocations to an out-of-process script or binary.
 public struct SubprocessToolBridge: Tool, Sendable {
@@ -196,23 +197,14 @@ public struct SubprocessToolBridge: Tool, Sendable {
                 process.standardError = stderrPipe
                 processBox.set(process)
 
-                var didResume = false
-                let lock = NSLock()
-
-                let resumeOnce: (Result<ToolOutput, Error>) -> Void = { result in
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !didResume else { return }
-                    didResume = true
-                    continuation.resume(with: result)
-                }
+                let resumeOnceBox = SubprocessResumeOnce(continuation)
 
                 // Timeout timer
                 let timeoutItem = DispatchWorkItem {
                     if process.isRunning {
                         process.terminate()
                     }
-                    resumeOnce(.success(.failure(
+                    resumeOnceBox.resume(with: .success(.failure(
                         "Tool execution timed out after \(Int(timeoutSeconds))s.",
                         callID: invocation.callID
                     )))
@@ -225,22 +217,22 @@ public struct SubprocessToolBridge: Tool, Sendable {
                     let drainGroup = DispatchGroup()
                     let stdoutDrain = BoundedDrain()
                     let stderrDrain = BoundedDrain()
-                    let outHandle = SendableHandle(stdoutPipe.fileHandleForReading)
-                    let errHandle = SendableHandle(stderrPipe.fileHandleForReading)
+                    let outFD = stdoutPipe.fileHandleForReading.fileDescriptor
+                    let errFD = stderrPipe.fileHandleForReading.fileDescriptor
 
                     // Concurrently drain stdout and stderr so a child producing large
                     // stderr output does not fill the OS pipe buffer and deadlock while
                     // Swift blocks waiting for stdout EOF.
                     drainGroup.enter()
                     DispatchQueue.global(qos: .userInitiated).async {
-                        let res = boundedRead(handle: outHandle.handle, limit: maxOutputBytes, process: process)
+                        let res = boundedRead(fileDescriptor: outFD, limit: maxOutputBytes, process: process)
                         stdoutDrain.set(res)
                         drainGroup.leave()
                     }
 
                     drainGroup.enter()
                     DispatchQueue.global(qos: .userInitiated).async {
-                        let res = boundedRead(handle: errHandle.handle, limit: 32768, process: process)
+                        let res = boundedRead(fileDescriptor: errFD, limit: 32768, process: process)
                         stderrDrain.set(res)
                         drainGroup.leave()
                     }
@@ -249,6 +241,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
                         try stdinPipe.fileHandleForWriting.write(contentsOf: invocation.inputData)
                         try stdinPipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
                     } catch {
+                        fputs("[WARN] SubprocessToolBridge: stdin write terminated early: \(error)\n", stderr)
                         // The child may have exited or closed stdin prematurely; handle reading handles EOF cleanly.
                     }
                     try? stdinPipe.fileHandleForWriting.close()
@@ -261,7 +254,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
                     let stderrResult = stderrDrain.get()
 
                     if stdoutResult.didExceed {
-                        resumeOnce(.success(.failure(
+                        resumeOnceBox.resume(with: .success(.failure(
                             "Tool output exceeded the \(maxOutputBytes)-byte limit and was terminated.",
                             callID: invocation.callID
                         )))
@@ -275,10 +268,10 @@ public struct SubprocessToolBridge: Tool, Sendable {
                         maxOutputBytes: maxOutputBytes,
                         callID: invocation.callID
                     )
-                    resumeOnce(.success(output))
+                    resumeOnceBox.resume(with: .success(output))
                 } catch {
                     timeoutItem.cancel()
-                    resumeOnce(.failure(error))
+                    resumeOnceBox.resume(with: .failure(error))
                 }
             }
         }
@@ -329,23 +322,53 @@ public struct SubprocessToolBridge: Tool, Sendable {
     }
 }
 
+/// One-shot gate ensuring a subprocess continuation resumes exactly once.
+///
+/// The timeout task and the worker completion race from unstructured
+/// dispatch queues; whichever finishes first wins and the loser is dropped.
+/// Uses the same `OSAllocatedUnfairLock` discipline as `WSResumeOnce` so the
+/// gate stays `Sendable` across `@Sendable` async closures.
+private final class SubprocessResumeOnce: Sendable {
+    private struct State: Sendable {
+        var continuation: CheckedContinuation<ToolOutput, Error>?
+        var didResume = false
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Creates a gate holding a continuation.
+    /// - Parameter continuation: Continuation to resume once.
+    init(_ continuation: CheckedContinuation<ToolOutput, Error>) {
+        state.withLock { $0.continuation = continuation }
+    }
+
+    /// Resumes the held continuation unless already resumed.
+    /// - Parameter result: Result to resume with.
+    func resume(with result: Result<ToolOutput, Error>) {
+        let continuation = state.withLock { lockState -> CheckedContinuation<ToolOutput, Error>? in
+            guard !lockState.didResume else { return nil }
+            lockState.didResume = true
+            let held = lockState.continuation
+            lockState.continuation = nil
+            return held
+        }
+        continuation?.resume(with: result)
+    }
+}
+
 /// Shares the live child across the cancellation handler and the worker queue
 /// so a cancelled turn can terminate the exact process that is producing output.
-private final class ProcessBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var boxed: Process?
+private final class ProcessBox: Sendable {
+    private let boxed = OSAllocatedUnfairLock<Process?>(initialState: nil)
 
     func set(_ process: Process) {
-        lock.lock()
-        defer { lock.unlock() }
-        boxed = process
+        boxed.withLock { $0 = process }
     }
 
     func terminate() {
-        lock.lock()
-        defer { lock.unlock() }
-        if let boxed, boxed.isRunning {
-            boxed.terminate()
+        let process = boxed.withLock { $0 }
+        if let process, process.isRunning {
+            process.terminate()
         }
     }
 }
@@ -359,7 +382,8 @@ private struct BoundedReadResult: Sendable {
 /// Reads a pipe in small chunks and kills the child as soon as the cap is
 /// passed, keeping a malicious rune from forcing a multi-gigabyte allocation
 /// before any truncation could run.
-private func boundedRead(handle: FileHandle, limit: Int, process: Process) -> BoundedReadResult {
+private func boundedRead(fileDescriptor: Int32, limit: Int, process: Process) -> BoundedReadResult {
+    let handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: false)
     var accumulated = Data()
     let chunkSize = 16384
 
@@ -390,28 +414,15 @@ private func boundedRead(handle: FileHandle, limit: Int, process: Process) -> Bo
     return BoundedReadResult(data: accumulated, didExceed: false)
 }
 
-/// Sendable wrapper for FileHandle across concurrent dispatch queues.
-private final class SendableHandle: @unchecked Sendable {
-    let handle: FileHandle
-    init(_ handle: FileHandle) {
-        self.handle = handle
-    }
-}
-
 /// Thread-safe accumulator for concurrent pipe draining.
-private final class BoundedDrain: @unchecked Sendable {
-    private let lock = NSLock()
-    private var result = BoundedReadResult(data: Data(), didExceed: false)
+private final class BoundedDrain: Sendable {
+    private let result = OSAllocatedUnfairLock(initialState: BoundedReadResult(data: Data(), didExceed: false))
 
     func set(_ newResult: BoundedReadResult) {
-        lock.lock()
-        defer { lock.unlock() }
-        result = newResult
+        result.withLock { $0 = newResult }
     }
 
     func get() -> BoundedReadResult {
-        lock.lock()
-        defer { lock.unlock() }
-        return result
+        result.withLock { $0 }
     }
 }

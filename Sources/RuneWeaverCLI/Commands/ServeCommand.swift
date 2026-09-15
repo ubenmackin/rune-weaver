@@ -57,13 +57,52 @@ struct ServeCommand: AsyncParsableCommand {
 
     /// Loads config, wires the engine context, and serves until stopped.
     mutating func run() async throws {
+        let loaded = try validateAndLoadConfig()
+        let (selected, allProviders) = try await resolveProvider(loaded: loaded)
+        let serverConfig = ServerConfig(hostname: hostname, port: port)
+        let (context, permissionGate) = await buildContext(
+            loaded: loaded,
+            selected: selected,
+            allProviders: allProviders,
+            serverConfig: serverConfig
+        )
+        var env = try Environment.detect()
+        try LoggingSystem.bootstrap(from: &env)
+        let app = try await Application.make(env)
+        await permissionGate.startPeriodicCleanup()
+        let serveCleanup = SandboxCleaner.cleanup(config: loaded.config.sandbox)
+        FileSandboxAuditLog.append(serveCleanup, stagingPath: loaded.config.sandbox.stagingPath)
+        if serveCleanup.filesRemoved > 0 || !serveCleanup.errors.isEmpty {
+            print(TerminalStyle.dim(
+                "Sandbox cleanup: removed \(serveCleanup.filesRemoved) files (\(serveCleanup.bytesFreed) bytes), \(serveCleanup.errors.count) errors."
+            ))
+        }
+        await context.sandboxCleanup.start(config: loaded.config.sandbox)
+        try await runServerLoop(
+            app: app,
+            context: context,
+            permissionGate: permissionGate,
+            serverConfig: serverConfig,
+            selectedName: selected.name
+        )
+    }
+
+    private func validateAndLoadConfig() throws -> CLIConfigLoader.LoadedConfig {
         guard ServerConfig.validPortRange.contains(port) else {
             throw ValidationError("--port must be \(ServerConfig.validPortRange) (got \(port)).")
+        }
+        let serverConfig = ServerConfig(hostname: hostname, port: port)
+        guard serverConfig.isLoopbackOnly else {
+            throw ValidationError("--hostname must be loopback (127.0.0.1, localhost, or ::1) until auth lands (got '\(hostname)').")
         }
         let loaded = try CLIConfigLoader.loadConfig(path: config)
         if loaded.isFallback {
             print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
         }
+        return loaded
+    }
+
+    private func resolveProvider(loaded: CLIConfigLoader.LoadedConfig) async throws -> (selected: any LLMProvider, all: [any LLMProvider]) {
         let providers = await CLIProviderBuilder.buildProviders(from: loaded.config.llm)
         guard !providers.isEmpty else {
             print(TerminalStyle.error("No LLM providers are enabled. Check [llm.providers.*] in \(loaded.url.path)."))
@@ -78,6 +117,15 @@ struct ServeCommand: AsyncParsableCommand {
             print(TerminalStyle.error("Unknown provider '\(provider ?? "")'. Available: \(names)."))
             throw ExitCode(1)
         }
+        return (selected, providers)
+    }
+
+    private func buildContext(
+        loaded: CLIConfigLoader.LoadedConfig,
+        selected: any LLMProvider,
+        allProviders: [any LLMProvider],
+        serverConfig: ServerConfig
+    ) async -> (context: ServerContext, permissionGate: PermissionGate) {
         let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
         let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
         do {
@@ -91,16 +139,12 @@ struct ServeCommand: AsyncParsableCommand {
             store: trustStore,
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
-        let serverConfig = ServerConfig(hostname: hostname, port: port)
-        guard serverConfig.isLoopbackOnly else {
-            throw ValidationError("--hostname must be loopback (127.0.0.1, localhost, or ::1) until auth lands (got '\(hostname)').")
-        }
         // Resolve the embeddings producer once from config so served memory
         // routes and the orchestrator share one backend; nil keeps the
         // keyword-only path when vectors are disabled or unknown.
         let embedder = EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
-            router: LLMRouter(providers: providers)
+            router: LLMRouter(providers: allProviders)
         )
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
@@ -134,7 +178,8 @@ struct ServeCommand: AsyncParsableCommand {
             systemPrompt: effectiveSystemPrompt,
             schedulerConfig: loaded.config.scheduler,
             episodesDBPath: loaded.config.memory.episodesDBPath,
-            pluginConfig: loaded.config.plugins
+            pluginConfig: loaded.config.plugins,
+            sandboxConfig: loaded.config.sandbox
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)
@@ -150,22 +195,27 @@ struct ServeCommand: AsyncParsableCommand {
         if livePrompt != effectiveSystemPrompt {
             print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
         }
-        var env = try Environment.detect()
-        try LoggingSystem.bootstrap(from: &env)
-        let app = try await Application.make(env)
-        // Start the trust reaper only after validation and bootstrap succeed
-        // so early throws never leak its sleep task; the do/catch below
-        // always stops it alongside the server shutdown.
-        await permissionGate.startPeriodicCleanup()
+        return (context, permissionGate)
+    }
+
+    private func runServerLoop(
+        app: Application,
+        context: ServerContext,
+        permissionGate: PermissionGate,
+        serverConfig: ServerConfig,
+        selectedName: String
+    ) async throws {
         do {
             try configureRuneWeaver(app, context: context)
-            print(TerminalStyle.dim("Serving engine API on \(serverConfig.hostname):\(serverConfig.port) (\(selected.name)). Ctrl+C to stop."))
+            print(TerminalStyle.dim("Serving engine API on \(serverConfig.hostname):\(serverConfig.port) (\(selectedName)). Ctrl+C to stop."))
             try await app.execute()
             await permissionGate.stopPeriodicCleanup()
+            await context.sandboxCleanup.stop()
             await context.hub.closeAll()
             try await app.asyncShutdown()
         } catch {
             await permissionGate.stopPeriodicCleanup()
+            await context.sandboxCleanup.stop()
             await context.hub.closeAll()
             try? await app.asyncShutdown()
             throw error

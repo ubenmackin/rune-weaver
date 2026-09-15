@@ -8,26 +8,6 @@
 import Foundation
 import RuneWeaverCore
 
-/// Sendable-safe box for a non-Sendable `URLSessionWebSocketTask`.
-///
-/// `URLSessionWebSocketTask` is not `Sendable`, so it cannot be stored
-/// directly in the `Sendable` actor `RuneWeaverClient` or captured across
-/// `Sendable` closures under Swift 6. The box is `@unchecked Sendable`
-/// with an audited contract: the client is the sole owner, all
-/// `send`/`receive`/`cancel` hops run through actor-isolated methods, and
-/// `URLSessionWebSocketTask` serializes its own I/O, so crossing the
-/// boundary inside the box introduces no data race.
-private final class ClientSocketBox: @unchecked Sendable {
-    /// Wrapped socket.
-    let task: URLSessionWebSocketTask
-
-    /// Wraps a socket.
-    /// - Parameter task: Live socket task.
-    init(_ task: URLSessionWebSocketTask) {
-        self.task = task
-    }
-}
-
 /// WebSocket wire shapes, single-sourced from `RuneWeaverCore`.
 ///
 /// The canonical `WSChatMessage`, `WSDecisionMessage`, `WSStreamDelta`,
@@ -91,7 +71,7 @@ public actor RuneWeaverClient {
     public private(set) var lastError: String?
 
     /// Live socket, present only while connecting or connected.
-    private var socketBox: ClientSocketBox?
+    private var socketTask: URLSessionWebSocketTask?
 
     /// Creates a client for the given engine URL.
     /// - Parameter baseURL: Engine base URL.
@@ -117,21 +97,20 @@ public actor RuneWeaverClient {
             return
         }
         let task = URLSession.shared.webSocketTask(with: socketURL)
-        let box = ClientSocketBox(task)
-        socketBox = box
+        socketTask = task
         task.resume()
         do {
             try await Self.ping(task: task)
-            guard socketBox?.task === task else {
+            guard socketTask === task else {
                 // A concurrent disconnect() cancelled this attempt.
                 task.cancel()
                 return
             }
             state = .connected
         } catch {
-            if socketBox?.task === task {
+            if socketTask === task {
                 task.cancel()
-                socketBox = nil
+                socketTask = nil
             }
             state = .disconnected
             lastError = error.localizedDescription
@@ -140,8 +119,8 @@ public actor RuneWeaverClient {
 
     /// Closes the connection.
     public func disconnect() async {
-        socketBox?.task.cancel(with: .goingAway, reason: nil)
-        socketBox = nil
+        socketTask?.cancel(with: .goingAway, reason: nil)
+        socketTask = nil
         state = .disconnected
     }
 
@@ -173,13 +152,12 @@ public actor RuneWeaverClient {
     ///   - source: Input origin. Defaults to `"client"`.
     /// - Returns: Stream yielding the final assistant message.
     public func send(text: String, sessionID: UUID? = nil, source: String? = "client") -> AsyncStream<Message> {
-        guard state == .connected, let box = socketBox else {
+        guard state == .connected, socketTask != nil else {
             return AsyncStream { $0.finish() }
         }
         return AsyncStream { continuation in
-            let worker = Task { [box] in
+            let worker = Task {
                 await self.runChatTurn(
-                    box: box,
                     text: text,
                     sessionID: sessionID,
                     source: source,
@@ -200,7 +178,7 @@ public actor RuneWeaverClient {
     ///   - approved: Whether the tool call may run.
     ///   - duration: Trust tier. Defaults to `thisTime`.
     public func sendDecision(id: UUID, approved: Bool, duration: TrustDuration = .thisTime) async throws {
-        guard let box = socketBox else {
+        guard let task = socketTask else {
             throw URLError(.notConnectedToInternet)
         }
         let outbound = ClientDecisionMessage(id: id, approved: approved, duration: duration)
@@ -208,7 +186,7 @@ public actor RuneWeaverClient {
         guard let frame = String(data: payload, encoding: .utf8) else {
             throw URLError(.cannotParseResponse)
         }
-        try await box.task.send(.string(frame))
+        try await task.send(.string(frame))
     }
 
     // MARK: - Private
@@ -227,28 +205,30 @@ public actor RuneWeaverClient {
     /// `delta` stream until the terminal `done` frame. Approval broadcasts
     /// are skipped and `error` frames terminate the turn as a failure.
     /// - Parameters:
-    ///   - box: Live socket box.
     ///   - text: Raw user text.
     ///   - sessionID: Owning session.
     ///   - source: Input origin.
     ///   - continuation: Stream receiving the final assistant message.
     private func runChatTurn(
-        box: ClientSocketBox,
         text: String,
         sessionID: UUID?,
         source: String?,
         continuation: AsyncStream<Message>.Continuation
     ) async {
+        guard let task = socketTask else {
+            continuation.finish()
+            return
+        }
         do {
             let frame = try Self.chatFrame(text: text, sessionID: sessionID, source: source)
-            try await box.task.send(.string(frame))
+            try await task.send(.string(frame))
             var accumulated = ""
             while true {
                 if Task.isCancelled {
                     continuation.finish()
                     return
                 }
-                let replyText = try await Self.replyText(box: box)
+                let replyText = try await Self.replyText(task: task)
                 guard let replyData = replyText.data(using: .utf8) else {
                     throw URLError(.cannotDecodeContentData)
                 }
@@ -285,10 +265,10 @@ public actor RuneWeaverClient {
     }
 
     /// Receives the next inbound WebSocket frame as text.
-    /// - Parameter box: Live socket box.
+    /// - Parameter task: Live socket task.
     /// - Returns: Inbound frame payload as UTF-8 text.
-    private static func replyText(box: ClientSocketBox) async throws -> String {
-        let reply = try await box.task.receive()
+    private static func replyText(task: URLSessionWebSocketTask) async throws -> String {
+        let reply = try await task.receive()
         switch reply {
         case let .string(string):
             return string

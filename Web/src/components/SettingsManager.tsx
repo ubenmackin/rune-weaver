@@ -4,6 +4,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
+  DEFAULT_FILES_ALLOW_ROOTS,
+  DEFAULT_FILES_DENY_PATTERNS,
+  DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS,
+  DEFAULT_SANDBOX_MAX_TOTAL_BYTES,
+  DEFAULT_SANDBOX_RETENTION_DAYS,
   getSettings,
   updateSettings,
   getPlugins,
@@ -33,7 +38,7 @@ import {
 } from "./icons";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 
-type SettingsTab = "providers" | "engine" | "tools" | "sandbox" | "memory" | "voice" | "email";
+type SettingsTab = "providers" | "engine" | "tools" | "sandbox" | "files" | "memory" | "voice" | "email";
 
 interface ProviderEntry {
   id: string;
@@ -47,7 +52,9 @@ interface EmailEntry {
 }
 
 function getEmailPasswordEnv(name: string): string {
-  const safeName = name.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+  // Unicode-aware to match Swift `EmailAccount.passwordEnvVar`, which keeps
+  // Unicode letters/numbers and maps everything else to `_`.
+  const safeName = name.toUpperCase().replace(/[^\p{L}\p{N}]/gu, "_");
   return `EMAIL_${safeName}_PASSWORD`;
 }
 
@@ -66,6 +73,27 @@ export default function SettingsManager() {
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
   const [sandboxStagingPath, setSandboxStagingPath] = useState("");
+  // Sandbox retention caps single-sourced via api.ts defaults mirroring
+  // SandboxConfig so a fresh dashboard without stored values still shows
+  // the bounded-staging policy before the first fetch resolves.
+  const [sandboxRetentionDays, setSandboxRetentionDays] = useState(
+    DEFAULT_SANDBOX_RETENTION_DAYS
+  );
+  const [sandboxMaxTotalBytes, setSandboxMaxTotalBytes] = useState(
+    DEFAULT_SANDBOX_MAX_TOTAL_BYTES
+  );
+  const [sandboxCleanupIntervalSeconds, setSandboxCleanupIntervalSeconds] = useState(
+    DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
+  );
+  // File access policy mirrors FilesConfig defaults so the deny list stays
+  // visible even when an older engine omits the [files] section.
+  const [filesDenyPatterns, setFilesDenyPatterns] = useState<string[]>([
+    ...DEFAULT_FILES_DENY_PATTERNS,
+  ]);
+  const [filesAllowRoots, setFilesAllowRoots] = useState<string[]>([
+    ...DEFAULT_FILES_ALLOW_ROOTS,
+  ]);
+  const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
@@ -250,6 +278,22 @@ export default function SettingsManager() {
     setProvidersList(pList);
 
     setSandboxStagingPath(data.sandboxStagingPath);
+    setSandboxRetentionDays(data.sandboxRetentionDays ?? DEFAULT_SANDBOX_RETENTION_DAYS);
+    setSandboxMaxTotalBytes(data.sandboxMaxTotalBytes ?? DEFAULT_SANDBOX_MAX_TOTAL_BYTES);
+    setSandboxCleanupIntervalSeconds(
+      data.sandboxCleanupIntervalSeconds ?? DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
+    );
+    setFilesDenyPatterns(
+      Array.isArray(data.filesDenyPatterns)
+        ? [...data.filesDenyPatterns]
+        : [...DEFAULT_FILES_DENY_PATTERNS]
+    );
+    setFilesAllowRoots(
+      Array.isArray(data.filesAllowRoots)
+        ? [...data.filesAllowRoots]
+        : [...DEFAULT_FILES_ALLOW_ROOTS]
+    );
+    setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
     setMemoryEmbeddingModel(data.memoryEmbeddingModel);
@@ -324,8 +368,25 @@ export default function SettingsManager() {
       const pType = entry.config.provider_type || entry.config.providerType;
       const aStyle = entry.config.api_style || entry.config.apiStyle;
       // Absent context_length means backend-default (nil), so only send a
-      // Number when the user entered a value; empty stays omitted.
+      // Number when the user entered a value; empty stays omitted. Present
+      // values fail closed on non-positive or non-integer input instead of
+      // coercing to the backend default, mirroring Config+Validation.
       const cLenRaw = entry.config.context_length ?? entry.config.contextLength;
+      if (
+        cLenRaw !== undefined &&
+        cLenRaw !== null &&
+        (cLenRaw as unknown) !== ""
+      ) {
+        const cLenCheck = Number(cLenRaw);
+        if (!Number.isInteger(cLenCheck) || cLenCheck <= 0) {
+          const label = trimmedName || "(unnamed)";
+          setError(
+            `Invalid context_length for provider "${label}": context_length must be a positive integer.`
+          );
+          setSaving(false);
+          return;
+        }
+      }
       const cLenNum =
         cLenRaw === undefined || cLenRaw === null || (cLenRaw as unknown) === ""
           ? undefined
@@ -349,16 +410,116 @@ export default function SettingsManager() {
       };
     }
 
-    // Reassemble email accounts array
-    const emailAccounts: EmailAccountData[] = emailAccountsList
-      .map((entry) => ({
+    // Deny patterns fail closed on blanks and `..` escapes so a bad row
+    // never persists a traversal into the policy file; the server enforces
+    // the same rule, but surfacing it here avoids a round-trip.
+    for (const pattern of filesDenyPatterns) {
+      const trimmed = pattern.trim();
+      if (!trimmed) {
+        setError("Deny patterns cannot be empty.");
+        setSaving(false);
+        return;
+      }
+      if (trimmed.includes("..")) {
+        setError(`Deny pattern must not contain '..': "${trimmed}".`);
+        setSaving(false);
+        return;
+      }
+    }
+    for (const root of filesAllowRoots) {
+      const trimmed = root.trim();
+      if (!trimmed) {
+        setError("Allowed roots cannot be empty.");
+        setSaving(false);
+        return;
+      }
+      if (trimmed.includes("..")) {
+        setError(`Allowed root must not contain '..': "${trimmed}".`);
+        setSaving(false);
+        return;
+      }
+    }
+
+    // Reassemble email accounts array, preserving optional SMTP overrides.
+    // Blank smtp_host collapses to omitted (derived fallback) and blank
+    // smtp_port omits so auto tries 587 then 465; smtp_security defaults
+    // to auto when blank or unknown.
+    // Incomplete rows abort instead of silently dropping so a half-filled
+    // row never vanishes on save; mirrors the provider-name checks above.
+    for (const entry of emailAccountsList) {
+      const trimmedName = entry.account.name.trim();
+      const trimmedHost = entry.account.host.trim();
+      const trimmedUsername = entry.account.username.trim();
+      if (!trimmedName || !trimmedHost || !trimmedUsername) {
+        setError(
+          "Email accounts require a name, host, and username. Complete or remove incomplete rows before saving."
+        );
+        setSaving(false);
+        return;
+      }
+    }
+    // IMAP ports fail closed on non-integer or out-of-range values instead
+    // of coercing to 993, mirroring Config+Validation 1-65535; explicit
+    // SMTP ports follow the same range when set.
+    for (const entry of emailAccountsList) {
+      const label = entry.account.name.trim() || "(unnamed)";
+      const portNum = Number(entry.account.port);
+      if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+        setError(
+          `Invalid port for email account "${label}": port must be between 1 and 65535.`
+        );
+        setSaving(false);
+        return;
+      }
+      const rawSmtpPort = entry.account.smtp_port ?? entry.account.smtpPort;
+      if (
+        rawSmtpPort !== undefined &&
+        rawSmtpPort !== null &&
+        String(rawSmtpPort).trim() !== ""
+      ) {
+        const smtpNum = Number(rawSmtpPort);
+        if (!Number.isInteger(smtpNum) || smtpNum < 1 || smtpNum > 65535) {
+          setError(
+            `Invalid SMTP port for email account "${label}": smtp_port must be between 1 and 65535.`
+          );
+          setSaving(false);
+          return;
+        }
+      }
+    }
+    const emailAccounts: EmailAccountData[] = emailAccountsList.map((entry) => {
+      const rawHost = entry.account.smtp_host ?? entry.account.smtpHost ?? "";
+      const trimmedSmtpHost = String(rawHost).trim();
+      const rawPort = entry.account.smtp_port ?? entry.account.smtpPort;
+      const portNum =
+        rawPort === undefined || rawPort === null || (rawPort as unknown) === ""
+          ? undefined
+          : Number(rawPort);
+      const rawSecurity = entry.account.smtp_security ?? entry.account.smtpSecurity ?? "";
+      const trimmedSecurity = String(rawSecurity).trim().toLowerCase();
+      const security =
+        trimmedSecurity === "ssl" || trimmedSecurity === "starttls" ? trimmedSecurity : undefined;
+      const rebuilt: EmailAccountData = {
         name: entry.account.name.trim(),
         type: entry.account.type.trim() || "imap",
         host: entry.account.host.trim(),
-        port: Number(entry.account.port) || 993,
+        port: Number(entry.account.port),
         username: entry.account.username.trim(),
-      }))
-      .filter((acc) => acc.name && acc.host && acc.username);
+      };
+      if (trimmedSmtpHost) {
+        rebuilt.smtp_host = trimmedSmtpHost;
+        rebuilt.smtpHost = trimmedSmtpHost;
+      }
+      if (portNum !== undefined && Number.isInteger(portNum) && portNum >= 1 && portNum <= 65535) {
+        rebuilt.smtp_port = portNum;
+        rebuilt.smtpPort = portNum;
+      }
+      if (security) {
+        rebuilt.smtp_security = security;
+        rebuilt.smtpSecurity = security;
+      }
+      return rebuilt;
+    });
 
     try {
       // The embedding model has no editable input: provider reuses the active
@@ -375,6 +536,12 @@ export default function SettingsManager() {
         fallbackProvider: fallbackProvider,
         providers: providersMap,
         sandboxStagingPath,
+        sandboxRetentionDays: Number(sandboxRetentionDays),
+        sandboxMaxTotalBytes: Number(sandboxMaxTotalBytes),
+        sandboxCleanupIntervalSeconds: Number(sandboxCleanupIntervalSeconds),
+        filesDenyPatterns: filesDenyPatterns.map((p) => p.trim()).filter(Boolean),
+        filesAllowRoots: filesAllowRoots.map((r) => r.trim()).filter(Boolean),
+        filesRequireApprovalOnDeny,
         memoryVectorDBPath,
         memoryEpisodesDBPath,
         memoryEmbeddingModel: preservedEmbeddingModel,
@@ -476,18 +643,20 @@ export default function SettingsManager() {
           if (field === "api_style") updated.apiStyle = val as string;
           if (field === "apiStyle") updated.api_style = val as string;
           // An empty context-length input means backend-default (nil), so
-          // clear both aliases instead of coercing to a concrete window.
+          // clear both aliases. Non-empty values (including NaN from invalid
+          // input) are preserved on both aliases so handleSave can fail
+          // closed instead of silently falling back to the backend default.
           if (field === "context_length") {
             const next =
               val === "" || val === undefined ? undefined : Number(val);
-            updated.contextLength =
-              next === undefined || Number.isNaN(next) ? undefined : next;
+            updated.context_length = next as unknown as number | undefined;
+            updated.contextLength = next as unknown as number | undefined;
           }
           if (field === "contextLength") {
             const next =
               val === "" || val === undefined ? undefined : Number(val);
-            updated.context_length =
-              next === undefined || Number.isNaN(next) ? undefined : next;
+            updated.context_length = next as unknown as number | undefined;
+            updated.contextLength = next as unknown as number | undefined;
           }
           return { ...item, config: updated };
         }
@@ -527,17 +696,73 @@ export default function SettingsManager() {
     setEmailAccountsList((prev) =>
       prev.map((item) => {
         if (item.id === id) {
+          // Keep snake and camel aliases synchronized so saves round-trip
+          // regardless of which key the engine echoes back.
+          const next = { ...item.account } as EmailAccountData & Record<string, unknown>;
+          if (field === "port") {
+            // Preserve the raw numeric value (including 0/NaN from empty input)
+            // so handleSave validation surfaces Invalid port 1-65535 instead
+            // of silently coercing back to 993.
+            (next as EmailAccountData).port = Number(val);
+          } else if (field === "smtp_port" || field === "smtpPort") {
+            // Preserve the raw numeric value (including 0/NaN from invalid
+            // input) so handleSave validation surfaces Invalid SMTP port
+            // 1-65535 instead of silently omitting back to the 587/465 fallback.
+            const num = val === "" || val === undefined ? undefined : Number(val);
+            next.smtp_port = num as unknown as number | undefined;
+            next.smtpPort = num as unknown as number | undefined;
+          } else if (field === "smtp_host" || field === "smtpHost") {
+            next.smtp_host = val as string;
+            next.smtpHost = val as string;
+          } else if (field === "smtp_security" || field === "smtpSecurity") {
+            next.smtp_security = val as string;
+            next.smtpSecurity = val as string;
+          } else {
+            (next as Record<string, unknown>)[field] = val;
+          }
           return {
             ...item,
-            account: {
-              ...item.account,
-              [field]: field === "port" ? Number(val) || 993 : val,
-            },
+            account: next as EmailAccountData,
           };
         }
         return item;
       })
     );
+  };
+
+  // Files deny-list CRUD helpers: rows are plain strings so add/remove stays
+  // index-based; reset restores the guard-mirroring defaults instead of
+  // clearing to an unprotected empty list.
+  const handleAddDenyPattern = () => {
+    setFilesDenyPatterns((prev) => [...prev, ""]);
+  };
+
+  const handleRemoveDenyPattern = (index: number) => {
+    setFilesDenyPatterns((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleDenyPatternChange = (index: number, value: string) => {
+    setFilesDenyPatterns((prev) => prev.map((p, i) => (i === index ? value : p)));
+  };
+
+  const handleResetDenyPatterns = () => {
+    setFilesDenyPatterns([...DEFAULT_FILES_DENY_PATTERNS]);
+  };
+
+  const handleAddAllowRoot = () => {
+    setFilesAllowRoots((prev) => [...prev, ""]);
+  };
+
+  const handleRemoveAllowRoot = (index: number) => {
+    setFilesAllowRoots((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleAllowRootChange = (index: number, value: string) => {
+    setFilesAllowRoots((prev) => prev.map((r, i) => (i === index ? value : r)));
+  };
+
+  const handleResetAllowRoots = () => {
+    setFilesAllowRoots([...DEFAULT_FILES_ALLOW_ROOTS]);
   };
 
   if (loading && !settings) {
@@ -636,6 +861,18 @@ export default function SettingsManager() {
         >
           <ApprovalsIcon size={16} />
           <span>Sandbox & Trust</span>
+        </button>
+
+        <button
+          type="button"
+          className={`settings-tab-btn ${activeTab === "files" ? "active" : ""}`}
+          onClick={() => setActiveTab("files")}
+        >
+          <ApprovalsIcon size={16} />
+          <span>Files & Access</span>
+          {filesDenyPatterns.length > 0 && (
+            <span className="settings-tab-badge">{filesDenyPatterns.length}</span>
+          )}
         </button>
 
         <button
@@ -1416,13 +1653,14 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* TAB 3: Sandbox & Trust */}
+        {/* TAB: Sandbox & Trust (staging path plus retention caps) */}
         {activeTab === "sandbox" && (
           <div className="settings-section card">
             <div className="settings-section-title-group">
               <h3>Sandbox & Security Policy</h3>
               <p className="settings-section-hint">
                 Controls where tool side-effects take place and when actions require user approval.
+                Changes need a restart to take effect.
               </p>
             </div>
             <div className="form-group">
@@ -1437,6 +1675,218 @@ export default function SettingsManager() {
               />
               <span className="form-group-hint">
                 Directory where modified files are staged before being committed.
+              </span>
+            </div>
+            {/* Retention caps bound staged-file lifetime and disk growth;
+                the sweeper reclaims the oldest files first once limits bite. */}
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-retention-days">Retention (days)</label>
+                <input
+                  id="sandbox-retention-days"
+                  type="number"
+                  min={1}
+                  max={365}
+                  step={1}
+                  className="input-field"
+                  value={sandboxRetentionDays}
+                  onChange={(e) => setSandboxRetentionDays(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Days a staged file stays valid before reclamation (1–365).
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-max-bytes">Max Total Size (bytes)</label>
+                <input
+                  id="sandbox-max-bytes"
+                  type="number"
+                  min={1}
+                  step={1024}
+                  className="input-field"
+                  value={sandboxMaxTotalBytes}
+                  onChange={(e) => setSandboxMaxTotalBytes(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Total byte cap across staging; oldest files evict first.
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-cleanup-interval">Cleanup Interval (seconds)</label>
+                <input
+                  id="sandbox-cleanup-interval"
+                  type="number"
+                  min={1}
+                  step={60}
+                  className="input-field"
+                  value={sandboxCleanupIntervalSeconds}
+                  onChange={(e) => setSandboxCleanupIntervalSeconds(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Seconds between periodic cleanup passes (hourly default).
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB: Files & Access (deny list plus allowed roots) */}
+        {activeTab === "files" && (
+          <div className="settings-section card">
+            <div className="settings-section-header">
+              <div className="settings-section-title-group">
+                <h3>Files & Access</h3>
+                <p className="settings-section-hint">
+                  Sensitive-path deny list for file tools, mirroring the engine guard.
+                  Changes need a restart to take effect.
+                </p>
+              </div>
+              <div className="row">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleResetDenyPatterns}
+                >
+                  <RefreshIcon size={14} />
+                  <span>Reset to Defaults</span>
+                </button>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleAddDenyPattern}
+                >
+                  <PlusIcon size={14} />
+                  <span>Add Pattern</span>
+                </button>
+              </div>
+            </div>
+
+            {filesDenyPatterns.length === 0 ? (
+              <div className="empty-state-box">
+                <p>No deny patterns configured. File tools will allow all in-scope paths.</p>
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={handleResetDenyPatterns}
+                >
+                  <RefreshIcon size={14} />
+                  <span>Reset to Defaults</span>
+                </button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {filesDenyPatterns.map((pattern, index) => (
+                  <div
+                    key={`deny-${index}`}
+                    style={{ display: "flex", gap: "8px", alignItems: "center" }}
+                  >
+                    <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                      <label htmlFor={`deny-pattern-${index}`} className="sr-only">
+                        Deny pattern {index + 1}
+                      </label>
+                      <input
+                        id={`deny-pattern-${index}`}
+                        type="text"
+                        className="input-field"
+                        aria-label={`Deny pattern ${index + 1}`}
+                        value={pattern}
+                        onChange={(e) => handleDenyPatternChange(index, e.target.value)}
+                        placeholder='e.g. .env*, *.pem, .ssh/*'
+                        required
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      className="icon-button danger"
+                      onClick={() => handleRemoveDenyPattern(index)}
+                      title={`Remove deny pattern ${index + 1}`}
+                      aria-label={`Remove deny pattern ${index + 1}`}
+                    >
+                      <TrashIcon size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <span className="form-group-hint" style={{ marginTop: "8px", display: "block" }}>
+              Glob-like patterns: `*` matches within a name, directory prefixes like
+              `.ssh/*` guard a whole subtree. Blank rows and `..` escapes are rejected.
+            </span>
+
+            <div className="settings-section-title-group" style={{ marginTop: "20px" }}>
+              <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
+              <p className="settings-section-hint">
+                Home containment boundary (`~` expands to the home directory). Paths outside
+                these roots escalate to approval.
+              </p>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+              {filesAllowRoots.map((root, index) => (
+                <div
+                  key={`allow-${index}`}
+                  style={{ display: "flex", gap: "8px", alignItems: "center" }}
+                >
+                  <div className="form-group" style={{ flex: 1, margin: 0 }}>
+                    <label htmlFor={`allow-root-${index}`} className="sr-only">
+                      Allowed root {index + 1}
+                    </label>
+                    <input
+                      id={`allow-root-${index}`}
+                      type="text"
+                      className="input-field"
+                      aria-label={`Allowed root ${index + 1}`}
+                      value={root}
+                      onChange={(e) => handleAllowRootChange(index, e.target.value)}
+                      placeholder="e.g. ~"
+                      required
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-button danger"
+                    onClick={() => handleRemoveAllowRoot(index)}
+                    title={`Remove allowed root ${index + 1}`}
+                    aria-label={`Remove allowed root ${index + 1}`}
+                  >
+                    <TrashIcon size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <div className="row" style={{ marginTop: "8px", gap: "8px" }}>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={handleAddAllowRoot}
+              >
+                <PlusIcon size={14} />
+                <span>Add Root</span>
+              </button>
+              <button
+                type="button"
+                className="ghost icon-text-btn"
+                onClick={handleResetAllowRoots}
+              >
+                <RefreshIcon size={14} />
+                <span>Reset Roots</span>
+              </button>
+            </div>
+
+            <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                <input
+                  id="files-require-approval"
+                  type="checkbox"
+                  checked={filesRequireApprovalOnDeny}
+                  onChange={(e) => setFilesRequireApprovalOnDeny(e.target.checked)}
+                />
+                <span>Require approval on deny</span>
+              </label>
+              <span className="form-group-hint">
+                When on, denied paths escalate to the approvals inbox instead of failing silently.
               </span>
             </div>
           </div>
@@ -1674,6 +2124,60 @@ export default function SettingsManager() {
                             placeholder="user@example.com"
                             required
                           />
+                        </div>
+
+                        <div className="form-group">
+                          <label htmlFor={`email-smtp-host-${item.id}`}>
+                            SMTP Host (Optional)
+                          </label>
+                          <input
+                            id={`email-smtp-host-${item.id}`}
+                            type="text"
+                            className="input-field"
+                            value={acc.smtp_host ?? acc.smtpHost ?? ""}
+                            onChange={(e) =>
+                              handleEmailFieldChange(item.id, "smtp_host", e.target.value)
+                            }
+                            placeholder="Blank means derived host"
+                          />
+                        </div>
+
+                        <div className="form-group">
+                          <label htmlFor={`email-smtp-port-${item.id}`}>
+                            SMTP Port (Optional)
+                          </label>
+                          <input
+                            id={`email-smtp-port-${item.id}`}
+                            type="number"
+                            className="input-field"
+                            value={acc.smtp_port ?? acc.smtpPort ?? ""}
+                            onChange={(e) =>
+                              handleEmailFieldChange(
+                                item.id,
+                                "smtp_port",
+                                e.target.value === "" ? "" : Number(e.target.value)
+                              )
+                            }
+                            placeholder="Blank means 587 then 465"
+                          />
+                        </div>
+
+                        <div className="form-group">
+                          <label htmlFor={`email-smtp-security-${item.id}`}>
+                            SMTP Security
+                          </label>
+                          <select
+                            id={`email-smtp-security-${item.id}`}
+                            className="input-field"
+                            value={acc.smtp_security ?? acc.smtpSecurity ?? "auto"}
+                            onChange={(e) =>
+                              handleEmailFieldChange(item.id, "smtp_security", e.target.value)
+                            }
+                          >
+                            <option value="auto">Auto (STARTTLS then SSL)</option>
+                            <option value="starttls">STARTTLS</option>
+                            <option value="ssl">SSL (implicit TLS)</option>
+                          </select>
                         </div>
                       </div>
 

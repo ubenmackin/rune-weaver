@@ -1,4 +1,12 @@
+// Rune Weaver Core — Conversation sessions, history, and SQLite persistence.
+//
+// Owns session lifecycle, message history, and context-window folding where
+// oldest turns collapse into a rolling summary. Persists sessions and messages
+// durably in SQLite and hydrates cache misses from disk so chat and scheduler
+// turns share one continuous history.
+
 import Foundation
+import os
 
 #if canImport(SQLite3)
     import SQLite3
@@ -409,7 +417,11 @@ public actor ConversationManager {
         unpersistedIDs.removeAll()
         guard let path = episodesDBPath else { return }
         await SQLiteSerialIO.runUncancellable {
-            _ = try? SessionStoreIO.deleteAll(dbPath: path)
+            do {
+                try SessionStoreIO.deleteAll(dbPath: path)
+            } catch {
+                fputs("[ERROR] ConversationManager: Failed to delete all sessions from \(path): \(error)\n", stderr)
+            }
         }
     }
 
@@ -703,6 +715,7 @@ public actor ConversationManager {
             }
             unpersistedIDs.remove(snapshot.id)
         } catch {
+            fputs("[WARN] ConversationManager: Failed to persist session \(snapshot.id): \(error)\n", stderr)
             // Best-effort only; the identifier stays unpersisted so a
             // concurrent list never mistakes it for a cross-process delete.
         }
@@ -719,7 +732,11 @@ public actor ConversationManager {
         guard let path = episodesDBPath else { return }
         let snapshot = session
         await SQLiteSerialIO.runUncancellable {
-            _ = try? SessionStoreIO.write(sessions: [snapshot], dbPath: path, merge: true)
+            do {
+                try SessionStoreIO.write(sessions: [snapshot], dbPath: path, merge: true)
+            } catch {
+                fputs("[ERROR] ConversationManager: Failed to uncancellably persist session \(snapshot.id): \(error)\n", stderr)
+            }
         }
         unpersistedIDs.remove(snapshot.id)
     }
@@ -732,7 +749,11 @@ public actor ConversationManager {
     private func deletePersistedSessionUncancellable(id: UUID) async {
         guard let path = episodesDBPath else { return }
         await SQLiteSerialIO.runUncancellable {
-            _ = try? SessionStoreIO.delete(sessionID: id, dbPath: path)
+            do {
+                try SessionStoreIO.delete(sessionID: id, dbPath: path)
+            } catch {
+                fputs("[ERROR] ConversationManager: Failed to uncancellably delete session \(id): \(error)\n", stderr)
+            }
         }
     }
 }
@@ -819,11 +840,9 @@ enum SessionStoreIO {
         /// state: every access runs inside the box so Swift 6 sees no
         /// data race, and eviction picks the sorted first entry so repeated
         /// runs evict the same victim instead of depending on hash order.
-        private final class MigrationPathCache: @unchecked Sendable {
-            /// Probed standardized paths.
-            private var paths: Set<String> = []
-            /// Guards `paths`.
-            private let lock = NSLock()
+        private final class MigrationPathCache: Sendable {
+            /// Probed standardized paths guarded by OSAllocatedUnfairLock.
+            private let paths = OSAllocatedUnfairLock(initialState: Set<String>())
 
             /// Creates an empty cache.
             init() {}
@@ -832,9 +851,7 @@ enum SessionStoreIO {
             /// - Parameter key: Standardized path.
             /// - Returns: True when already recorded.
             func contains(_ key: String) -> Bool {
-                lock.lock()
-                defer { lock.unlock() }
-                return paths.contains(key)
+                paths.withLock { $0.contains(key) }
             }
 
             /// Records a path, evicting deterministically at capacity.
@@ -846,12 +863,12 @@ enum SessionStoreIO {
             ///   - key: Standardized path to record.
             ///   - maxCapacity: Bound matching the session-cap discipline.
             func insert(_ key: String, maxCapacity: Int) {
-                lock.lock()
-                defer { lock.unlock() }
-                if paths.count >= maxCapacity, let victim = paths.sorted().first {
-                    paths.remove(victim)
+                paths.withLock { set in
+                    if set.count >= maxCapacity, let victim = set.sorted().first {
+                        set.remove(victim)
+                    }
+                    set.insert(key)
                 }
-                paths.insert(key)
             }
         }
 
@@ -936,17 +953,12 @@ enum SessionStoreIO {
                 // so one failed migration never fails every later read.
                 // Column names map through a literal allowlist so no
                 // interpolated identifier ever reaches SQLite.
-                let existingSessions = columnNames(in: "sessions", handle: handle)
-                for col in ["title", "source"] where !existingSessions.contains(col) {
-                    let alterSQL: String
-                    switch col {
-                    case "title":
-                        alterSQL = "ALTER TABLE sessions ADD COLUMN title TEXT;"
-                    case "source":
-                        alterSQL = "ALTER TABLE sessions ADD COLUMN source TEXT;"
-                    default:
-                        preconditionFailure("Unsupported sessions migration column")
-                    }
+                let existingSessions = columnNames(in: .sessions, handle: handle)
+                let sessionColumnsToAdd: [(name: String, sql: String)] = [
+                    ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
+                    ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;")
+                ]
+                for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
                     do {
                         try SQLiteHelpers.exec(
                             handle: handle,
@@ -958,7 +970,7 @@ enum SessionStoreIO {
                         fputs("[WARN] SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)\n", stderr)
                     }
                 }
-                if !columnNames(in: "messages", handle: handle).contains("is_error") {
+                if !columnNames(in: .messages, handle: handle).contains("is_error") {
                     do {
                         try SQLiteHelpers.exec(
                             handle: handle,
@@ -987,26 +999,28 @@ enum SessionStoreIO {
             try SQLiteHelpers.exec(handle: handle, sql: sql, failure: ConversationManagerError.persistenceFailed)
         }
 
+        private enum KnownTable {
+            case sessions
+            case messages
+
+            var pragmaSQL: String {
+                switch self {
+                case .sessions: "PRAGMA table_info(sessions);"
+                case .messages: "PRAGMA table_info(messages);"
+                }
+            }
+        }
+
         /// Lists the declared column names of a table, lowercased.
         ///
         /// Probes `PRAGMA table_info` so migrations only alter tables that
-        /// actually lack the column. The table name is allowlisted to the
-        /// store's own tables so no caller-controlled identifier reaches
-        /// SQLite; unknown names trap in debug and read as empty in release.
+        /// actually lack the column.
         /// - Parameters:
-        ///   - table: Table to inspect (`sessions` or `messages`).
+        ///   - table: Table to inspect (`.sessions` or `.messages`).
         ///   - handle: Open database handle.
         /// - Returns: Lowercased column names, empty when unreadable.
-        private static func columnNames(in table: String, handle: OpaquePointer?) -> Set<String> {
-            let pragmaSQL: String
-            switch table {
-            case "sessions":
-                pragmaSQL = "PRAGMA table_info(sessions);"
-            case "messages":
-                pragmaSQL = "PRAGMA table_info(messages);"
-            default:
-                preconditionFailure("Unsupported table for column lookup")
-            }
+        private static func columnNames(in table: KnownTable, handle: OpaquePointer?) -> Set<String> {
+            let pragmaSQL = table.pragmaSQL
             var names: Set<String> = []
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, pragmaSQL, -1, &statement, nil) == SQLITE_OK else {

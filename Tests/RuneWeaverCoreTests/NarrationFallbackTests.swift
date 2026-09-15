@@ -6,6 +6,7 @@
 // Orchestrator safety contract that local-model prose can never bypass
 // permission gates.
 import Foundation
+import os
 @testable import RuneWeaverCore
 import Testing
 
@@ -44,20 +45,21 @@ private struct FixtureNarrationTool: Tool, Sendable {
 /// Each `chat` call consumes the next entry so the orchestrator observes
 /// a narrated turn followed by a final synthesis turn without inference.
 /// Access is lock-guarded for Swift 6 data-race safety.
-private final class ScriptedNarrationLLM: LLMProvider, @unchecked Sendable {
+private final class ScriptedNarrationLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    private struct ScriptState: Sendable {
+        var texts: [String]
+        var index: Int
+    }
+
     /// Guards script state below.
-    private let lock = NSLock()
-    /// Canned texts in call order.
-    private var texts: [String]
-    /// Next script index.
-    private var index = 0
+    private let state: OSAllocatedUnfairLock<ScriptState>
 
     /// Creates a scripted provider.
     /// - Parameter texts: Canned texts in call order.
     init(texts: [String]) {
-        self.texts = texts
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(texts: texts, index: 0))
     }
 
     /// Replays the next canned text as a finished stream.
@@ -66,13 +68,11 @@ private final class ScriptedNarrationLLM: LLMProvider, @unchecked Sendable {
     ///   - tools: Ignored available tools.
     /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        let text: String = {
-            lock.lock()
-            defer { lock.unlock() }
-            let next = index < texts.count ? texts[index] : texts.last ?? ""
-            index += 1
+        let text: String = state.withLock { s in
+            let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
+            s.index += 1
             return next
-        }()
+        }
         return AsyncStream { continuation in
             continuation.yield(LLMResponse(delta: text, isFinished: true))
             continuation.finish()
@@ -88,25 +88,26 @@ private final class ScriptedNarrationLLM: LLMProvider, @unchecked Sendable {
 }
 
 /// Scripted provider replaying canned responses per turn.
-private final class ScriptedChunkedTurnLLM: LLMProvider, @unchecked Sendable {
+private final class ScriptedChunkedTurnLLM: LLMProvider, Sendable {
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
-    private let lock = NSLock()
-    private var rounds: [[LLMResponse]]
-    private var index = 0
+    private struct TurnState: Sendable {
+        var rounds: [[LLMResponse]]
+        var index: Int
+    }
+
+    private let state: OSAllocatedUnfairLock<TurnState>
 
     init(rounds: [[LLMResponse]]) {
-        self.rounds = rounds
+        self.state = OSAllocatedUnfairLock(initialState: TurnState(rounds: rounds, index: 0))
     }
 
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        let chunks: [LLMResponse] = {
-            lock.lock()
-            defer { lock.unlock() }
-            guard index < rounds.count else { return [] }
-            let r = rounds[index]
-            index += 1
+        let chunks: [LLMResponse] = state.withLock { s in
+            guard s.index < s.rounds.count else { return [] }
+            let r = s.rounds[s.index]
+            s.index += 1
             return r
-        }()
+        }
         return AsyncStream { continuation in
             for chunk in chunks {
                 continuation.yield(chunk)
