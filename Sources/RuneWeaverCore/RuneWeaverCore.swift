@@ -1,4 +1,4 @@
-// RuneWeaverCore module entry point.
+// Rune Weaver Core — Core module entry point.
 //
 // The core engine owns orchestration, conversation state, and the
 // protocol definitions that every other module builds on.

@@ -1,3 +1,8 @@
+// Rune Weaver Core — Tool execution output and failure constructors.
+//
+// Represents raw results yielded by tool execution, providing standard
+// constructors for success, failure, and correlation ID preservation.
+
 import Foundation
 
 /// Result returned from a tool execution.

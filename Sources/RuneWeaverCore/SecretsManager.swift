@@ -1,3 +1,9 @@
+// Rune Weaver Core — Secure credentials manager with Keychain and environment fallback.
+//
+// Manages sensitive tokens and secrets via macOS Keychain services with
+// fallback to process environment variables. Guarantees secrets are never
+// logged or written into configuration files.
+
 import Foundation
 
 #if canImport(Security)

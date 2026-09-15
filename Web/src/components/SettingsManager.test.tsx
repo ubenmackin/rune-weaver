@@ -36,6 +36,10 @@ const mockSettings = {
   voiceWhisperModel: "base.en",
   voiceTTSProvider: "system",
   sandboxStagingPath: "sandbox/staging",
+  sandboxContainerRuntime: "container",
+  sandboxContainerBaseImage: "alpine:latest",
+  sandboxArchiveSessionTTLMinutes: 10,
+  sandboxMaxConcurrentMachines: 3,
   emailAccounts: [
     {
       name: "icloud",
@@ -81,6 +85,8 @@ describe("SettingsManager", () => {
     const sandboxTabBtn = screen.getByRole("button", { name: /Sandbox & Trust/i });
     await user.click(sandboxTabBtn);
     expect(screen.getByDisplayValue("sandbox/staging")).toBeDefined();
+    expect(screen.getByDisplayValue("container")).toBeDefined();
+    expect(screen.getByDisplayValue("alpine:latest")).toBeDefined();
 
     // Switch to Email Accounts tab
     const emailTabBtn = screen.getByRole("button", { name: /Email Accounts/i });
@@ -719,6 +725,60 @@ describe("SettingsManager", () => {
         ?.querySelector(".tool-switch-track")
         ?.getAttribute("data-on")
     ).toBe("false");
+  });
+
+  it("allows configuring container sandboxing settings and saving", async () => {
+    const user = userEvent.setup();
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const sandboxTabBtn = screen.getByRole("button", { name: /Sandbox & Trust/i });
+    await user.click(sandboxTabBtn);
+
+    const runtimeInput = screen.getByLabelText(/Container Runtime/i);
+    await user.clear(runtimeInput);
+    await user.type(runtimeInput, "podman");
+
+    const baseImageInput = screen.getByLabelText(/Base Image/i);
+    await user.clear(baseImageInput);
+    await user.type(baseImageInput, "debian:slim");
+
+    const ttlInput = screen.getByLabelText(/Archive Session TTL/i);
+    await user.clear(ttlInput);
+    await user.type(ttlInput, "25");
+
+    const maxMachinesInput = screen.getByLabelText(/Max Concurrent Machines/i);
+    await user.clear(maxMachinesInput);
+    await user.type(maxMachinesInput, "7");
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+    });
+
+    expect(sentPayload).toBeDefined();
+    expect(sentPayload?.["sandboxContainerRuntime"]).toBe("podman");
+    expect(sentPayload?.["sandboxContainerBaseImage"]).toBe("debian:slim");
+    expect(sentPayload?.["sandboxArchiveSessionTTLMinutes"]).toBe(25);
+    expect(sentPayload?.["sandboxMaxConcurrentMachines"]).toBe(7);
   });
 });
 

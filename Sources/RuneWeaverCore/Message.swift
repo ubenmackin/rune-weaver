@@ -1,3 +1,8 @@
+// Rune Weaver Core — Conversation turns, message roles, and context helpers.
+//
+// Represents discrete message turns (system, user, assistant, tool), tool call
+// associations, and prompt composition helpers passed to LLM providers.
+
 import Foundation
 
 /// A single turn in a conversation history.

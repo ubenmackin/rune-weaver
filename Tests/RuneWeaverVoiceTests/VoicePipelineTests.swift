@@ -1,3 +1,5 @@
+// Rune Weaver Voice Tests — Voice pipeline initialization tests.
+
 @testable import RuneWeaverVoice
 import Testing
 

@@ -853,11 +853,8 @@ public extension SchedulerJobConfig {
             do {
                 handle = try open(dbPath: dbPath)
             } catch {
-                fputs(
-                    "[ERROR] SQLiteSchedulerJobStore: failed opening store"
-                        + " at \(dbPath): \(error); job \(job.id) kept"
-                        + " in memory only and will not survive restart.\n",
-                    stderr
+                RuneWeaverLog.stores.error(
+                    "SQLiteSchedulerJobStore: failed opening store at \(dbPath): \(error); job \(job.id) kept in memory only and will not survive restart."
                 )
                 return
             }
@@ -885,7 +882,7 @@ public extension SchedulerJobConfig {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed preparing job write (code \(code)); job \(job.id) kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed preparing job write (code \(code)); job \(job.id) kept in memory only.")
                 return
             }
             defer { sqlite3_finalize(statement) }
@@ -905,14 +902,14 @@ public extension SchedulerJobConfig {
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed writing job \(job.id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed writing job \(job.id) (code \(code)); in-memory state is ahead of disk.")
                 return
             }
         }
 
         static func delete(id: UUID, dbPath: String) {
             guard let handle = try? open(dbPath: dbPath) else {
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed opening store at \(dbPath); delete of \(id) kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed opening store at \(dbPath); delete of \(id) kept in memory only.")
                 return
             }
             defer { sqlite3_close(handle) }
@@ -921,7 +918,7 @@ public extension SchedulerJobConfig {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed preparing job delete (code \(code)) for \(id).\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed preparing job delete (code \(code)) for \(id).")
                 return
             }
             defer { sqlite3_finalize(statement) }
@@ -929,21 +926,21 @@ public extension SchedulerJobConfig {
             SQLiteHelpers.bindText(statement, index: 1, value: id.uuidString)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed deleting job \(id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed deleting job \(id) (code \(code)); in-memory state is ahead of disk.")
                 return
             }
         }
 
         static func clear(dbPath: String) {
             guard let handle = try? open(dbPath: dbPath) else {
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed opening store at \(dbPath); clear kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed opening store at \(dbPath); clear kept in memory only.")
                 return
             }
             defer { sqlite3_close(handle) }
             do {
                 try SQLiteHelpers.exec(handle: handle, sql: "DELETE FROM scheduler_jobs;", failure: { SchedulerDBError(message: $0) })
             } catch {
-                fputs("[ERROR] SQLiteSchedulerJobStore: failed clearing jobs: \(error)\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed clearing jobs: \(error)")
             }
         }
     }

@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - Context length config
+// Rune Weaver Core Tests — Context length config tests.
 import Foundation
 @testable import RuneWeaverCore
 import Testing

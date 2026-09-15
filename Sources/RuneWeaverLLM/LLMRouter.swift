@@ -1,3 +1,8 @@
+// Rune Weaver LLM — Priority-ordered provider router and failover orchestrator.
+//
+// Manages local-first and cloud fallback LLM providers, health checking,
+// dynamic provider selection, and streaming chunk consumption across backends.
+
 import RuneWeaverCore
 
 /// Selects the active LLM provider and falls through on failure.

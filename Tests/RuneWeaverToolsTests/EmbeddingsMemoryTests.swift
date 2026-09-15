@@ -1,4 +1,4 @@
-// Embeddings-backed memory recall tests.
+// Rune Weaver Tools Tests — Embeddings-backed memory recall tests.
 //
 // Proves the vector seam preserves today's keyword behavior while adding
 // semantic ranking: paraphrase queries with no shared tokens still surface

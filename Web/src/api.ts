@@ -617,6 +617,11 @@ export interface SettingsResponse {
   sandboxRetentionDays?: number;
   sandboxMaxTotalBytes?: number;
   sandboxCleanupIntervalSeconds?: number;
+  // Container virtualization sandbox settings
+  sandboxContainerRuntime?: string;
+  sandboxContainerBaseImage?: string;
+  sandboxArchiveSessionTTLMinutes?: number;
+  sandboxMaxConcurrentMachines?: number;
   // File access policy persisted under [files]; optional for back-compat
   // with older engines that predate the deny list.
   filesDenyPatterns?: string[];
@@ -646,6 +651,10 @@ export interface UpdateSettingsInput {
   sandboxRetentionDays?: number;
   sandboxMaxTotalBytes?: number;
   sandboxCleanupIntervalSeconds?: number;
+  sandboxContainerRuntime?: string;
+  sandboxContainerBaseImage?: string;
+  sandboxArchiveSessionTTLMinutes?: number;
+  sandboxMaxConcurrentMachines?: number;
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
@@ -678,13 +687,17 @@ export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
 export const DEFAULT_FILES_ALLOW_ROOTS: string[] = ["~"];
 
 // Manual mirrors of SandboxConfig defaults in
-// Sources/RuneWeaverCore/Config.swift (14 days, 500 MiB, hourly sweep). The
-// dashboard cannot import Swift, so these are updated by hand alongside the
-// Swift defaults and provide the single web source for sandbox fallbacks;
-// component state must import these instead of hardcoding magic numbers.
+// Sources/RuneWeaverCore/Config.swift. The dashboard cannot import Swift, so
+// these are updated by hand alongside the Swift defaults and provide the single
+// web source for sandbox fallbacks; component state must import these instead of
+// hardcoding magic numbers.
 export const DEFAULT_SANDBOX_RETENTION_DAYS = 14;
 export const DEFAULT_SANDBOX_MAX_TOTAL_BYTES = 524288000;
 export const DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS = 3600;
+export const DEFAULT_SANDBOX_CONTAINER_RUNTIME = "container";
+export const DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE = "alpine:latest";
+export const DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES = 10;
+export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;
 
 export function getSettings(): Promise<SettingsResponse> {
   return fetchJson<SettingsResponse>("/settings");

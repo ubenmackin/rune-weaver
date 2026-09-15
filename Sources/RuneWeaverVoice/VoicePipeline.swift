@@ -1,3 +1,8 @@
+// Rune Weaver Voice — Audio transcription and text-to-speech processing pipeline.
+//
+// Provides speech recognition and speech synthesis abstractions, converting
+// incoming spoken audio into text turns and model responses into synthesized speech.
+
 import Foundation
 import RuneWeaverCore
 

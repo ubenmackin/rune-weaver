@@ -1,4 +1,4 @@
-// RuneWeaver - CLI - Chat interrupt cancellation.
+// Rune Weaver CLI Tests — Chat interrupt cancellation tests.
 import Foundation
 @testable import RuneWeaverCLI
 import Testing

@@ -1,3 +1,5 @@
+// Rune Weaver CLI Tests — Chat session trailer formatting and token counter tests.
+
 import Foundation
 @testable import RuneWeaverCLI
 import Testing

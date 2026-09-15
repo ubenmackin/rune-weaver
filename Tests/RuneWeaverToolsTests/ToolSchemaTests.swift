@@ -1,3 +1,5 @@
+// Rune Weaver Tools Tests — JSON schema validation tests for registered tools.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM

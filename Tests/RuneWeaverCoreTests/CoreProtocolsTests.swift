@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - Core protocols
+// Rune Weaver Core Tests — Core protocol, model, and conversation management tests.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -167,5 +167,41 @@ struct ChatMemoryHelperTests {
         #expect(chatStored == false)
         let remembered = try await engine.storeRememberedFact(content: "I love testing")
         #expect(remembered == false)
+    }
+}
+
+@Suite("Conversation Manager Truncation")
+struct ConversationManagerTruncationTests {
+    @Test
+    func `ConversationManager preserves leading system prompt on overflow`() async {
+        let manager = ConversationManager(maxMessages: 2)
+        let session = await manager.createSession()
+        let sysMsg = Message(role: .system, content: "Developer system prompt")
+        await manager.append(sysMsg, to: session.id)
+        await manager.append(Message(role: .user, content: "Turn 1"), to: session.id)
+        await manager.append(Message(role: .assistant, content: "Reply 1"), to: session.id)
+        await manager.append(Message(role: .user, content: "Turn 2"), to: session.id)
+
+        let rawSession = await manager.session(id: session.id)
+        #expect(rawSession?.messages.count == 2)
+        #expect(rawSession?.messages.first?.role == .system)
+        #expect(rawSession?.messages.first?.content == "Developer system prompt")
+        #expect(rawSession?.messages.last?.content == "Turn 2")
+    }
+
+    @Test
+    func `ConversationManager preserves leading system prompt even when overflow exceeds non-system turns`() async {
+        let manager = ConversationManager(maxMessages: 2)
+        let session = await manager.createSession()
+        let sys1 = Message(role: .system, content: "System 1 (Lead)")
+        let sys2 = Message(role: .system, content: "System 2 (Secondary)")
+        let sys3 = Message(role: .system, content: "System 3 (Tertiary)")
+        await manager.setHistory([sys1, sys2, sys3], for: session.id)
+
+        let rawSession = await manager.session(id: session.id)
+        #expect(rawSession?.messages.count == 2)
+        #expect(rawSession?.messages.first?.role == .system)
+        #expect(rawSession?.messages.first?.content == "System 1 (Lead)")
+        #expect(rawSession?.messages.last?.content == "System 3 (Tertiary)")
     }
 }

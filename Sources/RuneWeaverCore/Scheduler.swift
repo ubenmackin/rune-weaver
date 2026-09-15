@@ -1460,7 +1460,7 @@ public extension SchedulerJobConfig {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             guard let handle = try? SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { _ in LoadError() }) else {
-                fputs("[WARN] SchedulerJobConfig: Failed opening scheduler store at \(dbPath); falling back to config seed.\n", stderr)
+                RuneWeaverLog.stores.warning("SchedulerJobConfig: Failed opening scheduler store at \(dbPath); falling back to config seed.")
                 return []
             }
             defer { sqlite3_close(handle) }
@@ -1472,7 +1472,7 @@ public extension SchedulerJobConfig {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[WARN] SchedulerJobConfig: Failed preparing scheduler read (code \(code)); falling back to config seed.\n", stderr)
+                RuneWeaverLog.stores.warning("SchedulerJobConfig: Failed preparing scheduler read (code \(code)); falling back to config seed.")
                 return []
             }
             defer { sqlite3_finalize(statement) }

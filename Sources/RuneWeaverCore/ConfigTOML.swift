@@ -588,6 +588,18 @@ extension RuneWeaverConfig {
         if let interval = try sandbox.strictInt("cleanup_interval_seconds", field: "sandbox.cleanup_interval_seconds") {
             config.sandbox.cleanupIntervalSeconds = interval
         }
+        if let runtime = try sandbox.strictString("container_runtime", field: "sandbox.container_runtime") {
+            config.sandbox.containerRuntime = runtime
+        }
+        if let image = try sandbox.strictString("container_base_image", field: "sandbox.container_base_image") {
+            config.sandbox.containerBaseImage = image
+        }
+        if let ttl = try sandbox.strictInt("archive_session_ttl_minutes", field: "sandbox.archive_session_ttl_minutes") {
+            config.sandbox.archiveSessionTTLMinutes = ttl
+        }
+        if let maxMachines = try sandbox.strictInt("max_concurrent_machines", field: "sandbox.max_concurrent_machines") {
+            config.sandbox.maxConcurrentMachines = maxMachines
+        }
     }
 
     private static func decodeFiles(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

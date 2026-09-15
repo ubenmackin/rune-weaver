@@ -235,11 +235,12 @@ When approving an action, the user can choose:
 
 Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic.com" = trusted for 1 day).
 
-**Sandbox**:
-- All file writes go to a staging directory first (`~/.runeweaver/sandbox/`)
-- Writes to real filesystem require explicit approval
+**Sandbox (tiered)**:
+- Tier 1/2 — Seatbelt-confinement for plugin subprocesses and staged file writes: document/image downloads stage under `~/.runeweaver/sandbox/` (`pending/`, `approved/`, `attachments/`) and writes to the real filesystem require explicit approval via `FilesAccessGuard`
+- Tier 3 — Ephemeral microVM detonation for untrusted archives: ZIP/TAR families run in zero-host-mounts container machines with manifest-only returns (no host staging); single-entry inspection truncates text to the preview cap and caps vision payloads, exports are approval-gated through the workspace guard
+- Each detonation is ephemeral and reaped immediately; `archive_session_ttl_minutes` reclaims only crash orphans and `max_concurrent_machines` caps concurrent detonations before spawn
 - Browser automation runs in an isolated Playwright context
-- Python plugins run in subprocess sandboxes
+- Python plugins run in subprocess sandboxes with timeouts and bounded output drains
 - Network access is logged and auditable
 
 ### 6. Secrets Manager
@@ -362,10 +363,10 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 ```
 ~/.runeweaver/
 ├── config.toml          # Non-sensitive configuration
-├── sandbox/             # Staging area for file writes
+├── sandbox/             # Staging area for document/image writes only (Tier 1/2 Seatbelt)
 │   ├── pending/         # Awaiting approval
 │   ├── approved/        # Approved for real filesystem
-│   └── attachments/     # `email.attachment` downloads only (10 MB cap, requiresApproval)
+│   └── attachments/     # `email.attachment` document/image downloads only (10 MB cap, requiresApproval)
 ├── memory/
 │   ├── episodes.db      # SQLite: conversation history (sessions, messages, episodes), scheduler jobs, run logs
 │   └── vectors/         # LanceDB: semantic memory
@@ -378,11 +379,18 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 └── voice/
     ├── whisper/         # Local Whisper model
     └── tts/             # TTS models/voice data
+
+Tier 3 (outside the host filesystem): ephemeral microVM detonation chamber
+for archives — zero host mounts, manifest-only returns, immediate reap.
 ```
 
-Staging is bounded by `[sandbox]` retention policy (`retention_days = 14`,
+Document/image staging is bounded by `[sandbox]` retention policy (`retention_days = 14`,
 `max_total_bytes = 524288000`, `cleanup_interval_seconds = 3600`): the
-sweeper reclaims expired files and evicts oldest-first past the cap. File-tool
+sweeper reclaims expired files and evicts oldest-first past the cap. Archives
+never touch staging: they detonate in ephemeral Tier 3 microVMs (`container_runtime`,
+`container_base_image`) with manifest-only returns, immediate post-call reap,
+crash-orphan reclamation after `archive_session_ttl_minutes = 10`, and a
+`max_concurrent_machines = 3` spawn gate. File-tool
 access is further bounded by `[files]` policy (`deny_patterns`,
 `allow_roots`, `require_approval_on_deny`).
 
@@ -473,10 +481,14 @@ whisper_model = "base"
 tts_provider = "system"  # macOS say command
 
 [sandbox]
-staging_path = "~/.runeweaver/sandbox"
+staging_path = "~/.runeweaver/sandbox"  # document/image staging only; archives detonate in ephemeral Tier 3 microVMs with no host mounts
 retention_days = 14  # staged-file retention window (1-365 days)
 max_total_bytes = 524288000  # total staging cap across pending/approved/attachments (500 MiB)
 cleanup_interval_seconds = 3600  # seconds between periodic cleanup passes (hourly)
+container_runtime = "container"  # Apple container CLI for Tier 3 detonation
+container_base_image = "alpine:latest"  # OCI image for detonation guests
+archive_session_ttl_minutes = 10  # crash-orphan reclamation TTL for ephemeral detonation machines (1-1440)
+max_concurrent_machines = 3  # concurrent detonation cap, enforced before spawn
 
 [files]
 deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]

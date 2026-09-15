@@ -842,7 +842,7 @@ public actor PermissionGate {
         do {
             try await store.save(snapshot)
         } catch {
-            fputs("[ERROR] PermissionGate: Failed to persist trust grants: \(error)\n", stderr)
+            RuneWeaverLog.stores.error("PermissionGate: Failed to persist trust grants: \(error)")
         }
     }
 }

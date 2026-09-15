@@ -2,8 +2,9 @@
 //
 // Provides the `email.search`, `email.read`, `email.attachment`, and
 // `email.send` plugin tools over the `python3 imaplib`/`smtplib` bridges
-// with read-only fetches, staged sandbox downloads, approval-gated
-// sending, and execution-time credential resolution.
+// with read-only fetches, staged sandbox downloads for documents and
+// images, zero-host-mounts microVM detonation for archives, approval-gated
+// sending and archive exports, and execution-time credential resolution.
 
 import Foundation
 import RuneWeaverCore
@@ -401,6 +402,209 @@ public struct EmailReadTool: Tool, Sendable {
     }
 }
 
+/// Result of detonating one archive inside an isolated microVM.
+///
+/// Carries only the session correlation id, the entry manifest, and the
+/// raw bytes of a single inspected entry when requested. Archive bytes
+/// themselves never cross back except through the single inspected entry
+/// or an explicit approval-gated export handled by the tool.
+public struct EmailArchiveDetonationResult: Sendable, Equatable {
+    /// Ephemeral detonation correlation id (`runeweaver-session-<uuid>`).
+    public let sessionId: String
+    /// Entries listed inside the archive, truncated to the manifest cap.
+    public let manifest: [EmailArchiveEntry]
+    /// Whether the manifest was truncated at the entry cap.
+    public let manifestTruncated: Bool
+    /// Raw bytes of the inspected subpath entry, when requested.
+    public let entryData: Data?
+
+    /// Creates a detonation result.
+    public init(sessionId: String, manifest: [EmailArchiveEntry], manifestTruncated: Bool = false, entryData: Data? = nil) {
+        self.sessionId = sessionId
+        self.manifest = manifest
+        self.manifestTruncated = manifestTruncated
+        self.entryData = entryData
+    }
+}
+
+/// Isolates archive inspection inside a zero-host-mounts microVM.
+///
+/// Production spawns an ephemeral container machine per archive with no
+/// filesystem mounts, unpacks and lists inside via `run`, and reaps the
+/// machine immediately; the TTL sweeper remains the safety net for
+/// crashes. Tests inject a stub so no container runtime is required.
+public protocol EmailArchiveDetonator: Sendable {
+    /// Detonates archive bytes and optionally extracts one entry.
+    /// - Parameters:
+    ///   - filename: Original attachment filename for format hints.
+    ///   - contentType: Raw MIME type for format hints.
+    ///   - data: Raw archive bytes (already capped at the attachment limit).
+    ///   - subpath: Validated relative entry path to extract, if any.
+    /// - Returns: Session id, manifest, and optional entry bytes.
+    func detonate(filename: String, contentType: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult
+}
+
+/// Ephemeral microVM detonator backed by the container machine manager.
+///
+/// Each call owns its machine lifetime: create with the configured base
+/// image and runtime (the manager exposes no mount options, so guests
+/// start with zero host mounts on an internal virtual disk), stream the
+/// archive bytes over stdin for listing and optional extraction, then
+/// best-effort stop and delete. Sessions are never reused across calls:
+/// every detonation is ephemeral and reaped immediately, with the TTL prune
+/// as the safety net only for machines orphaned by crashes. Concurrency is
+/// capped before spawn so a burst of archives fails closed instead of
+/// oversubscribing the host. Failures fail closed without staging
+/// anything to the host; cleanup errors are swallowed so the original
+/// detonation failure (never archive bytes or secrets) is what surfaces.
+public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
+    /// Container CLI runtime name or path.
+    public let containerRuntime: String
+    /// OCI base image for detonation guests.
+    public let containerBaseImage: String
+    /// Maximum concurrent detonation machines, enforced before spawn.
+    public let maxConcurrentMachines: Int
+
+    /// Creates a live detonator.
+    /// - Parameters:
+    ///   - containerRuntime: Container CLI runtime name or path.
+    ///   - containerBaseImage: OCI base image for detonation guests.
+    ///   - maxConcurrentMachines: Cap on concurrent detonation machines, enforced before spawn.
+    public init(
+        containerRuntime: String = SandboxConfig.defaultContainerRuntime,
+        containerBaseImage: String = SandboxConfig.defaultContainerBaseImage,
+        maxConcurrentMachines: Int = SandboxConfig.defaultMaxConcurrentMachines
+    ) {
+        self.containerRuntime = containerRuntime
+        self.containerBaseImage = containerBaseImage
+        self.maxConcurrentMachines = maxConcurrentMachines
+    }
+
+    /// Detonates archive bytes in a fresh ephemeral machine.
+    /// - Parameters:
+    ///   - filename: Original attachment filename for format hints.
+    ///   - contentType: Raw MIME type (unused beyond hints; listing probes formats inside the guest).
+    ///   - data: Raw archive bytes.
+    ///   - subpath: Validated relative entry path to extract, if any.
+    /// - Returns: Session id, manifest, and optional entry bytes.
+    public func detonate(filename: String, contentType _: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult {
+        let sessionId = "runeweaver-session-\(UUID().uuidString.lowercased())"
+        try await enforceConcurrencyLimit()
+        try await ContainerMachineManager.createMachine(name: sessionId, image: containerBaseImage, runtime: containerRuntime)
+        do {
+            let listing = try await ContainerMachineManager.run(
+                machineName: sessionId,
+                command: ["sh", "-c", Self.listScript],
+                runtime: containerRuntime,
+                inputData: data
+            )
+            guard listing.exitCode == 0 else {
+                throw EmailIMAPError.bridgeFailed("Could not inspect archive '\(filename)': unsupported or corrupt archive")
+            }
+            let parsed = EmailArchiveListingParser.parseListOutput(listing.stdoutString, filename: filename)
+            guard !parsed.isEmpty else {
+                throw EmailIMAPError.bridgeFailed("Could not inspect archive '\(filename)': unsupported or corrupt archive")
+            }
+            let capped = Array(parsed.prefix(EmailAttachmentLifecycle.maxArchiveManifestEntries))
+            let truncated = parsed.count > capped.count
+            var entryData: Data?
+            if let subpath {
+                guard capped.contains(where: { $0.path == subpath }) || parsed.contains(where: { $0.path == subpath }) else {
+                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
+                }
+                if let known = (parsed.first(where: { $0.path == subpath }))?.sizeBytes, known > EmailAttachmentTool.maxAttachmentBytes {
+                    throw EmailIMAPError.bridgeFailed(EmailAttachmentTool.oversizeNote(sizeBytes: known))
+                }
+                let extracted = try await ContainerMachineManager.run(
+                    machineName: sessionId,
+                    command: ["sh", "-c", Self.extractScript, "sh", subpath],
+                    runtime: containerRuntime,
+                    inputData: data
+                )
+                guard extracted.exitCode == 0 else {
+                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
+                }
+                guard extracted.stdout.count <= EmailAttachmentTool.maxAttachmentBytes else {
+                    throw EmailIMAPError.bridgeFailed(EmailAttachmentTool.oversizeNote(sizeBytes: extracted.stdout.count))
+                }
+                entryData = extracted.stdout
+            }
+            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
+            return EmailArchiveDetonationResult(sessionId: sessionId, manifest: capped, manifestTruncated: truncated, entryData: entryData)
+        } catch {
+            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
+            throw error
+        }
+    }
+
+    /// Guest script listing archive entries from stdin bytes.
+    ///
+    /// Streams stdin to a scratch file, then probes ZIP before TAR so a
+    /// mislabeled archive still lists; every probe is quiet so only the
+    /// successful listing reaches stdout. No caller input is interpolated:
+    /// the script is fixed text, keeping subpath payloads out of shell parsing.
+    private static var listScript: String {
+        "cat > /tmp/payload.bin; "
+            + "if command -v unzip >/dev/null 2>&1; then "
+            + "if unzip -l /tmp/payload.bin 2>/dev/null; then exit 0; fi; fi; "
+            + "if tar -tzvf /tmp/payload.bin 2>/dev/null; then exit 0; fi; "
+            + "if tar -tvf /tmp/payload.bin 2>/dev/null; then exit 0; fi; "
+            + "echo UNSUPPORTED_ARCHIVE >&2; exit 1"
+    }
+
+    /// Guest script extracting one argv-passed entry from stdin bytes.
+    ///
+    /// The entry arrives as `$1` (never interpolated into shell text) and is
+    /// always referenced behind `--` so leading dashes cannot parse as flags.
+    /// ZIP is probed before TAR for the same mislabeling reason as listing.
+    private static var extractScript: String {
+        "cat > /tmp/payload.bin; entry=\"$1\"; "
+            + "if command -v unzip >/dev/null 2>&1; then "
+            + "if unzip -p /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; fi; "
+            + "if tar -xzOf /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; "
+            + "if tar -xOf /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; "
+            + "exit 1"
+    }
+
+    /// Stops and deletes a detonation machine without masking the caller error.
+    ///
+    /// Ephemeral machines are reaped immediately after listing/extraction so
+    /// no detonation VM outlives its call; the periodic TTL prune stays
+    /// the safety net only for crashes between create and reap. There is no
+    /// warm-session reuse across calls.
+    /// - Parameters:
+    ///   - name: Machine to reap.
+    ///   - runtime: Container CLI runtime.
+    private static func bestEffortReap(name: String, runtime: String) async {
+        try? await ContainerMachineManager.stopMachine(name: name, runtime: runtime)
+        try? await ContainerMachineManager.deleteMachine(name: name, runtime: runtime)
+    }
+
+    /// Fails closed when the concurrent detonation cap is already reached.
+    ///
+    /// Counts live `runeweaver-`-prefixed machines before spawn so a burst of
+    /// archives cannot oversubscribe the host; listing failures fall through
+    /// to `createMachine` so a missing runtime still surfaces its own error.
+    private func enforceConcurrencyLimit() async throws {
+        let cap = max(1, maxConcurrentMachines)
+        do {
+            let live = try await ContainerMachineManager.listMachines(
+                prefix: ContainerMachineManager.machinePrefix,
+                runtime: containerRuntime
+            )
+            guard live.count < cap else {
+                throw EmailIMAPError.bridgeFailed(
+                    "Archive detonation limit reached (\(cap) concurrent sessions); try again after idle sessions are reclaimed."
+                )
+            }
+        } catch let bridge as EmailIMAPError {
+            throw bridge
+        } catch {
+            // Listing failed (for example runtime missing): let create surface it.
+        }
+    }
+}
+
 /// `email.attachment` tool over IMAP.
 ///
 /// Downloads one attachment part by zero-based index into the sandbox
@@ -412,6 +616,10 @@ public struct EmailReadTool: Tool, Sendable {
 /// payloads (`text/*`, `application/json` under 256 KB); binaries are
 /// never inlined. Pass the `mailbox` labeled on the `email.search` hit
 /// to fetch from folders outside `INBOX`; omitted or blank means `INBOX`.
+/// Archives (ZIP/TAR families by type or filename) never touch host
+/// staging: they detonate in a zero-host-mounts ephemeral microVM with
+/// only a manifest returned, plus `subpath` inspection and an
+/// approval-gated `saveToPath` export guarded by `FilesAccessGuard`.
 /// Declared `requiresApproval` so the graduated-trust gate prompts
 /// before any download. Reads only: it opens each mailbox read-only
 /// with `(BODY.PEEK[])` fetches and never sends mail. Secrets are
@@ -421,13 +629,14 @@ public struct EmailAttachmentTool: Tool, Sendable {
     public let name = "email.attachment"
     /// When the LLM should use this tool.
     public let description =
-        "Downloads one email attachment by index into the sandbox staging area. "
+        "Downloads one email attachment by index. "
             + "Use when the user asks to save or open an attachment listed by email.read. "
             + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
-            + "Writes only under the sandbox staging area; parts over the size cap are skipped with a note. "
+            + "Documents and images stage under the sandbox staging area with inline extracted text or vision payloads; "
+            + "archives detonate in a zero-host-mounts ephemeral microVM returning only a manifest. "
             + "Pass preview true to inline the first 2000 chars for small text parts (binaries are never inlined); "
-            + "the success envelope also reports the staged path expiry, MIME category, and a files.read follow-up hint."
-    /// Function-calling contract for `account`, `id`, `index`, `mailbox` (plus accepted aliases), and `preview`.
+            + "pass subpath to inspect one file inside a detonated archive, or saveToPath for an approval-gated workspace export."
+    /// Function-calling contract for `account`, `id`, `index`, `mailbox` (plus accepted aliases), `preview`, `subpath`, and `saveToPath`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -440,7 +649,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 + #"index","minimum":0},"mailbox":{"type":"string","description":"Mailbox from the email.search hit "#
                 + #"(e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias for mailbox"}, "#
                 + #""preview":{"type":"boolean","description":"When true, inline the first 2000 chars for small "#
-                + #"text parts (text/*, application/json under 256 KB); binaries are never inlined"}}"#
+                + #"text parts (text/*, application/json under 256 KB); binaries are never inlined"},"#
+                + #""subpath":{"type":"string","description":"Relative entry path inside a detonated archive to inspect"}, "#
+                + #""saveToPath":{"type":"string","description":"Workspace destination for an approval-gated archive export"}}"#
                 + #","required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
                 + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},"#
                 + #"{"anyOf":[{"required":["index"]},{"required":["attachmentIndex"]},"#
@@ -451,6 +662,8 @@ public struct EmailAttachmentTool: Tool, Sendable {
 
     /// Maximum decoded bytes staged per attachment (10 MB).
     public static let maxAttachmentBytes = 10 * 1024 * 1024
+    /// Maximum raw image bytes delivered inline as vision Base64 (1 MiB). Larger images stay staged/export-only so model context stays bounded.
+    static let maxVisionBytes = 1 * 1024 * 1024
     /// Subdirectory of the staging area holding downloaded attachments.
     public static let attachmentsSubdirectory = "attachments"
 
@@ -458,29 +671,54 @@ public struct EmailAttachmentTool: Tool, Sendable {
     private let emailConfig: EmailConfig
     /// IMAP gateway (subprocess bridge by default, stub in tests).
     private let gateway: any EmailIMAPGateway
-    /// Sandbox staging configuration. Writes stay under `stagingPath`.
+    /// Sandbox staging configuration. Document and image writes stay under `stagingPath`.
     private let sandboxConfig: SandboxConfig
+    /// `[files]` policy guarding approval-gated archive exports. Defaults to the built-in defaults.
+    private let filesConfig: FilesConfig
+    /// Home boundary override forwarded to the guard. Nil means the real home.
+    private let homeDirectoryURL: URL?
+    /// Archive detonator (live microVM by default, stub in tests).
+    private let archiveDetonator: any EmailArchiveDetonator
 
     /// Creates an attachment tool.
     /// - Parameters:
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
     ///   - sandboxConfig: Sandbox staging configuration. Defaults to the built-in staging path.
+    ///   - filesConfig: `[files]` policy for archive exports. Defaults to the built-in defaults.
+    ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
+    ///   - archiveDetonator: Archive detonator. Defaults to the live microVM detonator.
     public init(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig()
+        sandboxConfig: SandboxConfig = SandboxConfig(),
+        filesConfig: FilesConfig = FilesConfig(),
+        homeDirectoryURL: URL? = nil,
+        archiveDetonator: (any EmailArchiveDetonator)? = nil
     ) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
         self.sandboxConfig = sandboxConfig
+        self.filesConfig = filesConfig
+        self.homeDirectoryURL = homeDirectoryURL
+        self.archiveDetonator = archiveDetonator ?? LiveEmailArchiveDetonator(
+            containerRuntime: sandboxConfig.containerRuntime,
+            containerBaseImage: sandboxConfig.containerBaseImage,
+            maxConcurrentMachines: sandboxConfig.maxConcurrentMachines
+        )
     }
 
-    /// Downloads one attachment part into the sandbox staging area.
+    /// Downloads one attachment part, detonating archives in isolation.
+    ///
+    /// Documents and images keep the staged-download path with inline
+    /// payloads; archives branch to the ephemeral microVM detonator and
+    /// never touch host staging, so untrusted archive bytes cannot reach
+    /// `files.read` through the sandbox. Dry runs fetch metadata but spawn
+    /// no machines and write no files.
     /// - Parameters:
-    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, optional `mailbox`, and optional `preview`.
-    ///   - context: Ambient execution context. `dryRun` fetches but never writes.
-    /// - Returns: JSON envelope with the staged path, lifecycle hints, and optional inline preview, or a skip note, or a failure without secrets.
+    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, optional `mailbox`, `preview`, `subpath`, and `saveToPath`.
+    ///   - context: Ambient execution context. `dryRun` fetches but never writes or detonates.
+    /// - Returns: JSON envelope with the staged path or archive manifest, or a skip note, or a failure without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
@@ -493,7 +731,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 messageID: target.messageID,
                 attachmentIndex: target.attachmentIndex,
                 mailbox: effectiveMailbox,
-                preview: target.preview
+                preview: target.preview,
+                subpath: target.subpath,
+                saveToPath: target.saveToPath
             )
             let fetched = try await fetchedAttachment(
                 credentials: credentials,
@@ -503,6 +743,25 @@ public struct EmailAttachmentTool: Tool, Sendable {
             )
             if fetched.sizeBytes > Self.maxAttachmentBytes || fetched.data.count > Self.maxAttachmentBytes {
                 return oversizedEnvelope(target: effectiveTarget, accountName: account.name, fetched: fetched, callID: input.callID)
+            }
+            if EmailAttachmentLifecycle.isArchive(contentType: fetched.contentType, filename: fetched.filename) {
+                if context.dryRun {
+                    return archiveDryRunEnvelope(
+                        target: effectiveTarget,
+                        accountName: account.name,
+                        fetched: fetched,
+                        callID: input.callID
+                    )
+                }
+                return try await detonatedArchiveEnvelope(
+                    target: effectiveTarget,
+                    accountName: account.name,
+                    fetched: fetched,
+                    callID: input.callID
+                )
+            }
+            if effectiveTarget.subpath != nil || effectiveTarget.saveToPath != nil {
+                throw EmailIMAPError.bridgeFailed("Invalid email.attachment arguments: 'subpath' and 'saveToPath' are only valid for archives.")
             }
             let destination = try stagedDestinationURL(
                 target: effectiveTarget,
@@ -530,13 +789,6 @@ public struct EmailAttachmentTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-    }
-
-    /// Builds the skip note for an oversized part.
-    /// - Parameter sizeBytes: Decoded size of the skipped part.
-    /// - Returns: Human-readable note naming the size cap.
-    public static func oversizeNote(sizeBytes: Int) -> String {
-        "Attachment skipped: \(sizeBytes) bytes exceeds the 10 MB download cap."
     }
 
     /// Resolves the sandbox-confined destination for a download.
@@ -647,6 +899,10 @@ private struct AttachmentTarget {
     let mailbox: String
     /// Whether the caller requested an inline text preview.
     let preview: Bool
+    /// Validated relative entry path inside a detonated archive, if any.
+    let subpath: String?
+    /// Validated workspace export destination for a detonated archive, if any.
+    let saveToPath: String?
 }
 
 extension EmailAttachmentTool {
@@ -668,6 +924,12 @@ extension EmailAttachmentTool {
         if let requestedMailbox = args.trimmedMailbox {
             try EmailIMAPValidation.validateMailbox(requestedMailbox)
         }
+        if let rawSubpath = args.trimmedSubpath {
+            _ = try EmailAttachmentLifecycle.validateArchiveSubpath(rawSubpath)
+        }
+        if let rawSaveToPath = args.trimmedSaveToPath {
+            try Self.validateSaveToPathSyntax(rawSaveToPath)
+        }
         return args
     }
 
@@ -678,6 +940,10 @@ extension EmailAttachmentTool {
     /// via `resolveMailboxAgainstList` like explicit values; folder names are never
     /// assumed. The optional `preview` flag passes through untouched so text
     /// previews stay opt-in and legacy calls without it behave identically.
+    /// Archive follow-ups validate fail-closed before any network or VM use:
+    /// `subpath` must be a relative in-archive path and `saveToPath` must
+    /// already satisfy the workspace guard, so a denied export never fetches
+    /// IMAP bytes or spawns a machine.
     /// - Parameter args: Decoded attachment arguments.
     /// - Returns: Trimmed routing.
     /// - Throws: Failure message when routing is empty or invalid.
@@ -695,7 +961,28 @@ extension EmailAttachmentTool {
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
         try EmailIMAPValidation.validateMailbox(mailbox)
-        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex, mailbox: mailbox, preview: args.preview)
+        var validatedSubpath: String?
+        if let rawSubpath = args.trimmedSubpath {
+            validatedSubpath = try EmailAttachmentLifecycle.validateArchiveSubpath(rawSubpath)
+        }
+        var validatedSaveToPath: String?
+        if let rawSaveToPath = args.trimmedSaveToPath {
+            try Self.validateSaveToPathSyntax(rawSaveToPath)
+            let decision = FilesAccessGuard.evaluate(path: rawSaveToPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+            guard decision.allowed else {
+                throw EmailIMAPError.bridgeFailed(decision.reason ?? "Invalid saveToPath: path is not in the permitted workspace")
+            }
+            validatedSaveToPath = decision.resolvedPath
+        }
+        return AttachmentTarget(
+            accountName: accountName,
+            messageID: messageID,
+            attachmentIndex: attachmentIndex,
+            mailbox: mailbox,
+            preview: args.preview,
+            subpath: validatedSubpath,
+            saveToPath: validatedSaveToPath
+        )
     }
 
     /// Resolves the configured account by exact then case-insensitive name.
@@ -847,13 +1134,18 @@ extension EmailAttachmentTool {
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Stages bytes under the sandbox and builds the success result.
+    /// Stages document and image bytes under the sandbox and builds the success result.
     ///
-    /// Attaches the post-download lifecycle (expiry from the sandbox
-    /// retention window, coarse MIME bucket, `files.read` follow-up hint,
-    /// and the guarded inline preview) so the model can act on the staged
-    /// file without a second round trip. Oversized and dry-run skips keep
-    /// the legacy shape with no lifecycle keys.
+    /// Archives never reach here: `execute` routes them to the microVM
+    /// detonator before any host write, so this path only handles inline
+    /// payloads with a staged copy for `files.read` follow-ups. Attaches the
+    /// post-download lifecycle (expiry from the sandbox retention window,
+    /// coarse MIME bucket, follow-up hint, and the guarded inline preview)
+    /// so the model can act on the staged file without a second round trip.
+    /// Inline payloads stay bounded: `extractedText` truncates to the shared
+    /// preview char cap with the truncation flagged in `note`, and vision
+    /// Base64 is omitted over the vision byte cap in favor of the staged copy.
+    /// Oversized and dry-run skips keep the legacy shape with no lifecycle keys.
     /// - Parameters:
     ///   - target: Trimmed routing (including the caller's `preview` request).
     ///   - accountName: Resolved account name for the envelope.
@@ -897,11 +1189,32 @@ extension EmailAttachmentTool {
             previewText = inline.text
             previewWasTruncated = inline.truncated ? true : false
         }
+        var extractedText: String?
+        var imageDataBase64: String?
+        var inlineNote: String?
+        if category == "text" {
+            if let capped = Self.cappedExtractedText(for: fetched.data) {
+                extractedText = capped.text
+                if capped.truncated {
+                    inlineNote = "Extracted text truncated to \(EmailAttachmentLifecycle.maxPreviewChars) chars; "
+                        + "use files.read with path \"\(destination.path)\" for the full text."
+                }
+            }
+        } else if category == "image" {
+            if let vision = Self.cappedVisionBase64(for: fetched.data) {
+                imageDataBase64 = vision
+            } else {
+                inlineNote = "Image omitted from inline vision payload (over \(Self.maxVisionBytes) bytes); "
+                    + "use files.read with path \"\(destination.path)\" to inspect it."
+            }
+        }
+
         let hint = EmailAttachmentLifecycle.nextStepsHint(
             path: destination.path,
             expiresAt: expiry,
             mimeCategory: category,
-            previewTruncated: previewWasTruncated
+            previewTruncated: previewWasTruncated,
+            archiveSessionId: nil
         )
         let envelope = EmailAttachmentEnvelope(
             account: accountName,
@@ -912,13 +1225,177 @@ extension EmailAttachmentTool {
             sizeBytes: fetched.sizeBytes,
             path: destination.path,
             skipped: false,
-            note: nil,
+            note: inlineNote,
             mailbox: target.mailbox,
             expiresAt: expiry,
             mimeCategory: category,
             nextSteps: hint,
             preview: previewText,
-            previewTruncated: previewText == nil ? nil : previewWasTruncated
+            previewTruncated: previewText == nil ? nil : previewWasTruncated,
+            extractedText: extractedText,
+            imageDataBase64: imageDataBase64,
+            archiveSessionId: nil,
+            archiveManifest: nil,
+            subpath: nil
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
+    /// Builds the dry-run result for an archive without spawning a machine.
+    ///
+    /// Keeps the legacy skip shape (no lifecycle keys, no manifest) so a
+    /// preview never detonates untrusted bytes and never writes host files;
+    /// the note names the would-be detonation instead of a staging path so
+    /// no caller mistakes a dry run for an isolated session.
+    /// - Parameters:
+    ///   - target: Trimmed routing.
+    ///   - accountName: Resolved account name for the envelope.
+    ///   - fetched: Downloaded metadata.
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with the dry-run note.
+    private func archiveDryRunEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        callID: String
+    ) -> ToolOutput {
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: nil,
+            skipped: true,
+            note: "Dry run: would detonate archive in an isolated microVM without staging to the host.",
+            mailbox: target.mailbox
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
+    /// Detonates an archive in an ephemeral microVM and builds the manifest result.
+    ///
+    /// Host staging is never touched on this path: the manifest, optional
+    /// subpath inspection payload, and optional approval-gated export are the
+    /// only data that cross back. The export destination is re-checked against
+    /// the workspace guard at write time (covering policy edits between
+    /// validation and detonation), and parent directories are created so the
+    /// export lands atomically. Entry payloads decode like direct downloads but
+    /// stay bounded: UTF-8 entries surface as `extractedText` truncated to the
+    /// shared preview char cap with the truncation flagged in `note`, image
+    /// entries surface as vision Base64 only under the vision byte cap, and
+    /// other binaries stay export-only so opaque bytes never enter
+    /// the model context. Failures carry only the filename and reason, never
+    /// entry bytes or secrets.
+    /// - Parameters:
+    ///   - target: Trimmed routing with validated `subpath`/`saveToPath`.
+    ///   - accountName: Resolved account name for the envelope.
+    ///   - fetched: Downloaded archive bytes (already capped).
+    ///   - callID: Correlation identifier.
+    /// - Returns: Success envelope with the manifest-only result, or throws for `execute` to convert.
+    private func detonatedArchiveEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        callID: String
+    ) async throws -> ToolOutput {
+        let result = try await archiveDetonator.detonate(
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            data: fetched.data,
+            subpath: target.subpath
+        )
+        var extractedText: String?
+        var imageDataBase64: String?
+        var inlineNote: String?
+        if let subpath = target.subpath {
+            guard let entryData = result.entryData else {
+                throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
+            }
+            guard entryData.count <= Self.maxAttachmentBytes else {
+                throw EmailIMAPError.bridgeFailed(Self.oversizeNote(sizeBytes: entryData.count))
+            }
+            let entryCategory = EmailAttachmentLifecycle.archiveEntryCategory(forPath: subpath)
+            if entryCategory == "image" {
+                if let vision = Self.cappedVisionBase64(for: entryData) {
+                    imageDataBase64 = vision
+                } else {
+                    inlineNote = "Image entry omitted from inline vision payload (over \(Self.maxVisionBytes) bytes); use 'saveToPath' to export it."
+                }
+            } else if let capped = Self.cappedExtractedText(for: entryData) {
+                extractedText = capped.text
+                if capped.truncated {
+                    inlineNote = "Extracted text truncated to \(EmailAttachmentLifecycle.maxPreviewChars) chars; use 'saveToPath' to export the full entry."
+                }
+            }
+        }
+        var exportedPath: String?
+        if let saveToPath = target.saveToPath {
+            let decision = FilesAccessGuard.evaluate(path: saveToPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+            guard decision.allowed else {
+                throw EmailIMAPError.bridgeFailed(decision.reason ?? "Invalid saveToPath: path is not in the permitted workspace")
+            }
+            let bytesToWrite: Data
+            if target.subpath != nil {
+                guard let entryData = result.entryData else {
+                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
+                }
+                bytesToWrite = entryData
+            } else {
+                bytesToWrite = fetched.data
+            }
+            guard bytesToWrite.count <= Self.maxAttachmentBytes else {
+                throw EmailIMAPError.bridgeFailed(Self.oversizeNote(sizeBytes: bytesToWrite.count))
+            }
+            do {
+                let destination = URL(fileURLWithPath: decision.resolvedPath, isDirectory: false)
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try bytesToWrite.write(to: destination, options: .atomic)
+                exportedPath = decision.resolvedPath
+            } catch {
+                throw EmailIMAPError.bridgeFailed("Could not export archive entry: \(error.localizedDescription)")
+            }
+        }
+        // Workspace exports carry no staging expiry, so the session hint is
+        // built pathless (avoiding an empty "expires" tail) with the export
+        // destination prepended when present.
+        let sessionHint = EmailAttachmentLifecycle.nextStepsHint(
+            path: nil,
+            expiresAt: nil,
+            mimeCategory: "archive",
+            previewTruncated: nil,
+            archiveSessionId: result.sessionId
+        )
+        let hint = exportedPath.map { "Exported to \"\($0)\". \(sessionHint)" } ?? sessionHint
+        var notes: [String] = []
+        if result.manifestTruncated {
+            notes.append("Archive manifest truncated to \(EmailAttachmentLifecycle.maxArchiveManifestEntries) entries; narrow with 'subpath'.")
+        }
+        if let inlineNote {
+            notes.append(inlineNote)
+        }
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: exportedPath,
+            skipped: false,
+            note: notes.isEmpty ? nil : notes.joined(separator: " "),
+            mailbox: target.mailbox,
+            expiresAt: nil,
+            mimeCategory: "archive",
+            nextSteps: hint,
+            preview: nil,
+            previewTruncated: nil,
+            extractedText: extractedText,
+            imageDataBase64: imageDataBase64,
+            archiveSessionId: result.sessionId,
+            archiveManifest: result.manifest,
+            subpath: target.subpath
         )
         return successEnvelope(envelope, callID: callID)
     }
@@ -936,8 +1413,9 @@ extension EmailAttachmentTool {
 /// `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
 /// (`imap.mail.me.com:993`, account `icloud` via the
 /// `EMAIL_ICLOUD_PASSWORD` app-specific password) read-only with
-/// verified TLS; attachment bytes stage under the sandbox staging
-/// area only. Sending uses verified SMTP submission (explicit overrides
+/// verified TLS; document and image bytes stage under the sandbox staging
+/// area only while archives detonate in zero-host-mounts ephemeral
+/// microVMs with manifest-only returns. Sending uses verified SMTP submission (explicit overrides
 /// or 587 STARTTLS then 465 SSL) with the sender defaulting to the
 /// account username, sandbox-confined attachments, threaded replies,
 /// and a best-effort Sent copy.
@@ -951,12 +1429,18 @@ public enum EmailTools {
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
     ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
     ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
+    ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
+    ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
+    ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.
     /// - Returns: Search, read, attachment, and send tools in registration order.
     public static func makeTools(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig()
+        sandboxConfig: SandboxConfig = SandboxConfig(),
+        filesConfig: FilesConfig = FilesConfig(),
+        homeDirectoryURL: URL? = nil,
+        archiveDetonator: (any EmailArchiveDetonator)? = nil
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
         let sharedSMTP: any EmailSMTPGateway = smtpGateway ?? SubprocessSMTPGateway()
@@ -965,7 +1449,10 @@ public enum EmailTools {
         let attachment: any Tool = EmailAttachmentTool(
             emailConfig: emailConfig,
             gateway: shared,
-            sandboxConfig: sandboxConfig
+            sandboxConfig: sandboxConfig,
+            filesConfig: filesConfig,
+            homeDirectoryURL: homeDirectoryURL,
+            archiveDetonator: archiveDetonator
         )
         let send: any Tool = EmailSendTool(
             emailConfig: emailConfig,
@@ -983,14 +1470,28 @@ public enum EmailTools {
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
     ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
     ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
+    ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
+    ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
+    ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.
     public static func register(
         on bus: ToolBus,
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
         smtpGateway: (any EmailSMTPGateway)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig()
+        sandboxConfig: SandboxConfig = SandboxConfig(),
+        filesConfig: FilesConfig = FilesConfig(),
+        homeDirectoryURL: URL? = nil,
+        archiveDetonator: (any EmailArchiveDetonator)? = nil
     ) async {
-        for tool in makeTools(emailConfig: emailConfig, gateway: gateway, smtpGateway: smtpGateway, sandboxConfig: sandboxConfig) {
+        for tool in makeTools(
+            emailConfig: emailConfig,
+            gateway: gateway,
+            smtpGateway: smtpGateway,
+            sandboxConfig: sandboxConfig,
+            filesConfig: filesConfig,
+            homeDirectoryURL: homeDirectoryURL,
+            archiveDetonator: archiveDetonator
+        ) {
             await bus.register(tool: tool)
         }
     }

@@ -1,9 +1,12 @@
 // Rune Weaver Core — Sandbox staging retention and reclamation.
 //
-// Owns the lifecycle of staged files under the sandbox staging area. Staged
-// writes in `pending/`, `approved/`, and `attachments/` are bounded by a
-// retention window plus a total size cap so approvals stay reachable for days
-// without unbounded disk growth. Cleanup runs at service boot and on a
+// Owns the lifecycle of staged document/image files under the sandbox staging
+// area. Staged writes in `pending/`, `approved/`, and `attachments/` are
+// bounded by a retention window plus a total size cap so approvals stay
+// reachable for days without unbounded disk growth. Archives never touch
+// staging: they detonate in ephemeral microVMs with manifest-only returns,
+// so this sweeper covers only non-archive files while the TTL prune reclaims
+// crash-orphaned detonation machines. Cleanup runs at service boot and on a
 // periodic cadence; every pass records only aggregate counts to the local
 // audit trail, never file contents.
 
@@ -19,6 +22,10 @@ public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
     public let filesRemoved: Int
     /// Total bytes reclaimed in this pass.
     public let bytesFreed: Int
+    /// Number of ephemeral or stale container machines destroyed.
+    public let containersDestroyed: Int
+    /// Number of stale running container machines stopped.
+    public let staleMachinesStopped: Int
     /// Non-fatal problems encountered (for example skipped symlinks or
     /// failed removals). Messages carry no file contents.
     public let errors: [String]
@@ -27,10 +34,20 @@ public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
     /// - Parameters:
     ///   - filesRemoved: Files removed.
     ///   - bytesFreed: Bytes reclaimed.
+    ///   - containersDestroyed: Container machines destroyed.
+    ///   - staleMachinesStopped: Running container machines stopped.
     ///   - errors: Non-fatal problems. Defaults to empty.
-    public init(filesRemoved: Int, bytesFreed: Int, errors: [String] = []) {
+    public init(
+        filesRemoved: Int = 0,
+        bytesFreed: Int = 0,
+        containersDestroyed: Int = 0,
+        staleMachinesStopped: Int = 0,
+        errors: [String] = []
+    ) {
         self.filesRemoved = filesRemoved
         self.bytesFreed = bytesFreed
+        self.containersDestroyed = containersDestroyed
+        self.staleMachinesStopped = staleMachinesStopped
         self.errors = errors
     }
 }
@@ -47,6 +64,10 @@ public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
     public let filesRemoved: Int
     /// Bytes reclaimed in this pass.
     public let bytesFreed: Int
+    /// Container machines destroyed in this pass.
+    public let containersDestroyed: Int
+    /// Stale machines stopped in this pass.
+    public let staleMachinesStopped: Int
     /// Number of non-fatal problems encountered.
     public let errorCount: Int
     /// When the pass completed.
@@ -61,6 +82,8 @@ public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
         self.stagingPath = stagingPath
         self.filesRemoved = summary.filesRemoved
         self.bytesFreed = summary.bytesFreed
+        self.containersDestroyed = summary.containersDestroyed
+        self.staleMachinesStopped = summary.staleMachinesStopped
         self.errorCount = summary.errors.count
         self.timestamp = timestamp
     }
@@ -115,7 +138,7 @@ public enum FileSandboxAuditLog {
                     try payload.write(to: url, options: .atomic)
                 }
             } catch {
-                fputs("[WARN] FileSandboxAuditLog: Failed to append audit record to \(url.path): \(error)\n", stderr)
+                RuneWeaverLog.sandbox.warning("FileSandboxAuditLog: Failed to append audit record to \(url.path): \(error)")
                 // Best-effort: audit failures never fail the cleanup.
             }
         }
@@ -147,28 +170,95 @@ public enum SandboxCleaner {
     ///   - now: Reference date for age checks. Defaults to now so tests can pin time.
     /// - Returns: Aggregate counts plus non-fatal problems (no file contents).
     public static func cleanup(config: SandboxConfig, now: Date = Date()) -> SandboxCleanupSummary {
-        var filesRemoved = 0
-        var bytesFreed = 0
-        var errors: [String] = []
+        let containerResult = sweepContainers(config: config, now: now)
+        let fileResult = sweepStagingFiles(config: config, now: now)
 
+        return SandboxCleanupSummary(
+            filesRemoved: fileResult.filesRemoved,
+            bytesFreed: fileResult.bytesFreed,
+            containersDestroyed: containerResult.destroyed,
+            staleMachinesStopped: containerResult.stopped,
+            errors: containerResult.errors + fileResult.errors
+        )
+    }
+
+    private static func sweepContainers(config: SandboxConfig, now: Date) -> ContainerPruneResult {
+        guard ContainerMachineManager.isRuntimeAvailable(runtime: config.containerRuntime) else {
+            return ContainerPruneResult()
+        }
+        return ContainerMachineManager.pruneStaleMachinesSync(
+            prefix: ContainerMachineManager.machinePrefix,
+            maxAgeSeconds: TimeInterval(config.archiveSessionTTLMinutes * 60),
+            now: now,
+            runtime: config.containerRuntime
+        )
+    }
+
+    private struct StagingFilesSweepResult {
+        let filesRemoved: Int
+        let bytesFreed: Int
+        let errors: [String]
+    }
+
+    private struct SweepReclamation {
+        var filesRemoved: Int = 0
+        var bytesFreed: Int = 0
+    }
+
+    private static func sweepStagingFiles(config: SandboxConfig, now: Date) -> StagingFilesSweepResult {
         let trimmed = config.stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            return SandboxCleanupSummary(filesRemoved: 0, bytesFreed: 0, errors: ["Invalid sandbox staging path"])
+            return StagingFilesSweepResult(filesRemoved: 0, bytesFreed: 0, errors: ["Invalid sandbox staging path"])
         }
         let expanded = (trimmed as NSString).expandingTildeInPath
-        // Resolve both sides before comparing so a symlinked staging root or
-        // `..` segments cannot bypass the prefix check below.
         let stagingURL = URL(fileURLWithPath: expanded, isDirectory: true).standardized
         let resolvedStaging = stagingURL.resolvingSymlinksInPath().standardized
         let stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
 
         var isStagingDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: stagingURL.path, isDirectory: &isStagingDir) else {
-            // Missing staging is a clean no-op, not an error: fresh installs
-            // have nothing to reclaim yet.
-            return SandboxCleanupSummary(filesRemoved: 0, bytesFreed: 0, errors: [])
+            return StagingFilesSweepResult(filesRemoved: 0, bytesFreed: 0, errors: [])
         }
 
+        var errors: [String] = []
+        let candidates = collectStagingCandidates(
+            stagingURL: stagingURL,
+            stagingPrefix: stagingPrefix,
+            resolvedStaging: resolvedStaging,
+            errors: &errors
+        )
+
+        var reclamation = SweepReclamation()
+        let remaining = sweepExpiredEntries(
+            candidates: candidates,
+            config: config,
+            stagingPrefix: stagingPrefix,
+            now: now,
+            reclamation: &reclamation,
+            errors: &errors
+        )
+
+        sweepOversizedEntries(
+            remaining: remaining,
+            config: config,
+            stagingPrefix: stagingPrefix,
+            reclamation: &reclamation,
+            errors: &errors
+        )
+
+        return StagingFilesSweepResult(
+            filesRemoved: reclamation.filesRemoved,
+            bytesFreed: reclamation.bytesFreed,
+            errors: errors
+        )
+    }
+
+    private static func collectStagingCandidates(
+        stagingURL: URL,
+        stagingPrefix: String,
+        resolvedStaging: URL,
+        errors: inout [String]
+    ) -> [StagedEntry] {
         var candidates: [StagedEntry] = []
         for subdir in managedSubdirectories {
             let subURL = stagingURL.appendingPathComponent(subdir, isDirectory: true)
@@ -176,8 +266,6 @@ public enum SandboxCleaner {
             guard FileManager.default.fileExists(atPath: subURL.path, isDirectory: &isDir), isDir.boolValue else {
                 continue
             }
-            // A symlinked subdirectory pointing outside must not be descended
-            // into; verify containment before enumerating.
             let resolvedSub = subURL.resolvingSymlinksInPath().standardized
             guard resolvedSub.path == resolvedStaging.path || resolvedSub.path.hasPrefix(stagingPrefix) else {
                 errors.append("Skipped \(subdir): escapes the staging area")
@@ -185,9 +273,17 @@ public enum SandboxCleaner {
             }
             collectFiles(under: subURL, stagingPrefix: stagingPrefix, candidates: &candidates, errors: &errors)
         }
+        return candidates
+    }
 
-        // Expiry first: stale files leave before cap pressure is measured so
-        // the cap protects live approvals rather than expired debris.
+    private static func sweepExpiredEntries(
+        candidates: [StagedEntry],
+        config: SandboxConfig,
+        stagingPrefix: String,
+        now: Date,
+        reclamation: inout SweepReclamation,
+        errors: inout [String]
+    ) -> [StagedEntry] {
         var remaining: [StagedEntry] = []
         remaining.reserveCapacity(candidates.count)
         let retentionInterval = Double(max(0, config.retentionDays)) * 86400
@@ -201,8 +297,6 @@ public enum SandboxCleaner {
                 remaining.append(entry)
                 continue
             }
-            // Re-verify containment immediately before removal so a symlink
-            // swapped between enumeration and deletion cannot redirect the unlink.
             let resolved = entry.url.resolvingSymlinksInPath().standardized
             guard resolved.path.hasPrefix(stagingPrefix) else {
                 errors.append("Skipped expired file escaping the staging area")
@@ -211,57 +305,53 @@ public enum SandboxCleaner {
             }
             do {
                 try FileManager.default.removeItem(at: entry.url)
-                filesRemoved += 1
-                bytesFreed += entry.size
+                reclamation.filesRemoved += 1
+                reclamation.bytesFreed += entry.size
             } catch {
                 errors.append("Could not remove expired file: \(error.localizedDescription)")
                 remaining.append(entry)
             }
         }
+        return remaining
+    }
 
-        // Size cap second, oldest-first: evicting the stalest approvals first
-        // keeps the most recently staged work available the longest.
-        if config.maxTotalBytes > 0 {
-            var total = remaining.reduce(0) { $0 + $1.size }
-            if total > config.maxTotalBytes {
-                // Deterministic oldest-first order with a path tie-break so
-                // repeated passes under the same clock evict identically.
-                let ordered = remaining.sorted {
-                    let left = $0.modified ?? Date.distantPast
-                    let right = $1.modified ?? Date.distantPast
-                    if left != right {
-                        return left < right
-                    }
-                    return $0.url.path < $1.url.path
-                }
-                var survivors: [StagedEntry] = []
-                survivors.reserveCapacity(ordered.count)
-                for entry in ordered {
-                    if total <= config.maxTotalBytes {
-                        survivors.append(entry)
-                        continue
-                    }
-                    let resolved = entry.url.resolvingSymlinksInPath().standardized
-                    guard resolved.path.hasPrefix(stagingPrefix) else {
-                        errors.append("Skipped oversized file escaping the staging area")
-                        survivors.append(entry)
-                        continue
-                    }
-                    do {
-                        try FileManager.default.removeItem(at: entry.url)
-                        filesRemoved += 1
-                        bytesFreed += entry.size
-                        total -= entry.size
-                    } catch {
-                        errors.append("Could not remove oversized file: \(error.localizedDescription)")
-                        survivors.append(entry)
-                    }
-                }
-                remaining = survivors
+    private static func sweepOversizedEntries(
+        remaining: [StagedEntry],
+        config: SandboxConfig,
+        stagingPrefix: String,
+        reclamation: inout SweepReclamation,
+        errors: inout [String]
+    ) {
+        guard config.maxTotalBytes > 0 else { return }
+        var total = remaining.reduce(0) { $0 + $1.size }
+        guard total > config.maxTotalBytes else { return }
+
+        let ordered = remaining.sorted {
+            let left = $0.modified ?? Date.distantPast
+            let right = $1.modified ?? Date.distantPast
+            if left != right {
+                return left < right
+            }
+            return $0.url.path < $1.url.path
+        }
+        for entry in ordered {
+            if total <= config.maxTotalBytes {
+                break
+            }
+            let resolved = entry.url.resolvingSymlinksInPath().standardized
+            guard resolved.path.hasPrefix(stagingPrefix) else {
+                errors.append("Skipped oversized file escaping the staging area")
+                continue
+            }
+            do {
+                try FileManager.default.removeItem(at: entry.url)
+                reclamation.filesRemoved += 1
+                reclamation.bytesFreed += entry.size
+                total -= entry.size
+            } catch {
+                errors.append("Could not remove oversized file: \(error.localizedDescription)")
             }
         }
-
-        return SandboxCleanupSummary(filesRemoved: filesRemoved, bytesFreed: bytesFreed, errors: errors)
     }
 
     /// One enumerated regular file with its reclamation metadata.

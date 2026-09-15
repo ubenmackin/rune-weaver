@@ -1,3 +1,8 @@
+// Rune Weaver Core — LLM provider protocols, response streams, and model metadata.
+//
+// Establishes the core contracts for LLM inference, streaming response chunks,
+// and tool call generation across local and cloud language model backends.
+
 /// Describes a model behind an ``LLMProvider``.
 public struct ModelInfo: Sendable, Codable, Equatable {
     /// Display name of the model (e.g. `"gemma-4-9b"`).

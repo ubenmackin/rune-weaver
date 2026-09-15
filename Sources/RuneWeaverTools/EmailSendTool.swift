@@ -960,31 +960,35 @@ extension EmailSendTool {
         // Trim, expand tildes, then standardize so `~` and `..` resolve
         // before sandbox confinement is checked.
         let trimmedStaging = sandboxConfig.stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let expandedStaging = (trimmedStaging as NSString).expandingTildeInPath
-        let stagingRoot = (expandedStaging as NSString).standardizingPath
-        guard !stagingRoot.isEmpty else {
-            throw EmailIMAPError.bridgeFailed("Invalid sandbox staging path")
+        let stagingPrefix: String
+        if !trimmedStaging.isEmpty {
+            let expandedStaging = (trimmedStaging as NSString).expandingTildeInPath
+            let stagingRoot = (expandedStaging as NSString).standardizingPath
+            let stagingURL = URL(fileURLWithPath: stagingRoot, isDirectory: true).standardized
+            let resolvedStaging = stagingURL.resolvingSymlinksInPath()
+            stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
+        } else {
+            stagingPrefix = ""
         }
-        let stagingURL = URL(fileURLWithPath: stagingRoot, isDirectory: true).standardized
-        let resolvedStaging = stagingURL.resolvingSymlinksInPath()
-        let stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
         var staged: [StagedSendAttachment] = []
         var totalBytes = 0
         for path in paths {
             let expanded = (path as NSString).expandingTildeInPath
             let candidate = URL(fileURLWithPath: expanded, isDirectory: false).standardized
             let resolved = candidate.resolvingSymlinksInPath()
-            guard resolved.path.hasPrefix(stagingPrefix) else {
-                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': path must be under the sandbox staging area")
+            let isUnderStaging = !stagingPrefix.isEmpty && resolved.path.hasPrefix(stagingPrefix)
+            let guardDecision = FilesAccessGuard.evaluate(url: resolved)
+            guard isUnderStaging || guardDecision.allowed else {
+                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': path must be under the sandbox staging area or permitted workspace")
             }
             let values: URLResourceValues
             do {
                 values = try resolved.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             } catch {
-                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': file not found in the sandbox staging area")
+                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': file not found")
             }
             guard values.isRegularFile == true else {
-                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': not a regular file in the sandbox staging area")
+                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': not a regular file")
             }
             let data: Data
             do {

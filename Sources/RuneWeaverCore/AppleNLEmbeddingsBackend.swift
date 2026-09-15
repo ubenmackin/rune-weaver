@@ -1,4 +1,4 @@
-// RuneWeaver - Core - Apple NaturalLanguage sentence embeddings
+// Rune Weaver Core — Apple NaturalLanguage sentence embeddings.
 //
 // Local-first default vector producer with zero third-party dependencies.
 // Bridges semantic recall to the on-device English sentence model so facts

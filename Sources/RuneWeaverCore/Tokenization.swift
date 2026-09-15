@@ -1,3 +1,8 @@
+// Rune Weaver Core — Text tokenization and BM25-style keyword matching.
+//
+// Shared lexical tokenization, stopword filtering, and keyword scoring
+// used across vector stores, memory engines, and fallback search indexes.
+
 import Foundation
 
 /// Shared keyword helpers for memory search.

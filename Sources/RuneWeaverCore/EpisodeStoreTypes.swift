@@ -1,3 +1,8 @@
+// Rune Weaver Core — Types and summarizers for episodic memory.
+//
+// Defines episode records, query parameters, search hits, summarization
+// function types, and extractive summary utilities for episodic memory.
+
 import Foundation
 
 /// A single episodic memory record: one turn of conversation history.

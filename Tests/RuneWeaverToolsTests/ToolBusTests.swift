@@ -1,3 +1,5 @@
+// Rune Weaver Tools Tests — Built-in tool bus wiring and registration tests.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools

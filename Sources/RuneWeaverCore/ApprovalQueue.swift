@@ -232,6 +232,10 @@ public actor ApprovalQueue {
             cancelWaiter(id: id)
             return ApprovalQueueDecision(approved: false, duration: nil)
         }
+        // Cancellation contract: onCancel is synchronous and hops onto the
+        // actor via an asynchronous Task to invoke cancelWaiter. In the event
+        // of immediate process/actor teardown before the task executes,
+        // `clear()` guarantees all remaining suspended continuations are resumed.
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<ApprovalQueueDecision, Never>) in
                 waiters[id] = continuation

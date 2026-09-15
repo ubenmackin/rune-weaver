@@ -1,3 +1,8 @@
+// Rune Weaver Tools — Embedded Python IMAP subprocess script source.
+//
+// Generates the hardened Python helper script executed via subprocess
+// to perform read-only IMAP mailbox queries, message fetches, and attachment extraction.
+
 import Foundation
 
 /// Embedded `python3 imaplib` helper.

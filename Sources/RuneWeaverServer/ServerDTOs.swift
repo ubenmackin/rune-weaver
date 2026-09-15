@@ -893,6 +893,10 @@ public struct SettingsResponse: Content, Equatable {
     public let sandboxRetentionDays: Int
     public let sandboxMaxTotalBytes: Int
     public let sandboxCleanupIntervalSeconds: Int
+    public let sandboxContainerRuntime: String
+    public let sandboxContainerBaseImage: String
+    public let sandboxArchiveSessionTTLMinutes: Int
+    public let sandboxMaxConcurrentMachines: Int
     public let filesDenyPatterns: [String]
     public let filesAllowRoots: [String]
     public let filesRequireApprovalOnDeny: Bool
@@ -919,6 +923,10 @@ public struct SettingsResponse: Content, Equatable {
         self.sandboxRetentionDays = config.sandbox.retentionDays
         self.sandboxMaxTotalBytes = config.sandbox.maxTotalBytes
         self.sandboxCleanupIntervalSeconds = config.sandbox.cleanupIntervalSeconds
+        self.sandboxContainerRuntime = config.sandbox.containerRuntime
+        self.sandboxContainerBaseImage = config.sandbox.containerBaseImage
+        self.sandboxArchiveSessionTTLMinutes = config.sandbox.archiveSessionTTLMinutes
+        self.sandboxMaxConcurrentMachines = config.sandbox.maxConcurrentMachines
         self.filesDenyPatterns = config.files.denyPatterns
         self.filesAllowRoots = config.files.allowRoots
         self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
@@ -953,6 +961,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let sandboxRetentionDays: Int?
     public let sandboxMaxTotalBytes: Int?
     public let sandboxCleanupIntervalSeconds: Int?
+    public let sandboxContainerRuntime: String?
+    public let sandboxContainerBaseImage: String?
+    public let sandboxArchiveSessionTTLMinutes: Int?
+    public let sandboxMaxConcurrentMachines: Int?
     public let filesDenyPatterns: [String]?
     public let filesAllowRoots: [String]?
     public let filesRequireApprovalOnDeny: Bool?
@@ -978,6 +990,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
         sandboxRetentionDays: Int? = nil,
         sandboxMaxTotalBytes: Int? = nil,
         sandboxCleanupIntervalSeconds: Int? = nil,
+        sandboxContainerRuntime: String? = nil,
+        sandboxContainerBaseImage: String? = nil,
+        sandboxArchiveSessionTTLMinutes: Int? = nil,
+        sandboxMaxConcurrentMachines: Int? = nil,
         filesDenyPatterns: [String]? = nil,
         filesAllowRoots: [String]? = nil,
         filesRequireApprovalOnDeny: Bool? = nil,
@@ -1002,6 +1018,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.sandboxRetentionDays = sandboxRetentionDays
         self.sandboxMaxTotalBytes = sandboxMaxTotalBytes
         self.sandboxCleanupIntervalSeconds = sandboxCleanupIntervalSeconds
+        self.sandboxContainerRuntime = sandboxContainerRuntime
+        self.sandboxContainerBaseImage = sandboxContainerBaseImage
+        self.sandboxArchiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
+        self.sandboxMaxConcurrentMachines = sandboxMaxConcurrentMachines
         self.filesDenyPatterns = filesDenyPatterns
         self.filesAllowRoots = filesAllowRoots
         self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
@@ -1106,6 +1126,18 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let sandboxCleanupIntervalSeconds {
             sandbox.cleanupIntervalSeconds = sandboxCleanupIntervalSeconds
+        }
+        if let sandboxContainerRuntime {
+            sandbox.containerRuntime = sandboxContainerRuntime
+        }
+        if let sandboxContainerBaseImage {
+            sandbox.containerBaseImage = sandboxContainerBaseImage
+        }
+        if let sandboxArchiveSessionTTLMinutes {
+            sandbox.archiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
+        }
+        if let sandboxMaxConcurrentMachines {
+            sandbox.maxConcurrentMachines = sandboxMaxConcurrentMachines
         }
     }
 

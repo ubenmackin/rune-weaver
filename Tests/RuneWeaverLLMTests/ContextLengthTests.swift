@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - Context length providers and display
+// Rune Weaver LLM Tests — Context length providers and display.
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM
 import Testing

@@ -1,4 +1,4 @@
-// EmbeddingsBackend — pluggable vector-embedding seam for semantic memory.
+// Rune Weaver Core — Pluggable vector-embedding seam for semantic memory.
 // Defines the EmbeddingsBackend protocol and the EmbeddingsError taxonomy.
 // Production code stays keyword-only via a nil backend from the factory;
 // the disabled backend below exists for explicit injection and tests.

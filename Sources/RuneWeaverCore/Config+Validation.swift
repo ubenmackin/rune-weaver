@@ -153,11 +153,6 @@ extension RuneWeaverConfig {
     }
 
     private func validateSandboxSection() throws {
-        if sandbox.stagingPath.isEmpty {
-            throw ConfigError.validationError(
-                field: "sandbox.staging_path", message: "must not be empty"
-            )
-        }
         if sandbox.retentionDays < 1 || sandbox.retentionDays > 365 {
             throw ConfigError.validationError(
                 field: "sandbox.retention_days", message: "must be between 1 and 365"
@@ -171,6 +166,26 @@ extension RuneWeaverConfig {
         if sandbox.cleanupIntervalSeconds <= 0 {
             throw ConfigError.validationError(
                 field: "sandbox.cleanup_interval_seconds", message: "must be positive"
+            )
+        }
+        if sandbox.containerRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(
+                field: "sandbox.container_runtime", message: "must not be empty"
+            )
+        }
+        if sandbox.containerBaseImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(
+                field: "sandbox.container_base_image", message: "must not be empty"
+            )
+        }
+        if sandbox.archiveSessionTTLMinutes <= 0 || sandbox.archiveSessionTTLMinutes > 1440 {
+            throw ConfigError.validationError(
+                field: "sandbox.archive_session_ttl_minutes", message: "must be between 1 and 1440"
+            )
+        }
+        if sandbox.maxConcurrentMachines <= 0 {
+            throw ConfigError.validationError(
+                field: "sandbox.max_concurrent_machines", message: "must be positive"
             )
         }
     }

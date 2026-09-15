@@ -617,11 +617,8 @@ public actor RunLogStore {
             do {
                 handle = try open(dbPath: dbPath)
             } catch {
-                fputs(
-                    "[ERROR] SQLiteRunLogStore: failed opening store"
-                        + " at \(dbPath): \(error); run \(entry.id) kept"
-                        + " in memory only and will not survive restart.\n",
-                    stderr
+                RuneWeaverLog.stores.error(
+                    "SQLiteRunLogStore: failed opening store at \(dbPath): \(error); run \(entry.id) kept in memory only and will not survive restart."
                 )
                 return
             }
@@ -635,7 +632,7 @@ public actor RunLogStore {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed preparing run write (code \(code)); run \(entry.id) kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing run write (code \(code)); run \(entry.id) kept in memory only.")
                 return
             }
             defer { sqlite3_finalize(statement) }
@@ -655,7 +652,7 @@ public actor RunLogStore {
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed writing run \(entry.id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed writing run \(entry.id) (code \(code)); in-memory state is ahead of disk.")
                 return
             }
 
@@ -670,14 +667,14 @@ public actor RunLogStore {
                 var pruneStatement: OpaquePointer?
                 guard sqlite3_prepare_v2(handle, pruneSQL, -1, &pruneStatement, nil) == SQLITE_OK else {
                     let code = sqlite3_errcode(handle)
-                    fputs("[ERROR] SQLiteRunLogStore: failed preparing run prune (code \(code)).\n", stderr)
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing run prune (code \(code)).")
                     return
                 }
                 defer { sqlite3_finalize(pruneStatement) }
                 sqlite3_bind_int64(pruneStatement, 1, Int64(max(1, pruneCapacity)))
                 guard sqlite3_step(pruneStatement) == SQLITE_DONE else {
                     let code = sqlite3_errcode(handle)
-                    fputs("[ERROR] SQLiteRunLogStore: failed pruning runs (code \(code)).\n", stderr)
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed pruning runs (code \(code)).")
                     return
                 }
             }
@@ -685,7 +682,7 @@ public actor RunLogStore {
 
         static func clear(dbPath: String) {
             guard let handle = try? open(dbPath: dbPath) else {
-                fputs("[ERROR] SQLiteRunLogStore: failed opening store at \(dbPath); clear kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed opening store at \(dbPath); clear kept in memory only.")
                 return
             }
             defer { sqlite3_close(handle) }
@@ -693,20 +690,20 @@ public actor RunLogStore {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed preparing run clear (code \(code)).\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing run clear (code \(code)).")
                 return
             }
             defer { sqlite3_finalize(statement) }
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed clearing runs (code \(code)).\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed clearing runs (code \(code)).")
                 return
             }
         }
 
         static func delete(id: UUID, dbPath: String) {
             guard let handle = try? open(dbPath: dbPath) else {
-                fputs("[ERROR] SQLiteRunLogStore: failed opening store at \(dbPath); delete kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed opening store at \(dbPath); delete kept in memory only.")
                 return
             }
             defer { sqlite3_close(handle) }
@@ -714,7 +711,7 @@ public actor RunLogStore {
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed preparing run delete (code \(code)); run \(id) kept in memory only.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing run delete (code \(code)); run \(id) kept in memory only.")
                 return
             }
             defer { sqlite3_finalize(statement) }
@@ -722,7 +719,7 @@ public actor RunLogStore {
             SQLiteHelpers.bindText(statement, index: 1, value: idStr)
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)
-                fputs("[ERROR] SQLiteRunLogStore: failed deleting run \(id) (code \(code)); in-memory state is ahead of disk.\n", stderr)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed deleting run \(id) (code \(code)); in-memory state is ahead of disk.")
                 return
             }
         }

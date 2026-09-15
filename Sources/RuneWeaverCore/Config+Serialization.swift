@@ -122,6 +122,10 @@ extension RuneWeaverConfig {
             "retention_days = \(sandbox.retentionDays)",
             "max_total_bytes = \(sandbox.maxTotalBytes)",
             "cleanup_interval_seconds = \(sandbox.cleanupIntervalSeconds)",
+            "container_runtime = \(Self.tomlQuoted(sandbox.containerRuntime))",
+            "container_base_image = \(Self.tomlQuoted(sandbox.containerBaseImage))",
+            "archive_session_ttl_minutes = \(sandbox.archiveSessionTTLMinutes)",
+            "max_concurrent_machines = \(sandbox.maxConcurrentMachines)",
             ""
         ]
     }

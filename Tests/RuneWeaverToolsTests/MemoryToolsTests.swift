@@ -1,3 +1,5 @@
+// Rune Weaver Tools Tests — Long-term memory tool plugin tests.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools

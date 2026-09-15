@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - file tools (`files.read`, `files.grep`, `files.glob`) plus shared guard.
+// Rune Weaver Tools Tests — File tools (files.read, files.grep, files.glob) and shared guard.
 //
 // Covers the read-only file tools and the centralised deny policy:
 // sensitive pattern hits fail with an approval hint and never leak bytes,

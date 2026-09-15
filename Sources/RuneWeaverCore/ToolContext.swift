@@ -1,3 +1,8 @@
+// Rune Weaver Core — Tool execution context, JSON schemas, and argument wrappers.
+//
+// Encapsulates environmental metadata, session identifiers, raw schema
+// documents, and typed argument models supplied to tools during execution.
+
 import Foundation
 
 /// Minimal JSON Schema descriptor for a tool's input.

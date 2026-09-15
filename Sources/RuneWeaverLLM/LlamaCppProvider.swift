@@ -1,3 +1,8 @@
+// Rune Weaver LLM — Local llama.cpp inference server provider adapter.
+//
+// Bridges llama.cpp OpenAI-compatible server instances (default port 8081)
+// into the LLMProvider interface with streaming token and tool-call support.
+
 import Foundation
 import RuneWeaverCore
 

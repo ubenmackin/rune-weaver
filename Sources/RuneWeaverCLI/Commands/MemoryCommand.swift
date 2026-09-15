@@ -1,3 +1,7 @@
+// Rune Weaver CLI — Semantic and episodic memory management commands.
+//
+// Provides CLI commands to search memory tiers, manage facts, and reindex vector embeddings.
+
 import ArgumentParser
 import Foundation
 import RuneWeaverCore

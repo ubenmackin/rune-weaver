@@ -334,7 +334,7 @@ private enum SQLitePluginRegistryStore {
         do {
             handle = try open(dbPath: dbPath)
         } catch {
-            fputs("[ERROR] ToolRegistryStore: failed opening store at \(dbPath): \(error)\n", stderr)
+            RuneWeaverLog.stores.error("ToolRegistryStore: failed opening store at \(dbPath): \(error)")
             return
         }
         guard let handle else { return }
@@ -377,7 +377,7 @@ private enum SQLitePluginRegistryStore {
         do {
             handle = try open(dbPath: dbPath)
         } catch {
-            fputs("[ERROR] ToolRegistryStore: failed opening store at \(dbPath): \(error)\n", stderr)
+            RuneWeaverLog.stores.error("ToolRegistryStore: failed opening store at \(dbPath): \(error)")
             return
         }
         guard let handle else { return }

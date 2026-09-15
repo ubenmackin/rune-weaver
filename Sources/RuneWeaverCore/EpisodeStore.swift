@@ -1,3 +1,9 @@
+// Rune Weaver Core — SQLite-backed episodic memory with full-text search.
+//
+// Manages conversation turns in SQLite with FTS5 search, compaction, and
+// JSON fallback when SQLite3 is unavailable. Funnels blocking I/O through
+// SQLiteSerialIO to serialize disk access and keep actor methods suspension-friendly.
+
 import Foundation
 
 #if canImport(SQLite3)
