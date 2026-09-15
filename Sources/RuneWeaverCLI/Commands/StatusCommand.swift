@@ -1,3 +1,7 @@
+// Rune Weaver CLI — Subsystem status inspection and diagnostic commands.
+//
+// Provides CLI commands to probe provider reachability, memory statistics, and active tools.
+
 import ArgumentParser
 import Foundation
 import RuneWeaverCore

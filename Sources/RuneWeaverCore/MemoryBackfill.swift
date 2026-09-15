@@ -1,4 +1,4 @@
-// RuneWeaver - Core - Semantic store maintenance for MemoryEngine.
+// Rune Weaver Core — Semantic store maintenance for MemoryEngine.
 //
 // Houses the vector-store maintenance surface (counts, dimension reads,
 // clearing, reindexing, and embedding backfill) plus its outcome value so

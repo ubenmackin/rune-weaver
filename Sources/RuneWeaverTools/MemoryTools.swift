@@ -103,7 +103,7 @@ public enum FileMemoryAuditLog {
                     try payload.write(to: url, options: .atomic)
                 }
             } catch {
-                fputs("[WARN] FileMemoryAuditLog: Failed to append memory audit record to \(url.path): \(error)\n", stderr)
+                RuneWeaverLog.tools.warning("FileMemoryAuditLog: Failed to append memory audit record to \(url.path): \(error)")
                 // Best-effort: audit failures never fail the tool call.
             }
         }

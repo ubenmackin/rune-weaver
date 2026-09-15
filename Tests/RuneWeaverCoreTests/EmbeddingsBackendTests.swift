@@ -1,4 +1,4 @@
-// EmbeddingsBackendTests — contract tests for the embeddings seam.
+// Rune Weaver Core Tests — Contract tests for the embeddings seam.
 // Verifies the disabled backend, error equality, and the batch ordering
 // guarantees that semantic memory and recall depend on, using a lightweight
 // stub backend. Guards the invariants every future provider must uphold.

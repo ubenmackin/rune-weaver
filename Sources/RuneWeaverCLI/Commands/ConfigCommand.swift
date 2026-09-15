@@ -1,3 +1,12 @@
+// Rune Weaver CLI — Configuration show/set surface for config.toml.
+//
+// Human-facing inspection and mutation entry point for the effective
+// `RuneWeaverConfig`: `config show` renders every section without ever
+// revealing secret values, while `config set` updates one dotted key in
+// place. Preserves surrounding comments, ordering, and unknown sections
+// so hand edits survive automation, and delegates canonical rendering to
+// the core serializer for fresh files.
+
 import ArgumentParser
 import Foundation
 import RuneWeaverCore
@@ -45,28 +54,7 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("name = \(config.engine.name)")
         print("log_level = \(config.engine.logLevel)")
         print("")
-        print("[llm]")
-        print("default_provider = \(config.llm.defaultProvider)")
-        print("fallback_provider = \(config.llm.fallbackProvider ?? "(none)")")
-        for name in config.llm.providers.keys.sorted() {
-            guard let entry = config.llm.providers[name] else { continue }
-            print("")
-            print("[llm.providers.\(name)]")
-            print("enabled = \(entry.enabled)")
-            if let model = entry.model {
-                print("model = \(model)")
-            }
-            if let serverURL = entry.serverURL {
-                print("server_url = \(serverURL)")
-            }
-            if let apiKeyEnv = entry.apiKeyEnv {
-                print("api_key_env = \(apiKeyEnv)")
-            }
-            if let providerType = entry.providerType {
-                print("provider_type = \(providerType)")
-            }
-            print("api_style = \(entry.apiStyle.rawValue)")
-        }
+        printLLMSection(config)
         print("")
         print("[memory]")
         print("vector_db_path = \(config.memory.vectorDBPath)")
@@ -79,8 +67,48 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("whisper_model = \(config.voice.whisperModel)")
         print("tts_provider = \(config.voice.ttsProvider)")
         print("")
-        print("[sandbox]")
-        print("staging_path = \(config.sandbox.stagingPath)")
+        printSandboxAndFilesSections(config)
+        print("")
+        print("[email] (\(config.email.accounts.count) accounts)")
+        for account in config.email.accounts {
+            print("")
+            print("[[email.accounts]]")
+            print("name = \(account.name)")
+            print("type = \(account.type)")
+            print("host = \(account.host)")
+            print("port = \(account.port)")
+            print("username = \(account.username)")
+            if let smtpHost = account.smtpHost {
+                print("smtp_host = \(smtpHost)")
+            }
+            if let smtpPort = account.smtpPort {
+                print("smtp_port = \(smtpPort)")
+            }
+            if account.smtpSecurity != .auto {
+                print("smtp_security = \(account.smtpSecurity.rawValue)")
+            }
+        }
+        print("")
+        print("[home]")
+        for entry in config.home.homekit {
+            print("[[home.homekit]]")
+            print("enabled = \(entry.enabled ? "true" : "false")")
+        }
+        for entry in config.home.homeAssistant {
+            print("[[home.home_assistant]]")
+            print("enabled = \(entry.enabled ? "true" : "false")")
+            if let url = entry.url {
+                print("url = \(url)")
+            }
+            if let tokenEnv = entry.tokenEnv {
+                print("token_env = \(tokenEnv)")
+            }
+        }
+        print("")
+        print("[plugins]")
+        print("plugins_dir = \(config.plugins.pluginsDir)")
+        print("marketplace_index_url = \(config.plugins.marketplaceIndexURL)")
+        print("auto_rescan = \(config.plugins.autoRescan ? "true" : "false")")
         print("")
         print("[scheduler] (\(config.scheduler.jobs.count) jobs)")
         if config.scheduler.jobs.isEmpty {
@@ -106,6 +134,65 @@ struct ConfigShowCommand: AsyncParsableCommand {
             }
         }
     }
+
+    /// Prints the LLM provider section.
+    ///
+    /// Provider rows vary per entry with optional model, endpoint, and style
+    /// fields, so isolating the sorted loop keeps the top-level show flow
+    /// linear while preserving secret-free rendering order.
+    /// - Parameter config: Effective configuration to display.
+    private func printLLMSection(_ config: RuneWeaverConfig) {
+        print("[llm]")
+        print("default_provider = \(config.llm.defaultProvider)")
+        print("fallback_provider = \(config.llm.fallbackProvider ?? "(none)")")
+        for name in config.llm.providers.keys.sorted() {
+            guard let entry = config.llm.providers[name] else { continue }
+            print("")
+            print("[llm.providers.\(name)]")
+            print("enabled = \(entry.enabled)")
+            if let model = entry.model {
+                print("model = \(model)")
+            }
+            if let serverURL = entry.serverURL {
+                print("server_url = \(serverURL)")
+            }
+            if let apiKeyEnv = entry.apiKeyEnv {
+                print("api_key_env = \(apiKeyEnv)")
+            }
+            if let providerType = entry.providerType {
+                print("provider_type = \(providerType)")
+            }
+            print("api_style = \(entry.apiStyle.rawValue)")
+            if let contextLength = entry.contextLength {
+                print("context_length = \(contextLength)")
+            }
+        }
+    }
+
+    /// Prints sandbox retention and file-policy sections together.
+    ///
+    /// Both sections describe local trust boundaries for staged writes and
+    /// guarded reads, so grouping them keeps related policy visible in one
+    /// place without lengthening the main show flow.
+    /// - Parameter config: Effective configuration to display.
+    private func printSandboxAndFilesSections(_ config: RuneWeaverConfig) {
+        print("[sandbox]")
+        print("staging_path = \(config.sandbox.stagingPath)")
+        print("retention_days = \(config.sandbox.retentionDays)")
+        print("max_total_bytes = \(config.sandbox.maxTotalBytes)")
+        print("cleanup_interval_seconds = \(config.sandbox.cleanupIntervalSeconds)")
+        print("container_runtime = \(config.sandbox.containerRuntime)")
+        print("container_base_image = \(config.sandbox.containerBaseImage)")
+        print("archive_session_ttl_minutes = \(config.sandbox.archiveSessionTTLMinutes)")
+        print("max_concurrent_machines = \(config.sandbox.maxConcurrentMachines)")
+        print("")
+        print("[files]")
+        let denyPatterns = "[" + config.files.denyPatterns.map { RuneWeaverConfig.tomlQuoted($0) }.joined(separator: ", ") + "]"
+        let allowRoots = "[" + config.files.allowRoots.map { RuneWeaverConfig.tomlQuoted($0) }.joined(separator: ", ") + "]"
+        print("deny_patterns = \(denyPatterns)")
+        print("allow_roots = \(allowRoots)")
+        print("require_approval_on_deny = \(config.files.requireApprovalOnDeny ? "true" : "false")")
+    }
 }
 
 /// Updates a single configuration value.
@@ -117,7 +204,7 @@ struct ConfigSetCommand: AsyncParsableCommand {
     )
 
     /// Dotted config key to update.
-    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, memory.embedding_backend).")
+    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, sandbox.retention_days).")
     var key: String
 
     /// New value for the key.
@@ -256,9 +343,38 @@ private func sandboxTOMLAssignment(key lower: String, value: String) throws -> T
     switch lower {
     case "sandbox.staging_path":
         TOMLAssignment(section: "sandbox", key: "staging_path", rendered: tomlQuoted(value))
+    case "sandbox.retention_days":
+        try sandboxPositiveIntAssignment(dottedKey: "sandbox.retention_days", key: "retention_days", value: value)
+    case "sandbox.max_total_bytes":
+        try sandboxPositiveIntAssignment(dottedKey: "sandbox.max_total_bytes", key: "max_total_bytes", value: value)
+    case "sandbox.cleanup_interval_seconds":
+        try sandboxPositiveIntAssignment(dottedKey: "sandbox.cleanup_interval_seconds", key: "cleanup_interval_seconds", value: value)
+    case "sandbox.container_runtime":
+        TOMLAssignment(section: "sandbox", key: "container_runtime", rendered: tomlQuoted(value))
+    case "sandbox.container_base_image":
+        TOMLAssignment(section: "sandbox", key: "container_base_image", rendered: tomlQuoted(value))
+    case "sandbox.archive_session_ttl_minutes":
+        try sandboxPositiveIntAssignment(dottedKey: "sandbox.archive_session_ttl_minutes", key: "archive_session_ttl_minutes", value: value)
+    case "sandbox.max_concurrent_machines":
+        try sandboxPositiveIntAssignment(dottedKey: "sandbox.max_concurrent_machines", key: "max_concurrent_machines", value: value)
     default:
         nil
     }
+}
+
+/// Builds a validated positive-integer sandbox assignment so mistyped values fail fast with the offending key.
+/// - Parameters:
+///   - dottedKey: Dotted key for error reporting (e.g. `sandbox.retention_days`).
+///   - key: TOML key within `[sandbox]`.
+///   - value: Raw new value.
+/// - Returns: TOML assignment with a canonical integer rendering.
+/// - Throws: `ValidationError` when the value is not a positive integer.
+private func sandboxPositiveIntAssignment(dottedKey: String, key: String, value: String) throws -> TOMLAssignment {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let intValue = Int(trimmed), intValue > 0 else {
+        throw ValidationError("'\(dottedKey)' must be a positive integer (got '\(value)').")
+    }
+    return TOMLAssignment(section: "sandbox", key: key, rendered: String(intValue))
 }
 
 private func providerTOMLAssignment(key: String, lower: String, value: String) throws -> TOMLAssignment {
@@ -267,13 +383,13 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
                 + "llm.fallback_provider, memory.*, voice.*, sandbox.*, "
-                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style)."
+                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length)."
         )
     }
     let section = "llm.providers.\(parts[2])"
     guard let field = try providerFieldAssignment(section: section, field: parts[3], key: key, value: value) else {
         throw ValidationError(
-            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style."
+            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style, context_length."
         )
     }
     return field
@@ -298,9 +414,31 @@ private func providerFieldAssignment(section: String, field: String, key: String
             )
         }
         return TOMLAssignment(section: section, key: "api_style", rendered: tomlQuoted(style.rawValue))
+    case "context_length":
+        let length = try providerContextLengthValue(key: key, value: value)
+        return TOMLAssignment(section: section, key: "context_length", rendered: String(length))
     default:
         return nil
     }
+}
+
+/// Validates a provider context-window override shared by both file-edit and fresh-file paths.
+///
+/// A non-positive window would pass through to validation later with a less
+/// actionable message, so both `config set` paths fail fast here with the
+/// dotted key and the offending value. Surrounding whitespace is ignored so
+/// shell-quoted values behave like the sibling sandbox integer assignments.
+/// - Parameters:
+///   - key: Dotted key for error reporting.
+///   - value: Raw new value.
+/// - Returns: Validated positive context length.
+/// - Throws: `ValidationError` when the value is not a positive integer.
+private func providerContextLengthValue(key: String, value: String) throws -> Int {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let intValue = Int(trimmed), intValue > 0 else {
+        throw ValidationError("'\(key)' must be a positive integer (got '\(value)').")
+    }
+    return intValue
 }
 
 /// Applies a `config set` update to an in-memory config (new-file path).
@@ -395,6 +533,42 @@ private func applySandboxValue(key lower: String, value: String, config: inout R
     case "sandbox.staging_path":
         config.sandbox.stagingPath = value
         return true
+    case "sandbox.retention_days":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
+            throw ValidationError("sandbox.retention_days must be a positive integer (got '\(value)')")
+        }
+        config.sandbox.retentionDays = intVal
+        return true
+    case "sandbox.max_total_bytes":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
+            throw ValidationError("sandbox.max_total_bytes must be a positive integer (got '\(value)')")
+        }
+        config.sandbox.maxTotalBytes = intVal
+        return true
+    case "sandbox.cleanup_interval_seconds":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
+            throw ValidationError("sandbox.cleanup_interval_seconds must be a positive integer (got '\(value)')")
+        }
+        config.sandbox.cleanupIntervalSeconds = intVal
+        return true
+    case "sandbox.container_runtime":
+        config.sandbox.containerRuntime = value
+        return true
+    case "sandbox.container_base_image":
+        config.sandbox.containerBaseImage = value
+        return true
+    case "sandbox.archive_session_ttl_minutes":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
+            throw ValidationError("sandbox.archive_session_ttl_minutes must be a positive integer (got '\(value)')")
+        }
+        config.sandbox.archiveSessionTTLMinutes = intVal
+        return true
+    case "sandbox.max_concurrent_machines":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
+            throw ValidationError("sandbox.max_concurrent_machines must be a positive integer (got '\(value)')")
+        }
+        config.sandbox.maxConcurrentMachines = intVal
+        return true
     default:
         return false
     }
@@ -403,7 +577,10 @@ private func applySandboxValue(key lower: String, value: String, config: inout R
 private func applyProviderValue(key: String, lower: String, value: String, config: inout RuneWeaverConfig) throws {
     let parts = lower.split(separator: ".").map(String.init)
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
-        throw ValidationError("Unknown config key '\(key)'. Run 'rune-weaver config show' for supported keys.")
+        throw ValidationError(
+            "Unknown config key '\(key)'. Supported: llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length). "
+                + "Run 'rune-weaver config show' for supported keys."
+        )
     }
     var entry = config.llm.providers[parts[2]] ?? ProviderConfig()
     switch parts[3] {
@@ -424,8 +601,12 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
             )
         }
         entry.apiStyle = style
+    case "context_length":
+        entry.contextLength = try providerContextLengthValue(key: key, value: value)
     default:
-        throw ValidationError("Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style.")
+        throw ValidationError(
+            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style, context_length."
+        )
     }
     config.llm.providers[parts[2]] = entry
 }
@@ -447,26 +628,22 @@ private func tomlBool(_ value: String, key: String) throws -> String {
     }
 }
 
-/// Quotes a string for TOML output.
+/// Quotes a string for TOML output via the canonical core serializer.
+///
+/// Single-sourced through `RuneWeaverConfig.tomlQuoted` so CLI writes keep
+/// the same control-character escapes as dashboard and bootstrap saves and
+/// always reparse instead of drifting on edge-case strings.
 /// - Parameter value: Raw string.
 /// - Returns: Double-quoted, escaped TOML string.
 private func tomlQuoted(_ value: String) -> String {
-    var out = "\""
-    for character in value {
-        switch character {
-        case "\\": out += "\\\\"
-        case "\"": out += "\\\""
-        case "\n": out += "\\n"
-        case "\t": out += "\\t"
-        default: out.append(character)
-        }
-    }
-    out += "\""
-    return out
+    RuneWeaverConfig.tomlQuoted(value)
 }
 
 /// Inserts or replaces one key inside a TOML document, preserving every
 /// other line, comment, and section.
+///
+/// An existing key keeps its trailing `# comment` so intent annotations
+/// survive automated `config set` writes; only the value is replaced.
 /// - Parameters:
 ///   - text: Current file contents.
 ///   - section: Section header without brackets.
@@ -482,7 +659,7 @@ private func upsertTOMLValue(_ text: String, section: String, key: String, rende
     for (index, line) in lines.enumerated() {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.hasPrefix("[") {
-            if trimmed == header {
+            if tomlHeaderBody(trimmed) == header {
                 headerIndex = index
             } else if headerIndex != nil {
                 nextHeaderIndex = index
@@ -499,7 +676,17 @@ private func upsertTOMLValue(_ text: String, section: String, key: String, rende
     }
     if let keyIndex {
         let indent = lines[keyIndex].prefix(while: { $0 == " " || $0 == "\t" })
-        lines[keyIndex] = "\(indent)\(key) = \(rendered)"
+        let commentSuffix = tomlTrailingComment(lines[keyIndex])
+        let separator: String = {
+            if commentSuffix.isEmpty {
+                return ""
+            }
+            if commentSuffix.hasPrefix("#") {
+                return " "
+            }
+            return ""
+        }()
+        lines[keyIndex] = "\(indent)\(key) = \(rendered)\(separator)\(commentSuffix)"
         return lines.joined(separator: "\n")
     }
     if let headerIndex {
@@ -525,51 +712,83 @@ private func upsertTOMLValue(_ text: String, section: String, key: String, rende
     return result
 }
 
+/// Returns a section header without its trailing `# comment`, if any.
+///
+/// A header like `[sandbox] # staged writes` is valid TOML and parses as
+/// `[sandbox]`, so matching must ignore the comment to avoid appending a
+/// duplicate section. Quoting rules match the value-comment scanner so a
+/// `#` inside quotes never splits the header; the original line is left
+/// untouched and only the comparison uses the stripped form.
+/// - Parameter trimmed: Whitespace-trimmed header line.
+/// - Returns: Header text without the trailing comment.
+private func tomlHeaderBody(_ trimmed: String) -> String {
+    let comment = tomlTrailingComment(trimmed)
+    guard !comment.isEmpty else {
+        return trimmed
+    }
+    return String(trimmed.dropLast(comment.count)).trimmingCharacters(in: .whitespaces)
+}
+
+/// Extracts the trailing `# comment` from a TOML value line, if any.
+///
+/// Scans outside quoted strings so a `#` inside `"..."` or `'...'` never
+/// splits the value; the returned suffix keeps its leading separator spaces
+/// and `#` text so callers can reattach it verbatim after replacing the value.
+/// - Parameter line: Original file line (e.g. `retention_days = 14  # days`).
+/// - Returns: Comment suffix (e.g. `"  # days"`) or `""` when no comment exists.
+private func tomlTrailingComment(_ line: String) -> String {
+    var inDouble = false
+    var inSingle = false
+    var escaped = false
+    var hashIndex: String.Index?
+    var cursor = line.startIndex
+    while cursor < line.endIndex {
+        let character = line[cursor]
+        if inDouble {
+            if escaped {
+                escaped = false
+            } else if character == "\\" {
+                escaped = true
+            } else if character == "\"" {
+                inDouble = false
+            }
+        } else if inSingle {
+            if character == "'" {
+                inSingle = false
+            }
+        } else {
+            if character == "\"" {
+                inDouble = true
+            } else if character == "'" {
+                inSingle = true
+            } else if character == "#" {
+                hashIndex = cursor
+                break
+            }
+        }
+        cursor = line.index(after: cursor)
+    }
+    guard let hash = hashIndex else { return "" }
+    var start = hash
+    while start > line.startIndex {
+        let previous = line.index(before: start)
+        if line[previous] == " " || line[previous] == "\t" {
+            start = previous
+        } else {
+            break
+        }
+    }
+    return String(line[start...])
+}
+
 /// Renders a full `config.toml` for freshly created files.
+///
+/// Delegates to the canonical core serializer so fresh `config set` files
+/// keep every section (sandbox retention caps, files/email/home/scheduler/
+/// plugins, provider context lengths) instead of shedding sections the CLI
+/// never edits directly.
 /// - Parameter config: Config to render.
 /// - Returns: TOML document text.
 private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
-    var lines: [String] = ["# Generated by rune-weaver config set", ""]
-    lines += ["[engine]", "name = \(tomlQuoted(config.engine.name))", "log_level = \(tomlQuoted(config.engine.logLevel))", ""]
-    lines += ["[llm]", "default_provider = \(tomlQuoted(config.llm.defaultProvider))"]
-    if let fallback = config.llm.fallbackProvider {
-        lines.append("fallback_provider = \(tomlQuoted(fallback))")
-    }
-    lines.append("")
-    for name in config.llm.providers.keys.sorted() {
-        guard let entry = config.llm.providers[name] else { continue }
-        lines.append("[llm.providers.\(name)]")
-        lines.append("enabled = \(entry.enabled ? "true" : "false")")
-        if let model = entry.model {
-            lines.append("model = \(tomlQuoted(model))")
-        }
-        if let serverURL = entry.serverURL {
-            lines.append("server_url = \(tomlQuoted(serverURL))")
-        }
-        if let apiKeyEnv = entry.apiKeyEnv {
-            lines.append("api_key_env = \(tomlQuoted(apiKeyEnv))")
-        }
-        if let providerType = entry.providerType {
-            lines.append("provider_type = \(tomlQuoted(providerType))")
-        }
-        lines.append("api_style = \(tomlQuoted(entry.apiStyle.rawValue))")
-        lines.append("")
-    }
-    lines += [
-        "[memory]",
-        "vector_db_path = \(tomlQuoted(config.memory.vectorDBPath))",
-        "episodes_db_path = \(tomlQuoted(config.memory.episodesDBPath))",
-        "embedding_model = \(tomlQuoted(config.memory.embeddingModel))",
-        "embedding_backend = \(tomlQuoted(config.memory.embeddingBackend))",
-        "",
-        "[voice]",
-        "stt_provider = \(tomlQuoted(config.voice.sttProvider))",
-        "whisper_model = \(tomlQuoted(config.voice.whisperModel))",
-        "tts_provider = \(tomlQuoted(config.voice.ttsProvider))",
-        "",
-        "[sandbox]",
-        "staging_path = \(tomlQuoted(config.sandbox.stagingPath))",
-        ""
-    ]
-    return lines.joined(separator: "\n")
+    config.renderTOML()
 }

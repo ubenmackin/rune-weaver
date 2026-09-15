@@ -139,6 +139,7 @@ public func defaultSessionSummarizer(_ messages: [Message]) -> String {
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         return "[\(message.role.rawValue)] \(trimmed)"
     }
+    // Delegated to extractiveSummary(lines:truncationLength:) defined in EpisodeStoreTypes.swift.
     return extractiveSummary(lines: parts, truncationLength: 2000)
 }
 
@@ -146,46 +147,54 @@ public func defaultSessionSummarizer(_ messages: [Message]) -> String {
 ///
 /// The manager keeps per-session message history in memory, truncates
 /// the context window via summarization when `maxMessages` is
-/// exceeded, and persists sessions to SQLite (`episodesDBPath`, the
-/// `episodes.db` file from `config.toml`). Where the SQLite3 module
-/// is unavailable the manager falls back to JSON files beside the
-/// configured database path so behavior stays identical.
+/// exceeded, and mirrors conversation turns to an optional SQLite
+/// database (`episodes.db` file from `config.toml`). Where the SQLite3 module
+/// is unavailable, storage falls back to JSON files beside the
+/// database path.
 ///
-/// Blocking SQLite/JSON work runs off the actor executor: every read
-/// and write suspends via the shared serial store queue
-/// (`SQLiteSerialIO`) so disk order matches actor order and deletes
-/// never race earlier writes.
+/// Blocking SQLite/JSON work runs off the actor executor via the
+/// shared serial store queue (`SQLiteSerialIO`) so disk order matches actor
+/// call order and shares ordering with the episode, scheduler, and run stores
+/// in `episodes.db`, keeping actor methods suspension-friendly.
 public actor ConversationManager {
-    /// Maximum sessions tracked concurrently in memory before evicting oldest.
-    public static let maxSessions: Int = 500
-    /// Maximum character length kept in the rolling summary before oldest text is truncated.
-    public static let maxSummaryLength: Int = 2000
-    /// Maximum title characters stored per session, bounding the sessions table and sidebar display.
-    public static let maxTitleLength: Int = 200
-    /// Maximum messages retained per session before truncation.
+    /// Maximum messages kept in memory per session before truncation.
     public let maxMessages: Int
-    /// Filesystem path of the episodes database, if configured.
+    /// Summarizer applied to messages evicted during truncation.
+    public let summarizer: SessionSummarizer
+    /// Filesystem path of the SQLite database (or JSON sidecar anchor).
     public let episodesDBPath: String?
-    /// Summarizer applied to evicted turns.
-    private let summarizer: SessionSummarizer
 
-    /// Sessions indexed by identifier.
+    /// Active sessions indexed by identifier.
     private var sessions: [UUID: ConversationSession] = [:]
-    /// Identifiers created in memory but not yet confirmed on disk.
+    /// Sessions created in-memory that have not yet been confirmed on disk.
     ///
-    /// New sessions from `ensureSession` have no immediate persist, and
-    /// appends suspend on the serial store queue; a concurrent list must
-    /// not treat those identifiers as cross-process deletes.
+    /// Preserves new sessions across concurrent disk listings until their
+    /// first persist lands, so a background list sweep cannot drop an
+    /// in-flight conversation.
     private var unpersistedIDs: Set<UUID> = []
 
-    /// Creates a manager.
+    /// Default context window before summarization kicks in.
+    public static let defaultMaxMessages = 100
+
+    /// Maximum character length kept in the rolling summary before oldest text is truncated.
+    public static let maxSummaryLength: Int = 2000
+
+    /// Default rolling summary character cap.
+    public static let defaultMaxSummaryLength = 2000
+
+    /// Bound on active in-memory sessions so memory never grows unbounded.
+    public static let maxSessions: Int = 500
+
+    /// Maximum title characters stored per session, bounding the sessions table and sidebar display.
+    public static let maxTitleLength: Int = 200
+
+    /// Creates a conversation manager.
     /// - Parameters:
-    ///   - maxMessages: Messages retained per session before
-    ///     truncation. Defaults to 100.
-    ///   - episodesDBPath: SQLite path for session persistence.
-    ///     Defaults to nil (memory only until `load`/`save` with a path).
-    ///   - summarizer: Summarizer for evicted turns. Defaults to
-    ///     ``defaultSessionSummarizer``.
+    ///   - maxMessages: Messages kept per session before summarization.
+    ///     Defaults to 100.
+    ///   - summarizer: Function summarizing evicted messages. Defaults to
+    ///     ``defaultSessionSummarizer(_:)``.
+    ///   - episodesDBPath: SQLite database file path. Pass `nil` for memory-only.
     public init(
         maxMessages: Int = 100,
         episodesDBPath: String? = nil,
@@ -233,8 +242,7 @@ public actor ConversationManager {
                     if let existing = sessions[id] {
                         // SQLite REAL timestamps lose sub-second precision, so a
                         // tie means the disk copy is stale next to a just-mutated
-                        // memory copy (rapid append plus persist race). Memory wins
-                        // ties to avoid clobbering newer titles and appends.
+                        // in-memory session.
                         if diskSession.updatedAt > existing.updatedAt {
                             sessions[id] = diskSession
                             return diskSession
@@ -245,7 +253,7 @@ public actor ConversationManager {
                     return diskSession
                 }
             } catch {
-                fputs("[WARN] ConversationManager: Failed reading session \(id) from disk: \(error.localizedDescription)\n", stderr)
+                RuneWeaverLog.stores.warning("ConversationManager: Failed reading session \(id) from disk: \(error.localizedDescription)")
             }
         }
         return sessions[id]
@@ -309,6 +317,10 @@ public actor ConversationManager {
                 unpersistedIDs.remove(oldest.id)
             }
         }
+        // New sessions defer disk persistence until the first message append
+        // so empty/ghost sessions are not written to episodes.db if a turn
+        // aborts before generation. Tracked in unpersistedIDs to guard against
+        // reconciliation eviction in listSessions.
         let session = ConversationSession(id: id, title: title, source: source)
         sessions[id] = session
         unpersistedIDs.insert(id)
@@ -316,6 +328,11 @@ public actor ConversationManager {
     }
 
     /// Returns summaries of all tracked sessions, sorted by last update date descending.
+    ///
+    /// Reconciles disk state with in-memory sessions: reads all rows from SQLite,
+    /// arbitrates conflicts by recency (memory wins ties to protect pending mutations),
+    /// and drops deleted rows while preserving unpersistedIDs. Scaled for up to
+    /// `maxSessions` (500) active sessions with O(N log N) sorting.
     public func listSessions() async -> [SessionSummary] {
         if let path = episodesDBPath {
             do {
@@ -346,7 +363,7 @@ public actor ConversationManager {
                     sessions.removeValue(forKey: id)
                 }
             } catch {
-                fputs("[WARN] ConversationManager: Failed reading sessions from disk: \(error.localizedDescription)\n", stderr)
+                RuneWeaverLog.stores.warning("ConversationManager: Failed reading sessions from disk: \(error.localizedDescription)")
             }
         }
         return sessions.values
@@ -420,7 +437,7 @@ public actor ConversationManager {
             do {
                 try SessionStoreIO.deleteAll(dbPath: path)
             } catch {
-                fputs("[ERROR] ConversationManager: Failed to delete all sessions from \(path): \(error)\n", stderr)
+                RuneWeaverLog.stores.error("ConversationManager: Failed to delete all sessions from \(path): \(error)")
             }
         }
     }
@@ -629,7 +646,8 @@ public actor ConversationManager {
     ///
     /// Prefers non-system rows; when overflow exceeds the non-system
     /// count the oldest kept rows are evicted as well to stay within
-    /// budget, which may include system messages.
+    /// budget, while strictly preserving the leading system prompt
+    /// so developer/system instructions are never evicted.
     /// - Parameters:
     ///   - messages: In-out message buffer to truncate.
     ///   - summary: In-out summary to extend with evicted turns.
@@ -650,8 +668,15 @@ public actor ConversationManager {
         }
         if dropped < overflow {
             let extra = overflow - dropped
-            evicted.append(contentsOf: kept.prefix(extra))
-            kept = Array(kept.dropFirst(extra))
+            // Invariant: never evict the leading system prompt (index 0 if .system)
+            // so developer/system instructions remain preserved in context.
+            let preserveFirstSystem = kept.first?.role == .system
+            let startIndex = preserveFirstSystem ? 1 : 0
+            let evictCount = min(extra, max(0, kept.count - startIndex))
+            if evictCount > 0 {
+                evicted.append(contentsOf: kept[startIndex ..< (startIndex + evictCount)])
+                kept.removeSubrange(startIndex ..< (startIndex + evictCount))
+            }
         }
         guard !evicted.isEmpty else { return }
         let chunk = summarizer(evicted)
@@ -715,7 +740,7 @@ public actor ConversationManager {
             }
             unpersistedIDs.remove(snapshot.id)
         } catch {
-            fputs("[WARN] ConversationManager: Failed to persist session \(snapshot.id): \(error)\n", stderr)
+            RuneWeaverLog.stores.warning("ConversationManager: Failed to persist session \(snapshot.id): \(error)")
             // Best-effort only; the identifier stays unpersisted so a
             // concurrent list never mistakes it for a cross-process delete.
         }
@@ -735,7 +760,7 @@ public actor ConversationManager {
             do {
                 try SessionStoreIO.write(sessions: [snapshot], dbPath: path, merge: true)
             } catch {
-                fputs("[ERROR] ConversationManager: Failed to uncancellably persist session \(snapshot.id): \(error)\n", stderr)
+                RuneWeaverLog.stores.error("ConversationManager: Failed to uncancellably persist session \(snapshot.id): \(error)")
             }
         }
         unpersistedIDs.remove(snapshot.id)
@@ -752,7 +777,7 @@ public actor ConversationManager {
             do {
                 try SessionStoreIO.delete(sessionID: id, dbPath: path)
             } catch {
-                fputs("[ERROR] ConversationManager: Failed to uncancellably delete session \(id): \(error)\n", stderr)
+                RuneWeaverLog.stores.error("ConversationManager: Failed to uncancellably delete session \(id): \(error)")
             }
         }
     }
@@ -967,7 +992,7 @@ enum SessionStoreIO {
                         )
                     } catch {
                         let code = sqlite3_errcode(handle)
-                        fputs("[WARN] SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)\n", stderr)
+                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
                     }
                 }
                 if !columnNames(in: .messages, handle: handle).contains("is_error") {
@@ -979,7 +1004,7 @@ enum SessionStoreIO {
                         )
                     } catch {
                         let code = sqlite3_errcode(handle)
-                        fputs("[WARN] SQLiteSessionStore: Migration failed for column 'is_error' (code \(code)): \(error)\n", stderr)
+                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column 'is_error' (code \(code)): \(error)")
                     }
                 }
                 // Record through the lock-guarded box so only the cache
@@ -1100,11 +1125,8 @@ enum SessionStoreIO {
                 let code = sqlite3_errcode(handle)
                 sqlite3_finalize(sessionStatement)
                 sessionStatement = nil
-                fputs(
-                    "[ERROR] SQLiteSessionStore: session upsert prepare"
-                        + " failed (code \(code)); not a missing column,"
-                        + " failing instead of dropping title/source.\n",
-                    stderr
+                RuneWeaverLog.stores.error(
+                    "SQLiteSessionStore: session upsert prepare failed (code \(code)); not a missing column, failing instead of dropping title/source."
                 )
                 throw ConversationManagerError.persistenceFailed("Could not prepare session upsert (code \(code))")
             }
@@ -1183,12 +1205,8 @@ enum SessionStoreIO {
                     let code = sqlite3_errcode(handle)
                     sqlite3_finalize(messageStatement)
                     messageStatement = nil
-                    fputs(
-                        "[ERROR] SQLiteSessionStore: message insert"
-                            + " prepare failed (code \(code)); not"
-                            + " a missing column, failing instead"
-                            + " of dropping is_error.\n",
-                        stderr
+                    RuneWeaverLog.stores.error(
+                        "SQLiteSessionStore: message insert prepare failed (code \(code)); not a missing column, failing instead of dropping is_error."
                     )
                     throw ConversationManagerError.persistenceFailed("Could not prepare message insert (code \(code))")
                 }

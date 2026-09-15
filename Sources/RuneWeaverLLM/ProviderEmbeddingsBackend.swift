@@ -1,4 +1,4 @@
-// Provider-backed embeddings adapter for semantic memory.
+// Rune Weaver LLM — Provider-backed embeddings adapter for semantic memory.
 //
 // Exposes the existing OpenAI-compatible `/v1/embeddings` path as an opt-in
 // semantic-memory backend. The adapter wraps the shared `LLMRouter` so chat

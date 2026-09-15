@@ -1,3 +1,8 @@
+// Rune Weaver LLM — Apple Silicon MLX local inference provider adapter.
+//
+// Bridges local MLX servers running Apple Silicon models (default port 8080)
+// into the LLMProvider interface with SSE chunk streaming and embeddings support.
+
 import Foundation
 import RuneWeaverCore
 

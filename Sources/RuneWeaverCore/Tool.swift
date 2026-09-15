@@ -1,3 +1,8 @@
+// Rune Weaver Core — Tool capability protocol and invocation interface.
+//
+// Defines the primary Tool protocol that all native and external plugins
+// implement to advertise function calling schemas, trust levels, and execution logic.
+
 /// A capability plugin the agent can invoke.
 ///
 /// Each tool is a self-contained module that declares its identity

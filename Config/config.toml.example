@@ -57,6 +57,14 @@ retention_days = 14
 max_total_bytes = 524288000
 # Seconds between periodic cleanup passes (hourly default).
 cleanup_interval_seconds = 3600
+# Container runtime for archive detonation chambers (Apple container CLI).
+container_runtime = "container"
+# Default OCI base image for quarantine/detonation chambers.
+container_base_image = "alpine:latest"
+# Idle minutes before a warm archive exploration session is reaped (10 default).
+archive_session_ttl_minutes = 10
+# Maximum concurrent container machines allowed at once (3 default).
+max_concurrent_machines = 3
 
 [files]
 # Sensitive-path deny list for file tools, mirroring the engine guard.

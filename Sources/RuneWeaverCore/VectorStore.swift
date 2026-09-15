@@ -1,3 +1,8 @@
+// Rune Weaver Core — Semantic vector store with cosine similarity ranking.
+//
+// Manages vector-embedded facts in JSON persistence, providing cosine similarity
+// search, dimension validation, metadata filtering, and atomic file synchronization.
+
 import Foundation
 
 /// A single semantic memory record: a fact plus its embedding.

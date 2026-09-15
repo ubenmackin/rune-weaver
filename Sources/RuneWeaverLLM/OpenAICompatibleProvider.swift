@@ -1,3 +1,8 @@
+// Rune Weaver LLM — Generic OpenAI-compatible API endpoint provider.
+//
+// Bridges OpenAI-compatible APIs (OpenRouter, cloud gateways, local endpoints)
+// into the LLMProvider interface with token streaming and tool-calling support.
+
 import Foundation
 import RuneWeaverCore
 
@@ -88,6 +93,12 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Shared HTTP client for this provider.
+    ///
+    /// Constructed as a lightweight, stack-allocated value struct on demand.
+    /// Internal HTTP requests route through `URLSession.shared`, ensuring
+    /// TCP connection pooling, HTTP/2 multiplexing, and TLS session resumption
+    /// are fully preserved across calls, while DNS resolution for LAN targets
+    /// is memoized by `LocalNetworking`.
     var client: OpenAICompatibleHTTPClient {
         OpenAICompatibleHTTPClient(baseURL: baseURL, apiKey: apiKey, model: model, apiStyle: apiStyle, sessionID: sessionID)
     }

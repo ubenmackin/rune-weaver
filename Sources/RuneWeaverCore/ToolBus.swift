@@ -1,3 +1,8 @@
+// Rune Weaver Core — Central tool registry, permission checking, and execution bus.
+//
+// Manages tool registration, toggle state, permission gate consultation,
+// and synchronized tool dispatch for orchestrators and headless workers.
+
 import Foundation
 
 /// Result of a ``ToolBus`` execution.

@@ -21,7 +21,11 @@ public enum SQLiteSerialIO {
     ///
     /// One queue for every store: per-store call order is preserved, and
     /// cross-store writes serialize harmlessly since the work is
-    /// synchronous and never re-enters the queue.
+    /// synchronous and never re-enters the queue. Because all durable stores
+    /// (episodes, sessions, run logs, scheduler jobs, tool registry) share
+    /// the primary SQLite database (`episodes.db`), funneling all blocking
+    /// database handles through a single serial queue completely eliminates
+    /// `SQLITE_BUSY` file-level locking collisions across subsystems.
     private static let queue = DispatchQueue(label: "com.runeweaver.stores.serial-io", qos: .utility)
 
     /// Runs throwing blocking work on the serial queue.

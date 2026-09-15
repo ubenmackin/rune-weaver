@@ -22,6 +22,10 @@ struct SettingsRouteTests {
         #expect(response.logLevel == config.engine.logLevel)
         #expect(response.configPath == "/test/config.toml")
         #expect(response.sandboxStagingPath == config.sandbox.stagingPath)
+        #expect(response.sandboxContainerRuntime == config.sandbox.containerRuntime)
+        #expect(response.sandboxContainerBaseImage == config.sandbox.containerBaseImage)
+        #expect(response.sandboxArchiveSessionTTLMinutes == config.sandbox.archiveSessionTTLMinutes)
+        #expect(response.sandboxMaxConcurrentMachines == config.sandbox.maxConcurrentMachines)
         #expect(response.memoryEmbeddingModel == config.memory.embeddingModel)
         #expect(response.memoryEmbeddingBackend == config.memory.embeddingBackend)
     }
@@ -32,13 +36,21 @@ struct SettingsRouteTests {
         let update = UpdateSettingsRequest(
             engineName: "Custom Engine",
             logLevel: "debug",
-            sandboxStagingPath: "/tmp/custom-staging"
+            sandboxStagingPath: "/tmp/custom-staging",
+            sandboxContainerRuntime: "podman",
+            sandboxContainerBaseImage: "debian:bookworm-slim",
+            sandboxArchiveSessionTTLMinutes: 20,
+            sandboxMaxConcurrentMachines: 5
         )
 
         try update.apply(to: &config)
         #expect(config.engine.name == "Custom Engine")
         #expect(config.engine.logLevel == "debug")
         #expect(config.sandbox.stagingPath == "/tmp/custom-staging")
+        #expect(config.sandbox.containerRuntime == "podman")
+        #expect(config.sandbox.containerBaseImage == "debian:bookworm-slim")
+        #expect(config.sandbox.archiveSessionTTLMinutes == 20)
+        #expect(config.sandbox.maxConcurrentMachines == 5)
         // Preserved defaults
         #expect(config.llm.defaultProvider == RuneWeaverConfig.default.llm.defaultProvider)
     }

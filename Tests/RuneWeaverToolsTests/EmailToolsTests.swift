@@ -69,6 +69,39 @@ private func testICloudEmailConfig(username: String = "user@icloud.com") -> Emai
     EmailConfig(accounts: [EmailICloud.account(username: username)])
 }
 
+/// Stub archive detonator returning canned manifests without a container runtime.
+///
+/// Keeps detonation tests hermetic: no microVM is spawned, and a canned
+/// failure proves paths (dry runs, document downloads) never detonate.
+private struct StubArchiveDetonator: EmailArchiveDetonator, Sendable {
+    /// Entries returned in the manifest.
+    let manifest: [EmailArchiveEntry]
+    /// Raw bytes returned for an inspected subpath entry.
+    let entryData: Data?
+    /// Bridge failure thrown instead of returning, when set.
+    let failure: String?
+
+    /// Creates a stub detonator.
+    init(manifest: [EmailArchiveEntry] = [], entryData: Data? = nil, failure: String? = nil) {
+        self.manifest = manifest
+        self.entryData = entryData
+        self.failure = failure
+    }
+
+    /// Returns the canned manifest and optional entry bytes.
+    func detonate(filename _: String, contentType _: String, data _: Data, subpath: String?) async throws -> EmailArchiveDetonationResult {
+        if let failure {
+            throw EmailIMAPError.bridgeFailed(failure)
+        }
+        return EmailArchiveDetonationResult(
+            sessionId: "runeweaver-session-test0001",
+            manifest: manifest,
+            manifestTruncated: false,
+            entryData: subpath == nil ? nil : entryData
+        )
+    }
+}
+
 /// Serialized plus `testCredentialEnvLock`: `ToolsTestSupport.withTestPassword` and
 /// `ToolsTestSupport.withICloudTestPassword` (see `ToolsTestSupport.swift`) mutate the process
 /// environment via `setenv`, which is process-global and POSIX-unsafe under
@@ -1145,7 +1178,54 @@ struct EmailToolsTests {
         #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/json") == "text")
         #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/json; charset=utf-8") == "text")
         #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/octet-stream") == "other")
-        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/zip") == "other")
+        // Archives detonate in isolation, so their bucket must route away from host staging.
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/zip") == "archive")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/x-zip-compressed") == "archive")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/x-tar") == "archive")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/gzip") == "archive")
+        // Mislabeled archives still detonate via the filename fallback.
+        #expect(EmailAttachmentLifecycle.isArchive(contentType: "application/octet-stream", filename: "backup.zip") == true)
+        #expect(EmailAttachmentLifecycle.isArchive(contentType: "application/octet-stream", filename: "backup.tar.gz") == true)
+        #expect(EmailAttachmentLifecycle.isArchive(contentType: "application/octet-stream", filename: "report.pdf") == false)
+        #expect(EmailAttachmentLifecycle.isArchive(contentType: "application/pdf", filename: "report.pdf") == false)
+    }
+
+    @Test
+    func `Archive subpath validation rejects traversal and absolute paths`() throws {
+        for bad in ["../escape.txt", "a/../../b", "/absolute.txt", "", "   ", "a\r\nb"] {
+            do {
+                _ = try EmailAttachmentLifecycle.validateArchiveSubpath(bad)
+                Issue.record("Expected invalid subpath for '\(bad)'")
+            } catch {
+                #expect(error.localizedDescription.contains("Invalid subpath"))
+            }
+        }
+        #expect(try EmailAttachmentLifecycle.validateArchiveSubpath("docs/report.txt") == "docs/report.txt")
+    }
+
+    @Test
+    func `Archive listing parser reads unzip and tar rows`() {
+        let unzip = """
+        Archive:  /tmp/payload.bin
+          Length      Date    Time    Name
+        ---------  ---------- -----   ----
+               11  2025-09-01 09:00   hello.txt
+              100  2025-09-01 09:00   photos/pic.png
+        ---------                     -------
+              111                     2 files
+        """
+        let zipped = EmailArchiveListingParser.parseUnzipListing(unzip)
+        #expect(zipped.count == 2)
+        #expect(zipped[0].path == "hello.txt")
+        #expect(zipped[0].sizeBytes == 11)
+        #expect(zipped[0].category == "text")
+        #expect(zipped[1].category == "image")
+        let tar = "-rw-r--r-- user/group    11 2025-09-01 09:00 hello.txt\n-rw-r--r-- user/group   100 2025-09-01 09:00 docs/report.pdf\n"
+        let tarred = EmailArchiveListingParser.parseTarListing(tar)
+        #expect(tarred.count == 2)
+        #expect(tarred[0].path == "hello.txt")
+        #expect(tarred[1].category == "pdf")
+        #expect(EmailArchiveListingParser.parseListOutput("not a listing", filename: "a.zip").isEmpty)
     }
 
     @Test
@@ -1385,5 +1465,228 @@ struct EmailToolsTests {
         #expect(envelope.previewTruncated == nil)
         let encoded = try EmailBridgeParsing.encodeAttachmentEnvelope(envelope)
         #expect(encoded.contains("report.pdf"))
+    }
+
+    @Test
+    func `Archive detonates to manifest only without host staging`() async throws {
+        // Untrusted archive bytes must never land under the sandbox staging area.
+        let bytes = Data("fake-zip-bytes".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "bundle.zip",
+            contentType: "application/zip",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let detonator = StubArchiveDetonator(manifest: [
+            EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text"),
+            EmailArchiveEntry(path: "photos/pic.png", sizeBytes: 100, category: "image")
+        ])
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            archiveDetonator: detonator
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.mimeCategory == "archive")
+            #expect(envelope.skipped == false)
+            #expect(envelope.path == nil)
+            #expect(envelope.expiresAt == nil)
+            let session = try #require(envelope.archiveSessionId)
+            #expect(session.hasPrefix("runeweaver-session-"))
+            #expect((envelope.archiveManifest ?? []).count == 2)
+            #expect((envelope.nextSteps ?? "").contains(session))
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+            #expect(!output.content.contains("test-secret"))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Archive subpath inspection returns entry text without host staging`() async throws {
+        let bytes = Data("fake-zip-bytes".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "bundle.zip",
+            contentType: "application/zip",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let detonator = StubArchiveDetonator(
+            manifest: [EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")],
+            entryData: Data("inner hello".utf8)
+        )
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            archiveDetonator: detonator
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"subpath":"hello.txt"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.subpath == "hello.txt")
+            #expect(envelope.extractedText == "inner hello")
+            #expect(envelope.path == nil)
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Archive saveToPath exports entry through the workspace guard`() async throws {
+        let bytes = Data("fake-zip-bytes".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "bundle.zip",
+            contentType: "application/zip",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let staging = home.appendingPathComponent("staging")
+        let destination = home.appendingPathComponent("workspace").appendingPathComponent("hello.txt")
+        let detonator = StubArchiveDetonator(
+            manifest: [EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")],
+            entryData: Data("inner hello".utf8)
+        )
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            homeDirectoryURL: home,
+            archiveDetonator: detonator
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"subpath\":\"hello.txt\",\"saveToPath\":\"\(destination.path)\"}"
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: payload),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.path == destination.path)
+            #expect(envelope.subpath == "hello.txt")
+            let onDisk = try Data(contentsOf: destination)
+            #expect(onDisk == Data("inner hello".utf8))
+        }
+    }
+
+    @Test
+    func `Archive saveToPath outside the workspace fails closed`() async throws {
+        let bytes = Data("fake-zip-bytes".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "bundle.zip",
+            contentType: "application/zip",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let staging = home.appendingPathComponent("staging")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            homeDirectoryURL: home,
+            archiveDetonator: StubArchiveDetonator(manifest: [
+                EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")
+            ])
+        )
+        // No stub password needed: the workspace guard must win before credential resolution.
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"saveToPath":"/tmp/evil-outside-roots.txt"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == true)
+        #expect(output.content.contains("permitted workspace") || output.content.contains("outside"))
+        #expect(FileManager.default.fileExists(atPath: "/tmp/evil-outside-roots.txt") == false)
+    }
+
+    @Test
+    func `Non-archive rejects subpath and saveToPath`() async throws {
+        let bytes = Data("hello world".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "notes.txt",
+            contentType: "text/plain",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            archiveDetonator: StubArchiveDetonator(failure: "detonator must not run for documents")
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let subpathOutput = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"subpath":"hello.txt"}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(subpathOutput.isError == true)
+            #expect(subpathOutput.content.contains("only valid for archives"))
+        }
+    }
+
+    @Test
+    func `Archive dry run spawns no machine and stages nothing`() async throws {
+        let bytes = Data("fake-zip-bytes".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "bundle.zip",
+            contentType: "application/zip",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            archiveDetonator: StubArchiveDetonator(failure: "detonator must not run on dry run")
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID(), dryRun: true)
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("Dry run"))
+            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Archive attachment args decode subpath and saveToPath`() throws {
+        let legacy = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        #expect(legacy.trimmedSubpath == nil)
+        #expect(legacy.trimmedSaveToPath == nil)
+        let followUp = try JSONDecoder().decode(
+            EmailAttachmentArgs.self,
+            from: Data(#"{"account":"personal","id":"42","index":0,"subpath":"hello.txt","saveToPath":"~/workspace/hello.txt"}"#.utf8)
+        )
+        #expect(followUp.trimmedSubpath == "hello.txt")
+        #expect(followUp.trimmedSaveToPath == "~/workspace/hello.txt")
     }
 }

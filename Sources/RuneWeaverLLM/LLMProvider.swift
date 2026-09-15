@@ -1,3 +1,8 @@
+// Rune Weaver LLM — OpenAI-compatible provider streaming and tool definitions.
+//
+// Implements chunk streaming protocols, SSE payload parsing, tool definitions,
+// HTTP client dispatch, and token usage decoders for language model endpoints.
+
 import Foundation
 import RuneWeaverCore
 

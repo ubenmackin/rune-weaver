@@ -1,3 +1,5 @@
+// Rune Weaver CLI Tests — Chat prompt history storage tests.
+
 import Foundation
 @testable import RuneWeaverCLI
 import Testing

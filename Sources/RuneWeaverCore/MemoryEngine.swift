@@ -1467,7 +1467,7 @@ public extension MemoryEngine {
                 } catch let error as CancellationError {
                     throw error
                 } catch {
-                    fputs("[INFO] MemoryEngine: Semantic store failed, falling back to keyword storage: \(error)\n", stderr)
+                    RuneWeaverLog.memory.info("MemoryEngine: Semantic store failed, falling back to keyword storage: \(error)")
                     // Fall through to keyword-only storage below.
                 }
             }

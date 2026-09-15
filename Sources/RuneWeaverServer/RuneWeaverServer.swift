@@ -672,10 +672,11 @@ public final class ServerContext: Sendable {
             conversations: conversations,
             toolBus: toolBus
         )
-        let pStore = pluginStore ?? ToolRegistryStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        let defaultDBPath = (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+        let pStore = pluginStore ?? ToolRegistryStore(dbPath: defaultDBPath)
         self.pluginStore = pStore
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
-        self.toolStates = toolStates ?? ToolStateStore(dbPath: ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
     }
@@ -747,8 +748,9 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
-        let pStore = ToolRegistryStore(dbPath: episodesDBPath ?? ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
-        let tStates = ToolStateStore(dbPath: episodesDBPath ?? ("~/.runeweaver/memory/episodes.db" as NSString).expandingTildeInPath)
+        let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+        let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
+        let tStates = ToolStateStore(dbPath: resolvedDBPath)
         let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
         let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
         if pluginConfig.autoRescan {
@@ -867,7 +869,7 @@ extension Application {
     var runeWeaver: ServerContext {
         get {
             guard let context = storage[ServerContextKey.self] else {
-                fputs("[ERROR] Application.runeWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.\n", stderr)
+                RuneWeaverLog.server.error("Application.runeWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
                 fatalError("ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
             }
             return context

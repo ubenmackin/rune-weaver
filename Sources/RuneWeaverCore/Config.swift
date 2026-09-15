@@ -214,10 +214,13 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     /// or how each selector maps to a concrete backend.
     public static let allowedEmbeddingBackends = [embeddingBackendApple, embeddingBackendProvider, embeddingBackendNone]
 
+    /// Default SQLite database path for episodic memory, run logs, and scheduler jobs.
+    public static let defaultEpisodesDBPath = "~/.runeweaver/memory/episodes.db"
+
     /// Creates a memory config.
     public init(
         vectorDBPath: String = "~/.runeweaver/memory/vectors",
-        episodesDBPath: String = "~/.runeweaver/memory/episodes.db",
+        episodesDBPath: String = MemoryConfig.defaultEpisodesDBPath,
         embeddingModel: String = "all-MiniLM-L6-v2",
         embeddingBackend: String = MemoryConfig.embeddingBackendApple
     ) {
@@ -275,17 +278,23 @@ public struct VoiceConfig: Sendable, Codable, Equatable {
     }
 }
 
-/// `[sandbox]` — staging area for file operations.
+/// `[sandbox]` — staging area for document/image operations plus detonation policy.
 ///
-/// Staged downloads (for example `email.attachment` files under
-/// `attachments/`) are retained for `retentionDays` days before the
-/// sweeper may reclaim them; the tool surfaces the resulting expiry in
-/// its success envelope so callers know how long the staged path stays
-/// valid. The defaults keep two weeks of staging under a bounded total
+/// Document and image downloads (for example `email.attachment` files under
+/// `attachments/`) stage under `stagingPath` and are retained for
+/// `retentionDays` days before the sweeper may reclaim them; the tool
+/// surfaces the resulting expiry in its success envelope so callers know
+/// how long the staged path stays valid. Archives never touch staging:
+/// they detonate in zero-host-mounts ephemeral microVMs with manifest-only
+/// returns, so `stagingPath` covers only non-archive writes. Each detonation
+/// is ephemeral and reaped immediately after listing/extraction;
+/// `archiveSessionTTLMinutes` bounds only crash-orphan reclamation via the
+/// periodic prune, and `maxConcurrentMachines` caps concurrent detonations
+/// before spawn. The defaults keep two weeks of staging under a bounded total
 /// size with hourly reclamation so long-lived approvals stay reachable
 /// without unbounded disk growth.
 public struct SandboxConfig: Sendable, Equatable {
-    /// Staging directory for file writes awaiting approval.
+    /// Staging directory for document/image writes awaiting approval. Archives bypass this path entirely via ephemeral microVM detonation with no host mounts.
     public var stagingPath: String
     /// Days a staged file remains valid before reclamation. Defaults to 14.
     public var retentionDays: Int
@@ -295,38 +304,59 @@ public struct SandboxConfig: Sendable, Equatable {
     /// Seconds between periodic cleanup passes. Defaults to 3600 (hourly).
     public var cleanupIntervalSeconds: Int
 
+    /// Apple container CLI executable name or path (defaults to "container").
+    public var containerRuntime: String
+    /// Default OCI base image used for quarantine/detonation (defaults to "alpine:latest").
+    public var containerBaseImage: String
+    /// Crash-orphan reclamation TTL in minutes for ephemeral archive detonation machines (defaults to 10).
+    /// Detonations are reaped immediately; the sweeper reclaims only machines orphaned by crashes.
+    public var archiveSessionTTLMinutes: Int
+    /// Maximum concurrent detonation machines allowed (defaults to 3). Enforced before spawn; excess requests fail closed until reclamation frees capacity.
+    public var maxConcurrentMachines: Int
+
     /// Default staged-file retention in days.
-    ///
-    /// Mirrored by `DEFAULT_SANDBOX_RETENTION_DAYS` in `Web/src/api.ts`;
-    /// keep the two pinned equal.
     public static let defaultRetentionDays = 14
     /// Default total staging size cap (500 MiB) bounding disk growth.
-    ///
-    /// Mirrored by `DEFAULT_SANDBOX_MAX_TOTAL_BYTES` in `Web/src/api.ts`;
-    /// keep the two pinned equal.
     public static let defaultMaxTotalBytes = 500 * 1024 * 1024
     /// Default interval between cleanup passes (hourly).
-    ///
-    /// Mirrored by `DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS` in
-    /// `Web/src/api.ts`; keep the two pinned equal.
     public static let defaultCleanupIntervalSeconds = 3600
+    /// Default container CLI runtime.
+    public static let defaultContainerRuntime = "container"
+    /// Default container base image.
+    public static let defaultContainerBaseImage = "alpine:latest"
+    /// Default idle TTL for archive container sessions (10 minutes).
+    public static let defaultArchiveSessionTTLMinutes = 10
+    /// Default maximum concurrent container machines.
+    public static let defaultMaxConcurrentMachines = 3
 
     /// Creates a sandbox config.
     /// - Parameters:
-    ///   - stagingPath: Staging directory for file writes awaiting approval.
-    ///   - retentionDays: Days a staged file remains valid. Rejected by validation unless 1...365.
-    ///   - maxTotalBytes: Total byte cap across managed subdirectories. Must be positive.
-    ///   - cleanupIntervalSeconds: Seconds between cleanup passes. Must be positive.
+    ///   - stagingPath: Staging directory for document/image writes. Archives bypass staging via ephemeral microVM detonation.
+    ///   - retentionDays: Days a staged file remains valid.
+    ///   - maxTotalBytes: Total byte cap across managed subdirectories.
+    ///   - cleanupIntervalSeconds: Seconds between cleanup passes.
+    ///   - containerRuntime: Container CLI runtime name or path.
+    ///   - containerBaseImage: OCI image for detonation.
+    ///   - archiveSessionTTLMinutes: Crash-orphan reclamation TTL in minutes for ephemeral detonation machines.
+    ///   - maxConcurrentMachines: Cap on concurrent detonation machines, enforced before spawn.
     public init(
         stagingPath: String = "~/.runeweaver/sandbox",
         retentionDays: Int = defaultRetentionDays,
         maxTotalBytes: Int = defaultMaxTotalBytes,
-        cleanupIntervalSeconds: Int = defaultCleanupIntervalSeconds
+        cleanupIntervalSeconds: Int = defaultCleanupIntervalSeconds,
+        containerRuntime: String = defaultContainerRuntime,
+        containerBaseImage: String = defaultContainerBaseImage,
+        archiveSessionTTLMinutes: Int = defaultArchiveSessionTTLMinutes,
+        maxConcurrentMachines: Int = defaultMaxConcurrentMachines
     ) {
         self.stagingPath = stagingPath
         self.retentionDays = retentionDays
         self.maxTotalBytes = maxTotalBytes
         self.cleanupIntervalSeconds = cleanupIntervalSeconds
+        self.containerRuntime = containerRuntime
+        self.containerBaseImage = containerBaseImage
+        self.archiveSessionTTLMinutes = archiveSessionTTLMinutes
+        self.maxConcurrentMachines = maxConcurrentMachines
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -334,6 +364,10 @@ public struct SandboxConfig: Sendable, Equatable {
         case retentionDays = "retention_days"
         case maxTotalBytes = "max_total_bytes"
         case cleanupIntervalSeconds = "cleanup_interval_seconds"
+        case containerRuntime = "container_runtime"
+        case containerBaseImage = "container_base_image"
+        case archiveSessionTTLMinutes = "archive_session_ttl_minutes"
+        case maxConcurrentMachines = "max_concurrent_machines"
     }
 }
 
@@ -346,6 +380,10 @@ extension SandboxConfig: Codable {
         retentionDays = try container.decodeIfPresent(Int.self, forKey: .retentionDays) ?? Self.defaultRetentionDays
         maxTotalBytes = try container.decodeIfPresent(Int.self, forKey: .maxTotalBytes) ?? Self.defaultMaxTotalBytes
         cleanupIntervalSeconds = try container.decodeIfPresent(Int.self, forKey: .cleanupIntervalSeconds) ?? Self.defaultCleanupIntervalSeconds
+        containerRuntime = try container.decodeIfPresent(String.self, forKey: .containerRuntime) ?? Self.defaultContainerRuntime
+        containerBaseImage = try container.decodeIfPresent(String.self, forKey: .containerBaseImage) ?? Self.defaultContainerBaseImage
+        archiveSessionTTLMinutes = try container.decodeIfPresent(Int.self, forKey: .archiveSessionTTLMinutes) ?? Self.defaultArchiveSessionTTLMinutes
+        maxConcurrentMachines = try container.decodeIfPresent(Int.self, forKey: .maxConcurrentMachines) ?? Self.defaultMaxConcurrentMachines
     }
 
     /// Encodes a sandbox config including its retention window and caps.
@@ -356,6 +394,10 @@ extension SandboxConfig: Codable {
         try container.encode(retentionDays, forKey: .retentionDays)
         try container.encode(maxTotalBytes, forKey: .maxTotalBytes)
         try container.encode(cleanupIntervalSeconds, forKey: .cleanupIntervalSeconds)
+        try container.encode(containerRuntime, forKey: .containerRuntime)
+        try container.encode(containerBaseImage, forKey: .containerBaseImage)
+        try container.encode(archiveSessionTTLMinutes, forKey: .archiveSessionTTLMinutes)
+        try container.encode(maxConcurrentMachines, forKey: .maxConcurrentMachines)
     }
 }
 

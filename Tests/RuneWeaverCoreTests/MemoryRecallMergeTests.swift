@@ -1,4 +1,4 @@
-// MemoryRecallMergeTests — merge-rank regression coverage for recall tiers.
+// Rune Weaver Core Tests — Merge-rank regression coverage for recall tiers.
 //
 // Pins how episodic, semantic, and profile hits interleave when recall merges
 // them: paraphrased semantic facts must survive episodic keyword volume,

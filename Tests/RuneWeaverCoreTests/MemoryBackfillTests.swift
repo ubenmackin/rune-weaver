@@ -1,4 +1,4 @@
-// MemoryBackfillTests — embedding backfill with dimension discipline.
+// Rune Weaver Core Tests — Embedding backfill with dimension discipline.
 //
 // Covers giving keyword-only semantic rows vectors without losing identity:
 // backfill preserves fact identifiers, metadata, and creation order, leaves

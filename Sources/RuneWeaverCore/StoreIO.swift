@@ -1,3 +1,8 @@
+// Rune Weaver Core — Off-actor blocking I/O helper for sidecar file stores.
+//
+// Dispatches non-SQLite sidecar file operations (e.g. facts.json vector mirrors)
+// to a background queue, isolating blocking operations from the cooperative pool.
+
 import Foundation
 
 /// Runs blocking store I/O off the actor executor.

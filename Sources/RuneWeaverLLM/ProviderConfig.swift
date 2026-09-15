@@ -1,3 +1,8 @@
+// Rune Weaver LLM — Provider configuration models and factory constructors.
+//
+// Defines provider kinds, endpoint configurations, authentication options,
+// and factory methods constructing concrete LLMProvider instances from config.
+
 import Foundation
 import RuneWeaverCore
 

@@ -512,6 +512,11 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
 /// labeled on `email.search` hits; omitted or blank means `INBOX`.
 /// `preview` is optional (defaults to false): when true and the part is
 /// a small text payload, the success envelope inlines the leading text.
+/// `subpath` names one file inside a detonated archive for inspection
+/// without staging anything to the host; `saveToPath` names the
+/// workspace destination for an approval-gated export of that entry
+/// (or the raw archive when no subpath is given). Both stay nil for
+/// documents and images, which return inline payloads directly.
 public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -523,6 +528,10 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let mailbox: String?
     /// Whether to inline a text preview in the success envelope. Defaults to false.
     public let preview: Bool
+    /// Relative path of one entry inside a detonated archive to inspect (nil means list only).
+    public let subpath: String?
+    /// Workspace destination for an approval-gated export from a detonated archive (nil means no export).
+    public let saveToPath: String?
 
     /// Memberwise initializer.
     /// - Parameters:
@@ -531,12 +540,16 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     ///   - attachmentIndex: Zero-based attachment position.
     ///   - mailbox: Optional mailbox holding the message.
     ///   - preview: Whether to inline a text preview.
-    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil, preview: Bool = false) {
+    ///   - subpath: Relative entry path inside a detonated archive.
+    ///   - saveToPath: Workspace destination for an approval-gated archive export.
+    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil, preview: Bool = false, subpath: String? = nil, saveToPath: String? = nil) {
         self.account = account
         self.messageID = messageID
         self.attachmentIndex = attachmentIndex
         self.mailbox = mailbox
         self.preview = preview
+        self.subpath = subpath
+        self.saveToPath = saveToPath
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -551,6 +564,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         case mailbox
         case folder
         case preview
+        case subpath
+        case saveToPath
     }
 
     /// Decodes arguments, accepting every documented id and index alias.
@@ -594,6 +609,10 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(String.self, forKey: .folder)
         // Optional preview flag keeps legacy payloads decoding with no inline text.
         preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
+        // Archive follow-ups stay optional so legacy download-only payloads keep decoding;
+        // blank strings collapse downstream via the trimmed helpers rather than here.
+        subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
+        saveToPath = try container.decodeIfPresent(String.self, forKey: .saveToPath)
     }
 
     /// Trimmed account nickname.
@@ -609,6 +628,16 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Trimmed mailbox holding the message, or nil when omitted or blank (meaning `INBOX`).
     public var trimmedMailbox: String? {
         EmailMailboxNormalization.trimmed(mailbox)
+    }
+
+    /// Trimmed archive entry path, or nil when omitted or blank (meaning list only).
+    public var trimmedSubpath: String? {
+        EmailMailboxNormalization.trimmed(subpath)
+    }
+
+    /// Trimmed workspace export destination, or nil when omitted or blank (meaning no export).
+    public var trimmedSaveToPath: String? {
+        EmailMailboxNormalization.trimmed(saveToPath)
     }
 }
 
@@ -641,22 +670,27 @@ public struct EmailAttachmentData: Sendable, Equatable {
     }
 }
 
+/// One entry inside an unpacked archive.
+public struct EmailArchiveEntry: Sendable, Equatable, Codable {
+    /// Relative path inside the archive.
+    public let path: String
+    /// Uncompressed size in bytes.
+    public let sizeBytes: Int
+    /// Coarse MIME category of the entry.
+    public let category: String
+
+    public init(path: String, sizeBytes: Int, category: String = "other") {
+        self.path = path
+        self.sizeBytes = sizeBytes
+        self.category = category
+    }
+}
+
 /// Envelope wrapping `email.attachment` tool output.
 ///
 /// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the staged sandbox path (or the skip note) together with
-/// the attachment metadata. `path` is nil when the download was
-/// skipped; `skipped` with a `note` explains oversized and dry-run
-/// outcomes without writing outside the staging area. `mailbox`
-/// echoes the folder the bytes were fetched from so follow-up reads
-/// stay in the same folder. Successful downloads also carry the
-/// post-download lifecycle: `expiresAt` (ISO-8601 expiry derived from
-/// the sandbox retention window), `mimeCategory` (`pdf`/`image`/`text`/
-/// `other`), a human `nextSteps` hint pointing at `files.read` for
-/// follow-up inspection, and an optional inline `preview` (first 2000
-/// chars for small text payloads when requested; never for binaries).
-/// All lifecycle keys are optional so envelopes written before the
-/// lifecycle landed keep decoding.
+/// receives the staged path, extracted text, multimodal image payload,
+/// or archive session manifest together with attachment metadata.
 public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the attachment was fetched from.
     public let account: String
@@ -670,7 +704,7 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     public let contentType: String
     /// Decoded byte size of the attachment part.
     public let sizeBytes: Int
-    /// Sandbox staging path the bytes were written to (nil when skipped).
+    /// Staging or destination path (nil when skipped or memory-only).
     public let path: String?
     /// Whether the download was skipped (oversized part or dry run).
     public let skipped: Bool
@@ -680,14 +714,25 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     public let mailbox: String
     /// ISO-8601 expiry of the staged file, derived from the sandbox retention window (nil when skipped or unknown).
     public let expiresAt: String?
-    /// Coarse MIME bucket guiding follow-up handling: `pdf`, `image`, `text`, or `other`.
+    /// Coarse MIME bucket guiding follow-up handling: `pdf`, `image`, `text`, `archive`, or `other`.
     public let mimeCategory: String?
-    /// Human follow-up hint pointing at `files.read` for staged-file inspection (nil when skipped).
+    /// Human follow-up hint.
     public let nextSteps: String?
     /// Inline leading text for small text payloads when requested (nil unless previewed).
     public let preview: String?
     /// Whether `preview` was truncated at the inline char cap (nil when no preview).
     public let previewTruncated: Bool?
+
+    /// Direct text extracted from document attachments (PDF, DOCX, CSV, TXT).
+    public let extractedText: String?
+    /// Base64-encoded image data for multimodal vision models.
+    public let imageDataBase64: String?
+    /// Identifier for the ephemeral container session that detonated the archive.
+    public let archiveSessionId: String?
+    /// Manifest of files contained in an unpacked archive.
+    public let archiveManifest: [EmailArchiveEntry]?
+    /// Subpath inside an archive that was inspected.
+    public let subpath: String?
 
     private enum CodingKeys: String, CodingKey {
         case account
@@ -705,25 +750,14 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         case nextSteps
         case preview
         case previewTruncated
+        case extractedText
+        case imageDataBase64
+        case archiveSessionId
+        case archiveManifest
+        case subpath
     }
 
     /// Creates an attachment envelope.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - id: IMAP UID of the message.
-    ///   - index: Zero-based attachment position.
-    ///   - filename: Original filename.
-    ///   - contentType: MIME type.
-    ///   - sizeBytes: Decoded byte size.
-    ///   - path: Sandbox staging path, or nil when skipped.
-    ///   - skipped: Whether the download was skipped.
-    ///   - note: Human-readable skip note, if any.
-    ///   - mailbox: Mailbox the attachment was fetched from. Defaults to `INBOX` for legacy callers.
-    ///   - expiresAt: ISO-8601 staged-file expiry. Defaults to nil (skipped or legacy).
-    ///   - mimeCategory: Coarse MIME bucket. Defaults to nil (skipped or legacy).
-    ///   - nextSteps: Human follow-up hint. Defaults to nil (skipped or legacy).
-    ///   - preview: Inline leading text. Defaults to nil (not requested, binary, or oversized).
-    ///   - previewTruncated: Whether `preview` was cut at the char cap. Defaults to nil.
     public init(
         account: String,
         id: String,
@@ -739,7 +773,12 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         mimeCategory: String? = nil,
         nextSteps: String? = nil,
         preview: String? = nil,
-        previewTruncated: Bool? = nil
+        previewTruncated: Bool? = nil,
+        extractedText: String? = nil,
+        imageDataBase64: String? = nil,
+        archiveSessionId: String? = nil,
+        archiveManifest: [EmailArchiveEntry]? = nil,
+        subpath: String? = nil
     ) {
         self.account = account
         self.id = id
@@ -756,14 +795,14 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         self.nextSteps = nextSteps
         self.preview = preview
         self.previewTruncated = previewTruncated
+        self.extractedText = extractedText
+        self.imageDataBase64 = imageDataBase64
+        self.archiveSessionId = archiveSessionId
+        self.archiveManifest = archiveManifest
+        self.subpath = subpath
     }
 
-    /// Decodes an attachment envelope, defaulting legacy payloads without `mailbox` to `INBOX`.
-    ///
-    /// Lifecycle keys decode as optional so envelopes written before the
-    /// lifecycle landed (no `expiresAt`, `mimeCategory`, `nextSteps`,
-    /// `preview`) keep decoding with those fields as nil.
-    /// - Parameter decoder: Decoder for the envelope document.
+    /// Decodes an attachment envelope.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
@@ -782,14 +821,14 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         nextSteps = try container.decodeIfPresent(String.self, forKey: .nextSteps)
         preview = try container.decodeIfPresent(String.self, forKey: .preview)
         previewTruncated = try container.decodeIfPresent(Bool.self, forKey: .previewTruncated)
+        extractedText = try container.decodeIfPresent(String.self, forKey: .extractedText)
+        imageDataBase64 = try container.decodeIfPresent(String.self, forKey: .imageDataBase64)
+        archiveSessionId = try container.decodeIfPresent(String.self, forKey: .archiveSessionId)
+        archiveManifest = try container.decodeIfPresent([EmailArchiveEntry].self, forKey: .archiveManifest)
+        subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
     }
 
-    /// Encodes an attachment envelope including its mailbox and lifecycle hints.
-    ///
-    /// Lifecycle keys encode only when present so oversized and dry-run
-    /// skips keep the legacy wire shape (no `expiresAt`, `mimeCategory`,
-    /// `nextSteps`, or `preview`).
-    /// - Parameter encoder: Encoder for the envelope document.
+    /// Encodes an attachment envelope.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(account, forKey: .account)
@@ -807,6 +846,11 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         try container.encodeIfPresent(nextSteps, forKey: .nextSteps)
         try container.encodeIfPresent(preview, forKey: .preview)
         try container.encodeIfPresent(previewTruncated, forKey: .previewTruncated)
+        try container.encodeIfPresent(extractedText, forKey: .extractedText)
+        try container.encodeIfPresent(imageDataBase64, forKey: .imageDataBase64)
+        try container.encodeIfPresent(archiveSessionId, forKey: .archiveSessionId)
+        try container.encodeIfPresent(archiveManifest, forKey: .archiveManifest)
+        try container.encodeIfPresent(subpath, forKey: .subpath)
     }
 }
 
@@ -823,16 +867,21 @@ public enum EmailAttachmentLifecycle: Sendable {
     public static let maxPreviewBytes = 256 * 1024
     /// Maximum chars inlined in `preview` before truncation.
     public static let maxPreviewChars = 2000
+    /// Maximum entries returned in an archive manifest before truncation.
+    public static let maxArchiveManifestEntries = 500
+    /// Maximum characters accepted for an archive subpath.
+    public static let maxArchiveSubpathChars = 1024
 
     /// Returns the coarse MIME bucket for a content type.
     ///
     /// Matching is case-insensitive on the bare type (parameters such as
     /// `; charset=utf-8` are stripped): exact `application/pdf` maps to
     /// `pdf`, any `image/*` to `image`, any `text/*` plus `application/json`
-    /// to `text`, and everything else to `other` so follow-up hints stay
-    /// predictable without an exhaustive type table.
+    /// to `text`, known archive types (ZIP/TAR/GZIP families) to `archive`,
+    /// and everything else to `other` so follow-up hints stay predictable
+    /// without an exhaustive type table.
     /// - Parameter contentType: Raw MIME type, possibly with parameters.
-    /// - Returns: `pdf`, `image`, `text`, or `other`.
+    /// - Returns: `pdf`, `image`, `text`, `archive`, or `other`.
     public static func mimeCategory(for contentType: String) -> String {
         let base = contentType.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
             .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
@@ -842,8 +891,92 @@ public enum EmailAttachmentLifecycle: Sendable {
         if base.hasPrefix("image/") {
             return "image"
         }
-        if base.hasPrefix("text/") || base == "application/json" {
+        if base.hasPrefix("text/") || base == "application/json" || base == "text/csv" {
             return "text"
+        }
+        switch base {
+        case "application/zip", "application/x-zip-compressed",
+             "application/x-tar", "application/tar",
+             "application/gzip", "application/x-gzip",
+             "application/x-7z-compressed", "application/x-rar-compressed":
+            return "archive"
+        default:
+            return "other"
+        }
+    }
+
+    /// Returns whether an attachment part must detonate inside a microVM.
+    ///
+    /// Content types missed by the sender (notably `application/octet-stream`
+    /// for renamed ZIPs) still detonate when the filename carries an archive
+    /// suffix, so a mislabeled archive can never slip into host staging.
+    /// Matching is case-insensitive on both inputs.
+    /// - Parameters:
+    ///   - contentType: Raw MIME type, possibly with parameters.
+    ///   - filename: Original attachment filename.
+    /// - Returns: True for archive content types or archive filename suffixes.
+    public static func isArchive(contentType: String, filename: String) -> Bool {
+        if mimeCategory(for: contentType) == "archive" {
+            return true
+        }
+        let lower = filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for suffix in [".zip", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tbz", ".tbz2", ".gz", ".7z", ".rar"] where lower.hasSuffix(suffix) {
+            return true
+        }
+        return false
+    }
+
+    /// Validates an archive subpath without touching any filesystem.
+    ///
+    /// Subpaths name entries inside the quarantined archive, never host
+    /// files, so absolute paths and `..` segments fail closed even though
+    /// the detonation VM would contain them: the check keeps traversal
+    /// payloads from ever reaching the VM command line as ambiguous paths.
+    /// Callers pass the result as a single argv element (never interpolated
+    /// into shell text) with `--` separating flags from the name.
+    /// - Parameter subpath: Raw caller-supplied entry path.
+    /// - Returns: Trimmed entry path.
+    /// - Throws: `EmailIMAPError.bridgeFailed` when empty, overlong, absolute, escaping, or holding control bytes.
+    public static func validateArchiveSubpath(_ subpath: String) throws -> String {
+        let trimmed = subpath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid subpath: subpath must not be empty")
+        }
+        guard trimmed.count <= maxArchiveSubpathChars else {
+            throw EmailIMAPError.bridgeFailed("Invalid subpath: subpath must be at most \(maxArchiveSubpathChars) characters")
+        }
+        if trimmed.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 || $0.value == 0 }) {
+            throw EmailIMAPError.bridgeFailed("Invalid subpath: subpath must not contain CR, LF, or NUL")
+        }
+        guard !trimmed.hasPrefix("/"), !trimmed.hasPrefix("\\") else {
+            throw EmailIMAPError.bridgeFailed("Invalid subpath: subpath must be a relative path inside the archive")
+        }
+        let segments = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        if segments.contains("..") {
+            throw EmailIMAPError.bridgeFailed("Invalid subpath: subpath must not escape the archive")
+        }
+        return trimmed
+    }
+
+    /// Maps an archive entry path to the coarse MIME bucket.
+    ///
+    /// Extension-based so manifest entries carry a useful category without
+    /// sniffing entry bytes on the host; unknown suffixes stay `other`.
+    /// - Parameter path: Relative entry path inside the archive.
+    /// - Returns: `pdf`, `image`, `text`, `archive`, or `other`.
+    public static func archiveEntryCategory(forPath path: String) -> String {
+        let lower = path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if lower.hasSuffix(".pdf") {
+            return "pdf"
+        }
+        for suffix in [".png", ".jpg", ".jpeg", ".heic", ".heif", ".webp", ".gif", ".bmp", ".tiff", ".tif"] where lower.hasSuffix(suffix) {
+            return "image"
+        }
+        for suffix in [".txt", ".md", ".markdown", ".csv", ".json", ".log", ".xml", ".html", ".htm"] where lower.hasSuffix(suffix) {
+            return "text"
+        }
+        if isArchive(contentType: "application/octet-stream", filename: lower) {
+            return "archive"
         }
         return "other"
     }
@@ -909,30 +1042,48 @@ public enum EmailAttachmentLifecycle: Sendable {
         return formatter.string(from: date)
     }
 
-    /// Builds the human follow-up hint for a staged download.
-    ///
-    /// Always names the staged path and points at `files.read` for the
-    /// full content, since the inline preview (when present) holds only
-    /// the leading slice. Category-aware wording keeps PDF/image/other
-    /// hints accurate without changing the machine-readable fields.
+    /// Builds the human follow-up hint for an attachment outcome.
     /// - Parameters:
-    ///   - path: Staged sandbox path.
-    ///   - expiresAt: ISO-8601 expiry string.
+    ///   - path: Staged sandbox path, if any.
+    ///   - expiresAt: ISO-8601 expiry string, if any.
     ///   - mimeCategory: Coarse bucket from `mimeCategory(for:)`.
     ///   - previewTruncated: Whether the inline preview was cut (nil when no preview).
-    /// - Returns: Human hint referencing `files.read`.
-    public static func nextStepsHint(path: String, expiresAt: String, mimeCategory: String, previewTruncated: Bool?) -> String {
+    ///   - archiveSessionId: Session identifier for the ephemeral archive detonation microVM.
+    /// - Returns: Human hint for model next steps.
+    public static func nextStepsHint(
+        path: String? = nil,
+        expiresAt: String? = nil,
+        mimeCategory: String,
+        previewTruncated: Bool? = nil,
+        archiveSessionId: String? = nil
+    ) -> String {
+        let expiry = expiresAt ?? ""
+        if let path, !path.isEmpty {
+            switch mimeCategory {
+            case "text" where previewTruncated == true:
+                return "Preview shows the first 2000 chars. Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiry)."
+            case "text":
+                return "Text staged at \"\(path)\". Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiry)."
+            case "pdf":
+                return "PDF staged at \"\(path)\". Use files.read with path \"\(path)\" to extract a text preview. Staged file expires \(expiry)."
+            case "image":
+                return "Image staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiry)."
+            default:
+                return "Attachment staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiry)."
+            }
+        }
+
         switch mimeCategory {
-        case "text" where previewTruncated == true:
-            "Preview shows the first 2000 chars. Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiresAt)."
-        case "text":
-            "Text staged at \"\(path)\". Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiresAt)."
-        case "pdf":
-            "PDF staged at \"\(path)\". Use files.read with path \"\(path)\" to extract a text preview. Staged file expires \(expiresAt)."
+        case "archive":
+            let session = archiveSessionId ?? "active"
+            return "Archive unpacked in quarantine session '\(session)'. "
+                + "Call email.attachment with 'subpath' to inspect a file, or 'saveToPath' to copy to your workspace."
         case "image":
-            "Image staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiresAt)."
+            return "Image sanitized and delivered as base64 block for multimodal visual inspection."
+        case "text", "pdf":
+            return "Document contents extracted directly into 'extractedText'."
         default:
-            "Attachment staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiresAt)."
+            return "Attachment processed in isolated microVM container."
         }
     }
 }

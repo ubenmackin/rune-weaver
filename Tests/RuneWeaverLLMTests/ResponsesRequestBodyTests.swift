@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - Responses request body
+// Rune Weaver LLM Tests — Responses request body generation and formatting.
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverLLM

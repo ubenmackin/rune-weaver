@@ -231,7 +231,7 @@ private func handleResumeFailure(
     decidedCallID: String?,
     context: ServerContext
 ) async {
-    fputs("[ERROR] RuneWeaverServer resumeNarratedApproval \(id.uuidString) failed: \(detail)\n", stderr)
+    RuneWeaverLog.server.error("RuneWeaverServer resumeNarratedApproval \(id.uuidString) failed: \(detail)")
     guard let failedSessionID = targetSessionID else {
         return
     }

@@ -1,4 +1,4 @@
-// RuneWeaver - Tests - Apple NaturalLanguage embeddings backend
+// Rune Weaver Core Tests — Apple NaturalLanguage embeddings backend.
 //
 // Exercises the local-first sentence backend through injected lookups so
 // outcomes stay deterministic without loading the on-device model or

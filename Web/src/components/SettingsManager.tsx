@@ -6,7 +6,11 @@ import {
   ApiError,
   DEFAULT_FILES_ALLOW_ROOTS,
   DEFAULT_FILES_DENY_PATTERNS,
+  DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
   DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS,
+  DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
+  DEFAULT_SANDBOX_CONTAINER_RUNTIME,
+  DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   DEFAULT_SANDBOX_MAX_TOTAL_BYTES,
   DEFAULT_SANDBOX_RETENTION_DAYS,
   getSettings,
@@ -84,6 +88,18 @@ export default function SettingsManager() {
   );
   const [sandboxCleanupIntervalSeconds, setSandboxCleanupIntervalSeconds] = useState(
     DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
+  );
+  const [sandboxContainerRuntime, setSandboxContainerRuntime] = useState(
+    DEFAULT_SANDBOX_CONTAINER_RUNTIME
+  );
+  const [sandboxContainerBaseImage, setSandboxContainerBaseImage] = useState(
+    DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
+  );
+  const [sandboxArchiveSessionTTLMinutes, setSandboxArchiveSessionTTLMinutes] = useState(
+    DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES
+  );
+  const [sandboxMaxConcurrentMachines, setSandboxMaxConcurrentMachines] = useState(
+    DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
   );
   // File access policy mirrors FilesConfig defaults so the deny list stays
   // visible even when an older engine omits the [files] section.
@@ -282,6 +298,18 @@ export default function SettingsManager() {
     setSandboxMaxTotalBytes(data.sandboxMaxTotalBytes ?? DEFAULT_SANDBOX_MAX_TOTAL_BYTES);
     setSandboxCleanupIntervalSeconds(
       data.sandboxCleanupIntervalSeconds ?? DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
+    );
+    setSandboxContainerRuntime(
+      data.sandboxContainerRuntime ?? DEFAULT_SANDBOX_CONTAINER_RUNTIME
+    );
+    setSandboxContainerBaseImage(
+      data.sandboxContainerBaseImage ?? DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
+    );
+    setSandboxArchiveSessionTTLMinutes(
+      data.sandboxArchiveSessionTTLMinutes ?? DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES
+    );
+    setSandboxMaxConcurrentMachines(
+      data.sandboxMaxConcurrentMachines ?? DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
     );
     setFilesDenyPatterns(
       Array.isArray(data.filesDenyPatterns)
@@ -539,6 +567,10 @@ export default function SettingsManager() {
         sandboxRetentionDays: Number(sandboxRetentionDays),
         sandboxMaxTotalBytes: Number(sandboxMaxTotalBytes),
         sandboxCleanupIntervalSeconds: Number(sandboxCleanupIntervalSeconds),
+        sandboxContainerRuntime,
+        sandboxContainerBaseImage,
+        sandboxArchiveSessionTTLMinutes: Number(sandboxArchiveSessionTTLMinutes),
+        sandboxMaxConcurrentMachines: Number(sandboxMaxConcurrentMachines),
         filesDenyPatterns: filesDenyPatterns.map((p) => p.trim()).filter(Boolean),
         filesAllowRoots: filesAllowRoots.map((r) => r.trim()).filter(Boolean),
         filesRequireApprovalOnDeny,
@@ -1659,26 +1691,107 @@ export default function SettingsManager() {
             <div className="settings-section-title-group">
               <h3>Sandbox & Security Policy</h3>
               <p className="settings-section-hint">
-                Controls where tool side-effects take place and when actions require user approval.
+                Controls process and payload isolation, microVM container machines, and cleanup retention.
                 Changes need a restart to take effect.
               </p>
             </div>
+
+            {/* Container Machine (Apple Container microVM for Tier 3 detonation) */}
+            <div className="settings-section-title-group" style={{ marginTop: "10px" }}>
+              <h4>Apple Container Machine (Virtualization)</h4>
+              <p className="settings-section-hint">
+                MicroVM settings for untrusted external payloads (email attachments, archives). Zero host directory mounts.
+              </p>
+            </div>
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-container-runtime">Container Runtime</label>
+                <input
+                  id="sandbox-container-runtime"
+                  type="text"
+                  className="input-field"
+                  value={sandboxContainerRuntime}
+                  onChange={(e) => setSandboxContainerRuntime(e.target.value)}
+                  placeholder="container"
+                  required
+                />
+                <span className="form-group-hint">
+                  Apple container CLI command or binary path (default "container").
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-container-base-image">Base Image</label>
+                <input
+                  id="sandbox-container-base-image"
+                  type="text"
+                  className="input-field"
+                  value={sandboxContainerBaseImage}
+                  onChange={(e) => setSandboxContainerBaseImage(e.target.value)}
+                  placeholder="alpine:latest"
+                  required
+                />
+                <span className="form-group-hint">
+                  OCI base image for detonation microVMs (default "alpine:latest").
+                </span>
+              </div>
+            </div>
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-archive-ttl">Archive Session TTL (minutes)</label>
+                <input
+                  id="sandbox-archive-ttl"
+                  type="number"
+                  min={1}
+                  max={120}
+                  step={1}
+                  className="input-field"
+                  value={sandboxArchiveSessionTTLMinutes}
+                  onChange={(e) => setSandboxArchiveSessionTTLMinutes(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Idle timeout for warm archive exploration microVMs before automatic termination.
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="sandbox-max-machines">Max Concurrent Machines</label>
+                <input
+                  id="sandbox-max-machines"
+                  type="number"
+                  min={1}
+                  max={10}
+                  step={1}
+                  className="input-field"
+                  value={sandboxMaxConcurrentMachines}
+                  onChange={(e) => setSandboxMaxConcurrentMachines(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Maximum simultaneous microVM container machines allowed.
+                </span>
+              </div>
+            </div>
+
+            {/* Retention & Sweeper */}
+            <div className="settings-section-title-group" style={{ marginTop: "20px" }}>
+              <h4>Retention & Storage Caps</h4>
+              <p className="settings-section-hint">
+                Retention limits and sweeper interval for reclaimed container machines and legacy staging debris.
+              </p>
+            </div>
             <div className="form-group">
-              <label htmlFor="staging-path">Sandbox Staging Path</label>
+              <label htmlFor="staging-path">Sandbox Staging Path (Legacy / Deprecated)</label>
               <input
                 id="staging-path"
                 type="text"
                 className="input-field"
                 value={sandboxStagingPath}
                 onChange={(e) => setSandboxStagingPath(e.target.value)}
-                required
               />
               <span className="form-group-hint">
-                Directory where modified files are staged before being committed.
+                Legacy host directory for staged files. Runtime isolation is now enforced via macOS Seatbelt and Apple Container Machine.
               </span>
             </div>
-            {/* Retention caps bound staged-file lifetime and disk growth;
-                the sweeper reclaims the oldest files first once limits bite. */}
             <div className="form-row">
               <div className="form-group flex-1">
                 <label htmlFor="sandbox-retention-days">Retention (days)</label>
@@ -1702,7 +1815,7 @@ export default function SettingsManager() {
                 <input
                   id="sandbox-max-bytes"
                   type="number"
-                  min={1}
+                  min={0}
                   step={1024}
                   className="input-field"
                   value={sandboxMaxTotalBytes}
@@ -1718,7 +1831,7 @@ export default function SettingsManager() {
                 <input
                   id="sandbox-cleanup-interval"
                   type="number"
-                  min={1}
+                  min={0}
                   step={60}
                   className="input-field"
                   value={sandboxCleanupIntervalSeconds}

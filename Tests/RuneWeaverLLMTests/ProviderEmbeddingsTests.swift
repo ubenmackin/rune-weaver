@@ -1,4 +1,4 @@
-// Provider-backed embeddings adapter tests.
+// Rune Weaver LLM Tests — Provider-backed embeddings adapter tests.
 //
 // Covers the opt-in `provider` embeddings path that reuses the chat router's
 // priority order and fallthrough: a failing first provider yields to the next,

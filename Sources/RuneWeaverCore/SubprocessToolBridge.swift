@@ -26,6 +26,11 @@ public struct SubprocessToolBridge: Tool, Sendable {
     public let timeoutSeconds: TimeInterval
     /// Maximum allowed stdout byte count before the child is killed (defaults to 1 MB).
     public let maxOutputBytes: Int
+    /// Explicit opt-out permitting unsandboxed execution when the platform
+    /// sandbox is missing. Defaults to false so plugin code never inherits
+    /// host privileges silently; bypassing confinement must be a deliberate
+    /// choice at the construction site.
+    public let allowUnsandboxedExecution: Bool
 
     /// Creates a subprocess bridge tool.
     ///
@@ -39,7 +44,8 @@ public struct SubprocessToolBridge: Tool, Sendable {
         runtime: PluginRuntime,
         permissionOverride: PermissionLevel? = nil,
         timeoutSeconds: TimeInterval = 30.0,
-        maxOutputBytes: Int = 1_048_576
+        maxOutputBytes: Int = 1_048_576,
+        allowUnsandboxedExecution: Bool = false
     ) throws {
         if let permissionOverride, permissionOverride == .trusted {
             throw PluginManifestError.trustedPermissionProhibited(
@@ -63,6 +69,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
         self.runtime = runtime
         self.timeoutSeconds = timeoutSeconds
         self.maxOutputBytes = maxOutputBytes
+        self.allowUnsandboxedExecution = allowUnsandboxedExecution
     }
 
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
@@ -168,25 +175,59 @@ public struct SubprocessToolBridge: Tool, Sendable {
         }
     }
 
+    private func prepareProcess(
+        invocation: SubprocessInvocation,
+        isSandboxAvailable: Bool,
+        sandboxExecPath: String
+    ) -> Process {
+        let process = Process()
+        let sandboxExecURL = URL(fileURLWithPath: sandboxExecPath)
+        if isSandboxAvailable {
+            let profile = SeatbeltProfileBuilder(
+                allowedReadPaths: [invocation.workingDirectory.path],
+                allowedWritePaths: [invocation.workingDirectory.path],
+                allowNetwork: false
+            ).buildProfile()
+            process.executableURL = sandboxExecURL
+            process.arguments = ["-p", profile, invocation.executableURL.path] + invocation.arguments
+        } else {
+            RuneWeaverLog.tools.warning(
+                "SubprocessToolBridge: sandbox-exec unavailable, running plugin '\(name)' without sandbox confinement by explicit opt-in."
+            )
+            process.executableURL = invocation.executableURL
+            process.arguments = invocation.arguments
+        }
+        process.currentDirectoryURL = invocation.workingDirectory
+
+        var env = ProcessInfo.processInfo.environment
+        let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL"]
+        env = env.filter { allowedKeys.contains($0.key) }
+        env["RUNEWEAVER_PLUGIN"] = "1"
+        process.environment = env
+        return process
+    }
+
     private func runSubprocess(
         invocation: SubprocessInvocation,
         processBox: ProcessBox,
         maxOutputBytes: Int,
         timeoutSeconds: TimeInterval
     ) async throws -> ToolOutput {
-        try await withCheckedThrowingContinuation { continuation in
+        let allowUnsandboxed = allowUnsandboxedExecution
+        let toolName = name
+        let sandboxExecPath = "/usr/bin/sandbox-exec"
+        let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
+        if !isSandboxAvailable, !allowUnsandboxed {
+            RuneWeaverLog.tools.error("SubprocessToolBridge: sandbox-exec unavailable, refusing to execute plugin '\(toolName)' without sandbox confinement.")
+            return .failure("Plugin sandbox unavailable (sandbox-exec missing); execution refused.", callID: invocation.callID)
+        }
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = invocation.executableURL
-                process.arguments = invocation.arguments
-                process.currentDirectoryURL = invocation.workingDirectory
-
-                // Sanitize environment: do not leak Keychain or host ambient credentials
-                var env = ProcessInfo.processInfo.environment
-                let allowedKeys = ["PATH", "HOME", "USER", "SHELL", "TMPDIR", "LANG", "LC_ALL"]
-                env = env.filter { allowedKeys.contains($0.key) }
-                env["RUNEWEAVER_PLUGIN"] = "1"
-                process.environment = env
+                let process = prepareProcess(
+                    invocation: invocation,
+                    isSandboxAvailable: isSandboxAvailable,
+                    sandboxExecPath: sandboxExecPath
+                )
 
                 let stdinPipe = Pipe()
                 let stdoutPipe = Pipe()
@@ -241,7 +282,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
                         try stdinPipe.fileHandleForWriting.write(contentsOf: invocation.inputData)
                         try stdinPipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
                     } catch {
-                        fputs("[WARN] SubprocessToolBridge: stdin write terminated early: \(error)\n", stderr)
+                        RuneWeaverLog.tools.warning("SubprocessToolBridge: stdin write terminated early: \(error)")
                         // The child may have exited or closed stdin prematurely; handle reading handles EOF cleanly.
                     }
                     try? stdinPipe.fileHandleForWriting.close()

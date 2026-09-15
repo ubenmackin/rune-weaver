@@ -168,7 +168,7 @@ private enum SQLiteToolStateStore {
             do {
                 handle = try open(dbPath: dbPath)
             } catch {
-                fputs("[ERROR] ToolStateStore: failed opening store at \(dbPath): \(error)\n", stderr)
+                RuneWeaverLog.stores.error("ToolStateStore: failed opening store at \(dbPath): \(error)")
                 return
             }
             guard let handle else { return }
