@@ -610,6 +610,9 @@ export interface SettingsResponse {
   sandboxStagingPath: string;
   sandboxAutoApproveAfter: number;
   emailAccounts: EmailAccountData[];
+  pluginsDir: string;
+  pluginsMarketplaceIndexURL: string;
+  pluginsAutoRescan: boolean;
   configPath: string;
 }
 
@@ -629,6 +632,9 @@ export interface UpdateSettingsInput {
   sandboxStagingPath?: string;
   sandboxAutoApproveAfter?: number;
   emailAccounts?: EmailAccountData[];
+  pluginsDir?: string;
+  pluginsMarketplaceIndexURL?: string;
+  pluginsAutoRescan?: boolean;
 }
 
 export function getSettings(): Promise<SettingsResponse> {
@@ -643,3 +649,122 @@ export function updateSettings(
     body: JSON.stringify(input),
   });
 }
+
+export interface ToolInfo {
+  name: string;
+  description: string;
+  permissionLevel: string;
+  inputSchema: string;
+  isEnabled: boolean;
+  isBuiltIn: boolean;
+  pluginID?: string | null;
+  source: string;
+  integrityStatus: string;
+}
+
+export interface ToolsResponse {
+  tools: ToolInfo[];
+}
+
+export function getTools(): Promise<ToolsResponse> {
+  return fetchJson<ToolsResponse>("/tools");
+}
+
+export interface PluginSummary {
+  id: string;
+  name: string;
+  version: string;
+  author?: string | null;
+  description: string;
+  runtime: string;
+  source: string;
+  status: "discovered" | "enabled" | "disabled" | "tampered";
+  isEnabled: boolean;
+  integrityHash?: string | null;
+  tools: ToolInfo[];
+  permissionOverrides: Record<string, string>;
+  discoveredAt: string;
+  updatedAt: string;
+}
+
+export interface PluginsResponse {
+  plugins: PluginSummary[];
+}
+
+export interface UpdatePluginStateRequest {
+  action: "enable" | "disable" | "override_permission" | "clear_override";
+  toolName?: string;
+  permissionLevel?: "readOnly" | "requiresApproval";
+}
+
+export interface MarketplacePluginItem {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  description: string;
+  downloadURL: string;
+  tags: string[];
+  runtime: string;
+  declaredTools: string[];
+  isInstalled: boolean;
+}
+
+export interface MarketplaceResponse {
+  items: MarketplacePluginItem[];
+}
+
+export interface InstallMarketplacePluginRequest {
+  id: string;
+  // Optional display provenance carried alongside the install. The loopback
+  // service validates well-formed https URLs here but never fetches remote
+  // content from them, scaffolding a disabled-by-default stub from the
+  // curated catalog instead so a crafted URL cannot turn install into a
+  // fetch oracle. Omitting the field installs the same quarantined stub.
+  downloadURL?: string;
+}
+
+export function getPlugins(): Promise<PluginsResponse> {
+  return fetchJson<PluginsResponse>("/plugins");
+}
+
+export function getPlugin(id: string): Promise<PluginSummary> {
+  return fetchJson<PluginSummary>(`/plugins/${encodeURIComponent(id)}`);
+}
+
+export function rescanPlugins(): Promise<PluginsResponse> {
+  return fetchJson<PluginsResponse>("/plugins/rescan", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+export function updatePluginState(
+  id: string,
+  request: UpdatePluginStateRequest,
+): Promise<PluginSummary> {
+  return fetchJson<PluginSummary>(`/plugins/${encodeURIComponent(id)}/state`, {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+
+export function uninstallPlugin(id: string): Promise<void> {
+  return fetchJson<void>(`/plugins/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+}
+
+export function getMarketplacePlugins(): Promise<MarketplaceResponse> {
+  return fetchJson<MarketplaceResponse>("/marketplace/plugins");
+}
+
+export function installMarketplacePlugin(
+  request: InstallMarketplacePluginRequest,
+): Promise<PluginSummary> {
+  return fetchJson<PluginSummary>("/marketplace/install", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+}
+

@@ -85,7 +85,9 @@ struct ServeCommand: AsyncParsableCommand {
         } catch {
             cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
         }
-        let permissionGate = PermissionGate()
+        let permissionGate = PermissionGate(
+            pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        )
         let serverConfig = ServerConfig(hostname: hostname, port: port)
         guard serverConfig.isLoopbackOnly else {
             throw ValidationError("--hostname must be loopback (127.0.0.1, localhost, or ::1) until auth lands (got '\(hostname)').")
@@ -106,7 +108,19 @@ struct ServeCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder
         )
-        let effectiveSystemPrompt = SystemPromptComposer.resolve(flag: systemPrompt, tools: plugins)
+        // Snapshot discovered runes before the service owns the registry so
+        // external tools reach the served prompt; the service syncs the same
+        // directory again on boot, keeping both views consistent.
+        let previewBus = await CLIShared.makeToolBus(
+            emailConfig: loaded.config.email,
+            memoryEngine: memoryEngine,
+            permissionGate: permissionGate,
+            sandboxConfig: loaded.config.sandbox,
+            embedder: embedder,
+            pluginConfig: loaded.config.plugins,
+            episodesDBPath: loaded.config.memory.episodesDBPath
+        )
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: previewBus)
         let context = await ServerContext.make(
             config: serverConfig,
             conversations: conversations,
@@ -116,10 +130,18 @@ struct ServeCommand: AsyncParsableCommand {
             llm: selected,
             systemPrompt: effectiveSystemPrompt,
             schedulerConfig: loaded.config.scheduler,
-            episodesDBPath: loaded.config.memory.episodesDBPath
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            pluginConfig: loaded.config.plugins
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)
+        }
+        // Re-snapshot the live service registry so drift between the startup
+        // preview and the serving bus surfaces instead of silently omitting
+        // a rune from the prompt.
+        let livePrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: context.toolBus)
+        if livePrompt != effectiveSystemPrompt {
+            print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
         }
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)

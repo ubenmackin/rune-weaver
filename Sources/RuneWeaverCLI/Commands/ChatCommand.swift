@@ -308,34 +308,12 @@ struct ChatCommand: AsyncParsableCommand {
         }
         // Working memory (ConversationManager sessions/messages tables) is the
         // live source of truth; episodic storage (MemoryEngine episodes tables)
-        // in the same file is the durable mirror. Hydration flows one way,
-        // episodic into working, only for fresh sessions so `/clear` (which
-        // clears both stores) never resurrects cleared history on resume.
-        let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
-        do {
-            try await conversations.loadAll()
-        } catch {
-            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
-        }
-        let hadPersistedSession = await conversations.session(id: sessionID) != nil
-        await conversations.ensureSession(id: sessionID)
-        if await conversations.messageCount(for: sessionID) == 0, !hadPersistedSession {
-            do {
-                let limit = await conversations.maxMessages
-                let episodes = try await memoryEngine.recentEpisodes(for: sessionID, limit: limit)
-                // Hydration keeps tool outcomes replay-safe: legacy `.tool`
-                // rows with `tool_call_id` replay with wiring intact while
-                // compact `"Used <tool>: <outcome>"` records hydrate as
-                // `.assistant` synthesis. See
-                // `MemoryEngine.hydrationMessages(from:)`.
-                let replayable = MemoryEngine.hydrationMessages(from: episodes)
-                if !replayable.isEmpty {
-                    await conversations.setHistory(replayable, for: sessionID)
-                }
-            } catch {
-                cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
-            }
-        }
+        // in the same file is the durable mirror.
+        let conversations = await initializeConversations(
+            sessionID: sessionID,
+            memoryConfig: loaded.config.memory,
+            memoryEngine: memoryEngine
+        )
         // Email search/read are `readOnly` and memory tools are `trusted`
         // per the owner memory-write trust ruling, so both bypass the
         // approval handler by design (see `ToolBus.execute`): the handler
@@ -349,13 +327,17 @@ struct ChatCommand: AsyncParsableCommand {
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: providers)
         )
-        let permissionGate = PermissionGate()
+        let permissionGate = PermissionGate(
+            pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        )
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
             sandboxConfig: loaded.config.sandbox,
-            embedder: embedder
+            embedder: embedder,
+            pluginConfig: loaded.config.plugins,
+            episodesDBPath: loaded.config.memory.episodesDBPath
         )
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
@@ -420,6 +402,40 @@ struct ChatCommand: AsyncParsableCommand {
             throw ValidationError("--session must be a UUID (got '\(raw)').")
         }
         return id
+    }
+
+    /// Prepares and hydrates working conversation history from episodic storage.
+    /// - Parameters:
+    ///   - sessionID: Current chat session identifier.
+    ///   - memoryConfig: Memory configuration containing storage paths.
+    ///   - memoryEngine: Episodic memory engine to hydrate from.
+    /// - Returns: Initialized conversation manager.
+    private func initializeConversations(
+        sessionID: UUID,
+        memoryConfig: MemoryConfig,
+        memoryEngine: MemoryEngine
+    ) async -> ConversationManager {
+        let conversations = ConversationManager(episodesDBPath: memoryConfig.episodesDBPath)
+        do {
+            try await conversations.loadAll()
+        } catch {
+            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
+        }
+        let hadPersistedSession = await conversations.session(id: sessionID) != nil
+        await conversations.ensureSession(id: sessionID)
+        if await conversations.messageCount(for: sessionID) == 0, !hadPersistedSession {
+            do {
+                let limit = await conversations.maxMessages
+                let episodes = try await memoryEngine.recentEpisodes(for: sessionID, limit: limit)
+                let replayable = MemoryEngine.hydrationMessages(from: episodes)
+                if !replayable.isEmpty {
+                    await conversations.setHistory(replayable, for: sessionID)
+                }
+            } catch {
+                cliPrintError(TerminalStyle.dim("Could not load episodic history; starting fresh."))
+            }
+        }
+        return conversations
     }
 }
 

@@ -145,6 +145,16 @@ Repeat the `[[scheduler.jobs]]` table once per job. A job needs a `name`, a `pro
 | `poll_interval_seconds` | integer \| unset | `300` | Seconds between poll checks. Must be positive when set. |
 | `poll_limit` | integer \| unset | `10` | Maximum hits per poll, clamped `1...50`. |
 
+### `[plugins]`
+
+Controls external rune plugin discovery and marketplace integration. Discovered and newly installed runes enter the system in a disabled state awaiting human review and approval before they can execute on the live bus.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `plugins_dir` | string | `"~/.runeweaver/plugins"` | Directory scanned for external rune packages. Must not be empty. |
+| `marketplace_index_url` | string | `"https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"` | Remote marketplace catalog index URL. Must be a valid URL. |
+| `auto_rescan` | bool | `true` | Whether to automatically scan the plugins directory on engine startup. |
+
 ## Provider Setup Guides
 
 ### MLX (local, Apple Silicon)

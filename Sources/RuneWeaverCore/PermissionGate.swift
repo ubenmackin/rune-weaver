@@ -342,16 +342,43 @@ public actor PermissionGate {
     private var denials: [ActionDescriptor: String] = [:]
     /// Optional persistence backend.
     private let store: (any TrustStore)?
+    /// Configured plugins directory for protected path enforcement.
+    public let pluginsDir: URL?
 
     /// Creates a permission gate.
-    /// - Parameter store: Persistence backend. Defaults to nil
-    ///   (memory only). Stored grants load best-effort.
-    public init(store: (any TrustStore)? = nil) {
+    /// - Parameters:
+    ///   - store: Persistence backend. Defaults to nil (memory only). Stored grants load best-effort.
+    ///   - pluginsDir: Configured plugins directory. Defaults to nil (uses default path).
+    public init(store: (any TrustStore)? = nil, pluginsDir: URL? = nil) {
         self.store = store
+        self.pluginsDir = pluginsDir
         if let store {
             grants = (try? store.load()) ?? []
             grants.removeAll { $0.isExpired() }
         }
+    }
+
+    /// Checks whether a tool call targets a protected engine path.
+    private func isProtectedTarget(toolCall: ToolInput) -> Bool {
+        guard let data = toolCall.argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else {
+            let target = ActionDescriptor.target(from: toolCall)
+            guard !target.isEmpty else { return false }
+            let url = URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
+            return PluginSecurity.isProtectedPath(targetURL: url, pluginsDir: pluginsDir)
+        }
+
+        let candidateKeys = ["path", "file_path", "filePath", "target", "destination", "directory", "dir", "to"]
+        for key in candidateKeys {
+            if let str = object[key] as? String, !str.isEmpty {
+                let url = URL(fileURLWithPath: (str as NSString).expandingTildeInPath)
+                if PluginSecurity.isProtectedPath(targetURL: url, pluginsDir: pluginsDir) {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// Decides whether a tool call may run.
@@ -373,6 +400,12 @@ public actor PermissionGate {
         if let reason = denials[descriptor] ?? denials[ActionDescriptor(toolName: tool.name)] {
             return .denied(reason)
         }
+
+        // Guard against automated agent modifications to protected engine paths
+        if tool.permissionLevel != .readOnly, isProtectedTarget(toolCall: toolCall) {
+            return .denied("Access denied: direct modification of protected Rune Weaver engine files or installed plugins is prohibited.")
+        }
+
         switch tool.permissionLevel {
         case .readOnly:
             return .allowed

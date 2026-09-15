@@ -70,6 +70,13 @@ enum TerminalStyle {
     static func success(_ text: String) -> String {
         wrap(text, "32")
     }
+
+    /// Styles bold text.
+    /// - Parameter text: Text to style.
+    /// - Returns: Styled text.
+    static func bold(_ text: String) -> String {
+        wrap(text, "1")
+    }
 }
 
 /// Resolves and loads `config.toml` for CLI commands.
@@ -276,6 +283,8 @@ enum CLIShared {
     ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
     ///   - embedder: Optional embeddings producer forwarded to the memory
     ///     tools. Defaults to nil (keyword-only).
+    ///   - pluginConfig: Decoded `[plugins]` section, if any.
+    ///   - episodesDBPath: SQLite database path where plugin state is recorded. Defaults to `~/.runeweaver/episodes.db`.
     /// - Returns: Bus with every shared plugin registered.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
@@ -283,11 +292,22 @@ enum CLIShared {
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil,
         sandboxConfig: SandboxConfig? = nil,
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: (any EmbeddingsBackend)? = nil,
+        pluginConfig: PluginConfig? = nil,
+        episodesDBPath: String? = nil
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
         for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine, sandboxConfig: sandboxConfig, embedder: embedder) {
             await bus.register(tool: tool)
+        }
+        if let pluginConfig {
+            let expandedDir = (pluginConfig.pluginsDir as NSString).expandingTildeInPath
+            let pluginsURL = URL(fileURLWithPath: expandedDir)
+            let rawDBPath = episodesDBPath ?? "~/.runeweaver/episodes.db"
+            let dbPath = (rawDBPath as NSString).expandingTildeInPath
+            let store = ToolRegistryStore(dbPath: dbPath)
+            let discovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: store)
+            await discovery.discoverAndSync(toolBus: bus)
         }
         return bus
     }

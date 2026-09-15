@@ -98,6 +98,8 @@ public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput) async -> 
 public actor ToolBus {
     /// Tools indexed by name.
     private var tools: [String: any Tool] = [:]
+    /// Enablement state indexed by tool name. Absent entries default to true.
+    private var enabledStates: [String: Bool] = [:]
     /// Approval hook for `requiresApproval` tools.
     private var approvalHandler: ToolApprovalHandler?
     /// Graduated-trust gate consulted before the approval handler.
@@ -122,20 +124,54 @@ public actor ToolBus {
     }
 
     /// Registers a tool, replacing any existing tool with the same name.
-    /// - Parameter tool: The tool to register.
-    public func register(tool: any Tool) {
+    /// - Parameters:
+    ///   - tool: The tool to register.
+    ///   - isEnabled: Whether the tool is active for execution. Defaults to true.
+    public func register(tool: any Tool, isEnabled: Bool = true) {
         tools[tool.name] = tool
+        enabledStates[tool.name] = isEnabled
+    }
+
+    /// Enables a registered tool by name.
+    /// - Parameter name: Tool name to enable.
+    public func enableTool(named name: String) {
+        if tools[name] != nil {
+            enabledStates[name] = true
+        }
+    }
+
+    /// Disables a registered tool by name without unregistering its definition.
+    /// - Parameter name: Tool name to disable.
+    public func disableTool(named name: String) {
+        if tools[name] != nil {
+            enabledStates[name] = false
+        }
+    }
+
+    /// Whether the tool is registered and currently enabled.
+    /// - Parameter name: Tool name.
+    /// - Returns: True if registered and enabled.
+    public func isToolEnabled(named name: String) -> Bool {
+        guard tools[name] != nil else { return false }
+        return enabledStates[name] ?? true
     }
 
     /// Removes the tool with the given name. Missing names are a no-op.
     /// - Parameter name: Name of the tool to remove.
     public func unregister(toolNamed name: String) {
         tools.removeValue(forKey: name)
+        enabledStates.removeValue(forKey: name)
     }
 
-    /// Returns the registered tools.
-    /// - Returns: All registered tools, unsorted.
+    /// Returns the registered tools that are currently enabled.
+    /// - Returns: All enabled tools, unsorted.
     public func availableTools() -> [any Tool] {
+        tools.values.filter { isToolEnabled(named: $0.name) }
+    }
+
+    /// Returns all registered tools, including those currently disabled.
+    /// - Returns: All registered tools, unsorted.
+    public func allTools() -> [any Tool] {
         Array(tools.values)
     }
 
@@ -177,6 +213,9 @@ public actor ToolBus {
     public func execute(toolCall: ToolInput, context: ToolContext) async -> ToolResult {
         guard let tool = tools[toolCall.toolName] else {
             return .failure(toolCallID: toolCall.callID, content: "Unknown tool: \(toolCall.toolName)")
+        }
+        guard isToolEnabled(named: toolCall.toolName) else {
+            return .failure(toolCallID: toolCall.callID, content: "Tool '\(toolCall.toolName)' is currently disabled.")
         }
         switch tool.permissionLevel {
         case .readOnly, .trusted:

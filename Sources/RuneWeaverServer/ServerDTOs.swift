@@ -45,6 +45,16 @@ public enum ServerPaths {
     public static let websocket = "ws"
     /// Settings group.
     public static let settings = "settings"
+    /// Plugins group.
+    public static let plugins = "plugins"
+    /// Plugin rescan subpath.
+    public static let rescan = "rescan"
+    /// Plugin state subpath.
+    public static let state = "state"
+    /// Marketplace group.
+    public static let marketplace = "marketplace"
+    /// Marketplace install subpath.
+    public static let install = "install"
     /// Engine API version served on `/health`.
     public static let apiVersion = "0.1.0"
 }
@@ -186,23 +196,50 @@ public struct ToolInfo: Content, Equatable {
     public let permissionLevel: String
     /// Raw JSON Schema for the tool input.
     public let inputSchema: String
+    /// Whether this tool is currently enabled on the live bus.
+    public let isEnabled: Bool
+    /// Whether this tool is a built-in core capability vs external plugin.
+    public let isBuiltIn: Bool
+    /// Plugin ID owning this tool, if non-built-in.
+    public let pluginID: String?
+    /// Origin (`"builtin"`, `"local_disk"`, `"marketplace"`, `"agent_generated"`).
+    public let source: String
+    /// Integrity status (`"valid"`, `"tampered"`, `"unverified"`).
+    public let integrityStatus: String
 
     /// Creates a tool info row.
-    /// - Parameters:
-    ///   - name: Stable tool name.
-    ///   - description: When to use the tool.
-    ///   - permissionLevel: Trust level string.
-    ///   - inputSchema: Raw JSON Schema.
-    public init(name: String, description: String, permissionLevel: String, inputSchema: String) {
+    public init(
+        name: String,
+        description: String,
+        permissionLevel: String,
+        inputSchema: String,
+        isEnabled: Bool = true,
+        isBuiltIn: Bool = true,
+        pluginID: String? = nil,
+        source: String = "builtin",
+        integrityStatus: String = "valid"
+    ) {
         self.name = name
         self.description = description
         self.permissionLevel = permissionLevel
         self.inputSchema = inputSchema
+        self.isEnabled = isEnabled
+        self.isBuiltIn = isBuiltIn
+        self.pluginID = pluginID
+        self.source = source
+        self.integrityStatus = integrityStatus
     }
 
     /// Creates a row from a runtime tool.
     /// - Parameter tool: Registered tool.
-    public init(_ tool: any Tool) {
+    public init(
+        _ tool: any Tool,
+        isEnabled: Bool = true,
+        isBuiltIn: Bool = true,
+        pluginID: String? = nil,
+        source: String = "builtin",
+        integrityStatus: String = "valid"
+    ) {
         self.name = tool.name
         self.description = tool.description
         switch tool.permissionLevel {
@@ -211,6 +248,11 @@ public struct ToolInfo: Content, Equatable {
         case .trusted: self.permissionLevel = "trusted"
         }
         self.inputSchema = tool.inputSchema.rawValue
+        self.isEnabled = isEnabled
+        self.isBuiltIn = isBuiltIn
+        self.pluginID = pluginID
+        self.source = source
+        self.integrityStatus = integrityStatus
     }
 }
 
@@ -226,6 +268,156 @@ public struct ToolsResponse: Content, Equatable {
     public init(tools: [ToolInfo]) {
         self.tools = tools
         self.count = tools.count
+    }
+}
+
+/// Summary of an installed or discovered rune package.
+public struct PluginSummary: Content, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let version: String
+    public let author: String?
+    public let description: String
+    public let runtime: String
+    public let source: String
+    public let status: String
+    public let isEnabled: Bool
+    public let integrityHash: String?
+    public let toolsCount: Int
+    public let tools: [ToolInfo]
+    public let permissionOverrides: [String: String]
+    public let discoveredAt: Date
+    public let updatedAt: Date
+
+    public init(
+        id: String,
+        name: String,
+        version: String,
+        author: String? = nil,
+        description: String,
+        runtime: String,
+        source: String,
+        status: String,
+        isEnabled: Bool,
+        integrityHash: String? = nil,
+        tools: [ToolInfo],
+        permissionOverrides: [String: String] = [:],
+        discoveredAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.author = author
+        self.description = description
+        self.runtime = runtime
+        self.source = source
+        self.status = status
+        self.isEnabled = isEnabled
+        self.integrityHash = integrityHash
+        self.toolsCount = tools.count
+        self.tools = tools
+        self.permissionOverrides = permissionOverrides
+        self.discoveredAt = discoveredAt
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Response for `GET /plugins`.
+public struct PluginsResponse: Content, Equatable {
+    public let plugins: [PluginSummary]
+    public let count: Int
+    public let enabledCount: Int
+    public let discoveredPendingCount: Int
+    public let tamperedCount: Int
+
+    public init(plugins: [PluginSummary]) {
+        self.plugins = plugins
+        self.count = plugins.count
+        self.enabledCount = plugins.filter(\.isEnabled).count
+        self.discoveredPendingCount = plugins.filter { $0.status == "discovered" }.count
+        self.tamperedCount = plugins.filter { $0.status == "tampered" }.count
+    }
+}
+
+/// Request to modify a plugin's state or override a tool's permission level.
+public struct UpdatePluginStateRequest: Content, Equatable {
+    /// Action: `"enable"`, `"disable"`, `"override_permission"`, or `"clear_override"`.
+    public let action: String
+    /// Target tool name for permission override.
+    public let toolName: String?
+    /// Overridden permission level (`"readOnly"`, `"requiresApproval"`).
+    public let permissionLevel: String?
+
+    public init(action: String, toolName: String? = nil, permissionLevel: String? = nil) {
+        self.action = action
+        self.toolName = toolName
+        self.permissionLevel = permissionLevel
+    }
+}
+
+/// One item in the community marketplace index.
+public struct MarketplacePluginItem: Content, Equatable, Identifiable {
+    public let id: String
+    public let name: String
+    public let version: String
+    public let author: String
+    public let description: String
+    public let downloadURL: String
+    public let tags: [String]
+    public let runtime: String
+    public let declaredTools: [String]
+    public let isInstalled: Bool
+
+    public init(
+        id: String,
+        name: String,
+        version: String,
+        author: String,
+        description: String,
+        downloadURL: String,
+        tags: [String] = [],
+        runtime: String = "python",
+        declaredTools: [String] = [],
+        isInstalled: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.version = version
+        self.author = author
+        self.description = description
+        self.downloadURL = downloadURL
+        self.tags = tags
+        self.runtime = runtime
+        self.declaredTools = declaredTools
+        self.isInstalled = isInstalled
+    }
+}
+
+/// Response for `GET /marketplace/plugins`.
+public struct MarketplaceResponse: Content, Equatable {
+    public let items: [MarketplacePluginItem]
+    public let count: Int
+
+    public init(items: [MarketplacePluginItem]) {
+        self.items = items
+        self.count = items.count
+    }
+}
+
+/// Request to install a rune from the marketplace.
+///
+/// The download URL rides along as display provenance only and is validated
+/// as a well-formed https URL. The service scaffolds a disabled-by-default
+/// stub from the curated catalog instead of fetching remote content, so the
+/// loopback service never acts as a fetch oracle for crafted URLs.
+public struct InstallMarketplacePluginRequest: Content, Equatable {
+    public let id: String
+    public let downloadURL: String?
+
+    public init(id: String, downloadURL: String? = nil) {
+        self.id = id
+        self.downloadURL = downloadURL
     }
 }
 
@@ -684,6 +876,9 @@ public struct SettingsResponse: Content, Equatable {
     public let sandboxStagingPath: String
     public let sandboxAutoApproveAfter: Int
     public let emailAccounts: [EmailAccount]
+    public let pluginsDir: String
+    public let pluginsMarketplaceIndexURL: String
+    public let pluginsAutoRescan: Bool
     public let configPath: String
 
     public init(config: RuneWeaverConfig, configPath: String) {
@@ -702,6 +897,9 @@ public struct SettingsResponse: Content, Equatable {
         self.sandboxStagingPath = config.sandbox.stagingPath
         self.sandboxAutoApproveAfter = config.sandbox.autoApproveAfter
         self.emailAccounts = config.email.accounts
+        self.pluginsDir = config.plugins.pluginsDir
+        self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
+        self.pluginsAutoRescan = config.plugins.autoRescan
         self.configPath = configPath
     }
 }
@@ -728,6 +926,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let sandboxStagingPath: String?
     public let sandboxAutoApproveAfter: Int?
     public let emailAccounts: [EmailAccount]?
+    public let pluginsDir: String?
+    public let pluginsMarketplaceIndexURL: String?
+    public let pluginsAutoRescan: Bool?
 
     public init(
         engineName: String? = nil,
@@ -744,7 +945,10 @@ public struct UpdateSettingsRequest: Content, Equatable {
         voiceTTSProvider: String? = nil,
         sandboxStagingPath: String? = nil,
         sandboxAutoApproveAfter: Int? = nil,
-        emailAccounts: [EmailAccount]? = nil
+        emailAccounts: [EmailAccount]? = nil,
+        pluginsDir: String? = nil,
+        pluginsMarketplaceIndexURL: String? = nil,
+        pluginsAutoRescan: Bool? = nil
     ) {
         self.engineName = engineName
         self.logLevel = logLevel
@@ -761,6 +965,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.sandboxStagingPath = sandboxStagingPath
         self.sandboxAutoApproveAfter = sandboxAutoApproveAfter
         self.emailAccounts = emailAccounts
+        self.pluginsDir = pluginsDir
+        self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
+        self.pluginsAutoRescan = pluginsAutoRescan
     }
 
     /// Applies this update onto a loaded config, preserving every field
@@ -826,6 +1033,15 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let emailAccounts {
             config.email.accounts = emailAccounts
+        }
+        if let pluginsDir {
+            config.plugins.pluginsDir = pluginsDir
+        }
+        if let pluginsMarketplaceIndexURL {
+            config.plugins.marketplaceIndexURL = pluginsMarketplaceIndexURL
+        }
+        if let pluginsAutoRescan {
+            config.plugins.autoRescan = pluginsAutoRescan
         }
     }
 }
