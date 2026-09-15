@@ -1,4 +1,12 @@
+// Rune Weaver CLI — Shared terminal helpers and tool-bus wiring.
+//
+// Provides terminal styling, config loading, provider selection, and the
+// single shared plugin-tool source (`CLIShared`) every subcommand builds
+// on, so `chat`, `config`, `memory`, `scheduler`, `serve`, and `status`
+// resolve configuration, secrets handling, and output styling consistently.
+
 import Foundation
+import os
 import RuneWeaverCore
 import RuneWeaverLLM
 import RuneWeaverTools
@@ -180,29 +188,24 @@ enum CLIProviderBuilder {
 
 /// Compiler-checked lock-guarded box for CLI shared state.
 ///
-/// Encapsulates `NSLock` so the static itself stays an immutable
-/// `static let` and every mutation runs inside `withLock` (which uses
-/// `defer` for unlock), keeping access data-race free under Swift 6
-/// concurrency without `nonisolated(unsafe)` mutable state.
-final class CLILockedValue<Value: Sendable>: @unchecked Sendable {
-    /// Guarded value.
-    private var value: Value
+/// Encapsulates `OSAllocatedUnfairLock` so the static itself stays an immutable
+/// `static let` and every mutation runs inside `withLock`,
+/// keeping access data-race free under Swift 6 concurrency without `nonisolated(unsafe)`.
+final class CLILockedValue<Value: Sendable>: Sendable {
     /// Guards `value`.
-    private let lock = NSLock()
+    private let lock: OSAllocatedUnfairLock<Value>
 
     /// Creates a box.
     /// - Parameter value: Initial value.
     init(_ value: Value) {
-        self.value = value
+        self.lock = OSAllocatedUnfairLock(initialState: value)
     }
 
     /// Runs `body` with exclusive access to the value.
     /// - Parameter body: Mutation or read to perform while locked.
     /// - Returns: Body result.
-    func withLock<T>(_ body: (inout Value) throws -> T) rethrows -> T {
-        lock.lock()
-        defer { lock.unlock() }
-        return try body(&value)
+    func withLock<T: Sendable>(_ body: @Sendable (inout Value) throws -> T) rethrows -> T {
+        try lock.withLock(body)
     }
 }
 

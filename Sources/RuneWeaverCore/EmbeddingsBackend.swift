@@ -43,7 +43,7 @@ public protocol EmbeddingsBackend: Sendable {
     /// Provider endpoints often advertise no width up front, so nil
     /// means "discover from the first result" rather than "variable
     /// width": once known, every vector from the backend shares it.
-    var dimension: Int? { get }
+    var dimension: Int? { get async }
 
     /// Embeds a batch of texts.
     ///

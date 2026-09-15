@@ -1,3 +1,10 @@
+// Rune Weaver Tools — Long-term memory plugin tools for recall and persistence.
+//
+// Exposes the `remember_fact` and `recall_memories` tools over the memory engine
+// with audit-logged writes and calibrated merged recall. Lets the model persist
+// user facts and retrieve episodic, semantic, and profile hits without touching
+// storage directly.
+
 import Foundation
 import RuneWeaverCore
 
@@ -96,6 +103,7 @@ public enum FileMemoryAuditLog {
                     try payload.write(to: url, options: .atomic)
                 }
             } catch {
+                fputs("[WARN] FileMemoryAuditLog: Failed to append memory audit record to \(url.path): \(error)\n", stderr)
                 // Best-effort: audit failures never fail the tool call.
             }
         }

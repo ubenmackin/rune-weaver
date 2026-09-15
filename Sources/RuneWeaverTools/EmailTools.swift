@@ -1,8 +1,9 @@
-// Rune Weaver Tools — IMAP email search, read, and attachment tools.
+// Rune Weaver Tools — Email search, read, attachment, and send tools.
 //
-// Provides the `email.search`, `email.read`, and `email.attachment` plugin
-// tools over the `python3 imaplib` bridge with read-only fetches, staged
-// sandbox downloads, and execution-time credential resolution.
+// Provides the `email.search`, `email.read`, `email.attachment`, and
+// `email.send` plugin tools over the `python3 imaplib`/`smtplib` bridges
+// with read-only fetches, staged sandbox downloads, approval-gated
+// sending, and execution-time credential resolution.
 
 import Foundation
 import RuneWeaverCore
@@ -404,10 +405,13 @@ public struct EmailReadTool: Tool, Sendable {
 ///
 /// Downloads one attachment part by zero-based index into the sandbox
 /// staging area only (never to the real filesystem) and returns the
-/// staged path with filename, MIME type, and byte size. Parts over the
-/// size cap are skipped without writing, returning a note instead.
-/// Pass the `mailbox` labeled on the `email.search` hit to fetch from
-/// folders outside `INBOX`; omitted or blank means `INBOX`.
+/// staged path with filename, MIME type, byte size, staged-file expiry,
+/// coarse MIME bucket, and a follow-up hint. Parts over the size cap
+/// are skipped without writing, returning a note instead. Pass
+/// `preview: true` to inline the first 2000 chars for small text
+/// payloads (`text/*`, `application/json` under 256 KB); binaries are
+/// never inlined. Pass the `mailbox` labeled on the `email.search` hit
+/// to fetch from folders outside `INBOX`; omitted or blank means `INBOX`.
 /// Declared `requiresApproval` so the graduated-trust gate prompts
 /// before any download. Reads only: it opens each mailbox read-only
 /// with `(BODY.PEEK[])` fetches and never sends mail. Secrets are
@@ -420,8 +424,10 @@ public struct EmailAttachmentTool: Tool, Sendable {
         "Downloads one email attachment by index into the sandbox staging area. "
             + "Use when the user asks to save or open an attachment listed by email.read. "
             + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
-            + "Writes only under the sandbox staging area; parts over the size cap are skipped with a note."
-    /// Function-calling contract for `account`, `id`, `index`, and `mailbox` (plus accepted aliases).
+            + "Writes only under the sandbox staging area; parts over the size cap are skipped with a note. "
+            + "Pass preview true to inline the first 2000 chars for small text parts (binaries are never inlined); "
+            + "the success envelope also reports the staged path expiry, MIME category, and a files.read follow-up hint."
+    /// Function-calling contract for `account`, `id`, `index`, `mailbox` (plus accepted aliases), and `preview`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -432,7 +438,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 + #"position from email.read","minimum":0},"attachmentIndex":{"type":"integer","description":"Alias "#
                 + #"for index","minimum":0},"attachment_index":{"type":"integer","description":"Alias for "#
                 + #"index","minimum":0},"mailbox":{"type":"string","description":"Mailbox from the email.search hit "#
-                + #"(e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias for mailbox"}}"#
+                + #"(e.g. INBOX); omitted means INBOX"},"folder":{"type":"string","description":"Alias for mailbox"}, "#
+                + #""preview":{"type":"boolean","description":"When true, inline the first 2000 chars for small "#
+                + #"text parts (text/*, application/json under 256 KB); binaries are never inlined"}}"#
                 + #","required":["account"],"allOf":[{"anyOf":[{"required":["id"]},"#
                 + #"{"required":["messageId"]},{"required":["message_id"]},{"required":["uid"]}]},"#
                 + #"{"anyOf":[{"required":["index"]},{"required":["attachmentIndex"]},"#
@@ -470,9 +478,9 @@ public struct EmailAttachmentTool: Tool, Sendable {
 
     /// Downloads one attachment part into the sandbox staging area.
     /// - Parameters:
-    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, and optional `mailbox`.
+    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, optional `mailbox`, and optional `preview`.
     ///   - context: Ambient execution context. `dryRun` fetches but never writes.
-    /// - Returns: JSON envelope with the staged path or a skip note, or a failure without secrets.
+    /// - Returns: JSON envelope with the staged path, lifecycle hints, and optional inline preview, or a skip note, or a failure without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
@@ -484,7 +492,8 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 accountName: target.accountName,
                 messageID: target.messageID,
                 attachmentIndex: target.attachmentIndex,
-                mailbox: effectiveMailbox
+                mailbox: effectiveMailbox,
+                preview: target.preview
             )
             let fetched = try await fetchedAttachment(
                 credentials: credentials,
@@ -636,6 +645,8 @@ private struct AttachmentTarget {
     let messageID: String
     let attachmentIndex: Int
     let mailbox: String
+    /// Whether the caller requested an inline text preview.
+    let preview: Bool
 }
 
 extension EmailAttachmentTool {
@@ -665,7 +676,8 @@ extension EmailAttachmentTool {
     /// Omitted or blank mailboxes fall back to the legacy-default `INBOX`
     /// string here but are validated against `LIST` downstream in `resolvedMailbox`
     /// via `resolveMailboxAgainstList` like explicit values; folder names are never
-    /// assumed.
+    /// assumed. The optional `preview` flag passes through untouched so text
+    /// previews stay opt-in and legacy calls without it behave identically.
     /// - Parameter args: Decoded attachment arguments.
     /// - Returns: Trimmed routing.
     /// - Throws: Failure message when routing is empty or invalid.
@@ -683,7 +695,7 @@ extension EmailAttachmentTool {
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateAttachmentIndex(attachmentIndex)
         try EmailIMAPValidation.validateMailbox(mailbox)
-        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex, mailbox: mailbox)
+        return AttachmentTarget(accountName: accountName, messageID: messageID, attachmentIndex: attachmentIndex, mailbox: mailbox, preview: args.preview)
     }
 
     /// Resolves the configured account by exact then case-insensitive name.
@@ -836,13 +848,19 @@ extension EmailAttachmentTool {
     }
 
     /// Stages bytes under the sandbox and builds the success result.
+    ///
+    /// Attaches the post-download lifecycle (expiry from the sandbox
+    /// retention window, coarse MIME bucket, `files.read` follow-up hint,
+    /// and the guarded inline preview) so the model can act on the staged
+    /// file without a second round trip. Oversized and dry-run skips keep
+    /// the legacy shape with no lifecycle keys.
     /// - Parameters:
-    ///   - target: Trimmed routing.
+    ///   - target: Trimmed routing (including the caller's `preview` request).
     ///   - accountName: Resolved account name for the envelope.
     ///   - fetched: Downloaded bytes to stage.
     ///   - destination: Sandbox-confined file URL.
     ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the staged path, or a staging failure.
+    /// - Returns: Success envelope with the staged path and lifecycle hints, or a staging failure.
     private func storedEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -859,6 +877,32 @@ extension EmailAttachmentTool {
         } catch {
             return .failure("Could not stage attachment: \(error.localizedDescription)", callID: callID)
         }
+        let category = EmailAttachmentLifecycle.mimeCategory(for: fetched.contentType)
+        let expiry = EmailAttachmentLifecycle.expiryString(
+            from: EmailAttachmentLifecycle.expiryDate(retentionDays: sandboxConfig.retentionDays)
+        )
+        // Inline previews stay strictly opt-in and text-only: binaries never
+        // inline even when the flag is set, and oversized text stays out so
+        // a preview request cannot balloon the tool output.
+        var previewText: String?
+        var previewWasTruncated: Bool?
+        if target.preview,
+           EmailAttachmentLifecycle.isPreviewable(
+               contentType: fetched.contentType,
+               sizeBytes: fetched.sizeBytes,
+               dataCount: fetched.data.count
+           ),
+           let inline = EmailAttachmentLifecycle.inlinePreview(for: fetched.data)
+        {
+            previewText = inline.text
+            previewWasTruncated = inline.truncated ? true : false
+        }
+        let hint = EmailAttachmentLifecycle.nextStepsHint(
+            path: destination.path,
+            expiresAt: expiry,
+            mimeCategory: category,
+            previewTruncated: previewWasTruncated
+        )
         let envelope = EmailAttachmentEnvelope(
             account: accountName,
             id: target.messageID,
@@ -869,7 +913,12 @@ extension EmailAttachmentTool {
             path: destination.path,
             skipped: false,
             note: nil,
-            mailbox: target.mailbox
+            mailbox: target.mailbox,
+            expiresAt: expiry,
+            mimeCategory: category,
+            nextSteps: hint,
+            preview: previewText,
+            previewTruncated: previewText == nil ? nil : previewWasTruncated
         )
         return successEnvelope(envelope, callID: callID)
     }
@@ -877,34 +926,40 @@ extension EmailAttachmentTool {
 
 /// Factory registering the email tools on a `ToolBus`.
 ///
-/// Search and read stay `readOnly` while attachment downloads are
-/// `requiresApproval` so the graduated-trust gate prompts before any
-/// file is staged. All tools integrate with
-/// `EmailCredentialResolver` (environment first, Keychain service
-/// `com.runeweaver.secrets` second) so passwords never live in
+/// Search and read stay `readOnly` while attachment downloads and
+/// sending are `requiresApproval` so the graduated-trust gate prompts
+/// before any file is staged or message leaves the machine. All tools
+/// integrate with `EmailCredentialResolver` (environment first, Keychain
+/// service `com.runeweaver.secrets` second) so passwords never live in
 /// `config.toml` and never reach the LLM prompt. Verified live against
 /// Volcrypt IMAP (`mail.volcrypt.com:993`, account `volcrypt` via
 /// `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
 /// (`imap.mail.me.com:993`, account `icloud` via the
 /// `EMAIL_ICLOUD_PASSWORD` app-specific password) read-only with
 /// verified TLS; attachment bytes stage under the sandbox staging
-/// area only.
+/// area only. Sending uses verified SMTP submission (explicit overrides
+/// or 587 STARTTLS then 465 SSL) with the sender defaulting to the
+/// account username, sandbox-confined attachments, threaded replies,
+/// and a best-effort Sent copy.
 public enum EmailTools {
     /// Tool names in registration order.
-    public static let toolNames = ["email.search", "email.read", "email.attachment"]
+    public static let toolNames = ["email.search", "email.read", "email.attachment", "email.send"]
 
     /// Builds the email tools for an email config.
     /// - Parameters:
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads.
-    /// - Returns: Search, read, and attachment tools in registration order.
+    ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
+    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
+    /// - Returns: Search, read, attachment, and send tools in registration order.
     public static func makeTools(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
+        smtpGateway: (any EmailSMTPGateway)? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig()
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
+        let sharedSMTP: any EmailSMTPGateway = smtpGateway ?? SubprocessSMTPGateway()
         let search: any Tool = EmailSearchTool(emailConfig: emailConfig, gateway: shared)
         let read: any Tool = EmailReadTool(emailConfig: emailConfig, gateway: shared)
         let attachment: any Tool = EmailAttachmentTool(
@@ -912,7 +967,13 @@ public enum EmailTools {
             gateway: shared,
             sandboxConfig: sandboxConfig
         )
-        return [search, read, attachment]
+        let send: any Tool = EmailSendTool(
+            emailConfig: emailConfig,
+            smtpGateway: sharedSMTP,
+            gateway: shared,
+            sandboxConfig: sandboxConfig
+        )
+        return [search, read, attachment, send]
     }
 
     /// Registers the email tools, replacing same-named entries.
@@ -920,14 +981,16 @@ public enum EmailTools {
     ///   - bus: Bus receiving the tools (surfaced via `status`).
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads.
+    ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
+    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
     public static func register(
         on bus: ToolBus,
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
+        smtpGateway: (any EmailSMTPGateway)? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig()
     ) async {
-        for tool in makeTools(emailConfig: emailConfig, gateway: gateway, sandboxConfig: sandboxConfig) {
+        for tool in makeTools(emailConfig: emailConfig, gateway: gateway, smtpGateway: smtpGateway, sandboxConfig: sandboxConfig) {
             await bus.register(tool: tool)
         }
     }

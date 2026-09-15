@@ -24,45 +24,13 @@ public enum NotificationActions {
 }
 
 /// Coordinates system notifications and actionable buttons on macOS.
-public final class AppNotificationManager: NSObject, UNUserNotificationCenterDelegate, SchedulerNotifier, @unchecked Sendable {
-    /// Serializes handler reads/writes: `AppModel` assigns these on the
-    /// main actor while `UNUserNotificationCenterDelegate` callbacks read
-    /// them on the notification-center queue, so unsynchronized access
-    /// would race. Handlers are copied under the lock and invoked after
-    /// unlocking, never with the lock held across `await`.
-    private let lock = NSLock()
-    /// Lock-guarded backing for `onApprovalDecision`.
-    private var _onApprovalDecision: (@Sendable (UUID, Bool) async -> Void)?
-    /// Lock-guarded backing for `onOpenDashboard`.
-    private var _onOpenDashboard: (@Sendable () -> Void)?
-
+@MainActor
+public final class AppNotificationManager: NSObject, UNUserNotificationCenterDelegate, SchedulerNotifier {
     /// Handler invoked when an approval decision is made from a notification action.
-    public var onApprovalDecision: (@Sendable (UUID, Bool) async -> Void)? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _onApprovalDecision
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            _onApprovalDecision = newValue
-        }
-    }
+    public var onApprovalDecision: (@MainActor @Sendable (UUID, Bool) async -> Void)?
 
     /// Handler invoked to open the web dashboard in the default browser.
-    public var onOpenDashboard: (@Sendable () -> Void)? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return _onOpenDashboard
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            _onOpenDashboard = newValue
-        }
-    }
+    public var onOpenDashboard: (@MainActor @Sendable () -> Void)?
 
     /// Creates an instance and sets up categories.
     override public init() {
@@ -163,49 +131,38 @@ public final class AppNotificationManager: NSObject, UNUserNotificationCenterDel
 
     // MARK: - UNUserNotificationCenterDelegate
 
-    public func userNotificationCenter(
+    public nonisolated func userNotificationCenter(
         _: UNUserNotificationCenter,
         willPresent _: UNNotification,
-        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+        withCompletionHandler completionHandler: @escaping @Sendable (UNNotificationPresentationOptions) -> Void
     ) {
         completionHandler([.banner, .sound, .badge, .list])
     }
 
-    public func userNotificationCenter(
+    public nonisolated func userNotificationCenter(
         _: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
+        withCompletionHandler completionHandler: @escaping @Sendable () -> Void
     ) {
         let action = response.actionIdentifier
-        let userInfo = response.notification.request.content.userInfo
+        let approvalID = (response.notification.request.content.userInfo["approval_id"] as? String).flatMap(UUID.init(uuidString:))
+        Task {
+            await self.handleNotificationAction(action: action, approvalID: approvalID)
+            completionHandler()
+        }
+    }
 
-        // Snapshot both handlers under the lock before branching so the
-        // delegate queue never races a main-actor reassignment, and so the
-        // lock is never held across Task creation or handler invocation.
-        let decisionHandler = onApprovalDecision
-        let dashboardHandler = onOpenDashboard
-
-        if let idString = userInfo["approval_id"] as? String, let id = UUID(uuidString: idString) {
+    private func handleNotificationAction(action: String, approvalID: UUID?) async {
+        if let id = approvalID {
             if action == NotificationActions.approve {
-                if let decisionHandler {
-                    Task {
-                        await decisionHandler(id, true)
-                    }
-                }
+                await onApprovalDecision?(id, true)
             } else if action == NotificationActions.deny {
-                if let decisionHandler {
-                    Task {
-                        await decisionHandler(id, false)
-                    }
-                }
+                await onApprovalDecision?(id, false)
             } else {
-                // User clicked banner directly
-                dashboardHandler?()
+                onOpenDashboard?()
             }
         } else if action == NotificationActions.openDashboard || action == UNNotificationDefaultActionIdentifier {
-            dashboardHandler?()
+            onOpenDashboard?()
         }
-
-        completionHandler()
     }
 }

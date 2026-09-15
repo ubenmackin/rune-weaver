@@ -8,7 +8,7 @@ import SwiftUI
 
 @main
 struct RuneWeaverApp: App {
-    @StateObject private var model = AppModel()
+    @State private var model = AppModel()
 
     var body: some Scene {
         MenuBarExtra {
@@ -21,7 +21,7 @@ struct RuneWeaverApp: App {
 }
 
 struct AppMenuLabel: View {
-    @ObservedObject var model: AppModel
+    var model: AppModel
 
     var body: some View {
         HStack(spacing: 4) {
@@ -37,7 +37,7 @@ struct AppMenuLabel: View {
 }
 
 struct AppMenuView: View {
-    @ObservedObject var model: AppModel
+    var model: AppModel
 
     var body: some View {
         Text("Rune Weaver Engine")

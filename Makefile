@@ -1,7 +1,7 @@
 # Rune Weaver — unified build entrypoint for the Swift engine and web dashboard.
 #
 # Toolchain:
-#   - Swift 6.0 on macOS 14+ builds, tests, lints, and runs the engine.
+#   - Swift 6.4 on macOS 26+ builds, tests, lints, and runs the engine.
 #   - Node.js 20+ with npm is required only at build time to compile the
 #     React + TypeScript + Vite dashboard in Web/ to static files in Web/dist.
 #     There is no runtime Node server; the engine serves Web/dist on loopback.

@@ -7,6 +7,7 @@
 // sends and cooperative cancellation.
 
 import Foundation
+import os
 import RuneWeaverCore
 import Vapor
 
@@ -16,20 +17,8 @@ import Vapor
 /// while the turn is still working; the registry ties those tasks to
 /// the socket lifetime so a disconnect cancels them instead of leaving
 /// the model and tools running with nowhere to stream.
-///
-/// Stays a lock-guarded registry instead of an actor because `cancelAll()`
-/// runs from Vapor's synchronous `onClose` callback and `remove(id:)` runs
-/// from `defer` inside unstructured chat tasks, neither of which can `await`
-/// an actor call; forcing actor isolation would require blocking awaits or
-/// fire-and-forget hops that could outlive the socket. Lock discipline:
-/// `NSLock` guards `tasks` only, and `cancelAll()` copies the task handles
-/// under lock then cancels after unlock so cancellation never runs while
-/// holding the lock and cannot deadlock.
-final class ConnectionChatTasks: @unchecked Sendable {
-    /// Guards `tasks`.
-    private let lock = NSLock()
-    /// In-flight chat tasks keyed by tracking identifier.
-    private var tasks: [UUID: Task<Void, Never>] = [:]
+final class ConnectionChatTasks: Sendable {
+    private let tasks = OSAllocatedUnfairLock(initialState: [UUID: Task<Void, Never>]())
 
     /// Creates an empty registry.
     init() {}
@@ -39,24 +28,18 @@ final class ConnectionChatTasks: @unchecked Sendable {
     ///   - task: In-flight chat task.
     ///   - id: Tracking identifier removed on completion.
     func insert(_ task: Task<Void, Never>, id: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        tasks[id] = task
+        tasks.withLock { $0[id] = task }
     }
 
     /// Stops tracking a completed chat task.
     /// - Parameter id: Tracking identifier from `insert`.
     func remove(id: UUID) {
-        lock.lock()
-        defer { lock.unlock() }
-        tasks.removeValue(forKey: id)
+        _ = tasks.withLock { $0.removeValue(forKey: id) }
     }
 
     /// Cancels every tracked chat task.
     func cancelAll() {
-        lock.lock()
-        let current = Array(tasks.values)
-        lock.unlock()
+        let current = tasks.withLock { Array($0.values) }
         for task in current {
             task.cancel()
         }

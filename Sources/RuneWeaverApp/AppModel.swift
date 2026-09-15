@@ -14,18 +14,20 @@ import RuneWeaverTools
 import SwiftUI
 import Vapor
 
+@Observable
 @MainActor
-public final class AppModel: ObservableObject {
-    @Published public var serverStatus: String = "Starting..."
-    @Published public var isRunning: Bool = false
-    @Published public var hostname: String = "127.0.0.1"
-    @Published public var port: Int = 8082
-    @Published public var providerName: String = "Detecting..."
-    @Published public var pendingApprovals: [PermissionRequest] = []
-    @Published public var nextScheduleText: String = "No jobs scheduled"
-    @Published public var lastRunSummaryText: String = "None yet"
+public final class AppModel {
+    public var serverStatus: String = "Starting..."
+    public var isRunning: Bool = false
+    public var hostname: String = "127.0.0.1"
+    public var port: Int = 8082
+    public var providerName: String = "Detecting..."
+    public var pendingApprovals: [PermissionRequest] = []
+    public var nextScheduleText: String = "No jobs scheduled"
+    public var lastRunSummaryText: String = "None yet"
 
     public let notificationManager = AppNotificationManager()
+    private let serverRunner = ServerRunnerActor()
     private var serverContext: ServerContext?
     private var vaporApp: Application?
     private var serverTask: Task<Void, Never>?
@@ -46,9 +48,7 @@ public final class AppModel: ObservableObject {
         }
 
         notificationManager.onOpenDashboard = { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.openDashboard()
-            }
+            self?.openDashboard()
         }
     }
 
@@ -120,12 +120,9 @@ public final class AppModel: ObservableObject {
 
         try configureRuneWeaver(app, context: context)
 
-        serverTask = Task.detached {
-            do {
-                try await app.execute()
-            } catch {
-                print("[RuneWeaverApp] Server terminated: \(error)")
-            }
+        let runner = serverRunner
+        serverTask = Task {
+            await runner.runServer(app: app)
         }
 
         self.isRunning = true
@@ -237,7 +234,8 @@ public final class AppModel: ObservableObject {
                 onApprovalRequested: { [weak self] req in
                     await self?.notificationManager.postApprovalNotification(req)
                     await self?.refreshPendingApprovals()
-                }
+                },
+                sandboxConfig: config.sandbox
             )
 
             for tool in plugins {
@@ -349,26 +347,37 @@ public final class AppModel: ObservableObject {
     public func quit() {
         pollingTask?.cancel()
         pollingTask = nil
-        // Capture collaborators on the main actor, then shut down off it so
-        // the blocking server shutdown never stalls interface termination.
         let context = serverContext
         let app = vaporApp
         let task = serverTask
         serverTask = nil
-        Task.detached(priority: .userInitiated) {
-            if let context {
-                // Stop the trust reaper explicitly; nothing else owns its
-                // lifetime past shutdown.
-                await context.permissionGate.stopPeriodicCleanup()
-                await context.hub.closeAll()
-            }
-            if let app {
-                try? await app.asyncShutdown()
-            }
+        let runner = serverRunner
+        Task(priority: .userInitiated) {
+            await runner.shutdown(context: context, app: app)
             task?.cancel()
-            await MainActor.run {
-                NSApplication.shared.terminate(nil)
-            }
+            NSApplication.shared.terminate(nil)
+        }
+    }
+}
+
+/// Actor encapsulating background server execution and shutdown off the MainActor.
+private actor ServerRunnerActor {
+    func runServer(app: Application) async {
+        do {
+            try await app.execute()
+        } catch {
+            print("[RuneWeaverApp] Server terminated: \(error)")
+        }
+    }
+
+    func shutdown(context: ServerContext?, app: Application?) async {
+        if let context {
+            await context.permissionGate.stopPeriodicCleanup()
+            await context.sandboxCleanup.stop()
+            await context.hub.closeAll()
+        }
+        if let app {
+            try? await app.asyncShutdown()
         }
     }
 }

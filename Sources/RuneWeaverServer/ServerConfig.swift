@@ -21,9 +21,11 @@ import Foundation
 public struct ServerConfig: Sendable, Codable, Equatable {
     /// Valid TCP port range shared by direct construction and the CLI.
     ///
-    /// Single source for port validation: `ServerConfig.init` preconditions
-    /// on it and the `serve` command validates `--port` against it so the
-    /// two cannot drift.
+    /// Single source for port validation: callers check membership before
+    /// construction (the `serve` command rejects out-of-range `--port` with
+    /// a `ValidationError`) and `requireValidPort()` fails closed with
+    /// `ServerConfigError.invalidPort` on the serve path, so the two cannot
+    /// drift and a bad port never traps the process.
     public static let validPortRange = 1 ... 65535
     /// Interface to bind. Loopback only by design.
     public var hostname: String
@@ -32,17 +34,14 @@ public struct ServerConfig: Sendable, Codable, Equatable {
 
     /// Creates a server config.
     ///
-    /// - Precondition: `port` must lie in `validPortRange`; traps otherwise
-    ///   so direct/test construction fails fast instead of surfacing as an
-    ///   obscure Vapor bind failure.
+    /// Out-of-range ports are stored as-is (never trapped) so user-controlled
+    /// input cannot crash the process; validate before construction via
+    /// `validPortRange` / `isValidPort`, or fail closed on the serve path
+    /// via `requireValidPort()`.
     /// - Parameters:
     ///   - hostname: Interface to bind. Defaults to loopback.
     ///   - port: TCP port. Defaults to 8082 (MLX uses 8080, llama.cpp uses 8081).
     public init(hostname: String = "127.0.0.1", port: Int = 8082) {
-        precondition(
-            Self.validPortRange.contains(port),
-            "port must be in \(Self.validPortRange) (got \(port))"
-        )
         self.hostname = hostname
         self.port = port
     }
@@ -64,20 +63,47 @@ public struct ServerConfig: Sendable, Codable, Equatable {
         hostname == "127.0.0.1" || hostname == "localhost" || hostname == "::1"
     }
 
-    /// Preconditions loopback-only binding.
+    /// Preconditions loopback-only binding on a valid port.
     ///
     /// Auth-before-exposure: authentication must land before the service
-    /// binds a non-loopback interface or leaves the machine. Traps with
-    /// `fatalError` (never `precondition`, which is stripped in
-    /// `-Ounchecked`) when `hostname` is not loopback so a misconfigured
-    /// non-loopback bind never silently exposes the no-auth surface, even
-    /// in release builds.
-    public func requireLoopback() {
+    /// binds a non-loopback interface or leaves the machine. Throws
+    /// `ServerConfigError.invalidPort` when `port` lies outside
+    /// `validPortRange` so a misconfigured port fails closed instead of
+    /// surfacing as an obscure Vapor bind failure, and
+    /// `ServerConfigError.nonLoopbackRefused` when `hostname` is not loopback so a misconfigured
+    /// non-loopback bind never silently exposes the no-auth surface.
+    public func requireLoopback() throws {
+        try requireValidPort()
         guard isLoopbackOnly else {
-            fatalError(
-                "Refusing to bind non-loopback hostname '\(hostname)' without authentication. " +
-                    "Bind loopback (\(ServerConfig.default.hostname)) until auth lands."
-            )
+            throw ServerConfigError.nonLoopbackRefused(hostname)
+        }
+    }
+
+    /// Preconditions a bindable port.
+    ///
+    /// Fail-closed counterpart to `isValidPort` for user-controlled input
+    /// (`--port`, dashboard edits, direct construction): the initializer
+    /// never traps, so this is where an out-of-range port becomes an error
+    /// instead of a crash or a confusing bind failure.
+    /// - Throws: `ServerConfigError.invalidPort` when `port` lies outside `validPortRange`.
+    public func requireValidPort() throws {
+        guard isValidPort else {
+            throw ServerConfigError.invalidPort(port)
+        }
+    }
+}
+
+/// Errors raised when validating server configuration.
+public enum ServerConfigError: Error, LocalizedError, Sendable {
+    case nonLoopbackRefused(String)
+    case invalidPort(Int)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .nonLoopbackRefused(host):
+            "Refusing to bind non-loopback hostname '\(host)' without authentication. Bind loopback (\(ServerConfig.default.hostname)) until auth lands."
+        case let .invalidPort(port):
+            "Invalid port \(port): must be in \(ServerConfig.validPortRange)."
         }
     }
 }

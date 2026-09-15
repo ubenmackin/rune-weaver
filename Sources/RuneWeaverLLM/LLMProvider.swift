@@ -1137,14 +1137,12 @@ struct OpenAICompatibleHTTPClient: Sendable {
 /// Pumps SSE byte streams into chunk events.
 ///
 /// Extracted from `OpenAICompatibleHTTPClient` so the client type stays
-/// within lint body-length budgets. Per clarified Decision #2, usage
-/// accounting intentionally captures usage-only final chunks (see
-/// `ingestChatChunk`) so llama-server billing is not dropped, and falls
-/// back to `prompt + completion` when `total_tokens` is omitted; that
-/// accumulation intentionally differs from the old inline path, which
-/// ignored chunks without a first choice and recorded zero when
-/// `total_tokens` was absent. Request bodies and parsing shape are
-/// otherwise unchanged.
+/// within lint body-length budgets. Captures usage-only final chunks so
+/// llama-server billing is not dropped, and falls back to
+/// `prompt + completion` when `total_tokens` is omitted; that accumulation
+/// intentionally differs from the old inline path, which ignored chunks
+/// without a first choice and recorded zero when `total_tokens` was
+/// absent. Request bodies and parsing shape are otherwise unchanged.
 enum OpenAISSEPump {
     /// Reads a short error preview from an errored byte stream.
     /// - Parameter bytes: Response byte stream.
@@ -1167,11 +1165,10 @@ enum OpenAISSEPump {
 
     /// Applies one decoded chat SSE chunk to streaming state.
     ///
-    /// Per clarified Decision #2, captures chunk-level `model` and
-    /// `usage` before inspecting `choices` so a final usage-only chunk
-    /// with an empty `choices` array (as sent by llama-server and per
-    /// OpenAI convention) still records billing. This intentionally
-    /// differs from the prior inline path, which dropped usage-only
+    /// Captures chunk-level `model` and `usage` before inspecting `choices`
+    /// so a final usage-only chunk with an empty `choices` array (as sent
+    /// by llama-server and per OpenAI convention) still records billing.
+    /// This intentionally differs from the prior inline path, which dropped usage-only
     /// chunks via an early `guard let choice` and therefore lost the
     /// final billed total on llama-server; the new accumulation keeps
     /// that total by design. When `total_tokens` is omitted, the total
@@ -1369,9 +1366,9 @@ enum OpenAISSEPump {
 
     /// Converts a Responses usage block to token accounting.
     ///
-    /// Per clarified Decision #2, when `total_tokens` is omitted the
-    /// total intentionally falls back to `input + output` instead of
-    /// zero; request bodies and parsing shape are otherwise unchanged.
+    /// When `total_tokens` is omitted the total falls back to
+    /// `input + output` instead of zero; request bodies and parsing shape
+    /// are otherwise unchanged.
     /// - Parameter dto: Decoded usage block.
     /// - Returns: Token usage, or nil when absent.
     static func responsesUsage(from dto: OpenAIResponsesUsageDTO?) -> TokenUsage? {

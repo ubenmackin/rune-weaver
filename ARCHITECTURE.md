@@ -380,6 +380,12 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
     └── tts/             # TTS models/voice data
 ```
 
+Staging is bounded by `[sandbox]` retention policy (`retention_days = 14`,
+`max_total_bytes = 524288000`, `cleanup_interval_seconds = 3600`): the
+sweeper reclaims expired files and evicts oldest-first past the cap. File-tool
+access is further bounded by `[files]` policy (`deny_patterns`,
+`allow_roots`, `require_approval_on_deny`).
+
 ---
 
 ## MVP SCOPE
@@ -468,6 +474,14 @@ tts_provider = "system"  # macOS say command
 
 [sandbox]
 staging_path = "~/.runeweaver/sandbox"
+retention_days = 14  # staged-file retention window (1-365 days)
+max_total_bytes = 524288000  # total staging cap across pending/approved/attachments (500 MiB)
+cleanup_interval_seconds = 3600  # seconds between periodic cleanup passes (hourly)
+
+[files]
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]
+allow_roots = ["~"]  # allowed roots for file reads (`~` expands to home)
+require_approval_on_deny = true  # deny hits escalate to approvals inbox (true) or fail closed (false)
 
 [email]
 [[email.accounts]]
@@ -477,6 +491,10 @@ host = "imap.mail.me.com"
 port = 993
 username = "user@icloud.com"
 # password stored in Keychain
+# Optional SMTP overrides (omit for auto: derived host on 587 STARTTLS then 465 SSL, verified TLS only).
+# smtp_host = "smtp.mail.me.com"
+# smtp_port = 587
+# smtp_security = "auto"  # ssl | starttls | auto (default auto)
 
 [[email.accounts]]
 name = "personal"
@@ -485,6 +503,10 @@ host = "mail.yourdomain.com"
 port = 993
 username = "you@yourdomain.com"
 # password stored in Keychain
+# Optional SMTP overrides (omit for auto: same host on 587 STARTTLS then 465 SSL, verified TLS only).
+# smtp_host = "mail.yourdomain.com"
+# smtp_port = 587
+# smtp_security = "auto"  # ssl | starttls | auto (default auto)
 
 [home]
 [[home.homekit]]

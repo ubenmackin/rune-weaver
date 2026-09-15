@@ -1,3 +1,11 @@
+// Rune Weaver CLI — `rune-weaver` command entry point.
+//
+// Declares the top-level `RuneWeaverCommand` and registers every
+// subcommand (`chat`, `config`, `memory`, `plugin`, `scheduler`, `serve`,
+// `status`). The CLI links `RuneWeaverCore` directly for terminal use with
+// no service running, and launches the shared engine service via `serve`
+// for the web dashboard, iOS, and macOS clients.
+
 import ArgumentParser
 
 /// `rune-weaver` terminal interface.

@@ -890,6 +890,12 @@ public struct SettingsResponse: Content, Equatable {
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
     public let sandboxStagingPath: String
+    public let sandboxRetentionDays: Int
+    public let sandboxMaxTotalBytes: Int
+    public let sandboxCleanupIntervalSeconds: Int
+    public let filesDenyPatterns: [String]
+    public let filesAllowRoots: [String]
+    public let filesRequireApprovalOnDeny: Bool
     public let emailAccounts: [EmailAccount]
     public let pluginsDir: String
     public let pluginsMarketplaceIndexURL: String
@@ -910,6 +916,12 @@ public struct SettingsResponse: Content, Equatable {
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
         self.sandboxStagingPath = config.sandbox.stagingPath
+        self.sandboxRetentionDays = config.sandbox.retentionDays
+        self.sandboxMaxTotalBytes = config.sandbox.maxTotalBytes
+        self.sandboxCleanupIntervalSeconds = config.sandbox.cleanupIntervalSeconds
+        self.filesDenyPatterns = config.files.denyPatterns
+        self.filesAllowRoots = config.files.allowRoots
+        self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
         self.emailAccounts = config.email.accounts
         self.pluginsDir = config.plugins.pluginsDir
         self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
@@ -938,6 +950,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
     public let sandboxStagingPath: String?
+    public let sandboxRetentionDays: Int?
+    public let sandboxMaxTotalBytes: Int?
+    public let sandboxCleanupIntervalSeconds: Int?
+    public let filesDenyPatterns: [String]?
+    public let filesAllowRoots: [String]?
+    public let filesRequireApprovalOnDeny: Bool?
     public let emailAccounts: [EmailAccount]?
     public let pluginsDir: String?
     public let pluginsMarketplaceIndexURL: String?
@@ -957,6 +975,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
         sandboxStagingPath: String? = nil,
+        sandboxRetentionDays: Int? = nil,
+        sandboxMaxTotalBytes: Int? = nil,
+        sandboxCleanupIntervalSeconds: Int? = nil,
+        filesDenyPatterns: [String]? = nil,
+        filesAllowRoots: [String]? = nil,
+        filesRequireApprovalOnDeny: Bool? = nil,
         emailAccounts: [EmailAccount]? = nil,
         pluginsDir: String? = nil,
         pluginsMarketplaceIndexURL: String? = nil,
@@ -975,6 +999,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
         self.sandboxStagingPath = sandboxStagingPath
+        self.sandboxRetentionDays = sandboxRetentionDays
+        self.sandboxMaxTotalBytes = sandboxMaxTotalBytes
+        self.sandboxCleanupIntervalSeconds = sandboxCleanupIntervalSeconds
+        self.filesDenyPatterns = filesDenyPatterns
+        self.filesAllowRoots = filesAllowRoots
+        self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
         self.emailAccounts = emailAccounts
         self.pluginsDir = pluginsDir
         self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
@@ -991,65 +1021,123 @@ public struct UpdateSettingsRequest: Content, Equatable {
     /// email accounts. A present `memoryEmbeddingBackend` must name a
     /// known backend (`apple`, `provider`, `none`) so invalid strings fail
     /// here instead of persisting and silently degrading recall later.
-    /// - Throws: `ConfigError.validationError` for an unknown embedding backend.
+    /// File lists fail closed on blank patterns and `..` escapes so a
+    /// crafted dashboard payload cannot smuggle a directory traversal into
+    /// the persisted policy.
+    /// - Throws: `ConfigError.validationError` for an unknown embedding backend or invalid file patterns.
     public func apply(to config: inout RuneWeaverConfig) throws {
+        applyEngine(to: &config.engine)
+        applyLLM(to: &config.llm)
+        applyMemory(to: &config.memory)
+        try applyMemoryEmbeddingBackend(to: &config.memory)
+        applyVoice(to: &config.voice)
+        applySandbox(to: &config.sandbox)
+        try applyFiles(to: &config.files)
+        applyEmail(to: &config.email)
+        applyPlugins(to: &config.plugins)
+    }
+
+    private func applyEngine(to engine: inout EngineConfig) {
         if let engineName {
-            config.engine.name = engineName
+            engine.name = engineName
         }
         if let logLevel {
-            config.engine.logLevel = logLevel
+            engine.logLevel = logLevel
         }
+    }
+
+    private func applyLLM(to llm: inout LLMConfig) {
         if let defaultProvider {
-            config.llm.defaultProvider = defaultProvider
+            llm.defaultProvider = defaultProvider
         }
         if let fallbackProvider {
-            config.llm.fallbackProvider = fallbackProvider.isEmpty ? nil : fallbackProvider
+            llm.fallbackProvider = fallbackProvider.isEmpty ? nil : fallbackProvider
         }
         if let providers {
-            config.llm.providers = providers
+            llm.providers = providers
         }
+    }
+
+    private func applyMemory(to memory: inout MemoryConfig) {
         if let memoryVectorDBPath {
-            config.memory.vectorDBPath = memoryVectorDBPath
+            memory.vectorDBPath = memoryVectorDBPath
         }
         if let memoryEpisodesDBPath {
-            config.memory.episodesDBPath = memoryEpisodesDBPath
+            memory.episodesDBPath = memoryEpisodesDBPath
         }
         if let memoryEmbeddingModel {
-            config.memory.embeddingModel = memoryEmbeddingModel
+            memory.embeddingModel = memoryEmbeddingModel
         }
-        if let memoryEmbeddingBackend {
-            let allowedBackends = MemoryConfig.allowedEmbeddingBackends
-            guard allowedBackends.contains(memoryEmbeddingBackend) else {
-                throw ConfigError.validationError(
-                    field: "memory.embedding_backend",
-                    message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memoryEmbeddingBackend)')"
-                )
-            }
-            config.memory.embeddingBackend = memoryEmbeddingBackend
+    }
+
+    private func applyMemoryEmbeddingBackend(to memory: inout MemoryConfig) throws {
+        guard let memoryEmbeddingBackend else { return }
+        let allowedBackends = MemoryConfig.allowedEmbeddingBackends
+        guard allowedBackends.contains(memoryEmbeddingBackend) else {
+            throw ConfigError.validationError(
+                field: "memory.embedding_backend",
+                message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memoryEmbeddingBackend)')"
+            )
         }
+        memory.embeddingBackend = memoryEmbeddingBackend
+    }
+
+    private func applyVoice(to voice: inout VoiceConfig) {
         if let voiceSTTProvider {
-            config.voice.sttProvider = voiceSTTProvider
+            voice.sttProvider = voiceSTTProvider
         }
         if let voiceWhisperModel {
-            config.voice.whisperModel = voiceWhisperModel
+            voice.whisperModel = voiceWhisperModel
         }
         if let voiceTTSProvider {
-            config.voice.ttsProvider = voiceTTSProvider
+            voice.ttsProvider = voiceTTSProvider
         }
+    }
+
+    private func applySandbox(to sandbox: inout SandboxConfig) {
         if let sandboxStagingPath {
-            config.sandbox.stagingPath = sandboxStagingPath
+            sandbox.stagingPath = sandboxStagingPath
         }
+        if let sandboxRetentionDays {
+            sandbox.retentionDays = sandboxRetentionDays
+        }
+        if let sandboxMaxTotalBytes {
+            sandbox.maxTotalBytes = sandboxMaxTotalBytes
+        }
+        if let sandboxCleanupIntervalSeconds {
+            sandbox.cleanupIntervalSeconds = sandboxCleanupIntervalSeconds
+        }
+    }
+
+    private func applyFiles(to files: inout FilesConfig) throws {
+        if let filesDenyPatterns {
+            try RuneWeaverConfig.validateFilesPatterns(filesDenyPatterns, field: "files.deny_patterns")
+            files.denyPatterns = filesDenyPatterns
+        }
+        if let filesAllowRoots {
+            try RuneWeaverConfig.validateFilesPatterns(filesAllowRoots, field: "files.allow_roots")
+            files.allowRoots = filesAllowRoots
+        }
+        if let filesRequireApprovalOnDeny {
+            files.requireApprovalOnDeny = filesRequireApprovalOnDeny
+        }
+    }
+
+    private func applyEmail(to email: inout EmailConfig) {
         if let emailAccounts {
-            config.email.accounts = emailAccounts
+            email.accounts = emailAccounts
         }
+    }
+
+    private func applyPlugins(to plugins: inout PluginConfig) {
         if let pluginsDir {
-            config.plugins.pluginsDir = pluginsDir
+            plugins.pluginsDir = pluginsDir
         }
         if let pluginsMarketplaceIndexURL {
-            config.plugins.marketplaceIndexURL = pluginsMarketplaceIndexURL
+            plugins.marketplaceIndexURL = pluginsMarketplaceIndexURL
         }
         if let pluginsAutoRescan {
-            config.plugins.autoRescan = pluginsAutoRescan
+            plugins.autoRescan = pluginsAutoRescan
         }
     }
 }

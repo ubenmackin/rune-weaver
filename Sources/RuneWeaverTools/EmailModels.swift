@@ -1,4 +1,12 @@
+// Rune Weaver Tools — Email arg/envelope models and bridge wire formats.
+//
+// Defines the `email.search`/`email.read`/`email.attachment` argument shapes,
+// result envelopes, attachment lifecycle hints, and strict bridge payload
+// parsing, keeping model-facing contracts and IMAP subprocess wire formats
+// in one place so tools share decoding without touching the network.
+
 import Foundation
+import RuneWeaverCore
 
 /// Shared mailbox-name normalization for email args and envelopes.
 ///
@@ -291,8 +299,7 @@ public struct EmailFullMessage: Sendable, Equatable, Codable {
     public let subject: String
     /// Decoded `From` header.
     public let from: String
-    // Decoded `To` header.
-    // swiftlint:disable:next identifier_name
+    /// Decoded `To` header.
     public let to: String
     /// Raw `Date` header.
     public let date: String
@@ -320,7 +327,6 @@ public struct EmailFullMessage: Sendable, Equatable, Codable {
         id: String,
         subject: String,
         from: String,
-        // swiftlint:disable:next identifier_name
         to: String,
         date: String,
         body: String,
@@ -410,8 +416,7 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     public let subject: String
     /// Decoded `From` header.
     public let from: String
-    // Decoded `To` header.
-    // swiftlint:disable:next identifier_name
+    /// Decoded `To` header.
     public let to: String
     /// Raw `Date` header.
     public let date: String
@@ -431,7 +436,6 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
         case id
         case subject
         case from
-        // swiftlint:disable:next identifier_name
         case to
         case date
         case body
@@ -506,6 +510,8 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
 /// index is zero-based into the `email.read` attachment list. Accepts
 /// an optional `mailbox` (plus the `folder` alias) reusing the mailbox
 /// labeled on `email.search` hits; omitted or blank means `INBOX`.
+/// `preview` is optional (defaults to false): when true and the part is
+/// a small text payload, the success envelope inlines the leading text.
 public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -515,6 +521,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let attachmentIndex: Int
     /// Optional mailbox holding the message (nil means `INBOX`).
     public let mailbox: String?
+    /// Whether to inline a text preview in the success envelope. Defaults to false.
+    public let preview: Bool
 
     /// Memberwise initializer.
     /// - Parameters:
@@ -522,11 +530,13 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     ///   - messageID: IMAP UID of the message.
     ///   - attachmentIndex: Zero-based attachment position.
     ///   - mailbox: Optional mailbox holding the message.
-    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil) {
+    ///   - preview: Whether to inline a text preview.
+    public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil, preview: Bool = false) {
         self.account = account
         self.messageID = messageID
         self.attachmentIndex = attachmentIndex
         self.mailbox = mailbox
+        self.preview = preview
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -540,6 +550,7 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         case attachmentIndexSnake = "attachment_index"
         case mailbox
         case folder
+        case preview
     }
 
     /// Decodes arguments, accepting every documented id and index alias.
@@ -581,6 +592,8 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         }
         mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
             ?? container.decodeIfPresent(String.self, forKey: .folder)
+        // Optional preview flag keeps legacy payloads decoding with no inline text.
+        preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
     }
 
     /// Trimmed account nickname.
@@ -636,7 +649,14 @@ public struct EmailAttachmentData: Sendable, Equatable {
 /// skipped; `skipped` with a `note` explains oversized and dry-run
 /// outcomes without writing outside the staging area. `mailbox`
 /// echoes the folder the bytes were fetched from so follow-up reads
-/// stay in the same folder.
+/// stay in the same folder. Successful downloads also carry the
+/// post-download lifecycle: `expiresAt` (ISO-8601 expiry derived from
+/// the sandbox retention window), `mimeCategory` (`pdf`/`image`/`text`/
+/// `other`), a human `nextSteps` hint pointing at `files.read` for
+/// follow-up inspection, and an optional inline `preview` (first 2000
+/// chars for small text payloads when requested; never for binaries).
+/// All lifecycle keys are optional so envelopes written before the
+/// lifecycle landed keep decoding.
 public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the attachment was fetched from.
     public let account: String
@@ -658,6 +678,16 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     public let note: String?
     /// Mailbox the attachment was fetched from.
     public let mailbox: String
+    /// ISO-8601 expiry of the staged file, derived from the sandbox retention window (nil when skipped or unknown).
+    public let expiresAt: String?
+    /// Coarse MIME bucket guiding follow-up handling: `pdf`, `image`, `text`, or `other`.
+    public let mimeCategory: String?
+    /// Human follow-up hint pointing at `files.read` for staged-file inspection (nil when skipped).
+    public let nextSteps: String?
+    /// Inline leading text for small text payloads when requested (nil unless previewed).
+    public let preview: String?
+    /// Whether `preview` was truncated at the inline char cap (nil when no preview).
+    public let previewTruncated: Bool?
 
     private enum CodingKeys: String, CodingKey {
         case account
@@ -670,6 +700,11 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         case skipped
         case note
         case mailbox
+        case expiresAt
+        case mimeCategory
+        case nextSteps
+        case preview
+        case previewTruncated
     }
 
     /// Creates an attachment envelope.
@@ -684,6 +719,11 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     ///   - skipped: Whether the download was skipped.
     ///   - note: Human-readable skip note, if any.
     ///   - mailbox: Mailbox the attachment was fetched from. Defaults to `INBOX` for legacy callers.
+    ///   - expiresAt: ISO-8601 staged-file expiry. Defaults to nil (skipped or legacy).
+    ///   - mimeCategory: Coarse MIME bucket. Defaults to nil (skipped or legacy).
+    ///   - nextSteps: Human follow-up hint. Defaults to nil (skipped or legacy).
+    ///   - preview: Inline leading text. Defaults to nil (not requested, binary, or oversized).
+    ///   - previewTruncated: Whether `preview` was cut at the char cap. Defaults to nil.
     public init(
         account: String,
         id: String,
@@ -694,7 +734,12 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         path: String? = nil,
         skipped: Bool = false,
         note: String? = nil,
-        mailbox: String = "INBOX"
+        mailbox: String = "INBOX",
+        expiresAt: String? = nil,
+        mimeCategory: String? = nil,
+        nextSteps: String? = nil,
+        preview: String? = nil,
+        previewTruncated: Bool? = nil
     ) {
         self.account = account
         self.id = id
@@ -706,9 +751,18 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         self.skipped = skipped
         self.note = note
         self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
+        self.expiresAt = expiresAt
+        self.mimeCategory = mimeCategory
+        self.nextSteps = nextSteps
+        self.preview = preview
+        self.previewTruncated = previewTruncated
     }
 
     /// Decodes an attachment envelope, defaulting legacy payloads without `mailbox` to `INBOX`.
+    ///
+    /// Lifecycle keys decode as optional so envelopes written before the
+    /// lifecycle landed (no `expiresAt`, `mimeCategory`, `nextSteps`,
+    /// `preview`) keep decoding with those fields as nil.
     /// - Parameter decoder: Decoder for the envelope document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -723,9 +777,18 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         note = try container.decodeIfPresent(String.self, forKey: .note)
         let rawMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
         mailbox = EmailMailboxNormalization.normalizedMailbox(rawMailbox)
+        expiresAt = try container.decodeIfPresent(String.self, forKey: .expiresAt)
+        mimeCategory = try container.decodeIfPresent(String.self, forKey: .mimeCategory)
+        nextSteps = try container.decodeIfPresent(String.self, forKey: .nextSteps)
+        preview = try container.decodeIfPresent(String.self, forKey: .preview)
+        previewTruncated = try container.decodeIfPresent(Bool.self, forKey: .previewTruncated)
     }
 
-    /// Encodes an attachment envelope including its mailbox.
+    /// Encodes an attachment envelope including its mailbox and lifecycle hints.
+    ///
+    /// Lifecycle keys encode only when present so oversized and dry-run
+    /// skips keep the legacy wire shape (no `expiresAt`, `mimeCategory`,
+    /// `nextSteps`, or `preview`).
     /// - Parameter encoder: Encoder for the envelope document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -739,6 +802,138 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
         try container.encode(skipped, forKey: .skipped)
         try container.encodeIfPresent(note, forKey: .note)
         try container.encode(mailbox, forKey: .mailbox)
+        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
+        try container.encodeIfPresent(mimeCategory, forKey: .mimeCategory)
+        try container.encodeIfPresent(nextSteps, forKey: .nextSteps)
+        try container.encodeIfPresent(preview, forKey: .preview)
+        try container.encodeIfPresent(previewTruncated, forKey: .previewTruncated)
+    }
+}
+
+/// Post-download lifecycle for staged `email.attachment` files.
+///
+/// Centralizes the coarse MIME bucket, the retention-window expiry, the
+/// human follow-up hint, and the guarded inline text preview so the
+/// tool and its tests share one definition of "previewable". Size caps
+/// stay conservative: binaries are never inlined even when tiny, and
+/// text is only inlined well below the 10 MB download cap so a preview
+/// request cannot balloon the tool output.
+public enum EmailAttachmentLifecycle: Sendable {
+    /// Maximum bytes eligible for an inline preview (256 KB).
+    public static let maxPreviewBytes = 256 * 1024
+    /// Maximum chars inlined in `preview` before truncation.
+    public static let maxPreviewChars = 2000
+
+    /// Returns the coarse MIME bucket for a content type.
+    ///
+    /// Matching is case-insensitive on the bare type (parameters such as
+    /// `; charset=utf-8` are stripped): exact `application/pdf` maps to
+    /// `pdf`, any `image/*` to `image`, any `text/*` plus `application/json`
+    /// to `text`, and everything else to `other` so follow-up hints stay
+    /// predictable without an exhaustive type table.
+    /// - Parameter contentType: Raw MIME type, possibly with parameters.
+    /// - Returns: `pdf`, `image`, `text`, or `other`.
+    public static func mimeCategory(for contentType: String) -> String {
+        let base = contentType.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
+            .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+        if base == "application/pdf" {
+            return "pdf"
+        }
+        if base.hasPrefix("image/") {
+            return "image"
+        }
+        if base.hasPrefix("text/") || base == "application/json" {
+            return "text"
+        }
+        return "other"
+    }
+
+    /// Returns whether a part may be inlined as text.
+    ///
+    /// Only `text/*` (including `text/csv`) and `application/json` count
+    /// as previewable, and only while both the reported size and the
+    /// actual bytes stay under the 256 KB preview cap. Binaries (PDF,
+    /// images, archives, office docs) are never previewable even when
+    /// tiny, so their bytes never enter the model context.
+    /// - Parameters:
+    ///   - contentType: Raw MIME type.
+    ///   - sizeBytes: Reported decoded size.
+    ///   - dataCount: Actual byte count.
+    /// - Returns: True when an inline preview is allowed.
+    public static func isPreviewable(contentType: String, sizeBytes: Int, dataCount: Int) -> Bool {
+        let base = contentType.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
+            .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
+        let isTextType = base.hasPrefix("text/") || base == "application/json" || base == "text/csv"
+        guard isTextType else { return false }
+        return sizeBytes <= maxPreviewBytes && dataCount <= maxPreviewBytes
+    }
+
+    /// Builds the inline preview for an eligible payload.
+    ///
+    /// Decodes strictly as UTF-8 (returning nil when the bytes are not
+    /// valid text) and truncates to the first 2000 chars. The truncation
+    /// flag distinguishes a full inline body from a cut one so callers
+    /// know when `files.read` holds more.
+    /// - Parameter data: Decoded attachment bytes (already known previewable and under cap).
+    /// - Returns: Preview text plus whether it was truncated, or nil when the bytes are not UTF-8 text.
+    public static func inlinePreview(for data: Data) -> (text: String, truncated: Bool)? {
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        if text.count > maxPreviewChars {
+            return (String(text.prefix(maxPreviewChars)), true)
+        }
+        return (text, false)
+    }
+
+    /// Returns the staged-file expiry for a retention window.
+    ///
+    /// Adds whole days (86400 s each) to `now` so expiry math stays a
+    /// pure function of the configured window, keeping tests deterministic
+    /// without touching the clock. Non-positive windows fall back to the
+    /// shared staging default instead of expiring immediately.
+    /// - Parameters:
+    ///   - now: Reference date (defaults to now).
+    ///   - retentionDays: Configured retention window in days.
+    /// - Returns: Expiry date.
+    public static func expiryDate(from now: Date = Date(), retentionDays: Int) -> Date {
+        let days = retentionDays > 0 ? retentionDays : SandboxConfig.defaultRetentionDays
+        return now.addingTimeInterval(TimeInterval(days * 86400))
+    }
+
+    /// Formats an expiry date as ISO-8601 for the envelope.
+    /// - Parameter date: Expiry date.
+    /// - Returns: ISO-8601 string (internet date-time, no fractional seconds).
+    public static func expiryString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
+
+    /// Builds the human follow-up hint for a staged download.
+    ///
+    /// Always names the staged path and points at `files.read` for the
+    /// full content, since the inline preview (when present) holds only
+    /// the leading slice. Category-aware wording keeps PDF/image/other
+    /// hints accurate without changing the machine-readable fields.
+    /// - Parameters:
+    ///   - path: Staged sandbox path.
+    ///   - expiresAt: ISO-8601 expiry string.
+    ///   - mimeCategory: Coarse bucket from `mimeCategory(for:)`.
+    ///   - previewTruncated: Whether the inline preview was cut (nil when no preview).
+    /// - Returns: Human hint referencing `files.read`.
+    public static func nextStepsHint(path: String, expiresAt: String, mimeCategory: String, previewTruncated: Bool?) -> String {
+        switch mimeCategory {
+        case "text" where previewTruncated == true:
+            "Preview shows the first 2000 chars. Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiresAt)."
+        case "text":
+            "Text staged at \"\(path)\". Use files.read with path \"\(path)\" for the full text. Staged file expires \(expiresAt)."
+        case "pdf":
+            "PDF staged at \"\(path)\". Use files.read with path \"\(path)\" to extract a text preview. Staged file expires \(expiresAt)."
+        case "image":
+            "Image staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiresAt)."
+        default:
+            "Attachment staged at \"\(path)\". Use files.read with path \"\(path)\" to inspect it. Staged file expires \(expiresAt)."
+        }
     }
 }
 
@@ -751,8 +946,7 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
 public enum EmailBridgeParsing {
     /// Bridge `search` response shape.
     struct SearchResponse: Decodable {
-        // Whether the operation succeeded.
-        // swiftlint:disable:next identifier_name
+        /// Whether the operation succeeded.
         let ok: Bool
         /// Error detail when `ok` is false.
         let error: String?
@@ -762,8 +956,7 @@ public enum EmailBridgeParsing {
 
     /// Bridge `fetch` response shape.
     struct FetchResponse: Decodable {
-        // Whether the operation succeeded.
-        // swiftlint:disable:next identifier_name
+        /// Whether the operation succeeded.
         let ok: Bool
         /// Error detail when `ok` is false.
         let error: String?
@@ -787,8 +980,7 @@ public enum EmailBridgeParsing {
 
     /// Bridge `attachment` response shape.
     struct AttachmentResponse: Decodable {
-        // Whether the operation succeeded.
-        // swiftlint:disable:next identifier_name
+        /// Whether the operation succeeded.
         let ok: Bool
         /// Error detail when `ok` is false.
         let error: String?
@@ -798,8 +990,7 @@ public enum EmailBridgeParsing {
 
     /// Bridge `list` response shape.
     struct ListResponse: Decodable {
-        // Whether the operation succeeded.
-        // swiftlint:disable:next identifier_name
+        /// Whether the operation succeeded.
         let ok: Bool
         /// Error detail when `ok` is false.
         let error: String?
@@ -922,6 +1113,13 @@ public enum EmailBridgeParsing {
     }
 
     /// Encodes an attachment result as the `email.attachment` tool output document.
+    ///
+    /// Encodes the full post-download lifecycle (`path`, `expiresAt`,
+    /// `mimeCategory`, `nextSteps`, plus the guarded inline `preview`)
+    /// alongside the legacy metadata. Skipped envelopes omit the
+    /// lifecycle keys so oversized and dry-run outcomes keep the legacy
+    /// wire shape, while legacy payloads without lifecycle keys still
+    /// decode with those fields as nil.
     /// - Parameter envelope: Envelope to encode.
     /// - Returns: JSON document for `ToolOutput.content`.
     /// - Throws: Encoding errors.
@@ -942,6 +1140,27 @@ public enum EmailBridgeParsing {
             throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP list failed")
         }
         return response.mailboxes ?? []
+    }
+
+    /// Bridge `append` response shape.
+    struct AppendResponse: Decodable {
+        /// Whether the operation succeeded.
+        let ok: Bool
+        /// Error detail when `ok` is false.
+        let error: String?
+    }
+
+    /// Decodes a bridge `append` stdout payload.
+    ///
+    /// Best-effort Sent copies surface failures as `bridgeFailed` so the
+    /// send tool can warn without failing the send.
+    /// - Parameter data: Raw stdout bytes from the bridge.
+    /// - Throws: Decoding errors or bridge-reported failures.
+    public static func parseAppendPayload(_ data: Data) throws {
+        let response = try JSONDecoder().decode(AppendResponse.self, from: data)
+        if !response.ok {
+            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP append failed")
+        }
     }
 
     /// Filters a raw `LIST` mailbox list to selectable folders.
@@ -1024,67 +1243,30 @@ public enum EmailBridgeParsing {
 /// their relative order after dated hits so the merge never drops
 /// results. Mailbox labels are preserved for `email.read` reuse.
 public enum EmailSearchMerge: Sendable {
-    /// Lock-guarded cache of `Date` header formatters, built once.
-    ///
-    /// `DateFormatter` and `ISO8601DateFormatter` are not `Sendable` and
-    /// are not thread-safe, so the cached instances live in this
-    /// `@unchecked Sendable` box and every parse runs while holding the
-    /// lock (which uses `defer` for unlock), keeping the shared
-    /// `static let` data-race free under Swift 6 concurrency.
-    private final class DateParserCache: @unchecked Sendable {
-        /// Guards `formatters` and `isoFormatter`.
-        private let lock = NSLock()
-        /// Cached formatters for `Date` headers, built once.
-        private let formatters: [DateFormatter]
-        /// Cached ISO-8601 fallback formatter, built once.
-        private let isoFormatter: ISO8601DateFormatter
-
-        /// Builds the cached formatters once.
-        init() {
-            let formats = [
-                "EEE, dd MMM yyyy HH:mm:ss Z",
-                "EEE, d MMM yyyy HH:mm:ss Z",
-                "EEE, dd MMM yyyy HH:mm:ss zzz",
-                "dd MMM yyyy HH:mm:ss Z",
-                "yyyy-MM-dd'T'HH:mm:ssZ",
-                "yyyy-MM-dd'T'HH:mm:ssXXXXX",
-                "yyyy-MM-dd HH:mm:ss Z"
-            ]
-            formatters = formats.map { format in
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.dateFormat = format
-                return formatter
-            }
-            isoFormatter = ISO8601DateFormatter()
-        }
-
-        /// Parses an already-trimmed date string under the lock.
-        /// - Parameter trimmed: Non-empty trimmed `Date` header value.
-        /// - Returns: Parsed date, or nil when no formatter matches.
-        func date(from trimmed: String) -> Date? {
-            lock.lock()
-            defer { lock.unlock() }
-            for formatter in formatters {
-                if let date = formatter.date(from: trimmed) {
-                    return date
-                }
-            }
-            return isoFormatter.date(from: trimmed)
-        }
-    }
-
-    /// Shared formatter cache, built once.
-    ///
-    /// Immutable box; all parsing runs inside the box lock so no
-    /// `nonisolated(unsafe)` mutable state is needed.
-    private static let parserCache = DateParserCache()
-
-    /// Shared RFC 2822 formatter for `Date` headers.
+    /// Parses an RFC 2822 or ISO-8601 `Date` header.
     private static func rfc2822Dates(_ string: String) -> Date? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        return parserCache.date(from: trimmed)
+
+        let formats = [
+            "EEE, dd MMM yyyy HH:mm:ss Z",
+            "EEE, d MMM yyyy HH:mm:ss Z",
+            "EEE, dd MMM yyyy HH:mm:ss zzz",
+            "dd MMM yyyy HH:mm:ss Z",
+            "yyyy-MM-dd'T'HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mm:ssXXXXX",
+            "yyyy-MM-dd HH:mm:ss Z"
+        ]
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        for format in formats {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: trimmed) {
+                return date
+            }
+        }
+        let isoFormatter = ISO8601DateFormatter()
+        return isoFormatter.date(from: trimmed)
     }
 
     /// Parses a hit date for sorting.

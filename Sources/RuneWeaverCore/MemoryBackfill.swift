@@ -129,7 +129,8 @@ public extension MemoryEngine {
         batchSize: Int = 32
     ) async throws -> EmbeddingBackfillResult {
         let storeDimension = await semanticStoreDimension()
-        if let storeDimension, let backendDimension = embedder.dimension, storeDimension != backendDimension {
+        let backendDimension = await embedder.dimension
+        if let storeDimension, let backendDimension, storeDimension != backendDimension {
             throw Self.embeddingDimensionResetError(storeDimension: storeDimension, backendDimension: backendDimension)
         }
         let pending = await semanticStoreAllFacts()

@@ -5,6 +5,7 @@
 // argument JSON. Covers the MemoryEngine and Orchestrator contract that
 // working history stays replayable while the episodes mirror stays readable.
 import Foundation
+import os
 @testable import RuneWeaverCore
 import Testing
 
@@ -55,20 +56,21 @@ private struct FixturePlumbingTool: Tool, Sendable {
 /// Each `chat` call consumes the next entry so orchestration loops observe
 /// a tool round followed by a final synthesis turn without real inference.
 /// Access is lock-guarded for Swift 6 data-race safety.
-private final class ScriptedPlumbingLLM: LLMProvider, @unchecked Sendable {
+private final class ScriptedPlumbingLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    private struct ScriptState: Sendable {
+        var texts: [String]
+        var index: Int
+    }
+
     /// Guards script state below.
-    private let lock = NSLock()
-    /// Canned texts in call order.
-    private var texts: [String]
-    /// Next script index.
-    private var index = 0
+    private let state: OSAllocatedUnfairLock<ScriptState>
 
     /// Creates a scripted provider.
     /// - Parameter texts: Canned texts in call order.
     init(texts: [String]) {
-        self.texts = texts
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(texts: texts, index: 0))
     }
 
     /// Replays the next canned text as a finished stream.
@@ -77,13 +79,11 @@ private final class ScriptedPlumbingLLM: LLMProvider, @unchecked Sendable {
     ///   - tools: Ignored available tools.
     /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
-        let text: String = {
-            lock.lock()
-            defer { lock.unlock() }
-            let next = index < texts.count ? texts[index] : texts.last ?? ""
-            index += 1
+        let text: String = state.withLock { s in
+            let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
+            s.index += 1
             return next
-        }()
+        }
         return AsyncStream { continuation in
             continuation.yield(LLMResponse(delta: text, isFinished: true))
             continuation.finish()

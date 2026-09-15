@@ -1,10 +1,10 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 import PackageDescription
 
 let package = Package(
     name: "RuneWeaver",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v26)
     ],
     products: [
         .executable(name: "rune-weaver", targets: ["RuneWeaverCLI"]),
@@ -119,5 +119,6 @@ let package = Package(
             name: "RuneWeaverServerTests",
             dependencies: ["RuneWeaverServer", "RuneWeaverCore"]
         )
-    ]
+    ],
+    swiftLanguageModes: [.v6]
 )

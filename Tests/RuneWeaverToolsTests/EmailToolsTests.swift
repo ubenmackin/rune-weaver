@@ -1,3 +1,9 @@
+// Rune Weaver Tools Tests — Email bridge and tool behavior coverage.
+//
+// Exercises the email IMAP/SMTP bridge parsing, validation gates, and tool
+// envelopes with fixture payloads and stub gateways, so wire-format drift
+// and fail-closed validation surface without a live mailbox.
+
 import Foundation
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
@@ -185,12 +191,13 @@ struct EmailToolsTests {
     func `Email tools expose search read and gated attachment`() {
         let config = ToolsTestSupport.testEmailConfig()
         let tools = EmailTools.makeTools(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
-        #expect(tools.count == 3)
-        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment"]))
+        #expect(tools.count == 4)
+        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send"]))
         let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
         #expect(levels["email.search"] == .readOnly)
         #expect(levels["email.read"] == .readOnly)
         #expect(levels["email.attachment"] == .requiresApproval)
+        #expect(levels["email.send"] == .requiresApproval)
     }
 
     @Test
@@ -203,7 +210,7 @@ struct EmailToolsTests {
             await bus.register(tool: tool)
         }
         let names = await bus.toolNames()
-        #expect(names.sorted() == ["email.attachment", "email.read", "email.search"])
+        #expect(names.sorted() == ["email.attachment", "email.read", "email.search", "email.send"])
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":10}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
@@ -1115,5 +1122,268 @@ struct EmailToolsTests {
         #expect(!debugDesc.contains("super-secret-password-123"))
         #expect(desc == "Email(work: user@example.com@imap.example.com:993)")
         #expect(debugDesc == "Email(work: user@example.com@imap.example.com:993)")
+    }
+
+    @Test
+    func `Attachment args default preview to false for legacy calls`() throws {
+        // Legacy callers omit the flag, so decoding must stay opt-in rather than inlining by surprise.
+        let legacy = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        #expect(legacy.preview == false)
+        let requested = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"preview":true}"#.utf8))
+        #expect(requested.preview == true)
+    }
+
+    @Test
+    func `Attachment mime buckets stay coarse and predictable`() {
+        // Coarse buckets keep follow-up hints stable without an exhaustive type table.
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/pdf") == "pdf")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "Application/PDF; charset=utf-8") == "pdf")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "image/png") == "image")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "IMAGE/JPEG; name=\"a.jpg\"") == "image")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "text/plain") == "text")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "text/csv") == "text")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/json") == "text")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/json; charset=utf-8") == "text")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/octet-stream") == "other")
+        #expect(EmailAttachmentLifecycle.mimeCategory(for: "application/zip") == "other")
+    }
+
+    @Test
+    func `Attachment expiry math follows the retention window exactly`() {
+        // Pure date math keeps the envelope deterministic without touching the clock in tests.
+        let anchor = Date(timeIntervalSince1970: 1_700_000_000)
+        let week = EmailAttachmentLifecycle.expiryDate(from: anchor, retentionDays: 7)
+        #expect(week.timeIntervalSince(anchor) == 7 * 86400)
+        let single = EmailAttachmentLifecycle.expiryDate(from: anchor, retentionDays: 1)
+        #expect(single.timeIntervalSince(anchor) == 86400)
+        let roundTripped = EmailAttachmentLifecycle.expiryString(from: week)
+        let parsed = ISO8601DateFormatter().date(from: roundTripped)
+        #expect(parsed != nil)
+        #expect(abs((parsed ?? Date()).timeIntervalSince(week)) < 1.0)
+    }
+
+    @Test
+    func `Attachment success envelope carries expiry category and follow-up hint`() async throws {
+        // The lifecycle turns a blind download into an actionable staged file with a known lifetime.
+        let bytes = Data("hello world".utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "notes.txt",
+            contentType: "text/plain",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path, retentionDays: 7)
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.skipped == false)
+            #expect((envelope.path ?? "").hasPrefix(staging.path))
+            #expect(envelope.mimeCategory == "text")
+            let expiry = try #require(envelope.expiresAt)
+            let parsed = ISO8601DateFormatter().date(from: expiry)
+            #expect(parsed != nil)
+            // A week of retention with clock skew tolerance for the download round trip.
+            let remaining = (parsed ?? Date()).timeIntervalSince(Date())
+            #expect(remaining > 6 * 86400 && remaining <= 7 * 86400 + 60)
+            #expect((envelope.nextSteps ?? "").contains("files.read"))
+            #expect((envelope.nextSteps ?? "").contains(envelope.path ?? ""))
+            // No preview was requested, so text stays out of the envelope by default.
+            #expect(envelope.preview == nil)
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment preview truncates long text at two thousand chars`() async throws {
+        // Bounding inline text keeps tool output small while still showing the leading slice.
+        let long = String(repeating: "a", count: 5000)
+        let bytes = Data(long.utf8)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "long.txt",
+            contentType: "text/plain",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path, retentionDays: 7)
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            let preview = try #require(envelope.preview)
+            #expect(preview.count == 2000)
+            #expect(preview == String(long.prefix(2000)))
+            #expect(envelope.previewTruncated == true)
+            #expect((envelope.nextSteps ?? "").contains("files.read"))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment preview inlines small JSON and CSV`() async throws {
+        // JSON and CSV are machine-readable text, so they preview like text/plain under the byte cap.
+        for contentType in ["application/json", "text/csv"] {
+            let bytes = Data("{\"hello\": \"world\"}".utf8)
+            let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+                filename: "data",
+                contentType: contentType,
+                sizeBytes: bytes.count,
+                data: bytes
+            ))
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+            let tool = EmailAttachmentTool(
+                emailConfig: ToolsTestSupport.testEmailConfig(),
+                gateway: gateway,
+                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            )
+            try await ToolsTestSupport.withTestPassword {
+                let output = try await tool.execute(
+                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                    context: ToolContext(conversationID: UUID())
+                )
+                #expect(output.isError == false)
+                let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+                #expect(envelope.mimeCategory == "text")
+                #expect((envelope.preview ?? "").contains("hello"))
+                #expect(envelope.previewTruncated == false)
+            }
+            try? FileManager.default.removeItem(at: staging)
+        }
+    }
+
+    @Test
+    func `Attachment preview never inlines binaries even when tiny`() async throws {
+        // Binary bytes must never enter the model context, even when the caller asks for a preview.
+        for contentType in ["application/pdf", "image/png", "application/octet-stream"] {
+            let bytes = Data("hello world".utf8)
+            let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+                filename: "report.pdf",
+                contentType: contentType,
+                sizeBytes: bytes.count,
+                data: bytes
+            ))
+            let staging = FileManager.default.temporaryDirectory
+                .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+            let tool = EmailAttachmentTool(
+                emailConfig: ToolsTestSupport.testEmailConfig(),
+                gateway: gateway,
+                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            )
+            try await ToolsTestSupport.withTestPassword {
+                let output = try await tool.execute(
+                    input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                    context: ToolContext(conversationID: UUID())
+                )
+                #expect(output.isError == false)
+                let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+                #expect(envelope.preview == nil)
+                #expect(envelope.previewTruncated == nil)
+                #expect(envelope.mimeCategory != "text")
+                #expect((envelope.nextSteps ?? "").contains("files.read"))
+            }
+            try? FileManager.default.removeItem(at: staging)
+        }
+    }
+
+    @Test
+    func `Attachment preview stays out over the byte cap`() async throws {
+        // Large text stays staged-only so a preview request cannot balloon the tool output.
+        let bytes = Data(repeating: 65, count: EmailAttachmentLifecycle.maxPreviewBytes + 1)
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "big.txt",
+            contentType: "text/plain",
+            sizeBytes: bytes.count,
+            data: bytes
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.preview == nil)
+            #expect(envelope.previewTruncated == nil)
+            #expect(envelope.mimeCategory == "text")
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment skip envelopes keep the legacy shape with no lifecycle keys`() async throws {
+        // Oversized and dry-run outcomes must not gain lifecycle keys, so old readers keep working.
+        let oversize = EmailAttachmentTool.maxAttachmentBytes + 1
+        let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
+            filename: "big.bin",
+            contentType: "application/octet-stream",
+            sizeBytes: oversize,
+            data: Data(repeating: 0, count: 8)
+        ))
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
+        let tool = EmailAttachmentTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            gateway: gateway,
+            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0,"preview":true}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.skipped == true)
+            #expect(envelope.path == nil)
+            #expect(envelope.expiresAt == nil)
+            #expect(envelope.mimeCategory == nil)
+            #expect(envelope.nextSteps == nil)
+            #expect(envelope.preview == nil)
+            #expect(!output.content.contains("expiresAt"))
+            #expect(!output.content.contains("mimeCategory"))
+            #expect(!output.content.contains("nextSteps"))
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
+    @Test
+    func `Attachment legacy envelopes decode without lifecycle keys`() throws {
+        // Envelopes written before the lifecycle landed must still decode with lifecycle fields as nil.
+        let legacy = #"{"account":"personal","id":"42","index":0,"filename":"report.pdf","contentType":"application/pdf","sizeBytes":11,"path":"/tmp/report.pdf","skipped":false,"mailbox":"INBOX"}"#
+        let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(legacy.utf8))
+        #expect(envelope.path == "/tmp/report.pdf")
+        #expect(envelope.expiresAt == nil)
+        #expect(envelope.mimeCategory == nil)
+        #expect(envelope.nextSteps == nil)
+        #expect(envelope.preview == nil)
+        #expect(envelope.previewTruncated == nil)
+        let encoded = try EmailBridgeParsing.encodeAttachmentEnvelope(envelope)
+        #expect(encoded.contains("report.pdf"))
     }
 }

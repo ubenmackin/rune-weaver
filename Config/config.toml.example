@@ -50,6 +50,24 @@ tts_provider = "system"  # macOS say command
 
 [sandbox]
 staging_path = "~/.runeweaver/sandbox"
+# Days a staged file stays valid before the sweeper may reclaim it.
+retention_days = 14
+# Total byte cap across pending/, approved/, and attachments/; oldest files
+# are evicted first once the cap is exceeded (500 MiB default).
+max_total_bytes = 524288000
+# Seconds between periodic cleanup passes (hourly default).
+cleanup_interval_seconds = 3600
+
+[files]
+# Sensitive-path deny list for file tools, mirroring the engine guard.
+# Glob-like: `*` matches within a name, `dir/*` guards a subtree.
+# Changes need a restart to take effect.
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]
+# Allowed roots for file reads (`~` expands to home); outside-home paths
+# escalate to approval.
+allow_roots = ["~"]
+# Whether deny hits escalate to the approvals inbox (true) or fail closed.
+require_approval_on_deny = true
 
 [email]
 [[email.accounts]]
@@ -59,6 +77,10 @@ host = "imap.mail.me.com"
 port = 993
 username = "user@icloud.com"
 # password stored in Keychain
+# Optional SMTP overrides (omit for auto: derived host on 587 STARTTLS then 465 SSL, verified TLS only).
+# smtp_host = "smtp.mail.me.com"
+# smtp_port = 587
+# smtp_security = "auto"  # ssl | starttls | auto (default auto)
 
 [[email.accounts]]
 name = "personal"
@@ -67,6 +89,10 @@ host = "mail.yourdomain.com"
 port = 993
 username = "you@yourdomain.com"
 # password stored in Keychain
+# Optional SMTP overrides (omit for auto: same host on 587 STARTTLS then 465 SSL, verified TLS only).
+# smtp_host = "mail.yourdomain.com"
+# smtp_port = 587
+# smtp_security = "auto"  # ssl | starttls | auto (default auto)
 
 [home]
 [[home.homekit]]

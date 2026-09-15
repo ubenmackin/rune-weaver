@@ -3,6 +3,11 @@
 // across wire shapes, so chat and run views filter the same inbox identically.
 
 import type { PermissionRequest, RunLogEntry } from "./api";
+import { isRecord } from "./typeGuards";
+
+// Re-exported so existing callers importing from this module keep working;
+// new code should import from `./typeGuards` directly.
+export { isRecord };
 
 // Normalizes session identifiers for case-insensitive comparison: the engine
 // formats UUIDs uppercase while the dashboard mints lowercase, so both must
@@ -45,14 +50,6 @@ export function runSessionID(
   if (!run) return null;
   const sid = run.sessionID;
   return typeof sid === "string" && sid.trim().length > 0 ? sid : null;
-}
-
-// Narrows unknown wire values to plain records so socket payloads stay typed
-// without widening handlers to `any`; malformed frames fall through to the
-// drop/default paths instead of entering approval state. Arrays are excluded
-// because `typeof [] === "object"` would otherwise let lists pass as maps.
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // Validates an approval prompt before it joins the inbox badge, so a

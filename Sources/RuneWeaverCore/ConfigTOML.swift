@@ -1,32 +1,58 @@
+// Rune Weaver Core — Minimal TOML decoding for config.toml.
+//
+// Parses the engine configuration document into a typed node tree without
+// external dependencies, covering the tables, arrays-of-tables, and scalar
+// shapes the config schema uses. Decoders map the tree onto
+// `RuneWeaverConfig` so missing sections fall back to built-in defaults
+// while malformed lines fail with a line-numbered parse error.
+
 import Foundation
 
 // MARK: - Minimal TOML decoding
 
-/// Scalar TOML value.
+/// Scalar TOML value plus inline string lists for deny/allow lists.
 enum TOMLValue: Sendable, Equatable {
     case string(String)
     case integer(Int)
     case double(Double)
     case boolean(Bool)
+    case stringArray([String])
 }
 
-/// Mutable node in the parsed TOML document tree.
-final class TOMLNode {
+/// Node in the parsed TOML document tree with pure value semantics.
+struct TOMLNode: Sendable, Equatable {
     var values: [String: TOMLValue] = [:]
     var tables: [String: TOMLNode] = [:]
     var arrays: [String: [TOMLNode]] = [:]
+
+    /// Mutates the table at `path`, creating intermediate tables along the way.
+    mutating func withTable<R>(at path: [String], _ body: (inout TOMLNode) throws -> R) rethrows -> R {
+        guard let first = path.first else {
+            return try body(&self)
+        }
+        var child = tables[first, default: TOMLNode()]
+        defer { tables[first] = child }
+        return try child.withTable(at: Array(path.dropFirst()), body)
+    }
 }
 
 /// Minimal TOML parser covering the `config.toml` schema.
 ///
 /// Supports comments (`#`), quoted strings, integers, floats, booleans,
-/// `[table]` / `[dotted.table]` headers, and `[[array-of-tables]]`
-/// headers. Anything outside that subset throws a ``ConfigError/parseError(line:message:)``
-/// naming the offending line.
+/// inline string lists (e.g. `deny_patterns = ["a", "b"]` for the files
+/// policy), `[table]` / `[dotted.table]` headers, and
+/// `[[array-of-tables]]` headers. Anything outside that subset throws a
+/// ``ConfigError/parseError(line:message:)`` naming the offending line.
 enum TOMLParser {
+    private enum Target {
+        case root
+        case table([String])
+        case array([String])
+    }
+
     static func parse(_ text: String) throws -> TOMLNode {
-        let root = TOMLNode()
-        var current = root
+        var root = TOMLNode()
+        var target = Target.root
         let lines = text.components(separatedBy: .newlines)
         for (index, rawLine) in lines.enumerated() {
             let lineNumber = index + 1
@@ -37,17 +63,22 @@ enum TOMLParser {
                 continue
             }
             if stripped.hasPrefix("[[") {
-                current = try parseArrayHeader(stripped, line: lineNumber, root: root)
+                let path = try parseArrayHeader(stripped, line: lineNumber)
+                try appendArrayNode(at: path, in: &root, line: lineNumber)
+                target = .array(path)
             } else if stripped.hasPrefix("[") {
-                current = try parseTableHeader(stripped, line: lineNumber, root: root)
+                let path = try parseTableHeader(stripped, line: lineNumber)
+                root.withTable(at: path) { _ in }
+                target = .table(path)
             } else {
-                try parseKeyValue(stripped, line: lineNumber, into: current)
+                let (key, value) = try keyValue(stripped, lineNumber: lineNumber)
+                try insertKeyValue(key: key, value: value, at: target, in: &root, line: lineNumber)
             }
         }
         return root
     }
 
-    private static func parseArrayHeader(_ stripped: String, line: Int, root: TOMLNode) throws -> TOMLNode {
+    private static func parseArrayHeader(_ stripped: String, line: Int) throws -> [String] {
         guard stripped.hasSuffix("]]") else {
             throw ConfigError.parseError(
                 line: line, message: "malformed array-of-tables header: \(stripped)"
@@ -56,11 +87,10 @@ enum TOMLParser {
         let pathText = String(stripped.dropFirst(2).dropLast(2)).trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        let path = try tablePath(pathText, line: line)
-        return try appendArrayNode(at: path, in: root, line: line)
+        return try tablePath(pathText, line: line)
     }
 
-    private static func parseTableHeader(_ stripped: String, line: Int, root: TOMLNode) throws -> TOMLNode {
+    private static func parseTableHeader(_ stripped: String, line: Int) throws -> [String] {
         guard stripped.hasSuffix("]") else {
             throw ConfigError.parseError(
                 line: line, message: "malformed table header: \(stripped)"
@@ -69,18 +99,49 @@ enum TOMLParser {
         let pathText = String(stripped.dropFirst().dropLast()).trimmingCharacters(
             in: .whitespacesAndNewlines
         )
-        let path = try tablePath(pathText, line: line)
-        return try tableNode(at: path, in: root, line: line)
+        return try tablePath(pathText, line: line)
     }
 
-    private static func parseKeyValue(_ stripped: String, line: Int, into node: TOMLNode) throws {
-        let (key, value) = try keyValue(stripped, lineNumber: line)
-        if node.values[key] != nil {
-            throw ConfigError.parseError(
-                line: line, message: "duplicate key '\(key)'"
-            )
+    private static func insertKeyValue(
+        key: String,
+        value: TOMLValue,
+        at target: Target,
+        in root: inout TOMLNode,
+        line: Int
+    ) throws {
+        switch target {
+        case .root:
+            if root.values[key] != nil {
+                throw ConfigError.parseError(line: line, message: "duplicate key '\(key)'")
+            }
+            root.values[key] = value
+
+        case let .table(path):
+            try root.withTable(at: path) { table in
+                if table.values[key] != nil {
+                    throw ConfigError.parseError(line: line, message: "duplicate key '\(key)'")
+                }
+                table.values[key] = value
+            }
+
+        case let .array(path):
+            guard let leaf = path.last else {
+                throw ConfigError.parseError(line: line, message: "malformed array-of-tables header")
+            }
+            let parentPath = Array(path.dropLast())
+            try root.withTable(at: parentPath) { parent in
+                guard var list = parent.arrays[leaf], !list.isEmpty else {
+                    throw ConfigError.parseError(line: line, message: "missing array '\(leaf)'")
+                }
+                var entry = list[list.count - 1]
+                if entry.values[key] != nil {
+                    throw ConfigError.parseError(line: line, message: "duplicate key '\(key)'")
+                }
+                entry.values[key] = value
+                list[list.count - 1] = entry
+                parent.arrays[leaf] = list
+            }
         }
-        node.values[key] = value
     }
 
     private static func tablePath(_ text: String, line: Int) throws -> [String] {
@@ -91,53 +152,21 @@ enum TOMLParser {
         return parts.map { String($0) }
     }
 
-    /// Resolves (creating when absent) the table node at `path`.
-    /// - Parameters:
-    ///   - path: Dotted table path segments. Must be non-empty.
-    ///   - root: Document root.
-    ///   - line: 1-based line number for error reporting.
-    /// - Returns: Table node for the path.
-    /// - Throws: ``ConfigError/parseError(line:message:)`` when a cached
-    ///   entry is unexpectedly missing.
-    private static func tableNode(at path: [String], in root: TOMLNode, line: Int) throws -> TOMLNode {
-        var node = root
-        for part in path {
-            if node.tables[part] == nil {
-                node.tables[part] = TOMLNode()
-            }
-            guard let next = node.tables[part] else {
-                throw ConfigError.parseError(line: line, message: "missing table '\(part)'")
-            }
-            node = next
-        }
-        return node
-    }
-
     /// Appends a new entry for the array-of-tables at `path`.
     /// - Parameters:
     ///   - path: Dotted array path segments. Must be non-empty.
     ///   - root: Document root.
     ///   - line: 1-based line number for error reporting.
-    /// - Returns: Fresh entry node.
     /// - Throws: ``ConfigError/parseError(line:message:)`` when the path
-    ///   is empty or a cached entry is unexpectedly missing.
-    private static func appendArrayNode(at path: [String], in root: TOMLNode, line: Int) throws -> TOMLNode {
-        var node = root
-        for part in path.dropLast() {
-            if node.tables[part] == nil {
-                node.tables[part] = TOMLNode()
-            }
-            guard let next = node.tables[part] else {
-                throw ConfigError.parseError(line: line, message: "missing table '\(part)'")
-            }
-            node = next
-        }
+    ///   is empty.
+    private static func appendArrayNode(at path: [String], in root: inout TOMLNode, line: Int) throws {
         guard let leaf = path.last else {
             throw ConfigError.parseError(line: line, message: "malformed array-of-tables header")
         }
-        let entry = TOMLNode()
-        node.arrays[leaf, default: []].append(entry)
-        return entry
+        let parentPath = Array(path.dropLast())
+        root.withTable(at: parentPath) { parent in
+            parent.arrays[leaf, default: []].append(TOMLNode())
+        }
     }
 
     private static func keyValue(_ line: String, lineNumber: Int) throws -> (String, TOMLValue) {
@@ -193,6 +222,9 @@ enum TOMLParser {
         if text == "false" {
             return .boolean(false)
         }
+        if text.hasPrefix("[") {
+            return try stringArray(text, line: line)
+        }
         if text.hasPrefix("\"") || text.hasPrefix("'") {
             return try quoted(text, line: line)
         }
@@ -203,6 +235,74 @@ enum TOMLParser {
             return .double(double)
         }
         throw ConfigError.parseError(line: line, message: "unsupported value: \(text)")
+    }
+
+    /// Parses an inline string list such as `["a", "b"]`.
+    ///
+    /// Only quoted string elements are accepted so numbers and booleans
+    /// never coerce silently into patterns; commas inside quotes do not
+    /// split. A trailing comma is tolerated and an empty `[]` yields no
+    /// elements, matching the permissive TOML array shape used for
+    /// deny/allow lists.
+    /// - Parameters:
+    ///   - text: Raw value text including brackets.
+    ///   - line: 1-based line number for error reporting.
+    /// - Returns: String array value.
+    /// - Throws: ``ConfigError/parseError(line:message:)`` on malformed arrays.
+    private static func stringArray(_ text: String, line: Int) throws -> TOMLValue {
+        guard text.hasSuffix("]") else {
+            throw ConfigError.parseError(line: line, message: "unterminated array: \(text)")
+        }
+        let inner = String(text.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !inner.isEmpty else { return .stringArray([]) }
+        var elements: [String] = []
+        var current = ""
+        var inDouble = false
+        var inSingle = false
+        var index = inner.startIndex
+        while index < inner.endIndex {
+            let char = inner[index]
+            if char == "\\", inDouble, !inSingle {
+                let next = inner.index(after: index)
+                guard next < inner.endIndex else {
+                    throw ConfigError.parseError(line: line, message: "dangling escape in array: \(text)")
+                }
+                current.append(char)
+                current.append(inner[next])
+                index = inner.index(after: next)
+                continue
+            }
+            if char == "\"", !inSingle {
+                inDouble.toggle()
+                current.append(char)
+            } else if char == "'", !inDouble {
+                inSingle.toggle()
+                current.append(char)
+            } else if char == ",", !inDouble, !inSingle {
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    guard case let .string(value) = try quoted(trimmed, line: line) else {
+                        throw ConfigError.parseError(line: line, message: "array elements must be strings: \(text)")
+                    }
+                    elements.append(value)
+                }
+                current = ""
+            } else {
+                current.append(char)
+            }
+            index = inner.index(after: index)
+        }
+        let trailing = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trailing.isEmpty {
+            guard case let .string(value) = try quoted(trailing, line: line) else {
+                throw ConfigError.parseError(line: line, message: "array elements must be strings: \(text)")
+            }
+            elements.append(value)
+        }
+        if inDouble || inSingle {
+            throw ConfigError.parseError(line: line, message: "unterminated string in array: \(text)")
+        }
+        return .stringArray(elements)
     }
 
     private static func quoted(_ text: String, line: Int) throws -> TOMLValue {
@@ -330,6 +430,22 @@ extension TOMLNode {
         }
         return number
     }
+
+    /// Strict optional string list: nil when absent, throws when present
+    /// but not an inline string array so wrong-typed values never silently
+    /// clear the deny list.
+    /// - Parameters:
+    ///   - key: TOML key.
+    ///   - field: Dotted field path for error reporting.
+    /// - Returns: String list, or nil when absent.
+    /// - Throws: `ConfigError.validationError` when present but not a string array.
+    func strictStringArray(_ key: String, field: String) throws -> [String]? {
+        guard let value = values[key] else { return nil }
+        guard case let .stringArray(items) = value else {
+            throw ConfigError.validationError(field: field, message: "must be an array of strings")
+        }
+        return items
+    }
 }
 
 extension RuneWeaverConfig {
@@ -343,6 +459,7 @@ extension RuneWeaverConfig {
         try Self.decodeMemory(root, into: &config)
         try Self.decodeVoice(root, into: &config)
         try Self.decodeSandbox(root, into: &config)
+        try Self.decodeFiles(root, into: &config)
         try Self.decodeEmail(root, into: &config)
         try Self.decodeHome(root, into: &config)
         try Self.decodeScheduler(root, into: &config)
@@ -462,6 +579,28 @@ extension RuneWeaverConfig {
         if let path = try sandbox.strictString("staging_path", field: "sandbox.staging_path") {
             config.sandbox.stagingPath = path
         }
+        if let days = try sandbox.strictInt("retention_days", field: "sandbox.retention_days") {
+            config.sandbox.retentionDays = days
+        }
+        if let cap = try sandbox.strictInt("max_total_bytes", field: "sandbox.max_total_bytes") {
+            config.sandbox.maxTotalBytes = cap
+        }
+        if let interval = try sandbox.strictInt("cleanup_interval_seconds", field: "sandbox.cleanup_interval_seconds") {
+            config.sandbox.cleanupIntervalSeconds = interval
+        }
+    }
+
+    private static func decodeFiles(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let files = root.tables["files"] else { return }
+        if let patterns = try files.strictStringArray("deny_patterns", field: "files.deny_patterns") {
+            config.files.denyPatterns = patterns
+        }
+        if let roots = try files.strictStringArray("allow_roots", field: "files.allow_roots") {
+            config.files.allowRoots = roots
+        }
+        if let flag = try files.strictBool("require_approval_on_deny", field: "files.require_approval_on_deny") {
+            config.files.requireApprovalOnDeny = flag
+        }
     }
 
     private static func decodeEmail(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
@@ -484,12 +623,32 @@ extension RuneWeaverConfig {
                 field: "email.accounts[\(name)].username"
             )
         }
+        let rawSmtpHost = try node.strictString("smtp_host", field: "email.accounts[\(name)].smtp_host")
+        let trimmedSmtpHost = rawSmtpHost?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let smtpHost = (trimmedSmtpHost?.isEmpty == false) ? trimmedSmtpHost : nil
+        let smtpPort = try node.strictInt("smtp_port", field: "email.accounts[\(name)].smtp_port")
+        let smtpSecurity: EmailSMTPSecurity
+        if let rawSecurity = try node.strictString("smtp_security", field: "email.accounts[\(name)].smtp_security") {
+            let lowered = rawSecurity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let parsed = EmailSMTPSecurity(rawValue: lowered) else {
+                throw ConfigError.validationError(
+                    field: "email.accounts[\(name)].smtp_security",
+                    message: "must be one of \(EmailSMTPSecurity.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(rawSecurity)')"
+                )
+            }
+            smtpSecurity = parsed
+        } else {
+            smtpSecurity = .auto
+        }
         return try EmailAccount(
             name: name,
             type: node.strictString("type", field: "email.accounts[\(name)].type") ?? "imap",
             host: host,
             port: node.strictInt("port", field: "email.accounts[\(name)].port") ?? 993,
-            username: username
+            username: username,
+            smtpHost: smtpHost,
+            smtpPort: smtpPort,
+            smtpSecurity: smtpSecurity
         )
     }
 
