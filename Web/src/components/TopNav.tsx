@@ -7,6 +7,7 @@ import {
   DEFAULT_SEARCH_SEARXNG_URL,
   ensureSearch,
   getSearchHealth,
+  resolveSearchMessage,
   resolveSearchURL,
   stopSearch,
 } from "../api";
@@ -19,7 +20,9 @@ import {
   RuneGlyph,
   RunsIcon,
   SchedulesIcon,
+  SearchIcon,
   SettingsIcon,
+  StopIcon,
   UserIcon,
 } from "./icons";
 
@@ -61,7 +64,11 @@ export default function TopNav({
     reachable: boolean;
     url: string;
   } | null>(null);
-  const [searchBusy, setSearchBusy] = useState(false);
+  // One in-flight slot names the running side so Start and Stop stay mutually
+  // exclusive while the toggle label stays honest (Starting… vs Stopping…).
+  const [searchBusyAction, setSearchBusyAction] = useState<"start" | "stop" | null>(
+    null
+  );
   const [searchError, setSearchError] = useState<string | null>(null);
 
   // Tri-state reachability: an explicit Start/Stop result wins, then the /health payload, otherwise
@@ -164,11 +171,16 @@ export default function TopNav({
 
   // Toggles the SearXNG container through the engine service. The result becomes the local override
   // only on an honest boolean reachable flag; shape-drifted payloads keep the previous dot and
-  // surface an inline error instead of optimistically flipping. Failures surface inline
-  // and keep the menu open.
+  // surface an inline error instead of optimistically flipping. A failed start (reachable false
+  // after ensure) renders the cascade message in the existing error slot instead of flipping
+  // silently to red; a failed stop (still reachable) does the same. Failures keep the menu open.
   const handleToggleSearch = useCallback(async () => {
-    if (searchBusy) return;
-    setSearchBusy(true);
+    if (searchBusyAction !== null) return;
+    // Capture whether this action is a start so the error slot can tell a
+    // failed start (unreachable) apart from a clean stop (unreachable by design),
+    // and so the busy label names the in-flight action instead of always claiming Start.
+    const wasStarting = !searchRunning;
+    setSearchBusyAction(wasStarting ? "start" : "stop");
     setSearchError(null);
     try {
       const response = searchRunning
@@ -181,6 +193,14 @@ export default function TopNav({
           reachable: response.reachable,
           url: resolveSearchURL(response, searchURL),
         });
+        const detail = resolveSearchMessage(response);
+        if (wasStarting && !response.reachable) {
+          // Failed start: surface the cascade detail (stage, exit, tail, timeout).
+          setSearchError(detail ?? "Search start failed; status unchanged.");
+        } else if (!wasStarting && response.reachable) {
+          // Failed stop: the engine still answers, so the message explains why.
+          setSearchError(detail ?? "Search stop failed; still reachable.");
+        }
       } else {
         setSearchError("Search toggle returned an unexpected response; status unchanged.");
       }
@@ -189,9 +209,9 @@ export default function TopNav({
         error instanceof Error ? error.message : "Search toggle failed"
       );
     } finally {
-      setSearchBusy(false);
+      setSearchBusyAction(null);
     }
-  }, [searchBusy, searchRunning, searchURL]);
+  }, [searchBusyAction, searchRunning, searchURL]);
 
   return (
     <header className="top-nav" aria-label="Main navigation">
@@ -362,21 +382,36 @@ export default function TopNav({
                         event.stopPropagation();
                         void handleToggleSearch();
                       }}
-                      disabled={searchBusy}
+                      disabled={searchBusyAction !== null}
                     >
-                      {searchBusy
-                        ? "Working…"
-                        : searchRunning
-                          ? "Stop"
-                          : "Start"}
+                      {searchBusyAction === "start" ? (
+                        <>
+                          <SearchIcon size={14} />
+                          <span>Starting…</span>
+                        </>
+                      ) : searchBusyAction === "stop" ? (
+                        <>
+                          <StopIcon size={14} />
+                          <span>Stopping…</span>
+                        </>
+                      ) : searchRunning ? (
+                        <>
+                          <StopIcon size={14} />
+                          <span>Stop</span>
+                        </>
+                      ) : (
+                        <>
+                          <SearchIcon size={14} />
+                          <span>Start</span>
+                        </>
+                      )}
                     </button>
                   </span>
                 </div>
                 {searchError ? (
                   <div
-                    className="muted text-sm"
+                    className="error-banner"
                     data-testid="searxng-error"
-                    style={{ fontSize: "11px" }}
                   >
                     {searchError}
                   </div>
@@ -401,7 +436,7 @@ export default function TopNav({
               <div className="profile-menu-divider" />
 
               <div className="profile-menu-footer">
-                Rune Weaver v{health?.version || "1.0.0"}
+                Rune Weaver v{health?.version || "unknown"}
               </div>
             </div>
           )}

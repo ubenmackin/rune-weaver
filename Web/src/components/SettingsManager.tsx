@@ -18,6 +18,7 @@ import {
   ensureSearch,
   getSearchHealth,
   getSettings,
+  resolveSearchMessage,
   resolveSearchURL,
   updateSettings,
   getPlugins,
@@ -41,10 +42,12 @@ import {
   CloseIcon,
   MailIcon,
   MemoryIcon,
+  MicIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
   SettingsIcon,
+  StopIcon,
   TrashIcon,
   WrenchIcon,
 } from "./icons";
@@ -134,7 +137,7 @@ export default function SettingsManager() {
   const [voiceSTTProvider, setVoiceSTTProvider] = useState("");
   const [voiceWhisperModel, setVoiceWhisperModel] = useState("");
   const [voiceTTSProvider, setVoiceTTSProvider] = useState("");
-  // Web search policy under [search]: SearXNG base URL plus per-request
+  // Web search policy under [browser]: SearXNG base URL plus per-request
   // timeout and result cap. Defaults mirror the engine so a fresh form shows
   // the same boundary the service enforces before the first settings fetch.
   const [searchSearxngURL, setSearchSearxngURL] = useState(
@@ -146,12 +149,18 @@ export default function SettingsManager() {
   const [searchMaxResults, setSearchMaxResults] = useState(
     DEFAULT_SEARCH_MAX_RESULTS
   );
-  // Live container health for the Search pane: refreshed on tab open and
-  // after Start/Stop so the health line stays honest without a page reload.
+  // Live container health for the Search pane: probed on tab open and updated
+  // directly from Start/Stop action responses so the health line stays honest
+  // without a page reload or an extra probe round-trip.
   const [searchReachable, setSearchReachable] = useState<boolean | null>(null);
   const [searchHealthURL, setSearchHealthURL] = useState<string | null>(null);
   const [searchHealthLoading, setSearchHealthLoading] = useState(false);
-  const [searchActionBusy, setSearchActionBusy] = useState(false);
+  // Tracks which lifecycle action is in flight so Start shows Starting… and
+  // Stop shows Stopping… instead of sharing one misleading Starting… label.
+  const [searchAction, setSearchAction] = useState<"start" | "stop" | null>(
+    null
+  );
+  const searchActionBusy = searchAction !== null;
   const [searchHealthError, setSearchHealthError] = useState<string | null>(
     null
   );
@@ -225,15 +234,21 @@ export default function SettingsManager() {
   }, []);
 
   const handleEnsureSearch = async () => {
-    setSearchActionBusy(true);
+    setSearchAction("start");
     setSearchHealthError(null);
     try {
       const response = await ensureSearch();
       // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of optimistically flipping.
+      // A failed start (reachable false) renders the cascade message in the existing error slot
+      // instead of flipping silently to red.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+        if (!response.reachable) {
+          const detail = resolveSearchMessage(response);
+          setSearchHealthError(detail ?? "Search start failed; status unchanged.");
+        }
       } else {
         setSearchHealthError(
           "Search start returned an unexpected response; status unchanged."
@@ -244,20 +259,25 @@ export default function SettingsManager() {
         err instanceof Error ? err.message : "Failed to start search."
       );
     } finally {
-      setSearchActionBusy(false);
+      setSearchAction(null);
     }
   };
 
   const handleStopSearch = async () => {
-    setSearchActionBusy(true);
+    setSearchAction("stop");
     setSearchHealthError(null);
     try {
       const response = await stopSearch();
       // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of claiming stopped.
+      // A failed stop (still reachable) surfaces its message; a clean stop clears the slot.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+        if (response.reachable) {
+          const detail = resolveSearchMessage(response);
+          setSearchHealthError(detail ?? "Search stop failed; still reachable.");
+        }
       } else {
         setSearchHealthError(
           "Search stop returned an unexpected response; status unchanged."
@@ -268,7 +288,7 @@ export default function SettingsManager() {
         err instanceof Error ? err.message : "Failed to stop search."
       );
     } finally {
-      setSearchActionBusy(false);
+      setSearchAction(null);
     }
   };
 
@@ -488,7 +508,8 @@ export default function SettingsManager() {
 
   // Loads live container health when the Search pane opens so the health
   // line reflects the running container rather than the saved URL alone.
-  // Runs on tab entry only; Start/Stop refresh explicitly after acting.
+  // Runs on tab entry only; Start/Stop update directly from their action
+  // response without an extra probe so the health line never flashes stale.
   useEffect(() => {
     if (activeTab === "search") {
       void refreshSearchHealth();
@@ -1127,6 +1148,7 @@ export default function SettingsManager() {
             className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
             onClick={() => setActiveTab("voice")}
           >
+            <MicIcon size={16} />
             <span>Voice</span>
           </button>
 
@@ -1170,7 +1192,7 @@ export default function SettingsManager() {
               </div>
               <button
                 type="button"
-                className="secondary-button"
+                className="ghost icon-text-btn"
                 onClick={handleAddProvider}
               >
                 <PlusIcon size={14} />
@@ -1460,23 +1482,22 @@ export default function SettingsManager() {
         {/* TAB 3: Tools & Runes */}
         {activeTab === "tools" && (
           <div className="settings-section card">
-            <div className="settings-section-title-group" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "12px" }}>
-              <div>
+            <div className="settings-section-header">
+              <div className="settings-section-title-group">
                 <h3>Tools & Runes</h3>
                 <p className="settings-section-hint">
                   Manage internal and external tools. Discovered and newly installed runes remain disabled by default until reviewed and approved.
                 </p>
               </div>
-              <div style={{ display: "flex", gap: "8px" }}>
+              <div className="row">
                 {/* Marketplace entry points stay hidden while the catalog UX is
                     deferred; the modal remains mounted below so re-enabling is
                     UI-only and server routes stay untouched. */}
                 <button
                   type="button"
-                  className="secondary-button"
+                  className="ghost icon-text-btn"
                   onClick={handleRescanPlugins}
                   disabled={rescanLoading}
-                  style={{ display: "flex", alignItems: "center", gap: "6px" }}
                 >
                   <RefreshIcon size={14} className={rescanLoading ? "spin" : ""} />
                   <span>{rescanLoading ? "Scanning..." : "Rescan Plugins"}</span>
@@ -1647,13 +1668,9 @@ export default function SettingsManager() {
                         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                           <button
                             type="button"
-                            className={plugin.isEnabled ? "secondary-button" : "primary-button"}
+                            className={plugin.isEnabled ? "ghost icon-text-btn" : "primary icon-text-btn"}
                             onClick={() => handleToggleEnable(plugin)}
                             disabled={updatingPluginId === plugin.id}
-                            style={{
-                              padding: "5px 12px",
-                              fontSize: "0.85rem",
-                            }}
                           >
                             {updatingPluginId === plugin.id
                               ? "Updating..."
@@ -1891,7 +1908,7 @@ export default function SettingsManager() {
         )}
 
         {/* Security merge shell: sandbox isolation plus file guard share one
-            pane so the sidenav stays at seven items without losing either
+            pane so the sidenav stays at eight items without losing either
             surface. Both sections save together through the same form. */}
         {activeTab === "security" && (
           <>
@@ -2327,13 +2344,41 @@ export default function SettingsManager() {
             immediately on the container so health stays honest. */}
         {activeTab === "search" && (
           <div className="settings-section card">
-            <div className="settings-section-title-group">
-              <h3>Web Search</h3>
-              <p className="settings-section-hint">
-                SearXNG runs locally for private web search. No Docker needed,
-                it uses the Apple Container CLI. First start pulls the SearXNG
-                image (about 150 MB), later starts reuse it.
-              </p>
+            <div className="settings-section-header">
+              <div className="settings-section-title-group">
+                <h3>Web Search</h3>
+                <p className="settings-section-hint">
+                  SearXNG runs locally for private web search. No Docker needed,
+                  it uses the Apple Container CLI. First start pulls the SearXNG
+                  image (about 150 MB), later starts reuse it.
+                </p>
+              </div>
+              <div className="row">
+                <button
+                  type="button"
+                  className="ghost icon-text-btn"
+                  onClick={() => void handleEnsureSearch()}
+                  disabled={searchActionBusy}
+                  aria-label="Start SearXNG"
+                >
+                  <SearchIcon size={14} />
+                  <span>
+                    {searchAction === "start" ? "Starting…" : "Start SearXNG"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="ghost icon-text-btn"
+                  onClick={() => void handleStopSearch()}
+                  disabled={searchActionBusy}
+                  aria-label="Stop SearXNG"
+                >
+                  <StopIcon size={14} />
+                  <span>
+                    {searchAction === "stop" ? "Stopping…" : "Stop SearXNG"}
+                  </span>
+                </button>
+              </div>
             </div>
             <div className="form-group">
               <label htmlFor="search-searxng-url">SearXNG URL</label>
@@ -2349,7 +2394,7 @@ export default function SettingsManager() {
               <span className="form-group-hint">
                 Base URL of the local SearXNG service (default{" "}
                 {DEFAULT_SEARCH_SEARXNG_URL}). Saved to searxng_url under
-                [search]; changes need a restart to take effect.
+                [browser]; changes need a restart to take effect.
               </span>
             </div>
             <div className="form-row">
@@ -2367,8 +2412,8 @@ export default function SettingsManager() {
                   required
                 />
                 <span className="form-group-hint">
-                  Per-request timeout in seconds (1 to 120). Saved to timeout
-                  under [search].
+                  Per-request timeout in seconds (1 to 120). Saved to search_timeout_seconds
+                  under [browser].
                 </span>
               </div>
               <div className="form-group flex-1">
@@ -2386,59 +2431,28 @@ export default function SettingsManager() {
                 />
                 <span className="form-group-hint">
                   Max results per query (1 to 50). Saved to max_results under
-                  [search].
+                  [browser].
                 </span>
               </div>
             </div>
-            <div
-              className="form-row"
-              style={{ marginTop: "12px", alignItems: "center" }}
+            {/* Health line stays below the policy fields so container state
+                remains visible without a pane-level refresh; the pane probes
+                on open and Start/Stop update directly from their action
+                response while the global header Refresh stays the single
+                manual refresh. */}
+            <span
+              data-testid="search-health-text"
+              className="muted text-sm"
+              title={searchHealthURL || searchSearxngURL}
             >
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => void handleEnsureSearch()}
-                disabled={searchActionBusy}
-                aria-label="Start SearXNG"
-              >
-                {searchActionBusy ? "Working…" : "Start"}
-              </button>
-              <button
-                type="button"
-                className="ghost icon-text-btn"
-                onClick={() => void handleStopSearch()}
-                disabled={searchActionBusy}
-                aria-label="Stop SearXNG"
-              >
-                Stop
-              </button>
-              <button
-                type="button"
-                className="ghost icon-text-btn"
-                onClick={() => void refreshSearchHealth()}
-                disabled={searchHealthLoading || searchActionBusy}
-                aria-label="Refresh search health"
-              >
-                <RefreshIcon
-                  size={14}
-                  className={searchHealthLoading ? "spin" : ""}
-                />
-                <span>{searchHealthLoading ? "Checking…" : "Refresh"}</span>
-              </button>
-              <span
-                data-testid="search-health-text"
-                className="muted text-sm"
-                title={searchHealthURL || searchSearxngURL}
-              >
-                {searchHealthLoading
-                  ? "Checking search health…"
-                  : searchReachable === null
-                    ? "Search health unknown."
-                    : searchReachable
-                      ? `Search reachable at ${searchHealthURL || searchSearxngURL}.`
-                      : `Search stopped (${searchHealthURL || searchSearxngURL} unreachable).`}
-              </span>
-            </div>
+              {searchHealthLoading
+                ? "Checking search health…"
+                : searchReachable === null
+                  ? "Search health unknown."
+                  : searchReachable
+                    ? `Search reachable at ${searchHealthURL || searchSearxngURL}.`
+                    : `Search stopped (${searchHealthURL || searchSearxngURL} unreachable).`}
+            </span>
             {searchHealthError ? (
               <div className="error-banner" data-testid="search-health-error">
                 {searchHealthError}
@@ -2457,14 +2471,16 @@ export default function SettingsManager() {
                   Configure IMAP email accounts for background monitoring and automated schedules.
                 </p>
               </div>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={handleAddEmailAccount}
-              >
-                <PlusIcon size={14} />
-                <span>Add Account</span>
-              </button>
+              <div className="row">
+                <button
+                  type="button"
+                  className="ghost icon-text-btn"
+                  onClick={handleAddEmailAccount}
+                >
+                  <PlusIcon size={14} />
+                  <span>Add Account</span>
+                </button>
+              </div>
             </div>
 
             {emailAccountsList.length === 0 ? (
@@ -2473,7 +2489,7 @@ export default function SettingsManager() {
                 <p>No email accounts configured yet.</p>
                 <button
                   type="button"
-                  className="secondary-button"
+                  className="primary icon-text-btn"
                   onClick={handleAddEmailAccount}
                 >
                   <PlusIcon size={14} />

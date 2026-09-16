@@ -170,7 +170,9 @@ struct SettingsRouteTests {
         #expect(toml.contains("\\t"))
         let alphaRange = toml.range(of: "[llm.providers.alpha]")
         let zetaRange = toml.range(of: "[llm.providers.zeta]")
-        #expect(alphaRange != nil && zetaRange != nil && alphaRange!.lowerBound < zetaRange!.lowerBound)
+        let alpha = try #require(alphaRange)
+        let zeta = try #require(zetaRange)
+        #expect(alpha.lowerBound < zeta.lowerBound)
 
         let fileURL = tempDir.appendingPathComponent("config.toml")
         try config.save(to: fileURL)

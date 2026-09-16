@@ -65,7 +65,7 @@ public enum ToolEnvelopeEncoding: Sendable {
 /// live transports. Both chains follow redirects manually so every hop can be
 /// re-validated; a per-tool delegate copy would risk one transport silently
 /// auto-following while the other surfaces 3xx.
-final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _: URLSession,
         task _: URLSessionTask,

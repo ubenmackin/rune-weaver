@@ -66,9 +66,10 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         case replyToId
         case mailbox
         case folder
+        case body
     }
 
-    /// Decodes arguments, accepting the `folder` alias for `mailbox`.
+    /// Decodes arguments, accepting the `folder` alias for `mailbox` and `body` for `bodyText`.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
@@ -76,7 +77,11 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
         cc = try container.decodeIfPresent([String].self, forKey: .cc)
         bcc = try container.decodeIfPresent([String].self, forKey: .bcc)
         subject = try container.decode(String.self, forKey: .subject)
-        bodyText = try container.decodeIfPresent(String.self, forKey: .bodyText)
+        if let text = try container.decodeIfPresent(String.self, forKey: .bodyText) {
+            bodyText = text
+        } else {
+            bodyText = try container.decodeIfPresent(String.self, forKey: .body)
+        }
         bodyHtml = try container.decodeIfPresent(String.self, forKey: .bodyHtml)
         attachmentPaths = try container.decodeIfPresent([String].self, forKey: .attachmentPaths)
         replyToId = try container.decodeIfPresent(String.self, forKey: .replyToId)
@@ -427,7 +432,8 @@ public struct EmailSendTool: Tool, Sendable {
         "Sends an email via SMTP through the configured account. "
             + "Use when the user asks to send or compose mail. "
             + "From always defaults to the account username with no From override; sends immediately on approval with no scheduled or delayed send. "
-            + "HTML is standard with a derived text fallback; "
+            + "Markdown or plain text in bodyText is standard and is automatically rendered into styled HTML with a plain-text fallback; "
+            + "raw bodyHtml is optional for custom HTML overrides; "
             + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
             + "Returns the sender, recipients, subject, body size, and Sent status."
     /// Function-calling contract for the send envelope plus threading and attachments.
@@ -439,9 +445,12 @@ public struct EmailSendTool: Tool, Sendable {
                 + #""cc":{"type":"array","description":"Optional CC recipients (counted in the 20 total)","items":{"type":"string"}, "#
                 + #""minItems":0,"maxItems":20},"bcc":{"type":"array","description":"Optional BCC recipients (counted in the 20 total)", "#
                 + #""items":{"type":"string"},"minItems":0,"maxItems":20},"subject":{"type":"string","description":"Subject header "#
-                + #"(1-998 chars, no CR or LF)","maxLength":998},"bodyText":{"type":"string","description":"Plain-text body "#
-                + #"(provide bodyText and/or bodyHtml; HTML-only derives text)"},"bodyHtml":{"type":"string","description":"HTML body "#
-                + #"(standard; provide bodyText and/or bodyHtml)"},"attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
+                + #"(1-998 chars, no CR or LF)","maxLength":998},"bodyText":{"type":"string","description":"Email body formatted in standard "#
+                + #"Markdown or plain text. Automatically rendered to styled HTML with a plain-text fallback. You can also pass 'body'."},"#
+                + #""body":{"type":"string","description":"Alias for bodyText."},"#
+                + #""bodyHtml":{"type":"string","description":"Optional raw HTML body override. "#
+                + #"If omitted, styled HTML is automatically generated from bodyText."},"#
+                + #""attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
                 + #"absolute attachment paths (10 MB each, 25 MB total)","items":{"type":"string"}},"replyToId":{"type":"string","description":"Optional "#
                 + #"IMAP id of the message being replied to"},"mailbox":{"type":"string","description":"Mailbox holding the replied-to "#
                 + #"message (omitted means INBOX)"}}"#
@@ -486,11 +495,7 @@ public struct EmailSendTool: Tool, Sendable {
             let staged = try stagedAttachments(paths: target.attachmentPaths)
             let threading = try await threadingContext(
                 credentials: credentials,
-                replyToId: target.replyToId,
-                mailbox: target.mailbox,
-                subject: target.subject,
-                bodyText: target.bodyText,
-                bodyHtml: target.bodyHtml
+                target: target
             )
             try await smtpGateway.send(
                 credentials: credentials,
@@ -545,6 +550,7 @@ private struct EmailSendTarget {
     let subject: String
     let bodyText: String
     let bodyHtml: String?
+    let hasCustomHtml: Bool
     let attachmentPaths: [String]
     let replyToId: String?
     let mailbox: String
@@ -599,7 +605,7 @@ extension EmailSendTool {
             throw EmailIMAPError.bridgeFailed(
                 "Invalid email.send arguments: expected {\"account\": \"<name>\", "
                     + "\"to\": [\"<email>\"], \"subject\": \"<text>\", "
-                    + "\"bodyText\": \"<text>\" and/or \"bodyHtml\": \"<html>\"}."
+                    + "\"bodyText\": \"<text>\" (or \"body\": \"<text>\") and/or \"bodyHtml\": \"<html>\"}."
             )
         }
     }
@@ -625,10 +631,11 @@ extension EmailSendTool {
         }
         let rawHtml = try EmailSendValidation.validateOptionalBody(args.bodyHtml, field: "bodyHtml")
         guard rawText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false || rawHtml != nil else {
-            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' and/or 'bodyHtml'.")
+            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' (or 'body') and/or 'bodyHtml'.")
         }
-        // HTML is standard: HTML-only sends derive text by stripping tags
-        // with no markdown templating; text-only sends stay plain-only.
+        // Markdown or plain text in bodyText is standard: when rawHtml is omitted,
+        // styled HTML is automatically generated via Ink with a plain-text fallback.
+        // When rawHtml is provided, it is honored verbatim as a custom HTML override.
         let effectiveText: String
         if let rawText, !rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             try EmailSendValidation.validateBody(rawText, field: "bodyText")
@@ -641,9 +648,15 @@ extension EmailSendTool {
             try EmailSendValidation.validateBody(derived, field: "bodyText")
             effectiveText = derived
         } else {
-            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' and/or 'bodyHtml'.")
+            throw EmailIMAPError.bridgeFailed("Invalid body: provide 'bodyText' (or 'body') and/or 'bodyHtml'.")
         }
-        try EmailSendValidation.validateCombinedBody(text: effectiveText, html: rawHtml)
+        let hasCustomHtml = rawHtml != nil
+        let effectiveHtml: String? = if let rawHtml {
+            rawHtml
+        } else {
+            EmailMarkdownRenderer.render(markdown: effectiveText)
+        }
+        try EmailSendValidation.validateCombinedBody(text: effectiveText, html: effectiveHtml)
         let attachmentPaths = try validatedAttachmentSyntax(args.attachmentPaths ?? [])
         let replyToId = try validatedReplyToId(args.trimmedReplyToId)
         let mailbox = try validatedMailbox(args.trimmedMailbox)
@@ -661,7 +674,8 @@ extension EmailSendTool {
             bcc: bcc,
             subject: subject,
             bodyText: effectiveText,
-            bodyHtml: rawHtml,
+            bodyHtml: effectiveHtml,
+            hasCustomHtml: hasCustomHtml,
             attachmentPaths: attachmentPaths,
             replyToId: replyToId,
             mailbox: mailbox
@@ -759,37 +773,40 @@ extension EmailSendTool {
     /// Resolves threaded content by fetching the original when replying.
     private func threadingContext(
         credentials: ResolvedEmailCredentials,
-        replyToId: String?,
-        mailbox: String,
-        subject: String,
-        bodyText: String,
-        bodyHtml: String?
+        target: EmailSendTarget
     ) async throws -> SendThreading {
-        guard let replyToId else {
-            return SendThreading(subject: subject, bodyText: bodyText, bodyHtml: bodyHtml, inReplyTo: nil, references: nil)
+        guard let replyToId = target.replyToId else {
+            return SendThreading(
+                subject: target.subject,
+                bodyText: target.bodyText,
+                bodyHtml: target.bodyHtml,
+                inReplyTo: nil,
+                references: nil
+            )
         }
         let listed = try await imapGateway.listMailboxes(credentials: credentials)
         let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
-        let canonical = try EmailBridgeParsing.resolveMailboxAgainstList(requested: mailbox, available: available)
+        let canonical = try EmailBridgeParsing.resolveMailboxAgainstList(requested: target.mailbox, available: available)
         let original = try await imapGateway.fetch(credentials: credentials, mailbox: canonical, messageID: replyToId)
-        let effectiveSubject = EmailSendValidation.replySubject(for: subject)
+        let effectiveSubject = EmailSendValidation.replySubject(for: target.subject)
         let quoted = EmailSendValidation.quotedOriginal(original.body)
         let headerDate = original.date.trimmingCharacters(in: .whitespacesAndNewlines)
         let headerFrom = original.from.trimmingCharacters(in: .whitespacesAndNewlines)
         let attribution = if !headerDate.isEmpty, !headerFrom.isEmpty {
-            "\n\nOn \(headerDate), \(headerFrom) wrote:\n\(quoted)"
+            "\n\nOn \(headerDate), \(headerFrom) wrote:\n\n\(quoted)"
         } else if !quoted.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             "\n\n\(quoted)"
         } else {
             ""
         }
-        let effectiveText = bodyText + attribution
+        let effectiveText = target.bodyText + attribution
         try EmailSendValidation.validateBody(effectiveText, field: "bodyText")
-        try EmailSendValidation.validateCombinedBody(text: effectiveText, html: bodyHtml)
+        let effectiveHtml = target.hasCustomHtml ? target.bodyHtml : EmailMarkdownRenderer.render(markdown: effectiveText)
+        try EmailSendValidation.validateCombinedBody(text: effectiveText, html: effectiveHtml)
         return SendThreading(
             subject: effectiveSubject,
             bodyText: effectiveText,
-            bodyHtml: bodyHtml,
+            bodyHtml: effectiveHtml,
             inReplyTo: replyToId,
             references: replyToId
         )

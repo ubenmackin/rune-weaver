@@ -77,6 +77,7 @@ App users can skip the build row. Install only what matches the features you use
 | Order | Dependency | Needed for | Notes |
 |-------|------------|------------|-------|
 | 1 | Apple Container CLI (`container`) | SearXNG search and sandbox detonation | No Docker needed. The CLI ships the isolation used by search and untrusted files. |
+| 1a | Container system service (`container system start` plus `container list` verify) | SearXNG search and sandbox detonation | Start once with `container system start`, verify with `container list`. The engine and `scripts/searxng-up.sh` heal it automatically when down (XPC/system-service). |
 | 2 | SearXNG image | Local web search | Pulled automatically on first Start from the Settings Search pane or the Profile menu. First pull is about 150 MB, later starts reuse it. |
 | 3 | Python 3 plus Playwright plus Chromium | Browser automation tools | Needed only if you use browser tools. See install steps below. |
 | 4 | Whisper (optional) | Voice input | Needed only if you use speech to text. Skip it for text chat. See install steps below. |
@@ -132,6 +133,32 @@ Contributors only. The DMG app does not need any of this.
 - Install Xcode from the App Store, then check `swift --version` for Swift 6.
 - Install Node 20 or later with `brew install node`, then check `node --version`.
 - Vite ships with the repo `Web` dependencies, so `make build` handles it once Node is present. If you do not use Homebrew, get Node from: https://nodejs.org/
+
+## Releasing
+
+The version lives in one place: the `VERSION` file at the repo root.
+
+```bash
+# 1. Edit VERSION to the new X.Y.Z
+echo "0.2.0" > VERSION
+
+# 2. Stamp the Swift constant and sync the dashboard manifest
+make version
+
+# 3. Build and test
+make build
+make test
+
+# 4. Tag the release
+git add VERSION Web/package.json Web/package-lock.json
+git commit -m "Release 0.2.0"
+git tag v0.2.0
+git push && git push --tags
+```
+
+`make version` regenerates `Sources/RuneWeaverCore/GeneratedVersion.swift` from `VERSION` and syncs `Web/package.json` via `npm version`. The engine, CLI, and `/health` read the stamped constant, and the dashboard reads the version at runtime from `/health.version`.
+
+The generated file is gitignored: fresh clones bootstrap it via `make version` (already a prereq of `make build`, `make test`, and `make run`), so no hand edits are needed. A previously tracked copy may still exist in the working tree until the maintainer untracks it with `git rm --cached Sources/RuneWeaverCore/GeneratedVersion.swift`; do not edit it by hand either way.
 
 ## Links
 

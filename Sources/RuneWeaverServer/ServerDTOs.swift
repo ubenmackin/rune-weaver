@@ -653,6 +653,8 @@ public struct SearchHealthResponse: Content, Equatable {
 }
 
 /// Search engine ensure response for `POST /search/ensure`.
+/// Carries the last cascade failure detail in `message` when unreachable, so
+/// the dashboard can render why the heal stopped instead of flipping silently.
 public struct SearchEnsureResponse: Content, Equatable {
     /// Whether the engine answers after the ensure attempt.
     public let reachable: Bool
@@ -664,14 +666,18 @@ public struct SearchEnsureResponse: Content, Equatable {
     public let url: String
     /// Collapsed status (`"running"` when reachable, else `"stopped"`).
     public let status: String
+    /// Last cascade failure detail (stage, exit, capped tail, timeout) when unreachable.
+    public let message: String?
 
     /// Creates an ensure response.
-    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil) {
+    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil, message: String? = nil) {
         self.reachable = reachable
         self.baseURL = baseURL
         self.started = started
         self.url = url ?? baseURL
         self.status = status ?? (reachable ? "running" : "stopped")
+        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.message = trimmed.isEmpty ? nil : trimmed
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -680,9 +686,10 @@ public struct SearchEnsureResponse: Content, Equatable {
         case started
         case url
         case status
+        case message
     }
 
-    /// Decodes tolerantly across `baseURL`/`url` shapes.
+    /// Decodes tolerantly across `baseURL`/`url` shapes plus optional message.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         reachable = try container.decode(Bool.self, forKey: .reachable)
@@ -693,6 +700,9 @@ public struct SearchEnsureResponse: Content, Equatable {
         url = alias ?? resolved
         started = try container.decodeIfPresent(Bool.self, forKey: .started) ?? false
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
+        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        message = trimmed.isEmpty ? nil : trimmed
     }
 
     /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
@@ -703,10 +713,14 @@ public struct SearchEnsureResponse: Content, Equatable {
         try container.encode(url, forKey: .url)
         try container.encode(started, forKey: .started)
         try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(message, forKey: .message)
     }
 }
 
 /// Search engine stop response for `POST /search/stop`.
+/// Carries a failure detail in `message` when the engine still answers after
+/// the stop, so the dashboard can render why the halt did not take instead of
+/// falling back to a generic notice.
 public struct SearchStopResponse: Content, Equatable {
     /// Whether the container is stopped (honest re-probe: false when the engine still answers).
     public let stopped: Bool
@@ -720,15 +734,19 @@ public struct SearchStopResponse: Content, Equatable {
     public let url: String
     /// Collapsed status (honest re-probe: `"running"` when still reachable, else `"stopped"`).
     public let status: String
+    /// Failure detail when the engine still answers after the stop.
+    public let message: String?
 
     /// Creates a stop response.
-    public init(stopped: Bool, containerName: String, reachable: Bool = false, baseURL: String = "", url: String? = nil, status: String? = nil) {
+    public init(stopped: Bool, containerName: String, reachable: Bool = false, baseURL: String = "", url: String? = nil, status: String? = nil, message: String? = nil) {
         self.stopped = stopped
         self.containerName = containerName
         self.reachable = reachable
         self.baseURL = baseURL
         self.url = url ?? baseURL
         self.status = status ?? (reachable ? "running" : "stopped")
+        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.message = trimmed.isEmpty ? nil : trimmed
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -738,6 +756,7 @@ public struct SearchStopResponse: Content, Equatable {
         case baseURL
         case url
         case status
+        case message
     }
 
     /// Decodes tolerantly so dashboard `SearchHealthResponse` shapes still parse.
@@ -754,6 +773,9 @@ public struct SearchStopResponse: Content, Equatable {
         baseURL = resolved
         url = alias ?? resolved
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
+        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        message = trimmed.isEmpty ? nil : trimmed
     }
 
     /// Encodes the full shape so health-style readers keep working.
@@ -765,6 +787,7 @@ public struct SearchStopResponse: Content, Equatable {
         try container.encode(baseURL, forKey: .baseURL)
         try container.encode(url, forKey: .url)
         try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(message, forKey: .message)
     }
 }
 

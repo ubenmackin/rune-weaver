@@ -114,6 +114,10 @@ iOSInjectionProject/
 scratch/
 dist/
 
+# Generated engine version stamped by `make version` from the repo-root VERSION
+# file; fresh clones bootstrap it via `make version` (a prereq of build/test/run).
+Sources/RuneWeaverCore/GeneratedVersion.swift
+
 # Sprite design-review snapshots
 .sprite-previews/
 .venv/

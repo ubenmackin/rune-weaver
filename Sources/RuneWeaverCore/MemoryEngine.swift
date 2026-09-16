@@ -1119,9 +1119,17 @@ extension MemoryEngine {
         Self.profileWriteQueue.async {
             let directory = (expanded as NSString).deletingLastPathComponent
             if !directory.isEmpty {
-                try? FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+                do {
+                    try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+                } catch {
+                    RuneWeaverLog.memory.warning("MemoryEngine: Failed to create profile directory '\(directory)': \(error.localizedDescription)")
+                }
             }
-            try? data.write(to: URL(fileURLWithPath: expanded), options: .atomic)
+            do {
+                try data.write(to: URL(fileURLWithPath: expanded), options: .atomic)
+            } catch {
+                RuneWeaverLog.memory.warning("MemoryEngine: Failed to persist user profile to '\(expanded)': \(error.localizedDescription)")
+            }
         }
     }
 

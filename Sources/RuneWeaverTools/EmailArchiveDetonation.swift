@@ -142,7 +142,7 @@ public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
         } catch let bridge as EmailIMAPError {
             throw bridge
         } catch {
-            // Listing failed (for example runtime missing): let create surface it.
+            RuneWeaverLog.tools.debug("EmailArchiveDetonation: Container pre-check listing skipped: \(error.localizedDescription); deferring to creation.")
         }
     }
 }
