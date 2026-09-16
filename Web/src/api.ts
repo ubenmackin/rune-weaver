@@ -705,7 +705,7 @@ export const DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE = "alpine:latest";
 export const DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES = 10;
 export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;
 
-// Manual mirrors of the [search] defaults (searxng_url, timeout, max_results) pinned to
+// Manual mirrors of the [browser] defaults (searxng_url, timeout, max_results) pinned to
 // BrowserConfig in Sources/RuneWeaverCore/Config.swift (defaultSearxngURL, defaultMaxResults),
 // Config/config.toml.example, and CONFIG.md.
 export const DEFAULT_SEARCH_SEARXNG_URL = "http://127.0.0.1:8888";
@@ -728,6 +728,9 @@ export function updateSettings(
 // Web search (SearXNG) lifecycle surfaced by the engine service. The service
 // runs SearXNG in an Apple Container machine with no Docker dependency, so
 // these routes start and stop that machine rather than proxying queries.
+// The ensure path carries the last cascade failure detail (stage, exit,
+// capped tail, timeout) in `message` when unreachable so callers render why
+// the heal stopped instead of flipping silently.
 export interface SearchHealthResponse {
   reachable: boolean;
   url?: string;
@@ -736,6 +739,7 @@ export interface SearchHealthResponse {
   containerName?: string | null;
   started?: boolean | null;
   stopped?: boolean | null;
+  message?: string | null;
 }
 
 // Resolves the display URL across the dual `url`/`baseURL` contract so custom
@@ -750,6 +754,16 @@ export function resolveSearchURL(
     (typeof response.baseURL === "string" && response.baseURL.trim()) ||
     "";
   return candidate || fallback;
+}
+
+// Single-sourced cascade-detail extraction for the search lifecycle: trims the
+// engine `message` (stage, exit, capped tail, timeout) and normalizes blank or
+// non-string payloads to null so callers never render whitespace as detail.
+export function resolveSearchMessage(
+  response: SearchHealthResponse | null | undefined,
+): string | null {
+  const message = response?.message;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
 }
 
 // Reads live SearXNG reachability without touching settings: the profile

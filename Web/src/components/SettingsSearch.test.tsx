@@ -187,6 +187,21 @@ describe("SettingsManager search", () => {
     const searchTab = screen.getByRole("tab", { name: /Search/i });
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    const stopBtn = screen.getByRole("button", { name: "Stop SearXNG" });
+    // Header placement matches the providers and security panes: lifecycle
+    // actions sit in the right-aligned title group instead of a pane-level row.
+    for (const btn of [startBtn, stopBtn]) {
+      expect(btn.className).toContain("ghost");
+      expect(btn.className).toContain("icon-text-btn");
+      expect(btn.closest(".settings-section-header")).not.toBeNull();
+      expect(btn.querySelector("svg")).not.toBeNull();
+    }
+    // Full labels stay visible with matching accessible names so the header
+    // reads without relying on icon-only affordances.
+    expect(startBtn.textContent).toContain("Start SearXNG");
+    expect(stopBtn.textContent).toContain("Stop SearXNG");
+    expect(startBtn.getAttribute("aria-label")).toBe("Start SearXNG");
+    expect(stopBtn.getAttribute("aria-label")).toBe("Stop SearXNG");
     await user.click(startBtn);
     await waitFor(() => {
       expect(seen.some((u) => u.includes("/search/ensure"))).toBe(true);
@@ -194,10 +209,51 @@ describe("SettingsManager search", () => {
         "reachable"
       );
     });
-    const stopBtn = screen.getByRole("button", { name: "Stop SearXNG" });
     await user.click(stopBtn);
     await waitFor(() => {
       expect(seen.some((u) => u.includes("/search/stop"))).toBe(true);
     });
+  });
+
+  it("keeps the global header Refresh as the only manual refresh", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: true,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    // Health still probes automatically on pane open without a manual control.
+    await waitFor(() => {
+      expect(screen.getByTestId("search-health-text").textContent).toContain(
+        "reachable"
+      );
+    });
+    // Pane-level refresh is gone; the global Settings header Refresh remains
+    // the single manual refresh so probes stay automatic otherwise.
+    expect(
+      screen.queryByRole("button", { name: "Refresh search health" })
+    ).toBeNull();
+    const refreshButtons = screen.getAllByRole("button", { name: /Refresh/i });
+    expect(refreshButtons).toHaveLength(1);
+    expect(refreshButtons[0].textContent).toMatch(/Refresh/);
   });
 });

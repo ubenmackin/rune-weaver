@@ -880,4 +880,130 @@ struct EmailSendTests {
         #expect(EmailSentMailbox.resolve(among: ["INBOX"]) == nil)
         #expect(EmailSentMailbox.resolve(among: ["inbox", "sent"]) == "sent")
     }
+
+    @Test
+    func `Send automatically converts markdown bodyText to styled HTML alternative`() async throws {
+        let box = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: box),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"])
+        )
+        let markdownBody = """
+        # Project Update
+
+        Here is the latest progress with **bold** text and a [dashboard link](https://example.com).
+
+        - Milestone A complete
+        - Milestone B in progress
+        """
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(
+                    toolName: "email.send",
+                    argumentsJSON: sendPayload(bodyText: markdownBody, bodyHtml: nil)
+                ),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(box.calls == 1)
+            let sent = try #require(box.lastMessage)
+            #expect(sent.bodyText == markdownBody)
+            let html = try #require(sent.bodyHtml)
+            #expect(html.contains("<!DOCTYPE html>"))
+            #expect(html.contains("<h1>Project Update</h1>"))
+            #expect(html.contains("<strong>bold</strong>"))
+            #expect(html.contains("<a href=\"https://example.com\">dashboard link</a>"))
+            #expect(html.contains("<li>Milestone A complete</li>"))
+            let envelope = try JSONDecoder().decode(EmailSendEnvelope.self, from: Data(output.content.utf8))
+            #expect(envelope.bodyHtmlBytes != nil)
+            #expect(envelope.bodyTextBytes > 0)
+        }
+    }
+
+    @Test
+    func `Send accepts body as alias for bodyText`() async throws {
+        let box = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: box),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"])
+        )
+        let payload = """
+        {
+            "account": "personal",
+            "to": ["friend@example.com"],
+            "subject": "Using body alias",
+            "body": "Hello via **body** field"
+        }
+        """
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.send", argumentsJSON: payload),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(box.calls == 1)
+            let sent = try #require(box.lastMessage)
+            #expect(sent.bodyText == "Hello via **body** field")
+            let html = try #require(sent.bodyHtml)
+            #expect(html.contains("<strong>body</strong>"))
+        }
+    }
+
+    @Test
+    func `Send preserves explicit bodyHtml override without running markdown parser`() async throws {
+        let box = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: box),
+            gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"])
+        )
+        let customHtml = "<div class=\"custom\">Custom <em>HTML</em> override</div>"
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(
+                    toolName: "email.send",
+                    argumentsJSON: sendPayload(bodyText: "Plain text", bodyHtml: customHtml)
+                ),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(box.calls == 1)
+            let sent = try #require(box.lastMessage)
+            #expect(sent.bodyHtml == customHtml)
+        }
+    }
+
+    @Test
+    func `Threaded reply formats quoted blockquote in generated HTML`() async throws {
+        let original = EmailFullMessage(
+            id: "99",
+            subject: "Budget discussion",
+            from: "finance@example.com",
+            to: "you@yourdomain.com",
+            date: "Mon, 01 Sep 2025 09:00:00 +0000",
+            body: "Approved the Q3 figures."
+        )
+        let box = SendBox()
+        let tool = EmailSendTool(
+            emailConfig: ToolsTestSupport.testEmailConfig(),
+            smtpGateway: StubSMTPGateway(box: box),
+            gateway: StubSendIMAPGateway(message: original, mailboxes: ["INBOX", "Sent"])
+        )
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(
+                    toolName: "email.send",
+                    argumentsJSON: sendPayload(subject: "Budget discussion", bodyText: "Sounds good, proceeding.", replyToId: "99")
+                ),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            let sent = try #require(box.lastMessage)
+            let html = try #require(sent.bodyHtml)
+            #expect(html.contains("<blockquote>"))
+            #expect(html.contains("Approved the Q3 figures."))
+        }
+    }
 }

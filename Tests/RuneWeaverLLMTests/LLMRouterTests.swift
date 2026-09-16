@@ -142,7 +142,7 @@ struct LLMRouterTests {
             model: "gpt-4o-mini"
         )
         let anonymous = withoutSession.makeRequest(path: "/responses", body: body)
-        #expect(anonymous?.value(forHTTPHeaderField: "User-Agent") == "rune-weaver/0.1.0")
+        #expect(anonymous?.value(forHTTPHeaderField: "User-Agent") == RuneWeaverVersion.userAgent)
         #expect(anonymous?.value(forHTTPHeaderField: "x-opencode-session") == nil)
 
         let emptySession = OpenAICompatibleHTTPClient(
@@ -151,7 +151,7 @@ struct LLMRouterTests {
             sessionID: ""
         )
         let emptyRequest = emptySession.makeRequest(path: "/responses", body: body)
-        #expect(emptyRequest?.value(forHTTPHeaderField: "User-Agent") == "rune-weaver/0.1.0")
+        #expect(emptyRequest?.value(forHTTPHeaderField: "User-Agent") == RuneWeaverVersion.userAgent)
         #expect(emptyRequest?.value(forHTTPHeaderField: "x-opencode-session") == nil)
 
         let withSession = OpenAICompatibleHTTPClient(
@@ -160,7 +160,7 @@ struct LLMRouterTests {
             sessionID: "sess-123"
         )
         let identified = withSession.makeRequest(path: "/responses", body: body)
-        #expect(identified?.value(forHTTPHeaderField: "User-Agent") == "rune-weaver/0.1.0")
+        #expect(identified?.value(forHTTPHeaderField: "User-Agent") == RuneWeaverVersion.userAgent)
         #expect(identified?.value(forHTTPHeaderField: "x-opencode-session") == "sess-123")
     }
 }

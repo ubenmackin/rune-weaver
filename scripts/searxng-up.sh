@@ -163,6 +163,43 @@ else
     exit 1
 fi
 
+# Container system daemon must answer before any container command. A fast
+# `list` probe detects the down state via XPC/system-service text, then a
+# best-effort `system start` heals it; the verify `list` confirms the heal so
+# later `start`/`run` failures are container issues, not daemon outages.
+DAEMON_OUTPUT="$("${RUNTIME}" list 2>&1 || true)"
+if printf '%s' "${DAEMON_OUTPUT}" | grep -qiE 'XPC[^[:alnum:]]+connection|system[-_]service|system service'; then
+    echo "Container system service is down; starting with '${RUNTIME} system start'..."
+    # Bounded 8s heal on every platform: GNU timeout, Homebrew gtimeout, then a
+    # portable background sleep-plus-kill so macOS (no timeout) never blocks
+    # unbounded and stays inside the 41s cascade budget.
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 8 "${RUNTIME}" system start || true
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout 8 "${RUNTIME}" system start || true
+    else
+        "${RUNTIME}" system start &
+        START_PID=$!
+        # Portable timeout without GNU timeout: background `sleep` directly so
+        # its PID stays tracked, then a watcher kills the start on expiry
+        # while the parent kills the sleep on fast success. Killing the
+        # watcher subshell alone would orphan the inner `sleep` and leave
+        # `wait` holding the full 8s, so the sleep PID is reaped explicitly
+        # and no orphan `sleep` remains either way.
+        sleep 8 &
+        SLEEP_PID=$!
+        (wait "${SLEEP_PID}" 2>/dev/null; kill "${START_PID}" 2>/dev/null) &
+        WATCHER_PID=$!
+        wait "${START_PID}" 2>/dev/null || true
+        kill "${SLEEP_PID}" 2>/dev/null || true
+        wait "${SLEEP_PID}" 2>/dev/null || true
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+    fi
+    echo "Verifying container system with '${RUNTIME} list'..."
+    "${RUNTIME}" list >/dev/null 2>&1 || true
+fi
+
 # A stopped container from a prior run starts fastest; ignore the failure
 # when none exists yet and fall through to `run`.
 if "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then

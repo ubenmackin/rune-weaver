@@ -7,6 +7,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Single-source version: stamp the Swift constant from VERSION before building
+# so the app binary embeds the same version stamped into Info.plist below.
+# Covers direct script invocation without `make app` (which already depends on
+# `version`); fails closed when VERSION is not X.Y.Z semver like `make version`.
+echo "==> Stamping engine version from VERSION..."
+make -C "${ROOT_DIR}" version
+
 echo "==> Building Web Dashboard (Web/dist)..."
 cd "${ROOT_DIR}/Web"
 if [ ! -d "node_modules" ]; then
@@ -62,17 +69,24 @@ if [ -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
     cp "${ROOT_DIR}/Resources/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
 fi
 
-# App version (single source: VERSION file, else git tag, else fallback
-# matching the CLI/api version so Info.plist cannot drift silently).
+# App version (single source: VERSION file, else git tag, else fail closed
+# so Info.plist cannot drift on a hand-edited literal).
 APP_VERSION=""
 if [ -f "${ROOT_DIR}/VERSION" ]; then
-    APP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION" | sed 's/^v//')"
+    APP_VERSION="$(tr -d '[:space:]' < "${ROOT_DIR}/VERSION" | sed 's/^[vV]//')"
 fi
 if [ -z "${APP_VERSION}" ]; then
-    APP_VERSION="$(git -C "${ROOT_DIR}" describe --tags --dirty 2>/dev/null | sed 's/^v//' || true)"
+    APP_VERSION="$(git -C "${ROOT_DIR}" describe --tags --dirty 2>/dev/null | sed 's/^[vV]//' || true)"
 fi
 if [ -z "${APP_VERSION}" ]; then
-    APP_VERSION="0.1.0"
+    echo "Error: cannot determine app version (missing VERSION file and no git tag); refusing to stamp a hand-edited fallback." >&2
+    exit 1
+fi
+# Fail closed on non-semver like `make version`: Info.plist must never carry
+# a hand-edited or malformed string while the engine embeds the stamped X.Y.Z.
+if ! printf '%s' "${APP_VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+    echo "Error: APP_VERSION must be X.Y.Z semver (got '${APP_VERSION}')" >&2
+    exit 1
 fi
 
 # Generate Info.plist

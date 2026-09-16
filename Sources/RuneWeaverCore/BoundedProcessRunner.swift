@@ -126,7 +126,7 @@ public enum BoundedProcessRunner: Sendable {
             do {
                 try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
             } catch {
-                // Child closed stdin early; drains still report the exit status.
+                RuneWeaverLog.tools.debug("BoundedProcessRunner: Child closed stdin before write completed: \(error.localizedDescription)")
             }
         }
         try? stdinPipe.fileHandleForWriting.close()

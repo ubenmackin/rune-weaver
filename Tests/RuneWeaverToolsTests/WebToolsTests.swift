@@ -25,12 +25,13 @@ private enum WebTestSupport {
         let body: Data
         let statusCode: Int
         func data(for request: URLRequest) async throws -> (Data, URLResponse) {
+            let fallbackURL = URL(string: "http://127.0.0.1:8888/search") ?? URL(fileURLWithPath: "/")
             let response = HTTPURLResponse(
-                url: request.url ?? URL(string: "http://127.0.0.1:8888/search")!,
+                url: request.url ?? fallbackURL,
                 statusCode: statusCode,
                 httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
-            )!
+            ) ?? HTTPURLResponse(url: request.url ?? fallbackURL, mimeType: "application/json", expectedContentLength: 0, textEncodingName: nil)
             return (body, response)
         }
     }
@@ -45,17 +46,20 @@ private enum WebTestSupport {
 
     /// Builds a 200 text response for a URL.
     static func okResponse(for url: URL, contentType: String = "text/html") -> HTTPURLResponse {
-        HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": contentType])!
+        HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": contentType])
+            ?? HTTPURLResponse(url: url, mimeType: contentType, expectedContentLength: 0, textEncodingName: nil)
     }
 
     /// Builds a redirect response carrying a Location header.
     static func redirectResponse(for url: URL, location: String) -> HTTPURLResponse {
-        HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil, headerFields: ["Location": location])!
+        HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil, headerFields: ["Location": location])
+            ?? HTTPURLResponse(url: url, mimeType: nil, expectedContentLength: 0, textEncodingName: nil)
     }
 
     /// Builds a status-only response (401/403/415) for a URL.
     static func statusResponse(for url: URL, statusCode: Int, contentType: String = "text/html") -> HTTPURLResponse {
-        HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": contentType])!
+        HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: ["Content-Type": contentType])
+            ?? HTTPURLResponse(url: url, mimeType: contentType, expectedContentLength: 0, textEncodingName: nil)
     }
 
     /// Decoded search envelope for assertions.

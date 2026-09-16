@@ -73,7 +73,13 @@ public actor EpisodeStore {
         let dbPath = self.dbPath
         let episodes = [episode]
         return await SQLiteSerialIO.runUncancellable {
-            (try? EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)) != nil
+            do {
+                try EpisodeStoreIO.write(episodes: episodes, dbPath: dbPath, merge: true)
+                return true
+            } catch {
+                RuneWeaverLog.stores.error("EpisodeStore: storeUncancellable failed: \(error.localizedDescription)")
+                return false
+            }
         }
     }
 

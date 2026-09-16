@@ -176,7 +176,11 @@ public final class PluginDiscoveryService: Sendable {
         // enabled flag while bridge definitions stay registered for listing, so uninstall must
         // fully unregister each tool or stale disabled entries would linger in the live registry...
         let toolNames = findManifest(for: id)?.manifest.tools.map(\.name) ?? []
-        _ = try? await disablePlugin(id: id, toolBus: toolBus)
+        do {
+            _ = try await disablePlugin(id: id, toolBus: toolBus)
+        } catch {
+            RuneWeaverLog.tools.debug("PluginDiscoveryService: disablePlugin during uninstall of '\(id)' ignored: \(error.localizedDescription)")
+        }
 
         if let manifestInfo = findManifest(for: id) {
             guard PluginSecurity.isProtectedPath(targetURL: manifestInfo.dir, pluginsDir: pluginsDirectory) else {

@@ -9,12 +9,17 @@
 //
 // `SearXNGEnsurer` keeps the local engine warm for both serve boot and first
 // search. Concurrent callers for one normalized base URL collapse onto a single
-// in-flight attempt (10 second budget, 500 ms polls) while racing processes
-// serialize on the shared container name. A missing engine starts an existing
-// container or runs the pinned image (never `:latest`) with a loopback-only
-// publish plus a per-install secret (`0600` file, `0700` directory; the bundled
-// placeholder is never mounted), then fails closed with the manual hatch. The
-// container stays running after quit by design.
+// in-flight attempt following the runtime, daemon, start, run, poll cascade
+// (worst case about 41s: probe 5s plus system start 8s plus recheck 5s plus
+// start 5s plus run 8s plus final poll 10s with 500 ms polls) while racing
+// processes serialize on the shared container name. A missing runtime fails with install
+// guidance (Apple Container link, Docker unsupported); a down system service
+// heals via a fast probe plus bounded `system start` before any container
+// start. A missing engine then starts an existing container or runs the pinned
+// image (never `:latest`) with a loopback-only publish plus a per-install
+// secret (`0600` file, `0700` directory; the bundled placeholder is never
+// mounted), then fails closed with the last cascade detail (stage, exit,
+// capped tail, timeout). The container stays running after quit by design.
 
 import Foundation
 import RuneWeaverCore
@@ -38,7 +43,9 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Version-pinned (never `:latest`) so supply-chain updates stay explicit;
     /// bump alongside `scripts/searxng-up.sh` after verifying the digest.
     public static let containerImage = "searxng/searxng:2025.9.1"
-    /// Total budget for one ensure attempt, bounding start plus polling.
+    /// Budget for the final reachability poll only, not the whole cascade.
+    /// Heals above it (daemon probe, system start, container start/run) carry
+    /// their own timeouts, so one attempt runs about 41s worst case.
     public static let ensureBudgetSeconds: Double = 10
     /// Delay between reachability polls while waiting for boot.
     public static let pollIntervalNanoseconds: UInt64 = 500_000_000
@@ -103,6 +110,18 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         }
     }
 
+    /// Ordered cascade stages for one ensure attempt.
+    /// Kept explicit so the heal order stays reviewable: runtime must resolve
+    /// before any daemon probe, the daemon must answer before container
+    /// start/run, and polling always comes last.
+    public enum EnsureStage: String, CaseIterable, Sendable {
+        case runtime
+        case daemon
+        case start
+        case run
+        case poll
+    }
+
     /// Ensures SearXNG answers, starting it when down.
     public func ensure(browser: BrowserConfig) async throws {
         try Task.checkCancellation()
@@ -112,12 +131,34 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         }
         let flight = acquireFlight(browser: browser)
         if !flight.isOwner {
-            _ = try await flight.task.value
+            do {
+                _ = try await flight.task.value
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                if await Self.isReachable(baseURL: browser.searxngURL) {
+                    return
+                }
+                // The owner error already carries full guidance plus the last
+                // cascade detail, so propagate it directly instead of wrapping
+                // it in a second guidance message.
+                throw error
+            }
             try Task.checkCancellation()
             if await Self.isReachable(baseURL: browser.searxngURL) {
                 return
             }
-            throw Self.unreachableError(baseURL: browser.searxngURL)
+            // Owner succeeded but this joiner still probes dark (a flap
+            // between flights): fail closed with a poll-stage detail instead
+            // of a bare guidance string.
+            let flapFailure = Self.failureMessage(
+                stage: EnsureStage.poll.rawValue,
+                exitCode: nil,
+                output: "owner flight succeeded but engine still unreachable",
+                timedOut: false
+            )
+            throw Self.unreachableError(baseURL: browser.searxngURL, detail: flapFailure)
         }
         do {
             _ = try await awaitOwnedFlight(key: flight.key, task: flight.task)
@@ -138,45 +179,52 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Fresh callers own one `ensureImpl` flight and report its real start
     /// outcome; joiners collapsing onto an existing flight never claim a
     /// start. A cancelled turn reports unreachable without claiming, so the
-    /// route never marks a cancelled turn reachable.
+    /// route never marks a cancelled turn reachable. Failures carry the last
+    /// cascade detail (stage, exit, capped tail, timeout) so the dashboard can
+    /// surface why the start stopped instead of flipping silently to red.
     /// - Parameter browser: `[browser]` policy carrying the base URL.
-    /// - Returns: Reachability plus whether this caller actually started a container.
-    public func ensureReport(browser: BrowserConfig) async -> (reachable: Bool, started: Bool) {
+    /// - Returns: Reachability plus whether this caller actually started a container plus failure detail.
+    public func ensureReport(browser: BrowserConfig) async -> EnsureReport {
         if Task.isCancelled {
-            return (false, false)
+            return EnsureReport(reachable: false, started: false, message: nil)
         }
         if await Self.isReachable(baseURL: browser.searxngURL) {
             // Never report reachable for a cancelled turn, even when the
             // probe succeeded before cancellation landed.
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
-            return (true, false)
+            return EnsureReport(reachable: true, started: false, message: nil)
         }
         if Task.isCancelled {
-            return (false, false)
+            return EnsureReport(reachable: false, started: false, message: nil)
         }
         let key = Self.inFlightKey(for: browser.searxngURL)
         if inFlight[key] != nil {
             // Joiner: collapse onto the owner's flight without claiming.
+            var joinMessage: String?
             do {
                 try await ensure(browser: browser)
             } catch is CancellationError {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             } catch {
                 if Task.isCancelled {
-                    return (false, false)
+                    return EnsureReport(reachable: false, started: false, message: nil)
                 }
+                joinMessage = error.localizedDescription
                 // Fall through to the honest probe below.
             }
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
             let reachable = await Self.isReachable(baseURL: browser.searxngURL)
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
-            return (reachable, false)
+            if reachable {
+                return EnsureReport(reachable: true, started: false, message: nil)
+            }
+            return EnsureReport(reachable: false, started: false, message: joinMessage)
         }
         // Owner: run one flight and return its actual start outcome, not a
         // precomputed guess, so an engine already started by another process
@@ -185,62 +233,124 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         do {
             let didStart = try await awaitOwnedFlight(key: flight.key, task: flight.task)
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
-            return (true, didStart)
+            return EnsureReport(reachable: true, started: didStart, message: nil)
         } catch is CancellationError {
-            return (false, false)
+            return EnsureReport(reachable: false, started: false, message: nil)
         } catch {
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
             // Failed flight: probe honestly without claiming a start the
             // flight could not prove, so cross-process races never double-claim.
+            // The caught detail threads through so the route can render it.
+            let detail = error.localizedDescription
             let reachable = await Self.isReachable(baseURL: browser.searxngURL)
             if Task.isCancelled {
-                return (false, false)
+                return EnsureReport(reachable: false, started: false, message: nil)
             }
-            return (reachable, false)
+            if reachable {
+                return EnsureReport(reachable: true, started: false, message: nil)
+            }
+            return EnsureReport(reachable: false, started: false, message: detail)
         }
     }
 
-    /// Runs one start-and-poll attempt within the ten-second budget.
-    /// - Returns: Whether this attempt actually started a local container.
+    /// Runs one self-healing attempt through the ordered cascade.
+    /// Follows runtime, daemon, start, run, poll (worst case about 41s: the
+    /// 10s budget covers the final poll only): each stage records its own
+    /// failure detail, so the final error names the stage that stopped
+    /// progress plus exit, capped tail, and timeout.
+    /// - Returns: Whether this attempt actually started a local container or the system service.
     private static func ensureImpl(browser: BrowserConfig) async throws -> Bool {
         try Task.checkCancellation()
         if await isReachable(baseURL: browser.searxngURL) {
             try Task.checkCancellation()
             return false
         }
-        // Best-effort start: a missing runtime or a failed start simply
-        // falls through to polling and then to the guidance error, so a
-        // container-less host fails closed instead of crashing boot. The
-        // real start outcome flows back to `ensureReport` so it never
-        // reports a precomputed guess.
-        let didStart = await bestEffortStart(browser: browser)
+        // Stage order matters: a missing runtime short-circuits before any
+        // daemon probe, and a down daemon heals before container start/run so
+        // later stages never misreport a service outage as a container miss.
+        guard let runtime = resolveRuntimeURL() else {
+            throw unreachableError(baseURL: browser.searxngURL, detail: installGuidanceMessage())
+        }
+        try Task.checkCancellation()
+        // External bases need no local heal: poll only, so a remote SearXNG
+        // never triggers a container launch for an unrelated origin.
+        guard isManagedBaseURL(browser.searxngURL) else {
+            let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
+            while Date() < deadline {
+                try Task.checkCancellation()
+                if await isReachable(baseURL: browser.searxngURL) {
+                    return false
+                }
+                try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+            }
+            try Task.checkCancellation()
+            if await isReachable(baseURL: browser.searxngURL) {
+                return false
+            }
+            let pollFailure = failureMessage(
+                stage: EnsureStage.poll.rawValue,
+                exitCode: nil,
+                output: nil,
+                timedOut: true,
+                timeoutSeconds: ensureBudgetSeconds
+            )
+            throw unreachableError(baseURL: browser.searxngURL, detail: pollFailure)
+        }
+        var lastFailure: String?
+        let daemonOutcome = await ensureDaemonStarted(runtime: runtime)
+        var daemonStarted = daemonOutcome.daemonStarted
+        if let daemonFailure = daemonOutcome.failure {
+            lastFailure = daemonFailure
+        }
+        try Task.checkCancellation()
+        // Best-effort container heal: a failed start simply falls through to
+        // polling and then to the guidance error, so a container-less host
+        // fails closed instead of crashing boot. The real start outcome flows
+        // back to `ensureReport` so it never reports a precomputed guess.
+        let containerOutcome = await startExistingOrRun(browser: browser, runtime: runtime)
+        if containerOutcome.didStart {
+            daemonStarted = daemonStarted || containerOutcome.didStart
+        }
+        if let containerFailure = containerOutcome.failure {
+            lastFailure = containerFailure
+        }
         try Task.checkCancellation()
         let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
         while Date() < deadline {
             try Task.checkCancellation()
             if await isReachable(baseURL: browser.searxngURL) {
-                return didStart
+                return daemonStarted || containerOutcome.didStart
             }
             try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
         try Task.checkCancellation()
         if await isReachable(baseURL: browser.searxngURL) {
-            return didStart
+            return daemonStarted || containerOutcome.didStart
         }
-        throw unreachableError(baseURL: browser.searxngURL)
+        let pollFailure = failureMessage(
+            stage: EnsureStage.poll.rawValue,
+            exitCode: nil,
+            output: nil,
+            timedOut: true,
+            timeoutSeconds: ensureBudgetSeconds
+        )
+        throw unreachableError(baseURL: browser.searxngURL, detail: lastFailure.map { "\($0); \(pollFailure)" } ?? pollFailure)
     }
 
     /// Starts or runs the container without throwing.
     /// Shared by the tool path and the server lifecycle routes so boot logic
     /// cannot drift between loopback bind and settings-mount handling.
+    /// Heals the system daemon first, then the container, so a cold boot
+    /// after restart converges without manual `system start`.
     /// Returns true only when this call actually started a local container
-    /// (exit 0 on `start` or `run`): a missing runtime, a cancelled task, an
-    /// external (non-loopback) base URL, a missing settings document, or a
-    /// failed spawn reports false instead of claiming a start, so
+    /// or the system service (exit 0) and the engine answers afterwards: a
+    /// missing runtime, a cancelled task, an external (non-loopback) base
+    /// URL, a missing settings document, a failed spawn, or an engine that
+    /// stays unreachable reports false instead of claiming a start, so
     /// cross-process races never double-claim.
     @discardableResult
     public static func bestEffortStart(browser: BrowserConfig) async -> Bool {
@@ -249,122 +359,35 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         if Task.isCancelled {
             return false
         }
-        // An existing stopped container starts fastest; when none exists
-        // the start fails and the run below creates it. Only an exit-0 start
-        // claims the outcome, so a container revived by another process
-        // reports false here instead of double-claiming.
-        let startResult = try? await runProcess(
-            executableURL: runtime,
-            arguments: ["start", containerName],
-            timeoutSeconds: 5
-        )
+        // Daemon first: a down service makes every container call fail with
+        // XPC text, so heal it before judging start/run outcomes.
+        let daemon = await ensureDaemonStarted(runtime: runtime)
         if Task.isCancelled {
             return false
         }
         if await isReachable(baseURL: browser.searxngURL) {
-            return startResult?.0 == 0
+            return daemon.daemonStarted
         }
-        // Ensure the per-install override exists with a random secret before
-        // resolving the mount, so the shipped placeholder is never mounted.
-        ensureOverrideSettingsFile()
-        guard let settings = bundledSettingsPath() else {
-            // Fail closed: never start with image defaults, which lack the
-            // guaranteed formats:[html,json]. The caller falls through to
-            // polling and then to the guidance error naming the manual hatch.
-            return false
-        }
-        var runArgs = [
-            "run", "-d",
-            "--name", containerName,
-            // Loopback-only publish: the engine has no auth, so LAN exposure
-            // would open unauthenticated search to the local network.
-            "-p", "127.0.0.1:\(hostPort(from: browser.searxngURL)):8080"
-        ]
-        runArgs += ["-v", "\(settings):/etc/searxng/settings.yml:ro"]
-        runArgs += [containerImage]
-        let runResult = try? await runProcess(executableURL: runtime, arguments: runArgs, timeoutSeconds: 8)
+        let container = await startExistingOrRun(browser: browser, runtime: runtime)
         if Task.isCancelled {
             return false
         }
-        return runResult?.0 == 0
+        // Never claim a start while the engine stays unreachable: a `system
+        // start` or `run` exiting 0 without the socket answering leaves the
+        // engine dark, so gate the outcome on a final probe.
+        guard await isReachable(baseURL: browser.searxngURL) else {
+            return false
+        }
+        return daemon.daemonStarted || container.didStart
     }
 
     /// Best-effort start for callers holding only the base URL string.
     /// - Parameter baseURL: Configured `searxng_url` for port and settings.
-    /// - Returns: True only when this call actually started a container (exit 0).
+    /// - Returns: True only when this call actually started a container or the daemon (exit 0).
     @discardableResult
     public static func bestEffortStart(baseURL: String) async -> Bool {
         guard isManagedBaseURL(baseURL), resolveRuntimeURL() != nil else { return false }
         return await bestEffortStart(browser: BrowserConfig(searxngURL: baseURL))
-    }
-
-    /// Best-effort container stop shared by the server stop route.
-    /// A missing runtime or absent container still reports stopped so the
-    /// settings toggle never sticks on a 500; later searches re-ensure.
-    public static func bestEffortStop() async {
-        guard let runtime = resolveRuntimeURL() else { return }
-        _ = try? await runProcess(
-            executableURL: runtime,
-            arguments: ["stop", containerName],
-            timeoutSeconds: 8
-        )
-    }
-
-    /// Probes the SearXNG base URL with a short timeout.
-    /// Surfaces 3xx instead of auto-following so the probe shares the manual
-    /// redirect policy with `web.fetch`/`api.request` (`NoRedirectDelegate`
-    /// plus per-hop re-validation there); a safe start can never launder an
-    /// unsafe redirect through the session follower.
-    /// - Parameter baseURL: Configured `searxng_url`.
-    /// - Returns: True when the engine answers with 2xx/3xx.
-    public static func isReachable(baseURL: String) async -> Bool {
-        guard let url = URL(string: baseURL.trimmingCharacters(in: .whitespacesAndNewlines)) else {
-            return false
-        }
-        var request = URLRequest(url: url, timeoutInterval: probeTimeoutSeconds)
-        request.httpMethod = "GET"
-        request.setValue(WebFetchTool.userAgent, forHTTPHeaderField: "User-Agent")
-        do {
-            let delegate = NoRedirectDelegate()
-            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-            defer { session.invalidateAndCancel() }
-            let (_, response) = try await session.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return false }
-            return (200 ..< 400).contains(http.statusCode)
-        } catch {
-            return false
-        }
-    }
-
-    /// Fail-closed guidance naming the manual escape hatch.
-    /// - Parameter baseURL: Configured `searxng_url`.
-    /// - Returns: Error carrying remediation steps.
-    public static func unreachableError(baseURL: String) -> Error {
-        let message =
-            "SearXNG is not reachable at \(baseURL). Start it with `scripts/searxng-up.sh` "
-                + "or `container start \(containerName)`, then retry the search. "
-                + "The container is left running after quit by design."
-        return NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
-    }
-
-    /// Runs one container process without blocking the cooperative pool.
-    public static func runProcess(executableURL: URL, arguments: [String], timeoutSeconds: Double) async throws -> (Int32, String) {
-        try Task.checkCancellation()
-        do {
-            let result = try await BoundedProcessRunner.runAsync(
-                executableURL: executableURL,
-                arguments: arguments,
-                timeoutSeconds: timeoutSeconds,
-                maxOutputBytes: 64 * 1024,
-                maxErrorBytes: 64 * 1024
-            )
-            try Task.checkCancellation()
-            return (result.exitCode, result.stdoutString + result.stderrString)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            throw error
-        }
     }
 }
 
