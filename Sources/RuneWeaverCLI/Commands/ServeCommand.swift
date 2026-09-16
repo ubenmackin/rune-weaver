@@ -70,11 +70,17 @@ struct ServeCommand: AsyncParsableCommand {
         try LoggingSystem.bootstrap(from: &env)
         let app = try await Application.make(env)
         await permissionGate.startPeriodicCleanup()
+        // Tier-3 crash-orphan prune only; there is no host staging to sweep and
+        // no staging audit tied to an old path. Document writes stage in
+        // Seatbelt-confined temp with an atomic move on approval, so boot
+        // reclamation covers only orphaned detonation machines.
         let serveCleanup = SandboxCleaner.cleanup(config: loaded.config.sandbox)
-        FileSandboxAuditLog.append(serveCleanup, stagingPath: loaded.config.sandbox.stagingPath)
-        if serveCleanup.filesRemoved > 0 || !serveCleanup.errors.isEmpty {
+        if serveCleanup.containersDestroyed > 0 || serveCleanup.staleMachinesStopped > 0 || !serveCleanup.errors.isEmpty {
+            let reclaimed = serveCleanup.containersDestroyed
+            let stopped = serveCleanup.staleMachinesStopped
+            let errorCount = serveCleanup.errors.count
             print(TerminalStyle.dim(
-                "Sandbox cleanup: removed \(serveCleanup.filesRemoved) files (\(serveCleanup.bytesFreed) bytes), \(serveCleanup.errors.count) errors."
+                "Sandbox cleanup: reclaimed \(reclaimed) machines (\(stopped) stopped), \(errorCount) errors."
             ))
         }
         await context.sandboxCleanup.start(config: loaded.config.sandbox)

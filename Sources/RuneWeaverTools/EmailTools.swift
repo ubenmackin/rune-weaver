@@ -2,7 +2,7 @@
 //
 // Provides the `email.search`, `email.read`, `email.attachment`, and
 // `email.send` plugin tools over the `python3 imaplib`/`smtplib` bridges
-// with read-only fetches, staged sandbox downloads for documents and
+// with read-only fetches, isolated temp downloads for documents and
 // images, zero-host-mounts microVM detonation for archives, approval-gated
 // sending and archive exports, and execution-time credential resolution.
 
@@ -402,213 +402,10 @@ public struct EmailReadTool: Tool, Sendable {
     }
 }
 
-/// Result of detonating one archive inside an isolated microVM.
-///
-/// Carries only the session correlation id, the entry manifest, and the
-/// raw bytes of a single inspected entry when requested. Archive bytes
-/// themselves never cross back except through the single inspected entry
-/// or an explicit approval-gated export handled by the tool.
-public struct EmailArchiveDetonationResult: Sendable, Equatable {
-    /// Ephemeral detonation correlation id (`runeweaver-session-<uuid>`).
-    public let sessionId: String
-    /// Entries listed inside the archive, truncated to the manifest cap.
-    public let manifest: [EmailArchiveEntry]
-    /// Whether the manifest was truncated at the entry cap.
-    public let manifestTruncated: Bool
-    /// Raw bytes of the inspected subpath entry, when requested.
-    public let entryData: Data?
-
-    /// Creates a detonation result.
-    public init(sessionId: String, manifest: [EmailArchiveEntry], manifestTruncated: Bool = false, entryData: Data? = nil) {
-        self.sessionId = sessionId
-        self.manifest = manifest
-        self.manifestTruncated = manifestTruncated
-        self.entryData = entryData
-    }
-}
-
-/// Isolates archive inspection inside a zero-host-mounts microVM.
-///
-/// Production spawns an ephemeral container machine per archive with no
-/// filesystem mounts, unpacks and lists inside via `run`, and reaps the
-/// machine immediately; the TTL sweeper remains the safety net for
-/// crashes. Tests inject a stub so no container runtime is required.
-public protocol EmailArchiveDetonator: Sendable {
-    /// Detonates archive bytes and optionally extracts one entry.
-    /// - Parameters:
-    ///   - filename: Original attachment filename for format hints.
-    ///   - contentType: Raw MIME type for format hints.
-    ///   - data: Raw archive bytes (already capped at the attachment limit).
-    ///   - subpath: Validated relative entry path to extract, if any.
-    /// - Returns: Session id, manifest, and optional entry bytes.
-    func detonate(filename: String, contentType: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult
-}
-
-/// Ephemeral microVM detonator backed by the container machine manager.
-///
-/// Each call owns its machine lifetime: create with the configured base
-/// image and runtime (the manager exposes no mount options, so guests
-/// start with zero host mounts on an internal virtual disk), stream the
-/// archive bytes over stdin for listing and optional extraction, then
-/// best-effort stop and delete. Sessions are never reused across calls:
-/// every detonation is ephemeral and reaped immediately, with the TTL prune
-/// as the safety net only for machines orphaned by crashes. Concurrency is
-/// capped before spawn so a burst of archives fails closed instead of
-/// oversubscribing the host. Failures fail closed without staging
-/// anything to the host; cleanup errors are swallowed so the original
-/// detonation failure (never archive bytes or secrets) is what surfaces.
-public struct LiveEmailArchiveDetonator: EmailArchiveDetonator, Sendable {
-    /// Container CLI runtime name or path.
-    public let containerRuntime: String
-    /// OCI base image for detonation guests.
-    public let containerBaseImage: String
-    /// Maximum concurrent detonation machines, enforced before spawn.
-    public let maxConcurrentMachines: Int
-
-    /// Creates a live detonator.
-    /// - Parameters:
-    ///   - containerRuntime: Container CLI runtime name or path.
-    ///   - containerBaseImage: OCI base image for detonation guests.
-    ///   - maxConcurrentMachines: Cap on concurrent detonation machines, enforced before spawn.
-    public init(
-        containerRuntime: String = SandboxConfig.defaultContainerRuntime,
-        containerBaseImage: String = SandboxConfig.defaultContainerBaseImage,
-        maxConcurrentMachines: Int = SandboxConfig.defaultMaxConcurrentMachines
-    ) {
-        self.containerRuntime = containerRuntime
-        self.containerBaseImage = containerBaseImage
-        self.maxConcurrentMachines = maxConcurrentMachines
-    }
-
-    /// Detonates archive bytes in a fresh ephemeral machine.
-    /// - Parameters:
-    ///   - filename: Original attachment filename for format hints.
-    ///   - contentType: Raw MIME type (unused beyond hints; listing probes formats inside the guest).
-    ///   - data: Raw archive bytes.
-    ///   - subpath: Validated relative entry path to extract, if any.
-    /// - Returns: Session id, manifest, and optional entry bytes.
-    public func detonate(filename: String, contentType _: String, data: Data, subpath: String?) async throws -> EmailArchiveDetonationResult {
-        let sessionId = "runeweaver-session-\(UUID().uuidString.lowercased())"
-        try await enforceConcurrencyLimit()
-        try await ContainerMachineManager.createMachine(name: sessionId, image: containerBaseImage, runtime: containerRuntime)
-        do {
-            let listing = try await ContainerMachineManager.run(
-                machineName: sessionId,
-                command: ["sh", "-c", Self.listScript],
-                runtime: containerRuntime,
-                inputData: data
-            )
-            guard listing.exitCode == 0 else {
-                throw EmailIMAPError.bridgeFailed("Could not inspect archive '\(filename)': unsupported or corrupt archive")
-            }
-            let parsed = EmailArchiveListingParser.parseListOutput(listing.stdoutString, filename: filename)
-            guard !parsed.isEmpty else {
-                throw EmailIMAPError.bridgeFailed("Could not inspect archive '\(filename)': unsupported or corrupt archive")
-            }
-            let capped = Array(parsed.prefix(EmailAttachmentLifecycle.maxArchiveManifestEntries))
-            let truncated = parsed.count > capped.count
-            var entryData: Data?
-            if let subpath {
-                guard capped.contains(where: { $0.path == subpath }) || parsed.contains(where: { $0.path == subpath }) else {
-                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
-                }
-                if let known = (parsed.first(where: { $0.path == subpath }))?.sizeBytes, known > EmailAttachmentTool.maxAttachmentBytes {
-                    throw EmailIMAPError.bridgeFailed(EmailAttachmentTool.oversizeNote(sizeBytes: known))
-                }
-                let extracted = try await ContainerMachineManager.run(
-                    machineName: sessionId,
-                    command: ["sh", "-c", Self.extractScript, "sh", subpath],
-                    runtime: containerRuntime,
-                    inputData: data
-                )
-                guard extracted.exitCode == 0 else {
-                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
-                }
-                guard extracted.stdout.count <= EmailAttachmentTool.maxAttachmentBytes else {
-                    throw EmailIMAPError.bridgeFailed(EmailAttachmentTool.oversizeNote(sizeBytes: extracted.stdout.count))
-                }
-                entryData = extracted.stdout
-            }
-            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
-            return EmailArchiveDetonationResult(sessionId: sessionId, manifest: capped, manifestTruncated: truncated, entryData: entryData)
-        } catch {
-            await Self.bestEffortReap(name: sessionId, runtime: containerRuntime)
-            throw error
-        }
-    }
-
-    /// Guest script listing archive entries from stdin bytes.
-    ///
-    /// Streams stdin to a scratch file, then probes ZIP before TAR so a
-    /// mislabeled archive still lists; every probe is quiet so only the
-    /// successful listing reaches stdout. No caller input is interpolated:
-    /// the script is fixed text, keeping subpath payloads out of shell parsing.
-    private static var listScript: String {
-        "cat > /tmp/payload.bin; "
-            + "if command -v unzip >/dev/null 2>&1; then "
-            + "if unzip -l /tmp/payload.bin 2>/dev/null; then exit 0; fi; fi; "
-            + "if tar -tzvf /tmp/payload.bin 2>/dev/null; then exit 0; fi; "
-            + "if tar -tvf /tmp/payload.bin 2>/dev/null; then exit 0; fi; "
-            + "echo UNSUPPORTED_ARCHIVE >&2; exit 1"
-    }
-
-    /// Guest script extracting one argv-passed entry from stdin bytes.
-    ///
-    /// The entry arrives as `$1` (never interpolated into shell text) and is
-    /// always referenced behind `--` so leading dashes cannot parse as flags.
-    /// ZIP is probed before TAR for the same mislabeling reason as listing.
-    private static var extractScript: String {
-        "cat > /tmp/payload.bin; entry=\"$1\"; "
-            + "if command -v unzip >/dev/null 2>&1; then "
-            + "if unzip -p /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; fi; "
-            + "if tar -xzOf /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; "
-            + "if tar -xOf /tmp/payload.bin -- \"$entry\" 2>/dev/null; then exit 0; fi; "
-            + "exit 1"
-    }
-
-    /// Stops and deletes a detonation machine without masking the caller error.
-    ///
-    /// Ephemeral machines are reaped immediately after listing/extraction so
-    /// no detonation VM outlives its call; the periodic TTL prune stays
-    /// the safety net only for crashes between create and reap. There is no
-    /// warm-session reuse across calls.
-    /// - Parameters:
-    ///   - name: Machine to reap.
-    ///   - runtime: Container CLI runtime.
-    private static func bestEffortReap(name: String, runtime: String) async {
-        try? await ContainerMachineManager.stopMachine(name: name, runtime: runtime)
-        try? await ContainerMachineManager.deleteMachine(name: name, runtime: runtime)
-    }
-
-    /// Fails closed when the concurrent detonation cap is already reached.
-    ///
-    /// Counts live `runeweaver-`-prefixed machines before spawn so a burst of
-    /// archives cannot oversubscribe the host; listing failures fall through
-    /// to `createMachine` so a missing runtime still surfaces its own error.
-    private func enforceConcurrencyLimit() async throws {
-        let cap = max(1, maxConcurrentMachines)
-        do {
-            let live = try await ContainerMachineManager.listMachines(
-                prefix: ContainerMachineManager.machinePrefix,
-                runtime: containerRuntime
-            )
-            guard live.count < cap else {
-                throw EmailIMAPError.bridgeFailed(
-                    "Archive detonation limit reached (\(cap) concurrent sessions); try again after idle sessions are reclaimed."
-                )
-            }
-        } catch let bridge as EmailIMAPError {
-            throw bridge
-        } catch {
-            // Listing failed (for example runtime missing): let create surface it.
-        }
-    }
-}
-
 /// `email.attachment` tool over IMAP.
 ///
-/// Downloads one attachment part by zero-based index into the sandbox
-/// staging area only (never to the real filesystem) and returns the
+/// Downloads one attachment part by zero-based index into isolated
+/// temp only (never to the real filesystem) and returns the
 /// staged path with filename, MIME type, byte size, staged-file expiry,
 /// coarse MIME bucket, and a follow-up hint. Parts over the size cap
 /// are skipped without writing, returning a note instead. Pass
@@ -632,7 +429,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
         "Downloads one email attachment by index. "
             + "Use when the user asks to save or open an attachment listed by email.read. "
             + "Pass the mailbox labeled on the email.search hit (omitted means INBOX). "
-            + "Documents and images stage under the sandbox staging area with inline extracted text or vision payloads; "
+            + "Documents and images stage under isolated temp with inline extracted text or vision payloads; "
             + "archives detonate in a zero-host-mounts ephemeral microVM returning only a manifest. "
             + "Pass preview true to inline the first 2000 chars for small text parts (binaries are never inlined); "
             + "pass subpath to inspect one file inside a detonated archive, or saveToPath for an approval-gated workspace export."
@@ -664,14 +461,14 @@ public struct EmailAttachmentTool: Tool, Sendable {
     public static let maxAttachmentBytes = 10 * 1024 * 1024
     /// Maximum raw image bytes delivered inline as vision Base64 (1 MiB). Larger images stay staged/export-only so model context stays bounded.
     static let maxVisionBytes = 1 * 1024 * 1024
-    /// Subdirectory of the staging area holding downloaded attachments.
+    /// Subdirectory of the isolated temp area holding downloaded attachments.
     public static let attachmentsSubdirectory = "attachments"
 
     /// Configured mail accounts.
     private let emailConfig: EmailConfig
     /// IMAP gateway (subprocess bridge by default, stub in tests).
     private let gateway: any EmailIMAPGateway
-    /// Sandbox staging configuration. Document and image writes stay under `stagingPath`.
+    /// Detonation policy for archive isolation. Document previews stay inline with bounded caps.
     private let sandboxConfig: SandboxConfig
     /// `[files]` policy guarding approval-gated archive exports. Defaults to the built-in defaults.
     private let filesConfig: FilesConfig
@@ -684,7 +481,7 @@ public struct EmailAttachmentTool: Tool, Sendable {
     /// - Parameters:
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration. Defaults to the built-in staging path.
+    ///   - sandboxConfig: Tier-3 detonation policy. Defaults to the built-in detonation defaults.
     ///   - filesConfig: `[files]` policy for archive exports. Defaults to the built-in defaults.
     ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
     ///   - archiveDetonator: Archive detonator. Defaults to the live microVM detonator.
@@ -769,6 +566,10 @@ public struct EmailAttachmentTool: Tool, Sendable {
                 filename: fetched.filename
             )
             if context.dryRun {
+                // A dry run only names the would-be path, so the per-request
+                // temp created above is removed before reporting.
+                let requestTemp = destination.deletingLastPathComponent().deletingLastPathComponent()
+                SeatbeltTempStaging.discardTemp(at: requestTemp)
                 return dryRunEnvelope(
                     target: effectiveTarget,
                     accountName: account.name,
@@ -789,105 +590,6 @@ public struct EmailAttachmentTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-    }
-
-    /// Resolves the sandbox-confined destination for a download.
-    /// - Parameters:
-    ///   - stagingPath: Configured staging directory (`~` is expanded).
-    ///   - account: Account nickname used in the file prefix.
-    ///   - messageID: Message UID used in the file prefix.
-    ///   - index: Attachment position used in the file prefix.
-    ///   - filename: Original attachment filename, sanitized to its base name.
-    /// - Returns: Destination URL strictly under the staging area.
-    /// - Throws: A failure when the staging path is empty or escapes the sandbox.
-    public static func stagedDestination(
-        stagingPath: String,
-        account: String,
-        messageID: String,
-        index: Int,
-        filename: String
-    ) throws -> URL {
-        let trimmed = stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            throw EmailIMAPError.bridgeFailed("Invalid sandbox staging path")
-        }
-        let expanded = (trimmed as NSString).expandingTildeInPath
-        // Resolve symlinks on both sides so a symlinked staging directory
-        // cannot bypass confinement. The check runs before `createDirectory`
-        // and `write` create anything; callers stage only under the
-        // returned URL.
-        let stagingURL = URL(fileURLWithPath: expanded, isDirectory: true).standardized
-        let resolvedStaging = stagingURL.resolvingSymlinksInPath()
-        let sanitized = sanitizedFilename(filename, fallback: "attachment-\(index)")
-        let prefix = "\(safeSegment(account))-\(safeSegment(messageID))-\(index)-\(sanitized)"
-        let destination = stagingURL
-            .appendingPathComponent(attachmentsSubdirectory, isDirectory: true)
-            .appendingPathComponent(prefix, isDirectory: false)
-            .standardized
-        let resolvedDestination = destination.resolvingSymlinksInPath()
-        let stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
-        guard resolvedDestination.path.hasPrefix(stagingPrefix) else {
-            throw EmailIMAPError.bridgeFailed("Attachment path escapes the sandbox staging area")
-        }
-        return destination
-    }
-
-    /// Sanitizes a filename to its base name, falling back when empty.
-    ///
-    /// Strips path separators (`/` and `\`), NUL, colons, and ASCII
-    /// control characters, drops leading dots and dashes so the result
-    /// cannot hide as dotfiles or parse as a flag, and truncates to
-    /// 255 characters (`NAME_MAX`) to stay within filesystem limits.
-    /// - Parameters:
-    ///   - filename: Original filename.
-    ///   - fallback: Name used when the base name is empty.
-    /// - Returns: Base name safe to append under the staging area.
-    public static func sanitizedFilename(_ filename: String, fallback: String) -> String {
-        let base = (filename as NSString).lastPathComponent
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        var cleaned = base
-            .replacingOccurrences(of: "\0", with: "_")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "\\", with: "_")
-            .replacingOccurrences(of: ":", with: "_")
-        cleaned = cleaned.unicodeScalars.map { scalar -> String in
-            let value = scalar.value
-            if value < 32 || value == 127 {
-                return "_"
-            }
-            return String(scalar)
-        }.joined()
-        while cleaned.hasPrefix(".") || cleaned.hasPrefix("-") {
-            cleaned.removeFirst()
-        }
-        cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        if cleaned.count > 255 {
-            cleaned = String(cleaned.prefix(255))
-        }
-        guard !cleaned.isEmpty, cleaned != ".", cleaned != ".." else {
-            return fallback
-        }
-        return cleaned
-    }
-
-    /// Maps an account or message segment to filesystem-safe text.
-    /// - Parameter segment: Raw account or message identifier.
-    /// - Returns: Text with only alphanumerics, dash, underscore, and dot.
-    public static func safeSegment(_ segment: String) -> String {
-        let mapped = segment.unicodeScalars.map { scalar -> String in
-            let value = scalar.value
-            let isDigit = value >= 48 && value <= 57
-            let isUpper = value >= 65 && value <= 90
-            let isLower = value >= 97 && value <= 122
-            let isDash = value == 45
-            let isUnderscore = value == 95
-            let isDot = value == 46
-            if isDigit || isUpper || isLower || isDash || isUnderscore || isDot {
-                return String(scalar)
-            }
-            return "_"
-        }.joined()
-        return mapped.isEmpty ? "_" : mapped
     }
 }
 
@@ -1080,24 +782,57 @@ extension EmailAttachmentTool {
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Resolves the sandbox-confined destination for a download.
+    /// Resolves the isolated-temp destination for a download.
+    ///
+    /// Each download owns a per-request owner-only temp dir created through
+    /// the shared staging helper, so concurrent attachments never share a
+    /// predictable folder. The dir stays covered by a Seatbelt profile allow
+    /// while remaining never-executable, and the attachments base inside it
+    /// is set `0700`; staged bytes are never executed from this location.
     /// - Parameters:
     ///   - target: Trimmed routing.
     ///   - accountName: Resolved account name for the file prefix.
     ///   - filename: Original attachment filename.
-    /// - Returns: Destination under the staging area.
+    /// - Returns: Destination under isolated temp.
     private func stagedDestinationURL(
         target: AttachmentTarget,
         accountName: String,
         filename: String
     ) throws -> URL {
-        try Self.stagedDestination(
-            stagingPath: sandboxConfig.stagingPath,
-            account: accountName,
-            messageID: target.messageID,
-            index: target.attachmentIndex,
-            filename: filename
-        )
+        let requestTemp = try SeatbeltTempStaging.makeTempDirectory(prefix: "runeweaver-attachments-")
+        do {
+            try requireSeatbeltTempAllow(requestTemp)
+            let base = requestTemp.appendingPathComponent(Self.attachmentsSubdirectory, isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: base,
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
+            )
+            return try Self.stagedDestination(
+                stagingPath: requestTemp.path,
+                account: accountName,
+                messageID: target.messageID,
+                index: target.attachmentIndex,
+                filename: filename
+            )
+        } catch {
+            SeatbeltTempStaging.discardTemp(at: requestTemp)
+            throw error
+        }
+    }
+
+    /// Fails closed unless the Seatbelt profile allows the staging temp.
+    ///
+    /// The profile sanitizes paths before interpolating, so a temp dir that
+    /// vanishes from the rendered profile must never receive staged bytes;
+    /// refusing keeps confinement explicit instead of assumed.
+    /// - Parameter tempDir: Per-request staging temp to cover.
+    /// - Throws: A failure when the temp dir falls outside the profile allow.
+    private func requireSeatbeltTempAllow(_ tempDir: URL) throws {
+        let profile = SeatbeltProfileBuilder(allowedTempPaths: [tempDir.path]).buildProfile()
+        guard profile.contains(tempDir.path) else {
+            throw EmailIMAPError.bridgeFailed("Attachment staging confined temp rejected by Seatbelt profile")
+        }
     }
 
     /// Builds the dry-run result without writing any bytes.
@@ -1134,12 +869,12 @@ extension EmailAttachmentTool {
         return successEnvelope(envelope, callID: callID)
     }
 
-    /// Stages document and image bytes under the sandbox and builds the success result.
+    /// Stages document and image bytes under Seatbelt-confined isolated temp and builds the success result.
     ///
     /// Archives never reach here: `execute` routes them to the microVM
     /// detonator before any host write, so this path only handles inline
     /// payloads with a staged copy for `files.read` follow-ups. Attaches the
-    /// post-download lifecycle (expiry from the sandbox retention window,
+    /// post-download lifecycle (expiry from the isolated-temp retention window,
     /// coarse MIME bucket, follow-up hint, and the guarded inline preview)
     /// so the model can act on the staged file without a second round trip.
     /// Inline payloads stay bounded: `extractedText` truncates to the shared
@@ -1150,7 +885,7 @@ extension EmailAttachmentTool {
     ///   - target: Trimmed routing (including the caller's `preview` request).
     ///   - accountName: Resolved account name for the envelope.
     ///   - fetched: Downloaded bytes to stage.
-    ///   - destination: Sandbox-confined file URL.
+    ///   - destination: Seatbelt-confined isolated-temp file URL.
     ///   - callID: Correlation identifier.
     /// - Returns: Success envelope with the staged path and lifecycle hints, or a staging failure.
     private func storedEnvelope(
@@ -1161,17 +896,26 @@ extension EmailAttachmentTool {
         callID: String
     ) -> ToolOutput {
         do {
+            // The destination already sits inside a per-request temp from
+            // `stagedDestinationURL`; re-assert the Seatbelt allow here so a
+            // relocated path fails closed instead of writing outside cover.
+            // Staged bytes stay readable and writable but never executable.
+            let requestTemp = destination.deletingLastPathComponent().deletingLastPathComponent()
+            try requireSeatbeltTempAllow(requestTemp)
             try FileManager.default.createDirectory(
                 at: destination.deletingLastPathComponent(),
-                withIntermediateDirectories: true
+                withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700]
             )
             try fetched.data.write(to: destination, options: .atomic)
         } catch {
+            let requestTemp = destination.deletingLastPathComponent().deletingLastPathComponent()
+            SeatbeltTempStaging.discardTemp(at: requestTemp)
             return .failure("Could not stage attachment: \(error.localizedDescription)", callID: callID)
         }
         let category = EmailAttachmentLifecycle.mimeCategory(for: fetched.contentType)
         let expiry = EmailAttachmentLifecycle.expiryString(
-            from: EmailAttachmentLifecycle.expiryDate(retentionDays: sandboxConfig.retentionDays)
+            from: EmailAttachmentLifecycle.expiryDate(retentionDays: EmailAttachmentLifecycle.defaultRetentionDays)
         )
         // Inline previews stay strictly opt-in and text-only: binaries never
         // inline even when the flag is set, and oversized text stays out so
@@ -1278,10 +1022,9 @@ extension EmailAttachmentTool {
     ///
     /// Host staging is never touched on this path: the manifest, optional
     /// subpath inspection payload, and optional approval-gated export are the
-    /// only data that cross back. The export destination is re-checked against
-    /// the workspace guard at write time (covering policy edits between
-    /// validation and detonation), and parent directories are created so the
-    /// export lands atomically. Entry payloads decode like direct downloads but
+    /// only data that cross back. The export stages in Seatbelt-confined
+    /// isolated temp then lands with one guard-validated atomic move at write
+    /// time (covering policy edits between validation and detonation). Entry payloads decode like direct downloads but
     /// stay bounded: UTF-8 entries surface as `extractedText` truncated to the
     /// shared preview char cap with the truncation flagged in `note`, image
     /// entries surface as vision Base64 only under the vision byte cap, and
@@ -1332,30 +1075,12 @@ extension EmailAttachmentTool {
         }
         var exportedPath: String?
         if let saveToPath = target.saveToPath {
-            let decision = FilesAccessGuard.evaluate(path: saveToPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
-            guard decision.allowed else {
-                throw EmailIMAPError.bridgeFailed(decision.reason ?? "Invalid saveToPath: path is not in the permitted workspace")
-            }
-            let bytesToWrite: Data
-            if target.subpath != nil {
-                guard let entryData = result.entryData else {
-                    throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
-                }
-                bytesToWrite = entryData
-            } else {
-                bytesToWrite = fetched.data
-            }
-            guard bytesToWrite.count <= Self.maxAttachmentBytes else {
-                throw EmailIMAPError.bridgeFailed(Self.oversizeNote(sizeBytes: bytesToWrite.count))
-            }
-            do {
-                let destination = URL(fileURLWithPath: decision.resolvedPath, isDirectory: false)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try bytesToWrite.write(to: destination, options: .atomic)
-                exportedPath = decision.resolvedPath
-            } catch {
-                throw EmailIMAPError.bridgeFailed("Could not export archive entry: \(error.localizedDescription)")
-            }
+            exportedPath = try exportArchiveBytes(
+                for: target,
+                fetched: fetched,
+                entryData: result.entryData,
+                saveToPath: saveToPath
+            )
         }
         // Workspace exports carry no staging expiry, so the session hint is
         // built pathless (avoiding an empty "expires" tail) with the export
@@ -1399,6 +1124,62 @@ extension EmailAttachmentTool {
         )
         return successEnvelope(envelope, callID: callID)
     }
+
+    /// Exports detonated archive bytes through confined-temp staging.
+    ///
+    /// Untrusted bytes never write directly to the workspace: they stage as
+    /// one atomic file inside a per-request owner-only temp covered by a
+    /// Seatbelt profile allow, then move with one guard-validated atomic step
+    /// that re-checks live `[files]` policy at move time so edits between
+    /// validation and detonation still fail closed. Temp is discarded on any
+    /// deny or failure and never executed from.
+    /// - Parameters:
+    ///   - target: Trimmed routing with validated `subpath`/`saveToPath`.
+    ///   - fetched: Downloaded archive bytes (already capped).
+    ///   - entryData: Inspected entry bytes when `subpath` was requested.
+    ///   - saveToPath: Raw workspace destination (may contain `~`).
+    /// - Returns: Canonical destination path that was written.
+    /// - Throws: Guard denials or staging failures without leaking bytes.
+    private func exportArchiveBytes(
+        for target: AttachmentTarget,
+        fetched: EmailAttachmentData,
+        entryData: Data?,
+        saveToPath: String
+    ) throws -> String {
+        let bytesToWrite: Data
+        if target.subpath != nil {
+            guard let entryData else {
+                throw EmailIMAPError.bridgeFailed("Invalid subpath: entry not found in archive")
+            }
+            bytesToWrite = entryData
+        } else {
+            bytesToWrite = fetched.data
+        }
+        guard bytesToWrite.count <= Self.maxAttachmentBytes else {
+            throw EmailIMAPError.bridgeFailed(Self.oversizeNote(sizeBytes: bytesToWrite.count))
+        }
+        let stagingDir = try SeatbeltTempStaging.makeTempDirectory(prefix: "runeweaver-attachments-")
+        defer { SeatbeltTempStaging.discardTemp(at: stagingDir) }
+        try requireSeatbeltTempAllow(stagingDir)
+        let staged: URL
+        do {
+            staged = try SeatbeltTempStaging.stageBytes(bytesToWrite, filename: fetched.filename, in: stagingDir)
+        } catch {
+            throw EmailIMAPError.bridgeFailed("Could not export archive entry: \(error.localizedDescription)")
+        }
+        do {
+            return try SeatbeltTempStaging.atomicMoveTempFile(
+                at: staged,
+                to: saveToPath,
+                homeDirectoryURL: homeDirectoryURL,
+                filesConfig: filesConfig
+            )
+        } catch let staging as SeatbeltTempStaging.StagingError {
+            throw EmailIMAPError.bridgeFailed(staging.message)
+        } catch {
+            throw EmailIMAPError.bridgeFailed("Could not export archive entry: \(error.localizedDescription)")
+        }
+    }
 }
 
 /// Factory registering the email tools on a `ToolBus`.
@@ -1413,11 +1194,11 @@ extension EmailAttachmentTool {
 /// `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
 /// (`imap.mail.me.com:993`, account `icloud` via the
 /// `EMAIL_ICLOUD_PASSWORD` app-specific password) read-only with
-/// verified TLS; document and image bytes stage under the sandbox staging
-/// area only while archives detonate in zero-host-mounts ephemeral
+/// verified TLS; document and image bytes stage under isolated temp
+/// only while archives detonate in zero-host-mounts ephemeral
 /// microVMs with manifest-only returns. Sending uses verified SMTP submission (explicit overrides
 /// or 587 STARTTLS then 465 SSL) with the sender defaulting to the
-/// account username, sandbox-confined attachments, threaded replies,
+/// account username, workspace-guarded attachments, threaded replies,
 /// and a best-effort Sent copy.
 public enum EmailTools {
     /// Tool names in registration order.
@@ -1428,7 +1209,7 @@ public enum EmailTools {
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
     ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
+    ///   - sandboxConfig: Tier-3 detonation policy for `email.attachment` archives.
     ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
     ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
     ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.
@@ -1469,7 +1250,7 @@ public enum EmailTools {
     ///   - emailConfig: Decoded `[email]` section.
     ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
     ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration for `email.attachment` downloads and `email.send` attachments.
+    ///   - sandboxConfig: Tier-3 detonation policy for `email.attachment` archives.
     ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
     ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
     ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.

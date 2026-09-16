@@ -2,8 +2,9 @@
 //
 // Covers the deny-default SBPL baseline: every profile must block by default,
 // reopen only minimal system plus explicit workspace roots for reads and
-// writes, retain macOS dyld launch compat, and keep credential denies
-// overriding workspace allows.
+// writes, confine staged document writes to a non-executable temp dir with an
+// atomic move on approval, retain macOS dyld launch compat, and keep
+// credential denies overriding workspace allows.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -157,6 +158,48 @@ struct SeatbeltProfileBuilderTests {
         #expect(profile.contains("\\;"))
         let rootGuardCount = profile.components(separatedBy: "(subpath \"/\")").count - 1
         #expect(rootGuardCount == 1)
+    }
+
+    @Test
+    func `Temp staging is writable and readable but never executable`() {
+        // Staged document bytes must land in temp without gaining code
+        // execution: temp joins the read/write allows but is excluded from the
+        // executable mapping and carries an explicit exec deny.
+        let builder = SeatbeltProfileBuilder(
+            allowedReadPaths: ["/Users/test/workspace"],
+            allowedWritePaths: ["/Users/test/workspace"],
+            allowedTempPaths: ["/tmp/runeweaver-doc-123"],
+            allowNetwork: false
+        )
+        let profile = builder.buildProfile()
+
+        #expect(profile.contains("/tmp/runeweaver-doc-123"))
+        #expect(profile.contains("(allow file-write*"))
+        #expect(profile.contains("(allow file-read*"))
+        // The temp path must appear in the exec deny block, proving staged
+        // bytes cannot map as code even when the write allow covers them.
+        let denyExecSection = profile.components(separatedBy: "(deny file-map-executable").dropFirst().joined(separator: "(deny file-map-executable")
+        #expect(denyExecSection.contains("/tmp/runeweaver-doc-123"))
+        // And it must not appear in the exec allow block.
+        let allowExecPrefix = profile.components(separatedBy: "(allow file-map-executable").dropFirst().first ?? ""
+        let allowExecBlock = allowExecPrefix.components(separatedBy: "(deny").first ?? allowExecPrefix
+        #expect(!allowExecBlock.contains("/tmp/runeweaver-doc-123"))
+    }
+
+    @Test
+    func `Confined temp directory is owner-only`() throws {
+        // Temp staging must not leak across local users while awaiting the
+        // approval-gated atomic move; mode 0700 is the filesystem half of the
+        // never-execute guarantee.
+        let url = try SeatbeltProfileBuilder.makeConfinedTempDirectory()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var isDir: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir))
+        #expect(isDir.boolValue)
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        let rawPermissions = attributes[.posixPermissions]
+        let permissions = (rawPermissions as? NSNumber)?.intValue ?? (rawPermissions as? Int) ?? 0
+        #expect(permissions & 0o777 == 0o700)
     }
 
     @Test

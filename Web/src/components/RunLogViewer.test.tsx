@@ -123,7 +123,7 @@ describe("RunLogViewer", () => {
     expect(screen.getByText(/No runs yet/)).toBeInTheDocument();
   });
 
-  it("deletes an individual run entry", async () => {
+  it("deletes an individual run entry through the shared modal", async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       if (init?.method === "DELETE") {
@@ -138,7 +138,23 @@ describe("RunLogViewer", () => {
       expect(screen.getByText("hello")).toBeInTheDocument();
     });
 
+    // Trash stages a confirmation instead of deleting immediately.
     await user.click(screen.getByRole("button", { name: "Delete run" }));
+    const dialog = screen.getByRole("dialog", { name: "Confirm delete run" });
+    expect(dialog).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      expect.stringContaining("/runs/"),
+      expect.objectContaining({ method: "DELETE" }),
+    );
+
+    // Keep dismisses without a request.
+    await user.click(screen.getByRole("button", { name: "Keep" }));
+    expect(screen.queryByRole("dialog", { name: "Confirm delete run" })).not.toBeInTheDocument();
+    expect(screen.getByText("hello")).toBeInTheDocument();
+
+    // Delete confirms the persisted removal and clears the entry.
+    await user.click(screen.getByRole("button", { name: "Delete run" }));
+    await user.click(screen.getByRole("button", { name: "Confirm delete run" }));
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         `/runs/${encodeURIComponent("22222222-2222-2222-2222-222222222222")}`,
@@ -146,6 +162,34 @@ describe("RunLogViewer", () => {
       );
     });
     expect(screen.queryByText("hello")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Confirm delete run" })).not.toBeInTheDocument();
+  });
+
+  it("clears the detail selection when its run is deleted", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      if (init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return jsonResponse(runsPayload);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<RunLogViewer />);
+    await waitFor(() => {
+      expect(screen.getByText("hello")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    expect(screen.getByLabelText("Run details")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Delete run" }));
+    await user.click(screen.getByRole("button", { name: "Confirm delete run" }));
+    await waitFor(() => {
+      expect(screen.queryByText("hello")).not.toBeInTheDocument();
+    });
+    // The open detail view unmounts with its deleted run.
+    expect(screen.queryByLabelText("Run details")).not.toBeInTheDocument();
   });
 
   it("shows an empty state when no runs exist", async () => {

@@ -84,6 +84,11 @@ export default function RunLogViewer() {
   const [timeRange, setTimeRange] = useState<TimeRange>(getSavedRunsTimeRange);
   const [clearModalOpen, setClearModalOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // Non-blocking single-run delete confirmation: the pending run renders a
+  // true modal so an accidental trash click never drops audit history.
+  const [pendingDeleteRun, setPendingDeleteRun] = useState<RunLogEntry | null>(
+    null,
+  );
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const handleFilterChange = (nextFilter: FilterKind) => {
@@ -128,6 +133,21 @@ export default function RunLogViewer() {
 
   const handleDeleteRun = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
+    const target = runs.find((r) => r.id === id) ?? null;
+    // A stale identifier must fail visibly instead of opening an empty
+    // confirmation that would silently no-op on confirm.
+    if (!target) {
+      setError("Failed to delete run");
+      return;
+    }
+    // Stage the confirmation first; the destructive request only fires from
+    // the modal so list-row clicks stay non-destructive by default.
+    setPendingDeleteRun(target);
+  };
+
+  async function confirmDeleteRun() {
+    if (!pendingDeleteRun) return;
+    const id = pendingDeleteRun.id;
     setDeletingId(id);
     try {
       await deleteRun(id);
@@ -135,12 +155,17 @@ export default function RunLogViewer() {
       if (selected?.id === id) {
         setSelected(null);
       }
+      setPendingDeleteRun(null);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to delete run");
     } finally {
       setDeletingId(null);
     }
-  };
+  }
+
+  function cancelDeleteRun() {
+    setPendingDeleteRun(null);
+  }
 
   const refreshApprovals = useCallback(async () => {
     try {
@@ -440,6 +465,56 @@ export default function RunLogViewer() {
       {/* Full Run Details Modal */}
       {selected ? (
         <RunDetailModal run={selected} onClose={() => setSelected(null)} />
+      ) : null}
+
+      {/* Single-run delete confirmation; the bulk Clear Logs dialog below stays untouched. */}
+      {pendingDeleteRun ? (
+        <Modal
+          label="Confirm delete run"
+          onClose={() => {
+            if (deletingId === pendingDeleteRun.id) return;
+            cancelDeleteRun();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Delete run entry?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelDeleteRun}
+              disabled={deletingId === pendingDeleteRun.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently delete this run entry. This cannot be
+              undone.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelDeleteRun}
+              disabled={deletingId === pendingDeleteRun.id}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmDeleteRun()}
+              disabled={deletingId === pendingDeleteRun.id}
+              aria-label="Confirm delete run"
+            >
+              {deletingId === pendingDeleteRun.id ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
       ) : null}
 
       {/* Clean up / Archive Confirmation Modal */}

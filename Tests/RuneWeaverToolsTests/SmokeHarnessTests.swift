@@ -161,7 +161,7 @@ private func makeSmokeStack(gateway: any EmailIMAPGateway) async throws -> (
     let episodesPath = base.appendingPathComponent("episodes.db").path
     let conversations = ConversationManager(episodesDBPath: episodesPath)
     let audit = ToolsTestSupport.AuditCapture()
-    let sandbox = SandboxConfig(stagingPath: base.appendingPathComponent("sandbox").path)
+    let sandbox = SandboxConfig()
     let bus = ToolBus(permissionGate: PermissionGate())
     for tool in EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway, sandboxConfig: sandbox) {
         await bus.register(tool: tool)
@@ -578,12 +578,10 @@ struct SmokeHarnessTests {
             )
             #expect(readOutput.isError == false)
             #expect(readOutput.content.contains("quarterly numbers"))
-            let staging = FileManager.default.temporaryDirectory
-                .appendingPathComponent("runeweaver-smoke-\(UUID().uuidString)")
             let attachmentTool = EmailAttachmentTool(
                 emailConfig: config,
                 gateway: gateway,
-                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+                sandboxConfig: SandboxConfig()
             )
             let stagedOutput = try await attachmentTool.execute(
                 input: ToolInput(toolName: "email.attachment", argumentsJSON: #"{"account":"personal","id":"42","index":0}"#),
@@ -594,10 +592,10 @@ struct SmokeHarnessTests {
             let staged = try JSONDecoder().decode(StagedAttachment.self, from: Data(stagedOutput.content.utf8))
             #expect(staged.skipped == false)
             let path = try #require(staged.path)
-            #expect(path.hasPrefix(staging.path))
+            #expect(path.contains("runeweaver-attachments"))
             #expect(try Data(contentsOf: URL(fileURLWithPath: path)) == bytes)
             #expect(!stagedOutput.content.contains("test-secret"))
-            try? FileManager.default.removeItem(at: staging)
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
         }
     }
 }

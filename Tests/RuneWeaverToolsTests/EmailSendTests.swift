@@ -655,18 +655,14 @@ struct EmailSendTests {
 
     @Test
     func `Send refuses sandbox-escape attachment paths`() async throws {
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("send-sandbox-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let inside = staging.appendingPathComponent("note.txt")
-        try Data("hello".utf8).write(to: inside)
+        // Attachment inputs are judged by the workspace guard, so host
+        // staging is gone and outside-roots plus relative paths fail closed.
         let config = ToolsTestSupport.testEmailConfig()
-        let sandbox = SandboxConfig(stagingPath: staging.path)
         let tool = EmailSendTool(
             emailConfig: config,
             smtpGateway: StubSMTPGateway(),
             gateway: StubSendIMAPGateway(),
-            sandboxConfig: sandbox
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let outside = try await tool.execute(
@@ -677,7 +673,7 @@ struct EmailSendTests {
                 context: ToolContext(conversationID: UUID())
             )
             #expect(outside.isError == true)
-            #expect(outside.content.contains("sandbox"))
+            #expect(outside.content.contains("outside") || outside.content.contains("permitted workspace"))
             let relative = try await tool.execute(
                 input: ToolInput(
                     toolName: "email.send",
@@ -692,17 +688,20 @@ struct EmailSendTests {
 
     @Test
     func `Send stages sandbox-confined attachments`() async throws {
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("send-attach-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let file = staging.appendingPathComponent("report.txt")
+        // Send inputs live under the workspace guard, so the fixture sits in
+        // an isolated home subdirectory with no host staging directory.
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("runeweaver-send-test-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = base.appendingPathComponent("report.txt")
         try Data("report bytes".utf8).write(to: file)
         let box = SendBox()
         let tool = EmailSendTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             smtpGateway: StubSMTPGateway(box: box),
             gateway: StubSendIMAPGateway(mailboxes: ["INBOX", "Sent"]),
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -832,10 +831,13 @@ struct EmailSendTests {
     func `Dry run previews without network use`() async throws {
         let smtpBox = SendBox()
         let imapBox = IMAPBox()
-        let staging = FileManager.default.temporaryDirectory.appendingPathComponent("send-dry-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let file = staging.appendingPathComponent("dry.txt")
+        // Dry-run validation still reads through the workspace guard, so the
+        // preview fixture lives under an isolated home subdirectory.
+        let base = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("runeweaver-send-dry-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let file = base.appendingPathComponent("dry.txt")
         try Data("dry bytes".utf8).write(to: file)
         let tool = EmailSendTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
@@ -845,7 +847,7 @@ struct EmailSendTests {
                 mailboxes: ["INBOX", "Sent"],
                 box: imapBox
             ),
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(

@@ -797,11 +797,11 @@ public final class ServerContext: Sendable {
             toolStates: tStates,
             sandboxConfig: sandboxConfig
         )
-        // Reclaim expired and over-cap staged files once at boot so restarts
-        // never inherit unbounded staging; the periodic lifecycle below keeps
-        // it bounded afterwards. Only aggregate counts reach the audit trail.
+        // Reclaim crash-orphaned detonation machines once at boot so restarts
+        // never inherit leaked VMs; the periodic lifecycle below keeps
+        // pressure bounded afterwards. Only aggregate counts reach the audit trail.
         let bootSummary = SandboxCleaner.cleanup(config: sandboxConfig)
-        FileSandboxAuditLog.append(bootSummary, stagingPath: sandboxConfig.stagingPath)
+        FileSandboxAuditLog.append(bootSummary)
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
         await bus.setApprovalHandler { tool, call in

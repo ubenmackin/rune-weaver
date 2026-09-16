@@ -1,4 +1,4 @@
-// Rune Weaver Tools — Read-only local file tools (`files.read`, `files.grep`, `files.glob`).
+// Rune Weaver Tools — Local file tools (`files.read`, `files.grep`, `files.glob`) plus Seatbelt staging.
 //
 // Exposes bounded local file reads and search to the model over the shared
 // `FilesAccessGuard` deny policy, driven by the `[files]` config section
@@ -8,6 +8,12 @@
 // Grep walks with deny pruning and skips binaries and oversized files;
 // glob lists pruned, sorted paths. Denied paths fail with an
 // approval-escalation hint and never return file content.
+//
+// Confinement is Tier-1/Tier-2 Seatbelt plus Tier-3 microVM only with no host
+// sandbox folder: remaining document writes stage in a Seatbelt-confined temp
+// dir (`SeatbeltTempStaging`) and reach the workspace via one guard-validated
+// atomic move on approval. Temp is never executed from and is removed on deny
+// or failure.
 
 import Foundation
 import RuneWeaverCore
@@ -1366,6 +1372,123 @@ public struct FilesGlobTool: Tool, Sendable {
         } catch {
             return .failure("Access denied: \(detail)", callID: callID)
         }
+    }
+}
+
+/// Seatbelt-confined staging for remaining document writes.
+///
+/// Stages bytes in an owner-only temp dir that the Seatbelt profile keeps
+/// writable and readable but never executable, then moves them into the
+/// workspace with one guard-validated atomic step on approval. There is no
+/// host sandbox folder: temp is the only staging area, nothing is ever
+/// executed from it, and it is removed on deny or failure with no migration
+/// for old directories.
+///
+/// Approval discipline: validate the destination through `FilesAccessGuard`
+/// at approval time (not just at stage time) so a policy change between
+/// staging and approval still fails closed, and always discard temp on any
+/// deny or filesystem failure so staged bytes never accumulate.
+public enum SeatbeltTempStaging: Sendable {
+    /// Leading name component for temp directories and files.
+    public static let tempPrefix = "runeweaver-doc-"
+    /// Errors thrown while staging or committing temp files.
+    public struct StagingError: LocalizedError, Sendable {
+        /// Human-readable reason without file contents.
+        public let message: String
+        /// Creates a staging error.
+        /// - Parameter message: Human-readable reason.
+        public init(_ message: String) {
+            self.message = message
+        }
+
+        /// Human-readable reason for display.
+        public var errorDescription: String? {
+            message
+        }
+    }
+
+    /// Creates an owner-only temp directory for staged document writes.
+    ///
+    /// Single-sourced through the core confined-temp helper so creation stays
+    /// in one place; mode `0700` plus the Seatbelt never-execute deny hold for
+    /// every caller. Callers own cleanup via `discardTemp(at:)` on deny or failure.
+    /// - Parameter prefix: Leading name component. Defaults to `tempPrefix`.
+    /// - Returns: Newly created temp directory URL.
+    /// - Throws: Filesystem errors when creation fails.
+    public static func makeTempDirectory(prefix: String = tempPrefix) throws -> URL {
+        try SeatbeltProfileBuilder.makeConfinedTempDirectory(prefix: prefix)
+    }
+
+    /// Stages bytes as one temp file inside a confined temp directory.
+    ///
+    /// The filename is sanitized to its base name so a crafted attachment
+    /// name cannot escape the temp dir via separators, and the write is
+    /// atomic so a crash never leaves a half-written stage visible.
+    /// - Parameters:
+    ///   - bytes: Document bytes to stage.
+    ///   - filename: Original filename, reduced to a safe base name.
+    ///   - directory: Confined temp directory from `makeTempDirectory`.
+    /// - Returns: Staged temp file URL, never executed from.
+    /// - Throws: Filesystem errors when the write fails.
+    public static func stageBytes(_ bytes: Data, filename: String, in directory: URL) throws -> URL {
+        let base = (filename as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleaned = base.isEmpty ? "document" : base.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "\0", with: "_")
+        let name = "\(UUID().uuidString)-\(cleaned)"
+        let url = directory.appendingPathComponent(name, isDirectory: false)
+        try bytes.write(to: url, options: .atomic)
+        return url
+    }
+
+    /// Atomically moves a staged temp file into the workspace on approval.
+    ///
+    /// Re-validates the destination through `FilesAccessGuard` at move time so
+    /// the approval decision is judged against live policy rather than a
+    /// stale stage-time check, then ensures parents and moves. A same-volume
+    /// rename is atomic; across volumes the move copies and unlinks, so
+    /// callers must treat the destination as valid only after this returns.
+    /// Temp is removed on success (consumed by the move) and best-effort
+    /// removed on any failure so denies and errors never leak staged bytes.
+    /// - Parameters:
+    ///   - tempURL: Staged temp file URL.
+    ///   - destinationPath: Raw workspace destination (may contain `~`).
+    ///   - homeDirectoryURL: Home boundary override for tests. Defaults to nil (real home).
+    ///   - filesConfig: `[files]` deny/allow policy. Defaults to the built-in defaults.
+    /// - Returns: Canonical destination path that was written.
+    /// - Throws: Guard denials or filesystem failures; temp is discarded on throw.
+    @discardableResult
+    public static func atomicMoveTempFile(
+        at tempURL: URL,
+        to destinationPath: String,
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig()
+    ) throws -> String {
+        let decision = FilesAccessGuard.evaluate(path: destinationPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        guard decision.allowed else {
+            discardTemp(at: tempURL)
+            throw StagingError(decision.reason ?? "Destination requires explicit approval.")
+        }
+        let destination = URL(fileURLWithPath: decision.resolvedPath, isDirectory: false)
+        do {
+            try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                _ = try FileManager.default.replaceItemAt(destination, withItemAt: tempURL)
+            } else {
+                try FileManager.default.moveItem(at: tempURL, to: destination)
+            }
+            return decision.resolvedPath
+        } catch {
+            discardTemp(at: tempURL)
+            throw StagingError("Could not commit staged file: \(error.localizedDescription)")
+        }
+    }
+
+    /// Best-effort removes a staged temp file or directory.
+    ///
+    /// Called on deny or failure so staged bytes never outlive their decision;
+    /// failures are swallowed because cleanup must never mask the deny itself.
+    /// - Parameter url: Temp file or directory to remove.
+    public static func discardTemp(at url: URL) {
+        try? FileManager.default.removeItem(at: url)
     }
 }
 

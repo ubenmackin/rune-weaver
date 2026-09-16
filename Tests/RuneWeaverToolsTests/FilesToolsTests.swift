@@ -1,4 +1,4 @@
-// Rune Weaver Tools Tests — File tools (files.read, files.grep, files.glob) and shared guard.
+// Rune Weaver Tools Tests — File tools (files.read, files.grep, files.glob), shared guard, and Seatbelt staging.
 //
 // Covers the read-only file tools and the centralised deny policy:
 // sensitive pattern hits fail with an approval hint and never leak bytes,
@@ -6,7 +6,9 @@
 // windows truncate with a flag, oversized files honour the byte ceiling,
 // binaries refuse with a note, grep prunes denied subtrees while capping
 // matches with 200-char previews, and glob rejects `..` escapes while
-// returning pruned, sorted paths with a result cap.
+// returning pruned, sorted paths with a result cap. Seatbelt temp staging
+// confines document writes to a non-executable temp dir with a
+// guard-validated atomic move on approval and removal on deny or failure.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -649,5 +651,55 @@ struct FilesToolsTests {
         #expect(all.paths.count == 5)
         #expect(all.truncated == false)
         #expect(all.paths == all.paths.sorted())
+    }
+}
+
+@Suite("Seatbelt Temp Staging")
+struct SeatbeltTempStagingTests {
+    @Test
+    func `Stage then atomic move commits on approval`() throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        // Temp lives outside the home boundary under the system temp, proving
+        // staging needs no host sandbox folder; the move lands inside home.
+        let tempDir = try SeatbeltTempStaging.makeTempDirectory()
+        defer { SeatbeltTempStaging.discardTemp(at: tempDir) }
+        let staged = try SeatbeltTempStaging.stageBytes(Data("hello".utf8), filename: "notes.txt", in: tempDir)
+        #expect(FileManager.default.fileExists(atPath: staged.path))
+        let destination = home.appendingPathComponent("notes.txt").path
+        let committed = try SeatbeltTempStaging.atomicMoveTempFile(at: staged, to: destination, homeDirectoryURL: home)
+        #expect(committed == FilesAccessGuard.resolvedURL(for: destination).path)
+        #expect(FileManager.default.fileExists(atPath: staged.path) == false)
+        #expect(try String(data: Data(contentsOf: URL(fileURLWithPath: committed)), encoding: .utf8) == "hello")
+    }
+
+    @Test
+    func `Deny discards temp without writing`() throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        let tempDir = try SeatbeltTempStaging.makeTempDirectory()
+        defer { SeatbeltTempStaging.discardTemp(at: tempDir) }
+        let staged = try SeatbeltTempStaging.stageBytes(Data("secret".utf8), filename: "payload.txt", in: tempDir)
+        // Sensitive destinations fail closed at approval time via the guard,
+        // and the staged temp is removed so bytes never accumulate.
+        let denied = home.appendingPathComponent(".env").path
+        do {
+            try SeatbeltTempStaging.atomicMoveTempFile(at: staged, to: denied, homeDirectoryURL: home)
+            Issue.record("Expected guard denial for sensitive destination")
+        } catch {
+            // Deny path must discard the staged temp.
+            #expect(FileManager.default.fileExists(atPath: staged.path) == false)
+            #expect(FileManager.default.fileExists(atPath: FilesAccessGuard.resolvedURL(for: denied).path) == false)
+        }
+    }
+
+    @Test
+    func `Temp directory is owner-only`() throws {
+        let tempDir = try SeatbeltTempStaging.makeTempDirectory()
+        defer { SeatbeltTempStaging.discardTemp(at: tempDir) }
+        let attributes = try FileManager.default.attributesOfItem(atPath: tempDir.path)
+        let rawPermissions = attributes[.posixPermissions]
+        let permissions = (rawPermissions as? NSNumber)?.intValue ?? (rawPermissions as? Int) ?? 0
+        #expect(permissions & 0o777 == 0o700)
     }
 }

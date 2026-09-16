@@ -17,8 +17,10 @@ import {
 } from "../api";
 import RunDetailModal from "./RunDetailModal";
 import ScheduleWizardModal from "./ScheduleWizardModal";
+import Modal from "./Modal";
 import {
   ClockIcon,
+  CloseIcon,
   EditIcon,
   MailIcon,
   PlusIcon,
@@ -151,6 +153,20 @@ export default function SchedulerManager() {
     try {
       await deleteJob(job.id);
       setJobs((prev) => prev.filter((j) => j.id !== job.id));
+      // Dropping the owning schedule orphans its drawer state, so collapse
+      // the embedded history and dismiss a detail view bound to its runs.
+      if (expandedRunsJobId === job.id) {
+        setExpandedRunsJobId(null);
+      }
+      if (selectedRun?.jobID === job.id) {
+        setSelectedRun(null);
+      }
+      setJobRuns((prev) => {
+        if (!(job.id in prev)) return prev;
+        const next = { ...prev };
+        delete next[job.id];
+        return next;
+      });
       setPendingDelete(null);
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Delete failed");
@@ -477,35 +493,55 @@ export default function SchedulerManager() {
         />
       )}
 
-      {/* Non-blocking delete confirmation */}
+      {/* Non-blocking delete confirmation via the shared modal so the
+          dialog portals above page stacking contexts with Escape support. */}
       {pendingDelete && (
-        <div className="modal-overlay" role="dialog" aria-label="Confirm delete schedule">
-          <div className="modal">
+        <Modal
+          label="Confirm delete schedule"
+          onClose={() => {
+            if (deletingJobId === pendingDelete.id) return;
+            cancelDelete();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
             <h3>Delete schedule?</h3>
-            <p className="muted">
-              Delete schedule &quot;{pendingDelete.name}&quot;? This cannot be undone.
-            </p>
-            <div className="row">
-              <button
-                type="button"
-                className="ghost"
-                onClick={cancelDelete}
-                disabled={deletingJobId === pendingDelete.id}
-              >
-                Keep
-              </button>
-              <button
-                type="button"
-                className="danger"
-                onClick={() => void confirmDelete()}
-                disabled={deletingJobId === pendingDelete.id}
-                aria-label="Confirm delete"
-              >
-                {deletingJobId === pendingDelete.id ? "Deleting…" : "Delete"}
-              </button>
-            </div>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelDelete}
+              disabled={deletingJobId === pendingDelete.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
           </div>
-        </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              Delete schedule &quot;{pendingDelete.name}&quot;? This cannot be
+              undone.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelDelete}
+              disabled={deletingJobId === pendingDelete.id}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmDelete()}
+              disabled={deletingJobId === pendingDelete.id}
+              aria-label="Confirm delete"
+            >
+              {deletingJobId === pendingDelete.id ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
       )}
     </section>
   );
