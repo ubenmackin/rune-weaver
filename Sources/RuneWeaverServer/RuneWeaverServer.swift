@@ -1002,7 +1002,10 @@ private func registerMemoryRoutes(_ app: Application) {
     }
 }
 
-/// Registers approvals list plus decide routes.
+/// Registers approvals list plus decision routes.
+/// Durable trust-grants routes live in the dedicated grants file alongside
+/// their change broadcast; both sets register on the same paths.
+/// - Parameter app: Application receiving the routes.
 private func registerApprovalRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.approvals)) { req async throws -> ApprovalsResponse in
         let pending = await req.application.runeWeaver.approvals.list()
@@ -1011,6 +1014,8 @@ private func registerApprovalRoutes(_ app: Application) {
         }
         return ApprovalsResponse(approvals: pending)
     }
+
+    registerTrustGrantsRoutes(app)
 
     app
         .post(PathComponent.constant(ServerPaths.approvals), PathComponent.parameter("id"),
@@ -1028,6 +1033,12 @@ private func registerApprovalRoutes(_ app: Application) {
             let resolved = await context.approvals.decide(id: id, approved: body.approved, duration: body.resolvedDuration)
             guard resolved else {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
+            }
+            // Durable approvals create a stored grant inside `decide`, so
+            // dashboards need a refresh signal; one-shot approvals store
+            // nothing and leave the grants list untouched.
+            if body.approved, body.resolvedDuration != .thisTime {
+                await context.hub.broadcastTrustGrantsChanged()
             }
             if pending?.sessionID != nil {
                 Task {

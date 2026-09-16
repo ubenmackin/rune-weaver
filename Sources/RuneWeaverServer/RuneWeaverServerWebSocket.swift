@@ -214,6 +214,12 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
         await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)
         return
     }
+    // Durable approvals create a stored grant inside `decide`, so
+    // dashboards need a refresh signal; one-shot approvals store
+    // nothing and leave the grants list untouched.
+    if message.approved, message.resolvedDuration != .thisTime {
+        await context.hub.broadcastTrustGrantsChanged()
+    }
     if pending?.sessionID != nil {
         Task {
             await resumeNarratedApproval(

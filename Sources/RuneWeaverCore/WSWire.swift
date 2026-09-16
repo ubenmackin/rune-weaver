@@ -285,6 +285,22 @@ public struct WSApprovalDecidedFrame: Codable, Sendable, Equatable {
     }
 }
 
+/// Trust-grant change signal pushed by the engine over WebSocket.
+///
+/// Dashboards keep the trust list fresh by listening for this push instead of
+/// polling the grants endpoint, so a grant stored in one tab appears in every
+/// other tab without refresh lag, without extra request load, and without
+/// risking a stale allowlist when the next approval is judged.
+public struct WSTrustGrantsChanged: Codable, Sendable, Equatable {
+    /// Always `"trust_grants_changed"`.
+    public let type: String
+
+    /// Creates a trust-grant change signal.
+    public init() {
+        self.type = "trust_grants_changed"
+    }
+}
+
 /// Error frame sent by the engine over WebSocket.
 public struct WSErrorFrame: Codable, Sendable, Equatable {
     /// Always `"error"`.

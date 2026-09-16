@@ -97,6 +97,28 @@ export interface ApprovalDecisionResponse {
   duration: TrustDuration;
 }
 
+// Graduated-trust grant minted from an approval decision: one row per tool-plus-target pair
+// that stays auto-approved until revoked or expired. A null expiresAt is the forever tier,
+// so the dashboard must render it as never expiring rather than as missing data.
+export interface TrustGrant {
+  id: string;
+  toolName: string;
+  target: string;
+  // Creation time in either wire shape the engine emits: ISO-8601 strings from older payloads
+  // or Unix seconds as JSON numbers from SQLite persistence. Kept as a union so callers
+  // normalize through parseRunTimestamp instead of assuming one encoding.
+  grantedAt: string | number;
+  // Expiry in either wire shape, or null for the forever tier which never expires. Null must
+  // survive as "forever" through every UI path rather than collapsing to the epoch.
+  expiresAt: string | number | null;
+  duration: TrustDuration;
+}
+
+export interface TrustGrantsResponse {
+  grants: TrustGrant[];
+  count: number;
+}
+
 export interface MemoryResult {
   content: string;
   score: number;
@@ -421,6 +443,32 @@ export function decideApproval(
       body: JSON.stringify({ approved, duration }),
     },
   );
+}
+
+// Normalizes a grant expiry into a Date while preserving the forever contract: null stays
+// null so callers can branch on "never expires" without sentinel-date comparisons. Non-null
+// values delegate to parseRunTimestamp because the engine emits the same dual wire shape as
+// run timestamps (Unix seconds from SQLite versus ISO strings from older payloads).
+export function parseTrustGrantExpiry(
+  value: string | number | null | undefined,
+): Date | null {
+  if (value == null) return null;
+  return parseRunTimestamp(value);
+}
+
+// Lists active graduated-trust grants so the dashboard can show what stays auto-approved
+// without re-deriving it from the pending approvals inbox.
+export function listTrustGrants(): Promise<TrustGrantsResponse> {
+  return fetchJson<TrustGrantsResponse>("/approvals/grants");
+}
+
+// Revokes one grant by id. A 404 surfaces as ApiError through the shared fetchJson reason
+// parsing so the UI can explain the grant already lapsed; a successful revoke returns 204
+// with no body, which fetchJson maps to void.
+export function revokeTrustGrant(id: string): Promise<void> {
+  return fetchJson<void>(`/approvals/grants/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
 }
 
 export function searchMemory(
