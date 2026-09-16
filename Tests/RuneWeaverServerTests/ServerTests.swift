@@ -1099,3 +1099,185 @@ struct ToolStateStoreTests {
         #expect(denied.content.contains("currently disabled") == true)
     }
 }
+
+@Suite("Trust Grants Routes")
+struct TrustGrantsRouteTests {
+    /// Mirrors the GET /approvals/grants handler so route semantics stay
+    /// covered without a live socket: prune expired, newest-first, then map.
+    private func grantsResponse(for gate: PermissionGate) async -> TrustGrantsResponse {
+        let grants = await gate.activeGrants()
+        let newestFirst = grants.sorted { $0.grantedAt > $1.grantedAt }
+        return TrustGrantsResponse(grants: newestFirst.map(TrustGrantResponse.init))
+    }
+
+    /// Mirrors the DELETE /approvals/grants/:id handler mapping so the 404
+    /// contract stays pinned to the revoke result.
+    private func deleteGrantStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
+        let removed = await gate.revokeGrant(id: id)
+        guard removed else {
+            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+        }
+        return .noContent
+    }
+
+    @Test
+    func `Grants list returns oneHour and forever with correct fields`() async {
+        let gate = PermissionGate()
+        let timedDescriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let foreverDescriptor = ActionDescriptor(toolName: "file.write", target: "/tmp/report.md")
+        await gate.grantTrust(for: timedDescriptor, duration: .oneHour)
+        await gate.grantTrust(for: foreverDescriptor, duration: .forever)
+
+        // Both grants gate their actions until revoked or expired.
+        #expect(await gate.isTrusted(timedDescriptor) == true)
+        #expect(await gate.isTrusted(foreverDescriptor) == true)
+
+        let response = await grantsResponse(for: gate)
+        #expect(response.count == 2)
+        #expect(response.grants.count == 2)
+
+        guard let timed = response.grants.first(where: { $0.duration == .oneHour }) else {
+            Issue.record("Expected oneHour grant in list")
+            return
+        }
+        #expect(timed.toolName == "email.send")
+        #expect(timed.target == "alice@example.com")
+        #expect(timed.displayTarget == "alice@example.com")
+        #expect(timed.duration == .oneHour)
+        // Timed grants carry a future expiry derived from the grant moment.
+        #expect(timed.expiresAt != nil)
+        if let expiresAt = timed.expiresAt {
+            #expect(expiresAt > timed.grantedAt)
+        }
+
+        guard let forever = response.grants.first(where: { $0.duration == .forever }) else {
+            Issue.record("Expected forever grant in list")
+            return
+        }
+        #expect(forever.toolName == "file.write")
+        #expect(forever.target == "/tmp/report.md")
+        #expect(forever.displayTarget == "/tmp/report.md")
+        #expect(forever.duration == .forever)
+        // Forever grants never expire, so the wire expiry stays nil and
+        // dashboards render them as never expiring instead of epoch dates.
+        #expect(forever.expiresAt == nil)
+    }
+
+    @Test
+    func `Grants list hides expired entries`() async {
+        let now = Date()
+        let expired = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "stale@example.com"),
+            grantedAt: now.addingTimeInterval(-7200),
+            expiresAt: now.addingTimeInterval(-60),
+            duration: .fiveMinutes
+        )
+        let active = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "fresh@example.com"),
+            grantedAt: now,
+            expiresAt: now.addingTimeInterval(3600),
+            duration: .oneHour
+        )
+        let forever = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "file.write", target: "/tmp/kept.md"),
+            grantedAt: now,
+            expiresAt: nil,
+            duration: .forever
+        )
+        let store = InMemoryTrustStore(grants: [expired, active, forever])
+        let gate = await PermissionGate.load(store: store)
+
+        let response = await grantsResponse(for: gate)
+        #expect(response.count == 2)
+        #expect(response.grants.contains { $0.target == "stale@example.com" } == false)
+        #expect(response.grants.contains { $0.target == "fresh@example.com" } == true)
+        #expect(response.grants.contains { $0.target == "/tmp/kept.md" } == true)
+        // Gating follows the filtered list: lapsed scope falls back to asking.
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "stale@example.com")) == false)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "email.send", target: "fresh@example.com")) == true)
+
+        // An expiry exactly at the reference instant already counts as
+        // expired, so clock skew cannot stretch a grant by one poll tick.
+        let boundary = TrustGrant(
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "edge@example.com"),
+            grantedAt: now,
+            expiresAt: now,
+            duration: .fiveMinutes
+        )
+        #expect(boundary.isExpired(at: now) == true)
+        #expect(boundary.isValid(at: now) == false)
+        // A nil expiry never lapses regardless of the reference date.
+        #expect(forever.isExpired(at: now.addingTimeInterval(60 * 60 * 24 * 365)) == false)
+    }
+
+    @Test
+    func `Revoke removes grant and restores gating`() async throws {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        #expect(await gate.isTrusted(descriptor) == true)
+
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected granted row before revoke")
+            return
+        }
+        // A successful DELETE maps to 204 with no body.
+        #expect(try await deleteGrantStatus(id: id, gate: gate).code == 204)
+
+        // Revocation drops the row and returns gating to ask-every-time.
+        #expect(await gate.isTrusted(descriptor) == false)
+        let after = await grantsResponse(for: gate)
+        #expect(after.grants.contains { $0.id == id } == false)
+        #expect(after.count == 0)
+    }
+
+    @Test
+    func `Revoke unknown grant reports notFound`() async {
+        let gate = PermissionGate()
+        let unknown = UUID()
+        #expect(await gate.revokeGrant(id: unknown) == false)
+        do {
+            _ = try await deleteGrantStatus(id: unknown, gate: gate)
+            Issue.record("Expected notFound for unknown grant")
+        } catch let abort as Abort {
+            // The DELETE handler maps a missed revoke to 404 so dashboards
+            // can explain the grant already lapsed instead of retrying.
+            #expect(abort.status == .notFound)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
+
+    @Test
+    func `ThisTime decision creates no grant row`() async {
+        let gate = PermissionGate()
+        let store = ApprovalQueue(permissionGate: gate)
+        let request = await store.enqueue(
+            toolName: "stub.write",
+            description: "Write stub.",
+            input: ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/once.md"}"#)
+        )
+        #expect(await store.decide(id: request.id, approved: true, duration: .thisTime) == true)
+        // One-shot approvals resolve the waiter but record no durable row,
+        // so the grants list stays empty and gating stays closed.
+        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/once.md")) == false)
+
+        // A duration approval on the same gate mints exactly one row,
+        // proving the absence above comes from the tier rather than wiring.
+        let durable = await store.enqueue(
+            toolName: "stub.write",
+            description: "Write stub.",
+            input: ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/kept.md"}"#)
+        )
+        #expect(await store.decide(id: durable.id, approved: true, duration: .oneHour) == true)
+        let listed = await grantsResponse(for: gate)
+        #expect(listed.count == 1)
+        #expect(listed.grants.first?.target == "/tmp/kept.md")
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/kept.md")) == true)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/once.md")) == false)
+    }
+}

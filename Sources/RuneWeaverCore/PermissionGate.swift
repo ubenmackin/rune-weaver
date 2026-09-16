@@ -755,6 +755,19 @@ public actor PermissionGate {
         await persist()
     }
 
+    /// Removes one grant by identifier, persisting only when something changed.
+    /// Expired grants are pruned first so an expired identifier reports no match.
+    /// - Parameter id: Stable grant identifier.
+    /// - Returns: True when a matching grant was removed.
+    public func revokeGrant(id: UUID) async -> Bool {
+        pruneExpired()
+        let before = grants.count
+        grants.removeAll { $0.id == id }
+        guard grants.count != before else { return false }
+        await persist()
+        return true
+    }
+
     /// Explicitly refuses an action with a reason.
     public func deny(_ descriptor: ActionDescriptor, reason: String) {
         denials[descriptor] = reason

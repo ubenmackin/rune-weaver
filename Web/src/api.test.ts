@@ -20,7 +20,9 @@ import {
   listApprovals,
   listJobs,
   listRuns,
+  listTrustGrants,
   postChat,
+  revokeTrustGrant,
   runJobNow,
   searchMemory,
   storeFact,
@@ -252,6 +254,89 @@ describe("dashboard api client", () => {
       pollAccount: "icloud",
       pollIntervalSeconds: 300,
     });
+  });
+
+  it("lists trust grants from the grants endpoint", async () => {
+    const now = new Date().toISOString();
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        grants: [
+          {
+            id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            toolName: "email.send",
+            target: "alice@example.com",
+            grantedAt: now,
+            expiresAt: future,
+            duration: "oneHour",
+          },
+          {
+            id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            toolName: "file.write",
+            target: "",
+            grantedAt: now,
+            expiresAt: null,
+            duration: "forever",
+          },
+        ],
+        count: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const listed = await listTrustGrants();
+    expect(listed.count).toBe(2);
+    expect(listed.grants[0].toolName).toBe("email.send");
+    // Forever grants keep a null expiry through the client so the inbox can
+    // branch on never-expires without sentinel-date comparisons.
+    expect(listed.grants[1].expiresAt).toBeNull();
+    const [path] = fetchMock.mock.calls[0] as unknown as [string];
+    expect(path).toBe("/approvals/grants");
+    expect(path.startsWith("http")).toBe(false);
+  });
+
+  it("revokes a trust grant with an encoded DELETE", async () => {
+    const seen: Array<{ path: string; method?: string }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      seen.push({ path: input, method: init?.method });
+      return new Response(null, { status: 204 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await revokeTrustGrant("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(seen[0].path).toBe("/approvals/grants/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+    expect(seen[0].method).toBe("DELETE");
+    // Identifiers travel encoded so reserved characters never split the route.
+    await revokeTrustGrant("a/b c");
+    expect(seen[1].path).toBe("/approvals/grants/a%2Fb%20c");
+    expect(seen[1].method).toBe("DELETE");
+  });
+
+  it("surfaces trust grant failures as ApiError", async () => {
+    // A revoked-elsewhere grant reports 404 with the engine reason so the
+    // inbox can explain the row already lapsed instead of retrying blindly.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "Unknown grant abc" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const missing = await revokeTrustGrant("abc").catch((error: unknown) => error);
+    expect(missing).toBeInstanceOf(ApiError);
+    expect((missing as ApiError).status).toBe(404);
+    expect((missing as ApiError).message).toContain("Unknown grant abc");
+    // Transport failures surface with status 0 so callers can distinguish
+    // an unreachable engine from a rejected grant id.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("boom");
+      }),
+    );
+    const offline = await listTrustGrants().catch((error: unknown) => error);
+    expect(offline).toBeInstanceOf(ApiError);
+    expect((offline as ApiError).status).toBe(0);
   });
 
   it("throws ApiError with status on failure", async () => {
