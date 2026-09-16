@@ -1,5 +1,5 @@
 // Rune Weaver Dashboard — Settings manager for config.toml configuration.
-// Allows managing LLM providers, engine identity, sandbox policy, memory, voice, and email accounts.
+// Allows managing LLM providers, engine identity, sandbox policy, memory, voice, web search, and email accounts.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -12,10 +12,17 @@ import {
   DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
+  DEFAULT_SEARCH_MAX_RESULTS,
+  DEFAULT_SEARCH_SEARXNG_URL,
+  DEFAULT_SEARCH_TIMEOUT_SECONDS,
+  ensureSearch,
+  getSearchHealth,
   getSettings,
+  resolveSearchURL,
   updateSettings,
   getPlugins,
   rescanPlugins,
+  stopSearch,
   updatePluginState,
   uninstallPlugin,
   getTools,
@@ -36,6 +43,7 @@ import {
   MemoryIcon,
   PlusIcon,
   RefreshIcon,
+  SearchIcon,
   SettingsIcon,
   TrashIcon,
   WrenchIcon,
@@ -43,10 +51,18 @@ import {
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 
-// Seven-item vertical navigation keeps every category visible without
-// horizontal scrolling; sandbox and file policy share one Security pane so
-// the sidebar stays within the width budget as settings grow.
-type SettingsTab = "providers" | "engine" | "tools" | "security" | "memory" | "voice" | "email";
+// Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
+// and file policy share one Security pane so the sidebar stays within the width budget as settings
+// grow.
+type SettingsTab =
+  | "providers"
+  | "engine"
+  | "tools"
+  | "security"
+  | "memory"
+  | "voice"
+  | "search"
+  | "email";
 
 interface ProviderEntry {
   id: string;
@@ -92,10 +108,9 @@ export default function SettingsManager() {
   const [sandboxMaxConcurrentMachines, setSandboxMaxConcurrentMachines] = useState(
     DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
   );
-  // Blocked-paths editor holds raw textarea text (one glob per line) so
-  // blank lines survive editing and only collapse on save; the parsed count
-  // drives the live badge while an emptied editor intentionally means
-  // allow-all in scope rather than falling back to defaults.
+  // Blocked-paths editor holds raw textarea text (one glob per line) so blank lines survive editing
+  // and only collapse on save; the parsed count drives the live badge while an emptied editor
+  // intentionally means allow-all in scope rather than falling back to defaults.
   const [filesDenyText, setFilesDenyText] = useState<string>(
     DEFAULT_FILES_DENY_PATTERNS_TEXT
   );
@@ -119,6 +134,27 @@ export default function SettingsManager() {
   const [voiceSTTProvider, setVoiceSTTProvider] = useState("");
   const [voiceWhisperModel, setVoiceWhisperModel] = useState("");
   const [voiceTTSProvider, setVoiceTTSProvider] = useState("");
+  // Web search policy under [search]: SearXNG base URL plus per-request
+  // timeout and result cap. Defaults mirror the engine so a fresh form shows
+  // the same boundary the service enforces before the first settings fetch.
+  const [searchSearxngURL, setSearchSearxngURL] = useState(
+    DEFAULT_SEARCH_SEARXNG_URL
+  );
+  const [searchTimeoutSeconds, setSearchTimeoutSeconds] = useState(
+    DEFAULT_SEARCH_TIMEOUT_SECONDS
+  );
+  const [searchMaxResults, setSearchMaxResults] = useState(
+    DEFAULT_SEARCH_MAX_RESULTS
+  );
+  // Live container health for the Search pane: refreshed on tab open and
+  // after Start/Stop so the health line stays honest without a page reload.
+  const [searchReachable, setSearchReachable] = useState<boolean | null>(null);
+  const [searchHealthURL, setSearchHealthURL] = useState<string | null>(null);
+  const [searchHealthLoading, setSearchHealthLoading] = useState(false);
+  const [searchActionBusy, setSearchActionBusy] = useState(false);
+  const [searchHealthError, setSearchHealthError] = useState<string | null>(
+    null
+  );
   const [emailAccountsList, setEmailAccountsList] = useState<EmailEntry[]>([]);
   const [pluginsDir, setPluginsDir] = useState("~/.runeweaver/plugins");
   const [pluginsMarketplaceIndexURL, setPluginsMarketplaceIndexURL] = useState(
@@ -157,6 +193,84 @@ export default function SettingsManager() {
       setAllTools([]);
     }
   }, []);
+
+  // Refreshes the Search pane health line without touching the settings form: Start/Stop change
+  // container state, not config values, so health stays separate from Save.
+  // Honest tri-state: only a boolean reachable flag may move the dot, matching TopNav; empty or
+  // shape-drifted payloads keep unknown gray (null) instead of coercing missing to false red Stopped.
+  const refreshSearchHealth = useCallback(async () => {
+    setSearchHealthLoading(true);
+    setSearchHealthError(null);
+    try {
+      const response = await getSearchHealth();
+      if (typeof response?.reachable === "boolean") {
+        setSearchReachable(response.reachable);
+        setSearchHealthURL(resolveSearchURL(response, "") || null);
+      } else {
+        setSearchReachable(null);
+        setSearchHealthURL(null);
+        setSearchHealthError(
+          "Search health returned an unexpected response; status unknown."
+        );
+      }
+    } catch (err) {
+      setSearchReachable(null);
+      setSearchHealthURL(null);
+      setSearchHealthError(
+        err instanceof Error ? err.message : "Search health check failed."
+      );
+    } finally {
+      setSearchHealthLoading(false);
+    }
+  }, []);
+
+  const handleEnsureSearch = async () => {
+    setSearchActionBusy(true);
+    setSearchHealthError(null);
+    try {
+      const response = await ensureSearch();
+      // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
+      // preserve the previous state and surface an inline error instead of optimistically flipping.
+      if (typeof response?.reachable === "boolean") {
+        setSearchReachable(response.reachable);
+        setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+      } else {
+        setSearchHealthError(
+          "Search start returned an unexpected response; status unchanged."
+        );
+      }
+    } catch (err) {
+      setSearchHealthError(
+        err instanceof Error ? err.message : "Failed to start search."
+      );
+    } finally {
+      setSearchActionBusy(false);
+    }
+  };
+
+  const handleStopSearch = async () => {
+    setSearchActionBusy(true);
+    setSearchHealthError(null);
+    try {
+      const response = await stopSearch();
+      // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
+      // preserve the previous state and surface an inline error instead of claiming stopped.
+      if (typeof response?.reachable === "boolean") {
+        setSearchReachable(response.reachable);
+        setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+      } else {
+        setSearchHealthError(
+          "Search stop returned an unexpected response; status unchanged."
+        );
+      }
+    } catch (err) {
+      setSearchHealthError(
+        err instanceof Error ? err.message : "Failed to stop search."
+      );
+    } finally {
+      setSearchActionBusy(false);
+    }
+  };
 
   const handleRescanPlugins = async () => {
     setRescanLoading(true);
@@ -251,11 +365,8 @@ export default function SettingsManager() {
     setPendingUninstallPlugin(null);
   }
 
-  // Flips one builtin engine tool without a protected list: every builtin
-  // toggles independently so closely related tools (email.read vs
-  // email.attachment) never change together. Only the acted-on row disables
-  // while its request is in flight, and the list refreshes from the server so
-  // the switch always reflects the persisted bus state.
+  // Flips one builtin engine tool without a protected list: every builtin toggles independently so
+  // closely related tools (email.read vs email.attachment) never change together.
   const handleToggleTool = async (tool: ToolInfo) => {
     const nextEnabled = !tool.isEnabled;
     setTogglingToolName(tool.name);
@@ -328,6 +439,20 @@ export default function SettingsManager() {
     setVoiceSTTProvider(data.voiceSTTProvider);
     setVoiceWhisperModel(data.voiceWhisperModel);
     setVoiceTTSProvider(data.voiceTTSProvider);
+    // Search fields read either contract (canonical `browser*` first, then the
+    // `search*` alias) and fall back to local defaults when an older engine
+    // omits the [browser] section, so the form never renders blank.
+    setSearchSearxngURL(
+      data.browserSearxngURL ?? data.searchSearxngURL ?? DEFAULT_SEARCH_SEARXNG_URL
+    );
+    setSearchTimeoutSeconds(
+      data.browserSearchTimeoutSeconds ??
+        data.searchTimeoutSeconds ??
+        DEFAULT_SEARCH_TIMEOUT_SECONDS
+    );
+    setSearchMaxResults(
+      data.browserMaxResults ?? data.searchMaxResults ?? DEFAULT_SEARCH_MAX_RESULTS
+    );
     setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
     setPluginsMarketplaceIndexURL(
       data.pluginsMarketplaceIndexURL ??
@@ -360,6 +485,15 @@ export default function SettingsManager() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Loads live container health when the Search pane opens so the health
+  // line reflects the running container rather than the saved URL alone.
+  // Runs on tab entry only; Start/Stop refresh explicitly after acting.
+  useEffect(() => {
+    if (activeTab === "search") {
+      void refreshSearchHealth();
+    }
+  }, [activeTab, refreshSearchHealth]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -394,10 +528,9 @@ export default function SettingsManager() {
       const kEnv = entry.config.api_key_env || entry.config.apiKeyEnv;
       const pType = entry.config.provider_type || entry.config.providerType;
       const aStyle = entry.config.api_style || entry.config.apiStyle;
-      // Absent context_length means backend-default (nil), so only send a
-      // Number when the user entered a value; empty stays omitted. Present
-      // values fail closed on non-positive or non-integer input instead of
-      // coercing to the backend default, mirroring Config+Validation.
+      // Absent context_length means backend-default (nil), so only send a Number when the user
+      // entered a value; empty stays omitted. Present values fail closed on non-positive or non-
+      // integer input instead of coercing to the backend default, mirroring Config+Validation.
       const cLenRaw = entry.config.context_length ?? entry.config.contextLength;
       if (
         cLenRaw !== undefined &&
@@ -437,10 +570,9 @@ export default function SettingsManager() {
       };
     }
 
-    // Blocked-paths textarea validates per line with original numbers so a
-    // bad glob points at its editor row; blank lines collapse on save and an
-    // emptied editor stays a valid allow-all, while `..` fails closed here
-    // and authoritatively on the server guard.
+    // Blocked-paths textarea validates per line with original numbers so a bad glob points at its
+    // editor row; blank lines collapse on save and an emptied editor stays a valid allow-all, while
+    // `..` fails closed here and authoritatively on the server guard.
     const denyLines = filesDenyText.split("\n");
     for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
       const trimmed = denyLines[lineIndex].trim();
@@ -472,12 +604,9 @@ export default function SettingsManager() {
       }
     }
 
-    // Reassemble email accounts array, preserving optional SMTP overrides.
-    // Blank smtp_host collapses to omitted (derived fallback) and blank
-    // smtp_port omits so auto tries 587 then 465; smtp_security defaults
-    // to auto when blank or unknown.
-    // Incomplete rows abort instead of silently dropping so a half-filled
-    // row never vanishes on save; mirrors the provider-name checks above.
+    // Reassemble email accounts array, preserving optional SMTP overrides. Blank smtp_host
+    // collapses to omitted (derived fallback) and blank smtp_port omits so auto tries 587 then 465;
+    // smtp_security defaults to auto when blank or unknown.
     for (const entry of emailAccountsList) {
       const trimmedName = entry.account.name.trim();
       const trimmedHost = entry.account.host.trim();
@@ -492,7 +621,9 @@ export default function SettingsManager() {
     }
     // IMAP ports fail closed on non-integer or out-of-range values instead
     // of coercing to 993, mirroring Config+Validation 1-65535; explicit
-    // SMTP ports follow the same range when set.
+    // SMTP ports follow the narrow submission allowlist (25, 465, 587, 2525)
+    // mirroring Config+Validation/EmailConfig so a saved port never fails
+    // server load validation.
     for (const entry of emailAccountsList) {
       const label = entry.account.name.trim() || "(unnamed)";
       const portNum = Number(entry.account.port);
@@ -510,14 +641,54 @@ export default function SettingsManager() {
         String(rawSmtpPort).trim() !== ""
       ) {
         const smtpNum = Number(rawSmtpPort);
-        if (!Number.isInteger(smtpNum) || smtpNum < 1 || smtpNum > 65535) {
+        const allowedSmtpPorts = [25, 465, 587, 2525];
+        if (!Number.isInteger(smtpNum) || !allowedSmtpPorts.includes(smtpNum)) {
           setError(
-            `Invalid SMTP port for email account "${label}": smtp_port must be between 1 and 65535.`
+            `Invalid SMTP port for email account "${label}": smtp_port must be one of 25, 465, 587, 2525 (got ${String(rawSmtpPort).trim()}).`
           );
           setSaving(false);
           return;
         }
       }
+    }
+    // Search fields fail closed before any network write so a bad URL or out-of-range limit never
+    // persists to config.toml.
+    const trimmedSearxngURL = searchSearxngURL.trim();
+    if (!trimmedSearxngURL) {
+      setError("Search SearXNG URL cannot be empty.");
+      setSaving(false);
+      return;
+    }
+    try {
+      const parsedSearchURL = new URL(trimmedSearxngURL);
+      if (
+        parsedSearchURL.protocol !== "http:" &&
+        parsedSearchURL.protocol !== "https:"
+      ) {
+        throw new Error("bad protocol");
+      }
+    } catch {
+      setError(
+        `Invalid SearXNG URL: "${trimmedSearxngURL}". Use an absolute http(s) URL.`
+      );
+      setSaving(false);
+      return;
+    }
+    const timeoutNum = Number(searchTimeoutSeconds);
+    if (!Number.isInteger(timeoutNum) || timeoutNum < 1 || timeoutNum > 120) {
+      setError("Invalid search timeout: timeout must be between 1 and 120 seconds.");
+      setSaving(false);
+      return;
+    }
+    const maxResultsNum = Number(searchMaxResults);
+    if (
+      !Number.isInteger(maxResultsNum) ||
+      maxResultsNum < 1 ||
+      maxResultsNum > 50
+    ) {
+      setError("Invalid search max results: max results must be between 1 and 50.");
+      setSaving(false);
+      return;
     }
     const emailAccounts: EmailAccountData[] = emailAccountsList.map((entry) => {
       const rawHost = entry.account.smtp_host ?? entry.account.smtpHost ?? "";
@@ -580,6 +751,14 @@ export default function SettingsManager() {
         voiceSTTProvider,
         voiceWhisperModel,
         voiceTTSProvider,
+        // Dual-write both contracts so old (search*) and new (browser*) engines
+        // persist the [browser] values the tools dial.
+        browserSearxngURL: trimmedSearxngURL,
+        browserSearchTimeoutSeconds: timeoutNum,
+        browserMaxResults: maxResultsNum,
+        searchSearxngURL: trimmedSearxngURL,
+        searchTimeoutSeconds: timeoutNum,
+        searchMaxResults: maxResultsNum,
         emailAccounts,
         pluginsDir,
         pluginsMarketplaceIndexURL,
@@ -673,10 +852,9 @@ export default function SettingsManager() {
           if (field === "providerType") updated.provider_type = val as string;
           if (field === "api_style") updated.apiStyle = val as string;
           if (field === "apiStyle") updated.api_style = val as string;
-          // An empty context-length input means backend-default (nil), so
-          // clear both aliases. Non-empty values (including NaN from invalid
-          // input) are preserved on both aliases so handleSave can fail
-          // closed instead of silently falling back to the backend default.
+          // An empty context-length input means backend-default (nil), so clear both aliases. Non-
+          // empty values (including NaN from invalid input) are preserved on both aliases so
+          // handleSave can fail closed instead of silently falling back to the backend default.
           if (field === "context_length") {
             const next =
               val === "" || val === undefined ? undefined : Number(val);
@@ -830,7 +1008,7 @@ export default function SettingsManager() {
         <div>
           <h2>Settings & Configuration</h2>
           <p className="muted text-sm">
-            Manage LLM model routing, engine parameters, sandbox security, and email accounts.
+            Manage LLM model routing, engine parameters, sandbox security, web search, and email accounts.
           </p>
         </div>
 
@@ -950,6 +1128,17 @@ export default function SettingsManager() {
             onClick={() => setActiveTab("voice")}
           >
             <span>Voice</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "search"}
+            className={`settings-tab-btn ${activeTab === "search" ? "active" : ""}`}
+            onClick={() => setActiveTab("search")}
+          >
+            <SearchIcon size={16} />
+            <span>Search</span>
           </button>
 
           <button
@@ -1820,10 +2009,9 @@ export default function SettingsManager() {
               </div>
             </div>
 
-            {/* Blocked-paths deny list: multiline editor keeps long guard
-                lists compact; blank lines collapse on save and an emptied
-                editor means allow-all in scope, with the server guard as the
-                authoritative enforcer. */}
+            {/* Blocked-paths deny list: multiline editor keeps long guard lists compact;
+                blank lines collapse on save and an emptied editor means allow-all in scope,
+                with the server guard as the authoritative enforcer. */}
             <div className="settings-section-title-group" style={{ marginTop: "4px" }}>
               <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
               <p className="settings-section-hint">
@@ -2131,6 +2319,131 @@ export default function SettingsManager() {
                 />
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Search pane: SearXNG URL plus request limits and container
+            lifecycle. Config edits save through the form; Start/Stop act
+            immediately on the container so health stays honest. */}
+        {activeTab === "search" && (
+          <div className="settings-section card">
+            <div className="settings-section-title-group">
+              <h3>Web Search</h3>
+              <p className="settings-section-hint">
+                SearXNG runs locally for private web search. No Docker needed,
+                it uses the Apple Container CLI. First start pulls the SearXNG
+                image (about 150 MB), later starts reuse it.
+              </p>
+            </div>
+            <div className="form-group">
+              <label htmlFor="search-searxng-url">SearXNG URL</label>
+              <input
+                id="search-searxng-url"
+                type="url"
+                className="input-field"
+                value={searchSearxngURL}
+                onChange={(e) => setSearchSearxngURL(e.target.value)}
+                placeholder={DEFAULT_SEARCH_SEARXNG_URL}
+                required
+              />
+              <span className="form-group-hint">
+                Base URL of the local SearXNG service (default{" "}
+                {DEFAULT_SEARCH_SEARXNG_URL}). Saved to searxng_url under
+                [search]; changes need a restart to take effect.
+              </span>
+            </div>
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="search-timeout">Timeout (seconds)</label>
+                <input
+                  id="search-timeout"
+                  type="number"
+                  min={1}
+                  max={120}
+                  step={1}
+                  className="input-field"
+                  value={searchTimeoutSeconds}
+                  onChange={(e) => setSearchTimeoutSeconds(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Per-request timeout in seconds (1 to 120). Saved to timeout
+                  under [search].
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="search-max-results">Max Results</label>
+                <input
+                  id="search-max-results"
+                  type="number"
+                  min={1}
+                  max={50}
+                  step={1}
+                  className="input-field"
+                  value={searchMaxResults}
+                  onChange={(e) => setSearchMaxResults(Number(e.target.value))}
+                  required
+                />
+                <span className="form-group-hint">
+                  Max results per query (1 to 50). Saved to max_results under
+                  [search].
+                </span>
+              </div>
+            </div>
+            <div
+              className="form-row"
+              style={{ marginTop: "12px", alignItems: "center" }}
+            >
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void handleEnsureSearch()}
+                disabled={searchActionBusy}
+                aria-label="Start SearXNG"
+              >
+                {searchActionBusy ? "Working…" : "Start"}
+              </button>
+              <button
+                type="button"
+                className="ghost icon-text-btn"
+                onClick={() => void handleStopSearch()}
+                disabled={searchActionBusy}
+                aria-label="Stop SearXNG"
+              >
+                Stop
+              </button>
+              <button
+                type="button"
+                className="ghost icon-text-btn"
+                onClick={() => void refreshSearchHealth()}
+                disabled={searchHealthLoading || searchActionBusy}
+                aria-label="Refresh search health"
+              >
+                <RefreshIcon
+                  size={14}
+                  className={searchHealthLoading ? "spin" : ""}
+                />
+                <span>{searchHealthLoading ? "Checking…" : "Refresh"}</span>
+              </button>
+              <span
+                data-testid="search-health-text"
+                className="muted text-sm"
+                title={searchHealthURL || searchSearxngURL}
+              >
+                {searchHealthLoading
+                  ? "Checking search health…"
+                  : searchReachable === null
+                    ? "Search health unknown."
+                    : searchReachable
+                      ? `Search reachable at ${searchHealthURL || searchSearxngURL}.`
+                      : `Search stopped (${searchHealthURL || searchSearxngURL} unreachable).`}
+              </span>
+            </div>
+            {searchHealthError ? (
+              <div className="error-banner" data-testid="search-health-error">
+                {searchHealthError}
+              </div>
+            ) : null}
           </div>
         )}
 

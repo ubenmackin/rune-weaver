@@ -1,36 +1,20 @@
 // Rune Weaver Server — In-memory run log and execution audit store.
-//
-// Maintains an audit trail of chat turns and scheduled job firings for API
-// consumers. Provides bounded in-memory FIFO retention with lock-free actor
-// isolation, query limits, and job-specific history filtering.
 
 import Foundation
 import RuneWeaverCore
 
 /// One recorded run: a chat turn or a scheduler job execution.
-///
-/// The run log is the audit trail for the API surface: every `POST /chat`
-/// turn and every scheduler firing appends one entry so clients can review
-/// what the engine did without reopening conversation history.
 public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     /// Stable entry identifier.
     public let id: UUID
     /// Owning scheduler job, when this run came from a job.
     public let jobID: UUID?
     /// Owning chat session, when the run came from an interactive turn or a deterministic scheduler session.
-    ///
-    /// Every chat and scheduler entry carries its session so approval-gated
-    /// turns can correlate pending prompts without reopening history.
-    /// Tool-only entries without an owning conversation leave this untagged.
     public let sessionID: UUID?
     /// Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
     public let kind: String
     /// Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`, `"interrupted"`,
     /// `"cancelled"`, `"awaiting_approval"`, or `"denied"`).
-    ///
-    /// Parked approval-gated turns persist as `"awaiting_approval"` instead
-    /// of `"ok"` until their inbox decision transitions them to `"ok"`,
-    /// `"error"`, or `"denied"`.
     public let status: String
     /// Human-readable summary (user text or job prompt).
     public let message: String
@@ -72,19 +56,6 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     }
 
     /// Creates a run log entry.
-    /// - Parameters:
-    ///   - id: Entry identifier. Defaults to a new UUID.
-    ///   - jobID: Owning scheduler job, if any.
-    ///   - sessionID: Owning session, if any.
-    ///   - kind: Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
-    ///   - status: Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`,
-    ///     `"awaiting_approval"`, `"denied"`, and related lifecycle values).
-    ///   - message: Human-readable summary.
-    ///   - timestamp: Finish date. Defaults to now.
-    ///   - response: Assistant response or job output. Defaults to nil.
-    ///   - toolActions: Tools invoked during the run. Defaults to empty.
-    ///   - totalTokens: Billed tokens. Defaults to nil.
-    ///   - durationMs: Execution duration in milliseconds. Defaults to nil.
     public init(
         id: UUID = UUID(),
         jobID: UUID? = nil,
@@ -151,12 +122,6 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
 #endif
 
 /// In-memory and SQLite-persisted append-only store for run log entries.
-///
-/// Single owner of run history so REST (`GET /runs`), the chat path, and
-/// the scheduler firing path share one audit trail. When configured with
-/// `dbPath` (e.g. `episodes.db`), entries persist across server restarts.
-/// Stored messages are truncated to `maxMessageLength` characters so one
-/// huge `POST /chat` body cannot exhaust storage.
 public actor RunLogStore {
     /// Maximum characters kept per entry message; longer messages are
     /// truncated with a trailing `…`.
@@ -171,30 +136,12 @@ public actor RunLogStore {
     private var entries: [RunLogEntry] = []
 
     /// Creates a run log store.
-    ///
-    /// Memory only and never touches disk: actor initializers cannot
-    /// suspend, so synchronous SQLite reads here would block the
-    /// cooperative pool at startup. Disk hydration (including
-    /// `running` reconciliation) lives in `bootstrap()`; prefer
-    /// `load(capacity:dbPath:)` whenever durable state matters.
-    /// - Parameters:
-    ///   - capacity: Maximum entries kept. Defaults to 500.
-    ///   - dbPath: SQLite database file path. Defaults to nil (in-memory only).
     public init(capacity: Int = 500, dbPath: String? = nil) {
         self.capacity = max(1, capacity)
         self.dbPath = dbPath
     }
 
     /// Loads a store hydrated from durable SQLite state.
-    ///
-    /// Creates the store, then suspends on the shared serial store queue
-    /// to adopt persisted entries and reconcile stale `running` rows to
-    /// `interrupted`, so startup disk I/O never blocks the cooperative
-    /// pool.
-    /// - Parameters:
-    ///   - capacity: Maximum entries kept. Defaults to 500.
-    ///   - dbPath: SQLite database file path. Defaults to nil (in-memory only).
-    /// - Returns: Store reflecting durable state.
     public static func load(capacity: Int = 500, dbPath: String? = nil) async -> RunLogStore {
         let store = RunLogStore(capacity: capacity, dbPath: dbPath)
         await store.bootstrap()
@@ -202,12 +149,6 @@ public actor RunLogStore {
     }
 
     /// Hydrates entries from durable SQLite state.
-    ///
-    /// Adopts persisted entries and reconciles stale `running` rows left
-    /// by abnormal termination to `interrupted`, writing each
-    /// reconciliation back. No-op without a `dbPath`. Durable reads
-    /// observe cancellation so shutdown never blocks on disk I/O;
-    /// reconciliation writes run to completion so the audit trail lands.
     public func bootstrap() async {
         guard let dbPath else { return }
         #if canImport(SQLite3)
@@ -239,23 +180,6 @@ public actor RunLogStore {
     }
 
     /// Appends one entry, evicting the oldest when over capacity.
-    ///
-    /// The message is truncated to `maxMessageLength` characters (with a
-    /// trailing `…`) so capacity bounds bytes as well as entry count.
-    /// Parked approval-gated turns persist as `"awaiting_approval"` instead
-    /// of `"ok"` so inbox resolution can transition them later.
-    /// - Parameters:
-    ///   - kind: Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
-    ///   - status: Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`,
-    ///     `"awaiting_approval"`, `"denied"`, and related lifecycle values).
-    ///   - message: Human-readable summary.
-    ///   - jobID: Owning scheduler job, if any.
-    ///   - sessionID: Owning session, if any.
-    ///   - response: Assistant response text, if any.
-    ///   - toolActions: Tools invoked during the run.
-    ///   - totalTokens: Billed tokens.
-    ///   - durationMs: Execution duration in milliseconds.
-    /// - Returns: The stored entry.
     @discardableResult
     public func append(
         kind: String,
@@ -284,10 +208,6 @@ public actor RunLogStore {
     }
 
     /// Appends a prebuilt entry, evicting the oldest when over capacity.
-    ///
-    /// The entry message is truncated to `maxMessageLength` characters
-    /// before storage.
-    /// - Parameter entry: Entry to store.
     public func append(_ entry: RunLogEntry) async {
         let stored = RunLogEntry(
             id: entry.id,
@@ -317,18 +237,6 @@ public actor RunLogStore {
     }
 
     /// Updates an existing run entry by identifier.
-    ///
-    /// Preserves the owning session so an `"awaiting_approval"` turn keeps
-    /// its linkage when transitioning to `"ok"`, `"error"`, or `"denied"`.
-    /// - Parameters:
-    ///   - id: Target entry identifier.
-    ///   - status: New status (e.g. "ok", "error", "cancelled",
-    ///     "awaiting_approval", "denied").
-    ///   - response: Final assistant response, if any.
-    ///   - toolActions: Tool actions executed, if any.
-    ///   - totalTokens: Billed tokens, if any.
-    ///   - durationMs: Total duration in milliseconds, if any.
-    /// - Returns: The updated entry, or nil if not found.
     @discardableResult
     public func update(
         id: UUID,
@@ -384,14 +292,6 @@ public actor RunLogStore {
     }
 
     /// Lists entries, newest first.
-    ///
-    /// Memory-only snapshot of the bounded audit trail; durable rows are
-    /// adopted via `bootstrap()` and `load(capacity:dbPath:)`.
-    /// - Parameters:
-    ///   - limit: Maximum entries. Defaults to 50. Non-positive limits return an empty list.
-    ///   - jobID: Optional scheduler job filter.
-    ///   - sessionID: Optional owning session filter for per-conversation history.
-    /// - Returns: Entries newest first.
     public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil) async -> [RunLogEntry] {
         guard limit > 0 else { return [] }
         let matching = entries.filter { entry in
@@ -407,18 +307,11 @@ public actor RunLogStore {
     }
 
     /// Looks up one entry.
-    ///
-    /// Memory-only read of the bounded audit trail.
-    /// - Parameter id: Entry identifier.
-    /// - Returns: The entry, or nil when unknown.
     public func entry(id: UUID) async -> RunLogEntry? {
         entries.first { $0.id == id }
     }
 
     /// Number of stored entries.
-    ///
-    /// Memory-only count of the bounded audit trail.
-    /// - Returns: Entry count.
     public func count() async -> Int {
         entries.count
     }
@@ -500,8 +393,6 @@ public actor RunLogStore {
             guard let handle = try? open(dbPath: dbPath) else { return [] }
             defer { sqlite3_close(handle) }
 
-            // Preferred shape includes the session tag; legacy tables without
-            // the migration fall back to the session-less shape below.
             let sql = """
             SELECT id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
             FROM run_logs
@@ -509,7 +400,7 @@ public actor RunLogStore {
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                return readLegacy(handle: handle, limit: limit)
+                return []
             }
             defer { sqlite3_finalize(statement) }
 
@@ -537,65 +428,6 @@ public actor RunLogStore {
                     id: id,
                     jobID: jobID,
                     sessionID: sessionID,
-                    kind: kind,
-                    status: status,
-                    message: message,
-                    timestamp: timestamp,
-                    response: response,
-                    toolActions: toolActions,
-                    totalTokens: totalTokens,
-                    durationMs: durationMs
-                ))
-            }
-            if loaded.count > limit {
-                return Array(loaded.suffix(limit))
-            }
-            return loaded
-        }
-
-        /// Reads tables predating session linkage, attributing no session.
-        ///
-        /// Runs when the preferred `session_id` select cannot prepare, so an
-        /// unmigrated database still hydrates instead of returning empty.
-        /// - Parameters:
-        ///   - handle: Open database handle.
-        ///   - limit: Maximum entries to keep.
-        /// - Returns: Entries with nil sessions, oldest first capped to `limit`.
-        private static func readLegacy(handle: OpaquePointer?, limit: Int) -> [RunLogEntry] {
-            let sql = """
-            SELECT id, job_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
-            FROM run_logs
-            ORDER BY timestamp ASC, rowid ASC;
-            """
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                return []
-            }
-            defer { sqlite3_finalize(statement) }
-
-            var loaded: [RunLogEntry] = []
-            while sqlite3_step(statement) == SQLITE_ROW {
-                guard let idStr = SQLiteHelpers.columnText(statement, index: 0),
-                      let id = UUID(uuidString: idStr),
-                      let kind = SQLiteHelpers.columnText(statement, index: 2),
-                      let status = SQLiteHelpers.columnText(statement, index: 3),
-                      let message = SQLiteHelpers.columnText(statement, index: 4)
-                else { continue }
-
-                let jobID = SQLiteHelpers.columnText(statement, index: 1).flatMap { UUID(uuidString: $0) }
-                let timestamp = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 5))
-                let response = SQLiteHelpers.columnText(statement, index: 6)
-                let toolActionsText = SQLiteHelpers.columnText(statement, index: 7)
-                let toolActions = toolActionsText.flatMap { raw in
-                    raw.data(using: .utf8).flatMap { try? JSONDecoder().decode([ToolAction].self, from: $0) }
-                } ?? []
-                let totalTokens = SQLiteHelpers.columnInt64(statement, index: 8).map { Int($0) }
-                let durationMs = SQLiteHelpers.columnInt64(statement, index: 9).map { Int($0) }
-
-                loaded.append(RunLogEntry(
-                    id: id,
-                    jobID: jobID,
-                    sessionID: nil,
                     kind: kind,
                     status: status,
                     message: message,

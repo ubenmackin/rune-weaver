@@ -1,19 +1,9 @@
 // Rune Weaver Tools — Execution-time email credential resolution.
-//
-// Resolves per-account IMAP/SMTP passwords at execution time from the
-// environment-first `SecretsManager` lookup with a Keychain fallback, so
-// `config.toml` never stores secrets. Bundles connection fields with the
-// resolved password in memory only, redacting secrets from logs and errors.
 
 import Foundation
 import RuneWeaverCore
 
 /// Resolved credentials for one email account.
-///
-/// Bundles the non-sensitive connection fields from `EmailAccount` with
-/// the runtime-resolved password. The password is held in memory only:
-/// `description` redacts it, and `EmailCredentialError` messages never
-/// include it.
 public struct ResolvedEmailCredentials: Sendable, Equatable {
     /// Account nickname (e.g. `icloud`).
     public let accountName: String
@@ -33,15 +23,6 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
     public let smtpSecurity: EmailSMTPSecurity
 
     /// Creates resolved credentials from explicit fields.
-    /// - Parameters:
-    ///   - accountName: Account nickname.
-    ///   - host: IMAP hostname.
-    ///   - port: IMAP port.
-    ///   - username: Login username.
-    ///   - password: Runtime-resolved password. Never logged.
-    ///   - smtpHost: Optional SMTP hostname override.
-    ///   - smtpPort: Optional SMTP submission port override.
-    ///   - smtpSecurity: SMTP transport security. Defaults to `auto`.
     public init(
         accountName: String,
         host: String,
@@ -64,9 +45,6 @@ public struct ResolvedEmailCredentials: Sendable, Equatable {
     }
 
     /// Creates credentials from an account plus a resolved password.
-    /// - Parameters:
-    ///   - account: Configured account (host, port, username, plus SMTP overrides).
-    ///   - password: Runtime-resolved password. Never logged.
     public init(account: EmailAccount, password: String) {
         self.init(
             accountName: account.name,
@@ -97,10 +75,6 @@ extension ResolvedEmailCredentials: CustomStringConvertible, CustomDebugStringCo
 }
 
 /// Failures resolving or reaching an email account.
-///
-/// Messages echo only non-sensitive fields (account name, expected
-/// variable name, host, port, username) so misconfiguration is quick to
-/// fix. Secret values are never included.
 public enum EmailCredentialError: Error, Sendable, Equatable {
     /// No password found in the environment or Keychain.
     case missingPassword(accountName: String, envVar: String, host: String, port: Int, username: String)
@@ -124,13 +98,6 @@ extension EmailCredentialError: LocalizedError {
 }
 
 /// Resolves email account passwords at runtime.
-///
-/// Passwords live outside `config.toml` under
-/// `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` (see
-/// `EmailAccount.passwordEnvVar`). Lookup is environment-first with a
-/// Keychain fallback under service `com.runeweaver.secrets` — the same
-/// order `CLIProviderBuilder` uses for `ProviderConfig.apiKeyEnv`.
-/// Raw values are held in memory only and are never printed or logged.
 public enum EmailCredentialResolver {
     /// Variable name holding the account's password.
     /// - Parameter account: Configured account.
@@ -140,14 +107,6 @@ public enum EmailCredentialResolver {
     }
 
     /// Resolves the password via the shared secrets lookup.
-    ///
-    /// Single-sourced through `SecretsManager.retrieve(key:)` (live
-    /// environment first, launch-time snapshot second, then the Keychain
-    /// item `(service: com.runeweaver.secrets, account: envVar)`) so
-    /// concurrent callers issue one `getenv` each instead of two. Returns
-    /// `nil` when unset everywhere. Never logs the value.
-    /// - Parameter account: Configured account.
-    /// - Returns: Password, or `nil` when missing.
     public static func resolvePassword(for account: EmailAccount) async -> String? {
         let envVar = passwordEnvVar(for: account)
         let secrets = SecretsManager()
@@ -168,11 +127,6 @@ public enum EmailCredentialResolver {
     }
 
     /// Builds the missing-password error for an account.
-    ///
-    /// Echoes host, port, username, and the expected variable name —
-    /// never the secret value.
-    /// - Parameter account: Configured account.
-    /// - Returns: Missing-password error.
     public static func missingPasswordError(for account: EmailAccount) -> EmailCredentialError {
         .missingPassword(
             accountName: account.name,
@@ -184,9 +138,6 @@ public enum EmailCredentialResolver {
     }
 
     /// Resolves the password or throws a missing-credential error.
-    /// - Parameter account: Configured account.
-    /// - Returns: Password.
-    /// - Throws: `EmailCredentialError.missingPassword` when unset.
     public static func requirePassword(for account: EmailAccount) async throws -> String {
         if let password = await resolvePassword(for: account) {
             return password
@@ -195,18 +146,11 @@ public enum EmailCredentialResolver {
     }
 
     /// Resolves full credentials or throws a missing-credential error.
-    /// - Parameter account: Configured account.
-    /// - Returns: Connection fields plus the resolved password.
-    /// - Throws: `EmailCredentialError.missingPassword` when unset.
     public static func resolvedCredentials(for account: EmailAccount) async throws -> ResolvedEmailCredentials {
         try await ResolvedEmailCredentials(account: account, password: requirePassword(for: account))
     }
 
     /// Formats a connection failure echoing host, port, and username.
-    /// - Parameters:
-    ///   - account: Configured account.
-    ///   - reason: Transport detail (e.g. connection refused).
-    /// - Returns: Unreachable error without any secret value.
     public static func unreachableError(for account: EmailAccount, reason: String) -> EmailCredentialError {
         .unreachable(
             accountName: account.name,
@@ -219,17 +163,6 @@ public enum EmailCredentialResolver {
 }
 
 /// Well-known IMAP details for the iCloud account.
-///
-/// iCloud serves read-only IMAP at `imap.mail.me.com:993` and requires
-/// an app-specific password (never the Apple Account password). The
-/// value is resolved through the shared
-/// `EMAIL_<UPPERCASED_ACCOUNT_NAME>_PASSWORD` convention as
-/// `EMAIL_ICLOUD_PASSWORD` (environment first, Keychain service
-/// `com.runeweaver.secrets` second), so the bridge and tools need no
-/// iCloud-specific code path. This namespace single-sources the host,
-/// port, and setup pointer so docs, diagnostics, and tests stay
-/// consistent. All members are non-sensitive; the secret itself is
-/// never stored here.
 public enum EmailICloud: Sendable {
     /// Account nickname used in `[email.accounts]`.
     public static let accountName = "icloud"

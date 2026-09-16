@@ -1,9 +1,4 @@
 // Rune Weaver Core — Three-tier memory orchestration across working and durable stores.
-//
-// Coordinates episodic turns, semantic facts with pluggable embeddings, and
-// long-lived profile attributes behind one recall surface. Mirrors turns cleanly,
-// folds context overflow into summaries, and compacts aged episodes so recall
-// stays calibrated without losing durable history.
 
 import Foundation
 
@@ -18,10 +13,6 @@ public enum MemorySource: String, Sendable, Codable, Equatable, CaseIterable {
 }
 
 /// One retrieved memory with its relevance score.
-///
-/// Higher `score` means more relevant: cosine similarity in `[-1, 1]`
-/// for semantic hits, `1.0`-descending rank order for episodic hits,
-/// and stored `confidence` for profile hits.
 public struct MemoryResult: Sendable, Codable, Equatable {
     /// Human-readable content.
     public let content: String
@@ -33,11 +24,6 @@ public struct MemoryResult: Sendable, Codable, Equatable {
     public let metadata: [String: String]
 
     /// Creates a memory result.
-    /// - Parameters:
-    ///   - content: Result content.
-    ///   - score: Relevance score.
-    ///   - source: Originating tier.
-    ///   - metadata: Key/value annotations. Defaults to empty.
     public init(content: String, score: Double, source: MemorySource, metadata: [String: String] = [:]) {
         self.content = content
         self.score = score
@@ -60,12 +46,6 @@ public struct UserFact: Sendable, Codable, Equatable, Identifiable {
     public let lastConfirmed: Date
 
     /// Creates a user fact.
-    /// - Parameters:
-    ///   - id: Unique identifier. Defaults to a new UUID.
-    ///   - content: Fact text.
-    ///   - confidence: Confidence in `[0, 1]`. Defaults to `1.0`.
-    ///   - source: Origin label. Defaults to `"user"`.
-    ///   - lastConfirmed: Confirmation date. Defaults to now.
     public init(
         id: UUID = UUID(),
         content: String,
@@ -91,10 +71,6 @@ public struct Preference: Sendable, Codable, Equatable {
     public let confidence: Double
 
     /// Creates a preference.
-    /// - Parameters:
-    ///   - key: Preference key.
-    ///   - value: Preference value.
-    ///   - confidence: Confidence in `[0, 1]`. Defaults to `1.0`.
     public init(key: String, value: String, confidence: Double = 1.0) {
         self.key = key
         self.value = value
@@ -112,10 +88,6 @@ public struct UserProfile: Sendable, Codable, Equatable {
     public var lastUpdated: Date
 
     /// Creates a user profile.
-    /// - Parameters:
-    ///   - facts: Long-lived facts. Defaults to empty.
-    ///   - preferences: Preferences. Defaults to empty.
-    ///   - lastUpdated: Mutation date. Defaults to now.
     public init(facts: [UserFact] = [], preferences: [Preference] = [], lastUpdated: Date = Date()) {
         self.facts = facts
         self.preferences = preferences
@@ -139,10 +111,6 @@ public enum MemoryEngineError: Error, Sendable, Equatable {
 }
 
 /// Failure policy for episodic turn mirroring.
-///
-/// Single policy shared by the orchestrator (silent) and the CLI chat
-/// loop (report) so both callers use one `MemoryEngine`-owned helper
-/// with an explicit policy instead of duplicated helpers.
 public enum MirrorFailurePolicy: Sendable, Equatable {
     /// Ignore mirror failures.
     case silent
@@ -152,52 +120,23 @@ public enum MirrorFailurePolicy: Sendable, Equatable {
 
 /// Three-tier memory: episodic (SQLite + FTS5), semantic (vector),
 /// and profile (structured user facts and preferences).
-///
-/// Memory flow: user input lands in working memory (the
-/// `ConversationManager`), completed turns are fanned out here via
-/// ``MemoryEngine/storeEpisodic(content:metadata:sessionID:role:)``,
-/// key facts are extracted via
-/// ``MemoryEngine/extractAndStoreFacts(from:embeddings:)`` and stored
-/// with embeddings via
-/// ``MemoryEngine/storeSemantic(fact:embedding:metadata:confidence:source:)``,
-/// and future queries recall both tiers plus the profile.
 public actor MemoryEngine {
     /// Episodic conversation-history store.
     private let episodeStore: EpisodeStore
     /// Semantic fact/vector store.
-    ///
-    /// Private so every read and write funnels through this engine's
-    /// validation and dimension guards. The companion backfill file reaches
-    /// the store only through the narrow maintenance helpers below, never
-    /// the store itself; still actor-isolated.
     private let vectorStore: VectorStore
     /// In-memory profile snapshot, mirrored to disk best-effort.
     private var profile: UserProfile
     /// JSON file backing the profile, if configured.
     private let profilePath: String?
     /// Maximum results fetched per tier before merging.
-    ///
-    /// Bounds fan-out so huge limits (e.g. `.max`) never issue unbounded
-    /// store queries; stores additionally clamp to `Int32.max` at the
-    /// SQLite boundary.
     private static let maxPerTierResults = 1000
     /// Maximum characters accepted for a single stored content.
-    ///
-    /// Bounds episodic turns and semantic facts alike so unbounded input
-    /// never materializes huge rows; consistent with the tighter
-    /// preference caps applied during extraction.
     public static let maxContentLength = 10000
     /// Maximum episodic records retained before auto-compacting old sessions.
     public static let maxEpisodicCount = 10000
 
     /// Creates an engine from live stores.
-    /// - Parameters:
-    ///   - episodeStore: Episodic store.
-    ///   - vectorStore: Semantic store.
-    ///   - profilePath: JSON file for the profile. Defaults to nil
-    ///     (memory only).
-    ///   - initialProfile: Starting profile. Defaults to the file
-    ///     contents when `profilePath` exists, else empty.
     public init(
         episodeStore: EpisodeStore,
         vectorStore: VectorStore,
@@ -217,11 +156,6 @@ public actor MemoryEngine {
     }
 
     /// Creates an engine from filesystem paths.
-    /// - Parameters:
-    ///   - episodesDBPath: SQLite path for episodic memory.
-    ///   - vectorDBPath: Directory for semantic memory.
-    ///   - profilePath: JSON file for the profile. When nil, defaults
-    ///     to `<episodesDBPath>.profile.json`.
     public init(episodesDBPath: String, vectorDBPath: String, profilePath: String? = nil) {
         self.init(
             episodeStore: EpisodeStore(dbPath: episodesDBPath),
@@ -239,16 +173,6 @@ public actor MemoryEngine {
     // MARK: - Episodic
 
     /// Stores one conversation turn in episodic memory.
-    /// - Parameters:
-    ///   - content: Turn text. Must be non-empty after trimming
-    ///     whitespace and at most `maxContentLength` characters;
-    ///     empty or overlong content is rejected.
-    ///   - metadata: Key/value annotations. Defaults to empty.
-    ///   - sessionID: Owning session. Defaults to a new UUID.
-    ///   - role: Who produced the turn. Defaults to `.user`.
-    /// - Returns: The stored turn as a memory result.
-    /// - Throws: `MemoryEngineError/episodicFailed(_:)` when the content
-    ///   is empty, exceeds `maxContentLength`, or the store write fails.
     @discardableResult
     public func storeEpisodic(
         content: String,
@@ -284,20 +208,12 @@ public actor MemoryEngine {
     }
 
     /// Compacts episodic sessions older than the specified date.
-    /// - Parameters:
-    ///   - olderThan: Date cutoff for compaction.
-    /// - Returns: Compacted episode summaries.
     @discardableResult
     public func compactEpisodic(olderThan: Date) async throws -> [EpisodeSummary] {
         try await episodeStore.compactSessions(olderThan: olderThan)
     }
 
     /// Searches episodic memory by keyword.
-    /// - Parameters:
-    ///   - query: Search text.
-    ///   - limit: Maximum results. Defaults to 10. Non-positive limits
-    ///     return an empty list. Larger limits are capped per tier.
-    /// - Returns: Matching turns, best first.
     public func searchEpisodes(query: String, limit: Int = 10) async throws -> [MemoryResult] {
         guard limit > 0 else { return [] }
         let clamped = min(limit, Self.maxPerTierResults)
@@ -319,9 +235,6 @@ public actor MemoryEngine {
     }
 
     /// Runs an episodic store operation, mapping failures.
-    /// - Parameter work: Store operation to run.
-    /// - Returns: Operation result.
-    /// - Throws: `MemoryEngineError/episodicFailed(_:)` when the store fails.
     private func withEpisodic<T>(_ work: () async throws -> T) async throws -> T {
         do {
             return try await work()
@@ -331,20 +244,6 @@ public actor MemoryEngine {
     }
 
     /// Returns stored episodes for one session, oldest first.
-    ///
-    /// Exposed so the chat REPL can hydrate working memory on
-    /// `--session` resume from the same episodic store every turn
-    /// mirrors into, keeping session continuity without opening an
-    /// independent `EpisodeStore`. When `limit` is set, returns the
-    /// oldest `limit` episodes; use `recentEpisodes(for:limit:)` for
-    /// the newest window needed by resume hydration.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - limit: Maximum episodes. Defaults to nil (all). When set,
-    ///     the oldest `limit` episodes are returned. Non-positive limits
-    ///     return an empty list.
-    /// - Returns: Matching episodes in chronological order.
-    /// - Throws: `MemoryEngineError/episodicFailed(_:)` when the read fails.
     public func episodes(for sessionID: UUID, limit: Int? = nil) async throws -> [Episode] {
         if let limit, limit <= 0 {
             return []
@@ -356,15 +255,6 @@ public actor MemoryEngine {
     }
 
     /// Returns the newest stored episodes for one session, oldest first.
-    ///
-    /// Bounded resume path: fetches only the last `limit` turns instead
-    /// of loading the whole session, then returns them in chronological
-    /// order for direct history hydration.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - limit: Maximum episodes. Non-positive limits return an empty list.
-    /// - Returns: Newest episodes in chronological order.
-    /// - Throws: `MemoryEngineError/episodicFailed(_:)` when the read fails.
     public func recentEpisodes(for sessionID: UUID, limit: Int) async throws -> [Episode] {
         guard limit > 0 else { return [] }
         let clamped = min(limit, Self.maxPerTierResults)
@@ -374,11 +264,6 @@ public actor MemoryEngine {
     }
 
     /// Deletes every episodic turn for a session. Unknown sessions are a no-op.
-    ///
-    /// Used by `/clear` so working memory (`ConversationManager`) and the
-    /// durable episodic mirror stay consistent sharing one database file.
-    /// - Parameter sessionID: Owning session identifier.
-    /// - Throws: `MemoryEngineError/episodicFailed(_:)` when the delete fails.
     public func deleteSession(_ sessionID: UUID) async throws {
         try await withEpisodic {
             try await episodeStore.deleteSession(sessionID)
@@ -388,19 +273,6 @@ public actor MemoryEngine {
     // MARK: - Semantic
 
     /// Stores a fact in semantic memory and in the user profile.
-    /// - Parameters:
-    ///   - fact: Fact text. Leading/trailing whitespace is trimmed. Must not
-    ///     exceed `maxContentLength` characters.
-    ///   - embedding: Embedding vector for the fact.
-    ///   - metadata: Key/value annotations. Defaults to empty.
-    ///   - confidence: Confidence in `[0, 1]` stored on the profile fact.
-    ///     Defaults to `1.0`.
-    ///   - source: Origin label. Defaults to `"user"`.
-    /// - Returns: The profile fact that was recorded.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the fact
-    ///   is empty, has no alphanumeric characters, exceeds
-    ///   `maxContentLength`, holds an out-of-range confidence, or the
-    ///   store write fails.
     @discardableResult
     public func storeSemantic(
         fact: String,
@@ -423,18 +295,6 @@ public actor MemoryEngine {
     }
 
     /// Queries semantic memory by embedding, filtered by metadata.
-    ///
-    /// When `embedding` is empty the store falls back to keyword
-    /// overlap scoring against `query` so callers without an
-    /// embeddings model still get useful recall.
-    /// - Parameters:
-    ///   - query: Query text (used for the keyword fallback and
-    ///     echoed in result metadata).
-    ///   - embedding: Query vector.
-    ///   - limit: Maximum results. Defaults to 5. Non-positive limits
-    ///     return an empty list. Larger limits are capped per tier.
-    ///   - metadataFilter: Required metadata pairs. Defaults to nil.
-    /// - Returns: Matching facts, best first.
     public func querySemantic(
         query: String,
         embedding: [Float],
@@ -468,34 +328,11 @@ public actor MemoryEngine {
     }
 
     /// Total stored episode count from the shared episode store.
-    ///
-    /// Exposed so CLI commands can report memory stats from a single
-    /// `MemoryEngine` instead of opening an independent `EpisodeStore`
-    /// on the same file and diverging.
-    /// - Returns: Row count, or 0 when the store is unavailable.
     public func episodeCount() async -> Int {
         await (try? episodeStore.count()) ?? 0
     }
 
     /// Stores an explicit user-supplied fact in structured memory.
-    ///
-    /// Persists `content` as a keyword-only row in the vector store and
-    /// mirrors it into the user profile so both `getUserProfile()` and
-    /// `allSemanticFacts()` surface it for display commands. This is the
-    /// durable fallback when no embeddings producer is configured (or its
-    /// output is unavailable): for a vector-backed row with cosine-ranked
-    /// recall, store through `storeSemantic(fact:embedding:...)` or run an
-    /// embedding backfill over keyword-only rows.
-    /// - Parameters:
-    ///   - content: Fact text. Leading/trailing whitespace is trimmed. Must not
-    ///     exceed `maxContentLength` characters.
-    ///   - source: Origin label. Defaults to `"chat"`.
-    ///   - confidence: Confidence in `[0, 1]`. Defaults to `1.0`.
-    /// - Returns: The profile fact that was recorded.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the fact
-    ///   is empty, has no alphanumeric characters, exceeds
-    ///   `maxContentLength`, holds an out-of-range confidence, or the
-    ///   store write fails.
     @discardableResult
     public func storeProfileFact(
         content: String,
@@ -516,22 +353,6 @@ public actor MemoryEngine {
     }
 
     /// Persists one fact to the vector store and mirrors it into the profile.
-    ///
-    /// Validating entry shared by fact extraction so vector writes,
-    /// profile mirroring, and error mapping stay in one place. Trims and
-    /// validates `content` once before delegating to
-    /// `persistValidatedFact(content:embedding:metadata:confidence:source:)`.
-    /// Callers validate `confidence` is in `[0, 1]` before delegating here.
-    /// - Parameters:
-    ///   - content: Fact text to store. Leading/trailing whitespace is trimmed.
-    ///   - embedding: Embedding vector (empty for keyword-only rows).
-    ///   - metadata: Key/value annotations.
-    ///   - confidence: Confidence in `[0, 1]` stored on the profile fact.
-    ///   - source: Origin label.
-    /// - Returns: The profile fact that was recorded.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the fact
-    ///   is empty, has no alphanumeric characters, exceeds
-    ///   `maxContentLength`, or the store write fails.
     private func persistFact(
         content: String,
         embedding: [Float],
@@ -550,19 +371,6 @@ public actor MemoryEngine {
     }
 
     /// Persists one already-validated fact to the vector store and mirrors it into the profile.
-    ///
-    /// Shared by `storeSemantic`, `storeProfileFact`, and `persistFact`
-    /// so validation happens once per store: callers pass trimmed text
-    /// from `validatedFactText(_:)` and this helper assumes it is
-    /// non-empty, alphanumeric, and within `maxContentLength`.
-    /// - Parameters:
-    ///   - content: Trimmed fact text, already validated.
-    ///   - embedding: Embedding vector (empty for keyword-only rows).
-    ///   - metadata: Key/value annotations.
-    ///   - confidence: Confidence in `[0, 1]` stored on the profile fact.
-    ///   - source: Origin label.
-    /// - Returns: The profile fact that was recorded.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the store write fails.
     private func persistValidatedFact(
         content trimmed: String,
         embedding: [Float],
@@ -589,14 +397,6 @@ public actor MemoryEngine {
     }
 
     /// Records a preference, then persists the profile.
-    ///
-    /// Single-value keys (currently `name`) replace any existing row
-    /// with the same key so `call me X` never stacks names. All other
-    /// keys (including `likes` and `favorite-*`) accumulate: only an
-    /// exact key-plus-value duplicate is removed before appending, so
-    /// `I like apples` then `I like oranges` keeps both while storing
-    /// `I like apples` twice keeps one row.
-    /// - Parameter preference: Preference to store.
     public func setPreference(_ preference: Preference) {
         if Self.isSingleValuePreferenceKey(preference.key) {
             profile.preferences.removeAll { $0.key == preference.key }
@@ -608,21 +408,12 @@ public actor MemoryEngine {
     }
 
     /// Removes a preference by key and value.
-    /// - Parameters:
-    ///   - key: Preference key.
-    ///   - value: Preference value.
     public func removePreference(key: String, value: String) {
         profile.preferences.removeAll { $0.key == key && $0.value == value }
         touchProfile()
     }
 
     /// Confirms a profile fact, refreshing its confidence and timestamp.
-    ///
-    /// Confidence is clamped to `[0, 1]` so out-of-range input cannot
-    /// inflate later recall scoring.
-    /// - Parameters:
-    ///   - id: Fact identifier.
-    ///   - confidence: New confidence in `[0, 1]`. Defaults to `1.0`.
     public func confirmFact(id: UUID, confidence: Double = 1.0) {
         guard let index = profile.facts.firstIndex(where: { $0.id == id }) else { return }
         let clamped = min(max(confidence, 0.0), 1.0)
@@ -638,31 +429,12 @@ public actor MemoryEngine {
     }
 
     /// Removes a profile fact without touching the vector store.
-    ///
-    /// Profile-only path: drops the profile mirror and persists, so
-    /// synchronous callers keep working. Use the async
-    /// ``MemoryEngine/removeFact(id:)`` when the semantic row must be
-    /// deleted as well, or ``MemoryEngine/removeFactThrowing(id:)``
-    /// when failures must throw. Named distinctly from the async
-    /// `removeFact` so forgetting `await` is a compile error instead
-    /// of a silent profile-only delete leaving an orphaned vector row.
-    /// - Parameter id: Fact identifier. Unknown identifiers are a no-op.
     public func removeProfileFact(id: UUID) {
         profile.facts.removeAll { $0.id == id }
         touchProfile()
     }
 
     /// Removes a profile fact and its semantic row best-effort.
-    ///
-    /// Deletes the vector row first with failures ignored, then
-    /// removes the profile mirror so callers never need `try`. When
-    /// the vector delete fails the orphaned row stays recallable via
-    /// the keyword fallback until reindex or clear; use
-    /// ``MemoryEngine/removeFactThrowing(id:)`` when the caller must
-    /// observe persistence failures. Synchronous callers without an
-    /// async context should use ``MemoryEngine/removeProfileFact(id:)``
-    /// instead.
-    /// - Parameter id: Fact identifier. Unknown identifiers are a no-op.
     public func removeFact(id: UUID) async {
         try? await vectorStore.remove(id: id)
         profile.facts.removeAll { $0.id == id }
@@ -670,12 +442,6 @@ public actor MemoryEngine {
     }
 
     /// Removes a profile fact and its semantic row, reporting failures.
-    ///
-    /// Deletes the vector row first so orphaned rows never stay
-    /// recallable, then removes the profile mirror.
-    /// - Parameter id: Fact identifier. Unknown identifiers are a no-op.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the vector
-    ///   delete fails.
     public func removeFactThrowing(id: UUID) async throws {
         do {
             try await vectorStore.remove(id: id)
@@ -691,25 +457,6 @@ public actor MemoryEngine {
     // MARK: - Extraction
 
     /// Extracts durable facts and preferences from free text.
-    ///
-    /// Rule-based and fully local: splits `text` into sentences, keeps
-    /// first-person / possessive / "remember" sentences as facts, pulls
-    /// `call me X`, `my favorite X is Y`, and `I like/love/prefer X`
-    /// patterns into preferences, then stores each fact with the
-    /// caller-supplied embedding (or a keyword-only row when none is
-    /// given for that sentence) so search keeps working. Sentences
-    /// without alphanumeric content are skipped. Writes are
-    /// failure-isolated per sentence: one persist failure (e.g. an
-    /// embedding width mismatch) skips that sentence and the rest still
-    /// store, returning only successes. This failure-isolated method never
-    /// throws; every per-sentence failure is swallowed so extraction never
-    /// interrupts the caller. Use `extractAndStoreFactsThrowing(from:embeddings:)`
-    /// when the caller must observe persist failures.
-    /// - Parameters:
-    ///   - text: Free text (e.g. a user message) to mine.
-    ///   - embeddings: Optional per-sentence embeddings keyed by the
-    ///     exact sentence text. Defaults to empty (keyword-only rows).
-    /// - Returns: Facts that were stored.
     @discardableResult
     public func extractAndStoreFacts(
         from text: String,
@@ -729,18 +476,6 @@ public actor MemoryEngine {
     }
 
     /// Extracts durable facts and preferences from free text, reporting failures.
-    ///
-    /// Throwing overload of `extractAndStoreFacts(from:embeddings:)` with
-    /// identical sentence splitting, preference extraction, and fact
-    /// filtering. Unlike the failure-isolated variant, the first persist
-    /// failure (e.g. an embedding width mismatch) is thrown so callers can
-    /// observe store errors; facts stored before the failure remain stored.
-    /// - Parameters:
-    ///   - text: Free text (e.g. a user message) to mine.
-    ///   - embeddings: Optional per-sentence embeddings keyed by the
-    ///     exact sentence text. Defaults to empty (keyword-only rows).
-    /// - Returns: Facts that were stored.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when a fact persist fails.
     @discardableResult
     public func extractAndStoreFactsThrowing(
         from text: String,
@@ -750,19 +485,6 @@ public actor MemoryEngine {
     }
 
     /// Collects facts from free text, throwing on the first persist failure.
-    ///
-    /// Single shared extraction loop for `extractAndStoreFacts(from:embeddings:)`
-    /// and `extractAndStoreFactsThrowing(from:embeddings:)`: splits `text`
-    /// into sentences, records preferences, filters fact-like storable
-    /// sentences, and persists each with its caller-supplied embedding.
-    /// The failure-isolated wrapper calls this helper per sentence and
-    /// catches, so one width mismatch never aborts the remaining sentences.
-    /// - Parameters:
-    ///   - text: Free text (e.g. a user message) to mine.
-    ///   - embeddings: Optional per-sentence embeddings keyed by the
-    ///     exact sentence text.
-    /// - Returns: Facts that were stored.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when a fact persist fails.
     private func collectFactsThrowing(
         from text: String,
         embeddings: [String: [Float]]
@@ -791,36 +513,6 @@ public actor MemoryEngine {
     // MARK: - Combined recall
 
     /// Recalls across episodic, semantic, and profile tiers.
-    ///
-    /// Episodic FTS hits, semantic hits, and profile keyword hits are
-    /// always merged and sorted by calibrated score descending so memory search
-    /// works with zero ML dependencies. The tiers arrive on incomparable native
-    /// scales — episodic rank order (`1/(index+1)`), semantic cosine similarity,
-    /// and keyword overlap — so a direct sort lets episodic rank noise dominate:
-    /// a paraphrase query scoring the true semantic fact at cosine `~0.25-0.4`
-    /// always loses to the top episodic FTS rows at `1.0` and `0.5` even when
-    /// those rows share only a surface keyword and miss the meaning entirely.
-    /// Each tier is therefore scaled by its documented tier weight before
-    /// sorting, mapping episodic rank 1 to the floor of the observed paraphrase
-    /// band so genuine semantic matches outrank episodic keyword noise while
-    /// exact episodic hits still compete. When `embedding` holds a query
-    /// vector, semantic hits use vector similarity; when nil or empty,
-    /// semantic hits fall back to keyword overlap via `querySemantic`
-    /// so keyword-only rows (including orphaned vector rows whose
-    /// profile fact was removed) stay recallable. Keyword semantic
-    /// scores are normalized to `[0, 1]` before calibration so keyword-only
-    /// stores merge on the same shared scale, and merged hits are deduped
-    /// by identifier (with content matches scoped to semantic and profile
-    /// mirrors, keeping episodic turns) keeping the best calibrated score
-    /// because profile facts mirror vector rows.
-    /// - Parameters:
-    ///   - query: Query text.
-    ///   - embedding: Optional query vector. When nil or empty,
-    ///     semantic search uses the keyword fallback.
-    ///   - limit: Maximum results per tier before merging.
-    ///     Defaults to 10. Non-positive limits return an empty list.
-    ///     Larger limits are capped per tier.
-    /// - Returns: Merged results, best first.
     public func recall(query: String, embedding: [Float]? = nil, limit: Int = 10) async throws -> [MemoryResult] {
         guard limit > 0 else { return [] }
         let perTier = min(limit, Self.maxPerTierResults)
@@ -851,13 +543,6 @@ public actor MemoryEngine {
 
 extension MemoryEngine {
     /// Total stored semantic fact count without exposing the store.
-    ///
-    /// Narrow maintenance access for the backfill surface: keeps every read
-    /// and write funneled through the engine's validation and dimension
-    /// guards while living outside the actor body so the type stays within
-    /// style budgets. Extension methods on the actor stay actor-isolated,
-    /// so behavior and isolation are unchanged.
-    /// - Returns: Fact count.
     func semanticStoreCount() async -> Int {
         await vectorStore.count()
     }
@@ -875,10 +560,6 @@ extension MemoryEngine {
     }
 
     /// Clears every semantic row, resetting derived width but keeping configured width.
-    ///
-    /// Persists empty first, then reloads from disk so a stale derived width
-    /// never blocks the next backend while an init-configured expectation
-    /// survives the empty.
     func semanticStoreClear() async throws {
         try await vectorStore.clear()
         await vectorStore.reload()
@@ -901,14 +582,6 @@ extension MemoryEngine {
 
 extension MemoryEngine {
     /// Keyword matches against profile facts and preferences.
-    ///
-    /// Scores are clamped to `[0, 1]` so profile hits share one scale
-    /// with normalized semantic and episodic hits.
-    /// - Parameters:
-    ///   - query: Search text.
-    ///   - limit: Maximum hits to return. Non-positive limits return
-    ///     an empty list.
-    /// - Returns: Profile hits scored by token overlap.
     private func profileResults(query: String, limit: Int) -> [MemoryResult] {
         guard limit > 0 else { return [] }
         let queryTokens = Tokenization.tokenize(query)
@@ -949,48 +622,15 @@ extension MemoryEngine {
     }
 
     /// Weight mapping episodic rank scores onto the shared recall scale.
-    ///
-    /// Episodic FTS rank (`1.0`, `0.5`, `0.33`, ...) carries no notion of meaning:
-    /// rank 1 only means the FTS query matched first, not that the turn answers
-    /// the query. Left unscaled, those ranks always outscore the cosine band where
-    /// true paraphrase matches land (`~0.25-0.4`), so a paraphrase with no shared
-    /// tokens loses to any episodic row sharing one keyword. Scaling rank 1 to
-    /// `0.25` puts the best episodic hit at the floor of that band: mid-to-strong
-    /// semantic matches outrank episodic noise outright, borderline matches win
-    /// the tie-break below, and multi-token keyword hits (which score above `0.25`
-    /// on the shared scale) still compete. Rank 2 lands at `0.125`, just above the
-    /// automatic-recall noise floor, so only the top episodic hits inject as chat
-    /// context instead of every FTS match.
     private static let episodicTierWeight = 0.25
 
     /// Weight for semantic hits on the shared recall scale.
-    ///
-    /// Unity: cosine similarity already spans a meaning-calibrated `[0, 1]` range
-    /// (vector search filters non-positive scores), and keyword-fallback hits reach
-    /// calibration pre-normalized to `[0, 1]` by `normalizedSemantic`, so no further
-    /// scaling is needed to keep vector and keyword semantic hits comparable with
-    /// each other and with profile hits.
     private static let semanticTierWeight = 1.0
 
     /// Weight for profile hits on the shared recall scale.
-    ///
-    /// Unity: profile scoring (`overlap/10 * confidence`, clamped) already shares
-    /// the `[0, 1]` keyword scale with normalized semantic hits, so profile facts
-    /// keep full value and multi-token profile matches naturally outrank a lone
-    /// episodic rank-1 hit (`0.25`) while single-token matches do not.
     private static let profileTierWeight = 1.0
 
     /// Applies the tier weight for a recall hit's source.
-    ///
-    /// Runs after per-tier fetching and keyword normalization, so every tier enters
-    /// the merge on one comparable scale and sorting reflects meaning rather than
-    /// native rank magnitudes. Scores stay within `[0, 1]` because each tier's input
-    /// is already bounded there (episodic rank, filtered cosine, clamped keyword
-    /// scores) and every weight is within `[0, 1]`; the result is clamped
-    /// defensively so a future tier widening its range cannot leak an out-of-band
-    /// score into threshold checks downstream.
-    /// - Parameter result: Merged hit with its native-scale score.
-    /// - Returns: Hit with the calibrated score, source and metadata unchanged.
     private static func calibrated(_ result: MemoryResult) -> MemoryResult {
         let weight: Double = switch result.source {
         case .episodic: Self.episodicTierWeight
@@ -1006,18 +646,6 @@ extension MemoryEngine {
     }
 
     /// Normalizes a keyword semantic hit to the shared `[0, 1]` recall scale.
-    ///
-    /// Keyword overlap scores (`overlap * 2 + substring`) grow unbounded
-    /// and would always outrank episodic ranks and profile hits without
-    /// normalization. Dividing by `10` aligns keyword semantic hits with
-    /// profile scoring (`overlap/10 * confidence`) so keyword-only stores —
-    /// where no cosine exists and every semantic hit arrives through this
-    /// path — merge sensibly with profile mirrors instead of dominating
-    /// them. The result feeds the tier calibration, where the unity semantic
-    /// weight keeps this normalized value as-is alongside cosine scores, so
-    /// vector and keyword semantic hits stay comparable with each other.
-    /// - Parameter result: Raw semantic hit.
-    /// - Returns: Hit with a clamped `[0, 1]` score.
     private static func normalizedSemantic(_ result: MemoryResult) -> MemoryResult {
         MemoryResult(
             content: result.content,
@@ -1028,14 +656,6 @@ extension MemoryEngine {
     }
 
     /// Priority for tie-breaking merged recall hits.
-    ///
-    /// Profile hits carry confidence and survive over mirrored vector rows
-    /// when scores tie. The ordering also resolves the calibration boundary:
-    /// a borderline semantic cosine at `0.25` ties the best episodic hit
-    /// (`1.0 * 0.25`) and wins here, so the full observed paraphrase band
-    /// outranks episodic keyword noise rather than just the middle of it.
-    /// - Parameter source: Hit source.
-    /// - Returns: Higher wins ties.
     private static func sourcePriority(_ source: MemorySource) -> Int {
         switch source {
         case .profile: 2
@@ -1045,16 +665,6 @@ extension MemoryEngine {
     }
 
     /// Dedupes merged recall hits by identifier, with content scope.
-    ///
-    /// Profile facts mirror vector rows under the same `id`, so recall
-    /// would otherwise return the same fact twice with different sources
-    /// and scores. Content matches are deduped only between semantic and
-    /// profile hits; episodic turns keep their own content even when it
-    /// matches a stored fact so identical wording never loses recall
-    /// coverage. The input is expected sorted best-first with profile
-    /// winning ties; the first occurrence wins.
-    /// - Parameter results: Sorted merged hits.
-    /// - Returns: Hits with duplicate identifiers or mirrored content removed.
     private static func dedupe(_ results: [MemoryResult]) -> [MemoryResult] {
         var seenIDs = Set<String>()
         var seenSemanticProfileContent = Set<String>()
@@ -1089,23 +699,6 @@ extension MemoryEngine {
 
 public extension MemoryEngine {
     /// Extracts an explicit remember request from chat input.
-    ///
-    /// Matches case-insensitive `remember that <fact>`, `remember <fact>`,
-    /// and `/remember <fact>` forms, preserving the fact's original casing
-    /// while trimming surrounding whitespace. The separator after the
-    /// command may be any whitespace (space, tab, multiple spaces), not
-    /// just a single space. A leading `that` after `/remember` is stripped
-    /// only when followed by whitespace or end so hyphenated or punctuated
-    /// words such as `that-foo` are preserved. Bare `remember` forms that
-    /// look interrogative (a `?` followed by whitespace or end, including
-    /// a trailing `?`) are not treated as store requests so conversational
-    /// questions such as `remember when we went to Paris? It was great`
-    /// still reach the LLM while facts containing `?` inside a token such
-    /// as `remember my password is foo?bar` still store; the explicit
-    /// `/remember` form always captures.
-    /// - Parameter input: Raw user input.
-    /// - Returns: Stripped fact text (possibly empty when no fact was
-    ///   given), or nil when `input` is not a remember request.
     static func rememberFactText(from input: String) -> String? {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -1120,16 +713,6 @@ public extension MemoryEngine {
     }
 
     /// Suffix after a case-insensitive command prefix.
-    ///
-    /// Accepts the bare command (`remember`) or the command followed by
-    /// any whitespace (`remember\tfact`, `remember  fact`), preserving
-    /// the fact's original casing while trimming surrounding whitespace.
-    /// Matching uses an anchored case-insensitive range so case folding
-    /// never misaligns the suffix slice.
-    /// - Parameters:
-    ///   - trimmed: Already-trimmed user input.
-    ///   - command: Command prefix without trailing whitespace.
-    /// - Returns: Stripped suffix, or nil when the prefix does not match.
     private static func suffixAfterCommand(_ trimmed: String, command: String) -> String? {
         guard let range = trimmed.range(of: command, options: [.caseInsensitive, .anchored]) else {
             return nil
@@ -1142,13 +725,6 @@ public extension MemoryEngine {
     }
 
     /// Whether trimmed input looks like a question rather than a store request.
-    ///
-    /// Only a `?` followed by whitespace or end marks an interrogative so
-    /// facts containing `?` inside a token (e.g. `foo?bar`) still store
-    /// while conversational questions (`remember when we went to Paris?
-    /// It was great`, trailing `?`) still reach the LLM.
-    /// - Parameter trimmed: Already-trimmed user input.
-    /// - Returns: True when a `?` is followed by whitespace or end.
     private static func isInterrogative(_ trimmed: String) -> Bool {
         var index = trimmed.startIndex
         while index < trimmed.endIndex {
@@ -1164,18 +740,6 @@ public extension MemoryEngine {
     }
 
     /// Strips a leading `that` word from a remember suffix.
-    ///
-    /// Keeps `/remember that <fact>` consistent with `remember that <fact>`
-    /// while tolerating any whitespace run and casing (`that`, `THAT`,
-    /// `that  fact`, `that\tfact`). `that` is stripped only when followed
-    /// by end or whitespace so hyphenated or punctuated words such as
-    /// `that-foo` or `that.foo` are preserved; a bare `that` or `that`
-    /// followed only by whitespace becomes empty so the caller prints
-    /// usage instead of storing it.
-    /// - Parameter suffix: Fact candidate after the remember command.
-    /// - Returns: Fact without the leading `that`, empty for bare `that`,
-    ///   or the suffix unchanged when `that` starts a longer word or is
-    ///   followed by punctuation.
     private static func stripLeadingThatWord(from suffix: String) -> String {
         guard let range = suffix.range(of: "that", options: [.caseInsensitive, .anchored]) else {
             return suffix
@@ -1198,13 +762,6 @@ public extension MemoryEngine {
     }
 
     /// Whether text is storable as an explicit fact.
-    ///
-    /// Shared by profile stores and chat remember paths so empty and
-    /// punctuation-only validation stays in one place. Surrounding
-    /// whitespace is ignored.
-    /// - Parameter content: Candidate fact text.
-    /// - Returns: True when trimmed text is non-empty and holds at
-    ///   least one alphanumeric character.
     static func isStorableFact(_ content: String) -> Bool {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
@@ -1212,16 +769,6 @@ public extension MemoryEngine {
     }
 
     /// Builds the acknowledgement text for an explicit remember request.
-    ///
-    /// Single shared text for the CLI remember path and
-    /// `Orchestrator.rememberAcknowledgement` so every caller stores the
-    /// same assistant turn. Usage text is returned when `fact` holds no
-    /// storable content; otherwise the stored flag selects between the
-    /// remembered confirmation and the failure note.
-    /// - Parameters:
-    ///   - fact: Stripped fact text.
-    ///   - stored: Whether the fact was stored.
-    /// - Returns: Acknowledgement text for the assistant turn.
     static func rememberAcknowledgementText(for fact: String, stored: Bool) -> String {
         guard isStorableFact(fact) else {
             return "Usage: /remember <fact> — what should I remember?"
@@ -1230,16 +777,6 @@ public extension MemoryEngine {
     }
 
     /// Validates fact text and returns the trimmed form.
-    ///
-    /// Single helper for `storeSemantic`, `storeProfileFact`, and
-    /// `persistFact` so empty versus punctuation-only failures stay
-    /// consistent. Facts longer than `maxContentLength` characters are
-    /// rejected, matching the episodic bound.
-    /// - Parameter content: Candidate fact text.
-    /// - Returns: Trimmed fact text.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the fact is
-    ///   empty, has no alphanumeric characters, or exceeds
-    ///   `maxContentLength`.
     internal static func validatedFactText(_ content: String) throws -> String {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -1255,17 +792,6 @@ public extension MemoryEngine {
     }
 
     /// Mirrors one chat turn into episodic memory without throwing.
-    ///
-    /// Used by the chat REPL so a failing store never interrupts the
-    /// conversation. `toolCallID` is kept in episode metadata so hydration
-    /// can restore tool correlation for future LLM turns.
-    /// - Parameters:
-    ///   - content: Turn text to persist.
-    ///   - sessionID: Session identifier used as the conversation key.
-    ///   - role: Who produced the turn. Defaults to `.user`.
-    ///   - toolCallID: Tool correlation identifier for `.tool` turns.
-    ///     Defaults to nil.
-    /// - Returns: True when the turn was stored.
     @discardableResult
     func storeChatTurn(
         content: String,
@@ -1289,20 +815,6 @@ public extension MemoryEngine {
     static let mirrorFailureMessage = "Episodic memory write failed; continuing."
 
     /// Mirrors one turn into episodic memory with an explicit failure policy.
-    ///
-    /// Single `MemoryEngine`-owned helper for the orchestrator and the CLI
-    /// chat loop: `.silent` ignores failures (orchestrator), `.report`
-    /// invokes `onFailure` with the shared message (CLI dim warning).
-    /// - Parameters:
-    ///   - content: Turn text to persist.
-    ///   - sessionID: Session identifier used as the conversation key.
-    ///   - role: Who produced the turn. Defaults to `.user`.
-    ///   - toolCallID: Tool correlation identifier for `.tool` turns.
-    ///     Defaults to nil.
-    ///   - failurePolicy: Whether to report failures. Defaults to `.silent`.
-    ///   - onFailure: Handler receiving the shared failure message when
-    ///     `failurePolicy` is `.report` and the store fails. Defaults to nil.
-    /// - Returns: True when the turn was stored.
     @discardableResult
     func mirrorTurn(
         content: String,
@@ -1325,16 +837,6 @@ public extension MemoryEngine {
     }
 
     /// Mirrors one turn without observing cancellation.
-    ///
-    /// Cancelled turns keep working-memory partials for executed tools, so the
-    /// episodic mirror must land even though the surrounding task is already
-    /// cancelled; a cancellable store would throw before dispatch and leave
-    /// the audit trail behind.
-    /// - Parameters:
-    ///   - content: Turn text to persist.
-    ///   - sessionID: Session identifier used as the conversation key.
-    ///   - role: Who produced the turn. Defaults to `.user`.
-    /// - Returns: True when the turn was stored.
     @discardableResult
     func mirrorTurnUncancellable(
         content: String,
@@ -1353,29 +855,9 @@ public extension MemoryEngine {
     }
 
     /// Maximum characters kept from a tool outcome in a compact episodic record.
-    ///
-    /// Bounds the outcome portion of `episodicToolRecord(toolName:content:isError:)`
-    /// so one large tool payload never materializes a huge episode row; the
-    /// record truncates with an ellipsis when over budget.
     static let episodicToolOutcomeLimit = 2000
 
     /// Builds compact episodic content for one tool execution.
-    ///
-    /// Episodic memory keeps user text and final assistant text verbatim and
-    /// drops interim assistant notes (narration plus `Calling ... [...]`
-    /// placeholder lines) entirely, so tool-call mechanics never reach the
-    /// store. Each meaningful tool execution persists as one compact record
-    /// carrying only the tool name plus its outcome; raw placeholder call
-    /// identifiers and call-argument JSON are never included, and no
-    /// `tool_call_id` metadata is stored alongside the record.
-    /// - Parameters:
-    ///   - toolName: Name of the tool that ran (e.g. `"email.search"`).
-    ///   - content: Raw tool outcome text.
-    ///   - isError: Whether the outcome represents a failure.
-    /// - Returns: Compact record such as `"Used email.search: <outcome>"`
-    ///   (or `"Used email.search (failed): <outcome>"` when `isError`), or
-    ///   nil when the name is blank or the outcome is blank after stripping
-    ///   placeholder lines.
     static func episodicToolRecord(toolName: String, content: String, isError: Bool) -> String? {
         let trimmedName = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return nil }
@@ -1394,38 +876,16 @@ public extension MemoryEngine {
     }
 
     /// Builds compact episodic content from a bus result.
-    ///
-    /// Convenience over `episodicToolRecord(toolName:content:isError:)` so
-    /// orchestration loops pass the executed call name plus its
-    /// ``ToolResult`` without unpacking fields at the call site.
-    /// - Parameters:
-    ///   - toolName: Name of the tool that ran.
-    ///   - result: Result returned by the bus.
-    /// - Returns: Compact record, or nil when the outcome is not meaningful.
     static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         episodicToolRecord(toolName: toolName, content: result.content, isError: result.isError)
     }
 
     /// Whether a line looks like persisted tool-call plumbing.
-    ///
-    /// Delegates to the shared `ToolInput/parsePlaceholderLine(_:)` parser
-    /// (the same parser backing Responses replay) so episodic stripping and
-    /// replay never drift; ordinary prose starting with "Calling " (e.g.
-    /// "Calling the bank tomorrow") never counts as plumbing.
-    /// - Parameter line: Single line to inspect.
-    /// - Returns: True when the line has the full placeholder shape.
     static func isToolPlumbingLine(_ line: String) -> Bool {
         ToolInput.parsePlaceholderLine(line) != nil
     }
 
     /// Removes tool-call plumbing lines from text.
-    ///
-    /// Drops every `Calling ...` placeholder line and trims the remainder,
-    /// preserving all other lines verbatim. Used defensively when building
-    /// compact tool records so a leaked placeholder never reaches episodic
-    /// storage.
-    /// - Parameter text: Candidate text possibly containing placeholders.
-    /// - Returns: Text without plumbing lines, trimmed.
     static func strippingToolPlumbing(from text: String) -> String {
         let normalized = text
             .replacingOccurrences(of: "\r\n", with: "\n")
@@ -1436,19 +896,6 @@ public extension MemoryEngine {
     }
 
     /// Stores one fact preferring vectors, falling back to keyword-only.
-    ///
-    /// Single helper for explicit remember paths, the remember tool, and the
-    /// server facts route so embed-then-`storeSemantic`-fallback-to-`storeProfileFact`
-    /// stays in one place. When `embedder` is set the fact is embedded
-    /// best-effort and stored with its vector; a missing vector or a
-    /// dimension/store failure falls back to the keyword-only path so vectors
-    /// never fail the write. Only cancellation propagates so a cancelled write
-    /// never stores a downgraded row.
-    /// - Parameters:
-    ///   - content: Fact text.
-    ///   - source: Origin label.
-    ///   - embedder: Optional embeddings producer. Nil keeps keyword-only.
-    /// - Returns: The profile fact that was recorded.
     func storeFactWithEmbedder(
         content: String,
         source: String,
@@ -1476,19 +923,6 @@ public extension MemoryEngine {
     }
 
     /// Stores a remembered fact, preferring vectors when a producer is set.
-    ///
-    /// Used by explicit remember requests so a failing store never interrupts
-    /// the conversation. Punctuation-only facts (no alphanumeric characters)
-    /// are rejected like empty facts. When `embedder` is set the fact carries
-    /// vectors via `storeFactWithEmbedder(content:source:embedder:)`; any
-    /// embedding or dimension failure falls back to keyword-only, while
-    /// cancellation propagates instead of storing a downgraded row.
-    /// - Parameters:
-    ///   - content: Fact text.
-    ///   - source: Origin label. Defaults to `"chat"`.
-    ///   - embedder: Optional embeddings producer. Defaults to nil
-    ///     (keyword-only).
-    /// - Returns: True when the fact was stored.
     @discardableResult
     func storeRememberedFact(
         content: String,
@@ -1512,24 +946,12 @@ public extension MemoryEngine {
     }
 
     /// Maximum memories injected as system context on one chat turn.
-    ///
-    /// Top-N bound for the per-tier `recall` fan-out so every turn issues
-    /// one bounded per-tier read; context size never grows with store size.
     static let automaticRecallLimit = 5
 
     /// Minimum calibrated score for an injected recall hit.
-    ///
-    /// Recall merges tiers on one calibrated scale (episodic rank ×0.25,
-    /// semantic cosine or normalized keyword ×1.0, profile overlap
-    /// × confidence ×1.0). Hits below this threshold are treated as noise
-    /// and the turn runs with no injected context.
     static let automaticRecallThreshold = 0.1
 
     /// Maximum characters for the injected recall block, header included.
-    ///
-    /// Bounds the source-labeled system message (roughly 500 tokens at
-    /// four characters per token) so long-term context never crowds out
-    /// the live conversation; over-budget blocks truncate with an ellipsis.
     static let automaticRecallMaxChars = 2000
 
     /// Header labeling injected recall as system context.
@@ -1537,19 +959,6 @@ public extension MemoryEngine {
         "Relevant memories (use for context; do not mention unless relevant):"
 
     /// Builds source-labeled recall context, token-bounded with truncation.
-    ///
-    /// Keeps hits scoring at or above `threshold`, renders each as
-    /// `[source] content` on its own line under the shared header, and
-    /// truncates the whole block to `maxChars` with an ellipsis when over
-    /// budget. Returns nil when no hit clears the threshold so callers
-    /// skip injection entirely.
-    /// - Parameters:
-    ///   - results: Ranked recall hits, best first.
-    ///   - threshold: Minimum score to keep. Defaults to
-    ///     `automaticRecallThreshold`.
-    ///   - maxChars: Maximum characters including the header. Defaults to
-    ///     `automaticRecallMaxChars`. Non-positive limits return nil.
-    /// - Returns: System context text, or nil when nothing is relevant.
     static func automaticRecallContext(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
@@ -1575,17 +984,6 @@ public extension MemoryEngine {
     }
 
     /// Wraps recall hits as an injectable system message.
-    ///
-    /// Thin wrapper over `automaticRecallContext(for:threshold:maxChars:)`
-    /// so chat loops inject one `system` message without duplicating the
-    /// threshold and truncation policy.
-    /// - Parameters:
-    ///   - results: Ranked recall hits, best first.
-    ///   - threshold: Minimum score to keep. Defaults to
-    ///     `automaticRecallThreshold`.
-    ///   - maxChars: Maximum characters including the header. Defaults to
-    ///     `automaticRecallMaxChars`.
-    /// - Returns: System message to inject, or nil when nothing is relevant.
     static func automaticRecallMessage(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
@@ -1602,17 +1000,6 @@ public extension MemoryEngine {
 
 public extension MemoryEngine {
     /// Drops the just-mirrored self-echo from recall hits.
-    ///
-    /// Single shared filter for the orchestrator and the CLI chat loop so
-    /// both entry points agree on what counts as an echo: an episodic hit
-    /// from this session whose content matches the query
-    /// case-insensitively after trimming. Semantic and profile hits, and
-    /// episodic hits from other sessions, always survive.
-    /// - Parameters:
-    ///   - results: Ranked recall hits, best first.
-    ///   - query: Current user message used as the recall query.
-    ///   - sessionID: Current session identifier for echo filtering.
-    /// - Returns: Hits with the self-echo removed.
     static func filteredRecallResults(
         _ results: [MemoryResult],
         query: String,
@@ -1627,16 +1014,6 @@ public extension MemoryEngine {
     }
 
     /// Inserts injected recall into LLM history after leading system messages.
-    ///
-    /// Single shared splice for the orchestrator and the CLI chat loop:
-    /// the recall `system` message goes right after any leading `system`
-    /// rows (developer prompt, rolling summary), ahead of the live
-    /// conversation. Ephemeral only; the recall message is never appended
-    /// to working memory.
-    /// - Parameters:
-    ///   - history: Base LLM history including prompt and summary.
-    ///   - recall: Recall system message, if any.
-    /// - Returns: History with recall spliced in, or unchanged when nil.
     static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         guard let recall else { return history }
         var spliced = history
@@ -1649,23 +1026,6 @@ public extension MemoryEngine {
     }
 
     /// Resolves automatic recall for one user turn, failure-isolated except cancellation.
-    ///
-    /// Single `MemoryEngine`-owned helper for the orchestrator and the CLI
-    /// chat loop: runs one bounded `recall`, drops the just-mirrored
-    /// self-echo via `filteredRecallResults`, and wraps the survivors via
-    /// `automaticRecallMessage`. Recall failures, empty queries, and
-    /// below-threshold hits yield nil so the turn proceeds with no injected
-    /// context. When `embedder` is set the query is embedded best-effort so
-    /// semantic hits rank by cosine similarity; any embedding failure keeps
-    /// the keyword path (nil embedding) so recall never fails because
-    /// vectors did. Cancellation propagates instead of degrading to
-    /// no-memory so the turn aborts rather than continuing as if uncancelled.
-    /// - Parameters:
-    ///   - query: Current user message used as the recall query.
-    ///   - sessionID: Current session identifier for self-echo filtering.
-    ///   - embedder: Optional embeddings producer for vector-ranked recall.
-    ///     Defaults to nil (keyword-only).
-    /// - Returns: System message to inject, or nil when nothing is relevant.
     func recallMessage(for query: String, sessionID: UUID, embedder: (any EmbeddingsBackend)? = nil) async throws -> Message? {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         // `embedQuery` isolates embedding failures internally (falling back
@@ -1695,12 +1055,6 @@ public extension MemoryEngine {
 
 public extension Episode {
     /// Converts an episodic turn back to working-memory history.
-    ///
-    /// Preserves the episode identifier, tool correlation identifier, and
-    /// timestamp so hydrated history keeps LLM tool wiring intact. Tool
-    /// correlation is read from `metadata["tool_call_id"]` written by the
-    /// chat turn mirror helper.
-    /// - Returns: Equivalent chat message.
     func asMessage() -> Message {
         Message(
             id: id,
@@ -1712,18 +1066,6 @@ public extension Episode {
     }
 
     /// Converts an episode for session-resume hydration, if replayable.
-    ///
-    /// Legacy correlated tool rows (role `.tool` with a non-blank
-    /// `tool_call_id` in metadata) keep their wiring via `asMessage()` so
-    /// future LLM turns retain tool correlation. Compact episodic tool
-    /// records (`"Used <tool>: <outcome>"`, role `.tool`, no `tool_call_id`
-    /// by policy) have no parent `function_call` in the episodic store —
-    /// interim assistant placeholder notes are never mirrored — so sending
-    /// them as `.tool` messages would orphan them with nil/empty `call_id`.
-    /// They hydrate as replay-safe `.assistant` synthesis carrying the same
-    /// outcome text, so compact outcomes survive resume instead of
-    /// vanishing while the next turn stays replayable.
-    /// - Returns: Equivalent chat message, or nil for blank tool records.
     func hydrationMessage() -> Message? {
         guard role == .tool else { return asMessage() }
         if let callID = metadata["tool_call_id"]?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -1739,15 +1081,6 @@ public extension Episode {
 
 public extension MemoryEngine {
     /// Converts episodes to replay-safe working history for resume.
-    ///
-    /// Legacy correlated `.tool` rows (with `tool_call_id`) replay with
-    /// their wiring intact; compact `"Used <tool>: <outcome>"` records
-    /// without a call identifier hydrate as `.assistant` synthesis (see
-    /// `Episode.hydrationMessage()`) so outcomes survive resume without
-    /// ever sending orphaned tool messages with nil/empty `call_id` and
-    /// no parent `function_call`.
-    /// - Parameter episodes: Episodes in chronological order.
-    /// - Returns: Messages safe to load into working history.
     static func hydrationMessages(from episodes: [Episode]) -> [Message] {
         episodes.compactMap { $0.hydrationMessage() }
     }
@@ -1757,10 +1090,6 @@ public extension MemoryEngine {
 
 extension MemoryEngine {
     /// Serial queue for profile file writes.
-    ///
-    /// The actor captures each profile snapshot in call order and
-    /// enqueues the write here, so disk order always matches actor
-    /// order even when mutations arrive back-to-back.
     private static let profileWriteQueue = DispatchQueue(label: "com.runeweaver.memoryengine.profile", qos: .utility)
 
     /// Inserts or replaces a profile fact by `id`, then persists.
@@ -1772,13 +1101,6 @@ extension MemoryEngine {
     }
 
     /// Whether a preference key holds a single value.
-    ///
-    /// Single-value keys replace on write; all other keys accumulate
-    /// exact-duplicate-deduped rows. Currently only `name` is
-    /// single-value (case-insensitive); `likes`, `favorite-*`, and any
-    /// future keys are multi-value.
-    /// - Parameter key: Preference key.
-    /// - Returns: True when the key replaces on write.
     private static func isSingleValuePreferenceKey(_ key: String) -> Bool {
         key.lowercased() == "name"
     }
@@ -1790,11 +1112,6 @@ extension MemoryEngine {
     }
 
     /// Writes the profile JSON without throwing (used after mutation).
-    ///
-    /// The snapshot is captured on the actor in call order and the file
-    /// write is enqueued on the serial profile queue, so disk order
-    /// matches actor order and rapid mutations cannot reorder.
-    /// Failures are ignored best-effort.
     private func persistProfileBestEffort() {
         guard let profilePath else { return }
         guard let data = try? JSONEncoder().encode(profileSnapshot()) else { return }
@@ -1829,12 +1146,6 @@ extension MemoryEngine {
 
 extension MemoryEngine {
     /// Splits text into trimmed sentence candidates.
-    ///
-    /// Splits on `.`, `!`, `?`, and newlines, preserving a trailing
-    /// `?` on the sentence so interrogatives stay detectable by
-    /// `isFactLike`. Other terminators are stripped like before.
-    /// - Parameter text: Free text.
-    /// - Returns: Sentences longer than a couple of characters.
     private static func splitSentences(_ text: String) -> [String] {
         var sentences: [String] = []
         var current = ""
@@ -1861,15 +1172,6 @@ extension MemoryEngine {
     }
 
     /// Whether a sentence looks worth remembering.
-    ///
-    /// Keeps first-person statements, possessives, and explicit
-    /// "remember" requests; drops bare questions and very short text.
-    /// `splitSentences` preserves trailing `?` so this check observes
-    /// the original interrogative form. Markers match on token and word
-    /// boundaries (via `Tokenization.tokenize` and `\b` regex) so
-    /// substrings like `"my "` inside `"enemy"` never match.
-    /// - Parameter sentence: Candidate sentence.
-    /// - Returns: True when the sentence should become a fact.
     private static func isFactLike(_ sentence: String) -> Bool {
         let lower = sentence.lowercased()
         if lower.hasSuffix("?") {
@@ -1890,17 +1192,6 @@ extension MemoryEngine {
     }
 
     /// Pulls a `Preference` out of common phrasings.
-    ///
-    /// Matches `call me X`, `my favorite X is Y`, and
-    /// `I love/like/prefer X` case-insensitively against the original
-    /// sentence so suffix slices never misalign. `call me` and
-    /// `my favorite` match on word boundaries (`\b` regex) so
-    /// substrings like `"recall me"` or `"enemy favorite"` never match.
-    /// Favorite keys strip leading `my`/`favorite` before prefixing so
-    /// `my favorite drink` becomes `favorite-drink` without stutter, and
-    /// an already prefixed key is never double-prefixed.
-    /// - Parameter sentence: Candidate sentence.
-    /// - Returns: A preference, or nil when no pattern matches.
     private static func extractPreference(from sentence: String) -> Preference? {
         let trimmedSentence = sentence.trimmingCharacters(in: .whitespacesAndNewlines)
         if let range = trimmedSentence.range(of: #"\bcall me\b"#, options: [.regularExpression, .caseInsensitive]) {

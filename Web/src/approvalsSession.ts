@@ -16,10 +16,9 @@ export function normalizeSessionID(id?: string | null): string {
   return (id ?? "").trim().toLowerCase();
 }
 
-// Reads the owning session from an approval payload across wire shapes:
-// top-level identifiers take precedence, with nested input locations honored
-// for forward-compatible engines that tag the gated call itself. Unknown
-// fields are probed internally so callers pass a plain approval with no cast.
+// Reads the owning session from an approval payload across wire shapes: top-level identifiers take
+// precedence, with nested input locations honored for forward-compatible engines that tag the gated
+// call itself. Unknown fields are probed internally so callers pass a plain approval with no cast.
 export function approvalSessionID(
   request: PermissionRequest | null | undefined,
 ): string | null {
@@ -42,8 +41,8 @@ export function approvalSessionID(
 }
 
 // Reads the owning session from a run log entry. The engine tags interactive
-// turns with `sessionID`, so run views share this reader instead of probing
-// legacy wire variants or reimplementing the lookup per call site.
+// turns with `sessionID`, so run views share this reader instead of
+// reimplementing the lookup per call site.
 export function runSessionID(
   run: RunLogEntry | null | undefined,
 ): string | null {
@@ -52,10 +51,9 @@ export function runSessionID(
   return typeof sid === "string" && sid.trim().length > 0 ? sid : null;
 }
 
-// Validates an approval prompt before it joins the inbox badge, so a
-// malformed socket frame cannot alarm the session with an undecidable entry.
-// Single source for approval validation so chat, inbox, and run views filter
-// the same inbox identically.
+// Validates an approval prompt before it joins the inbox badge, so a malformed socket frame cannot
+// alarm the session with an undecidable entry. Single source for approval validation so chat,
+// inbox, and run views filter the same inbox identically.
 export function isPermissionRequest(value: unknown): value is PermissionRequest {
   if (!isRecord(value)) return false;
   if (typeof value.id !== "string" || value.id.length === 0) return false;
@@ -88,10 +86,9 @@ export function mergeApprovalFrame(data: unknown): PermissionRequest | null {
   return data.request;
 }
 
-// Compares two session identifiers case-insensitively: the engine formats
-// UUIDs uppercase while the dashboard mints lowercase, so both spellings
-// must correlate without leaking approvals across sessions. Empty or absent
-// identifiers never match, keeping unattributed entries in the global inbox.
+// Compares two session identifiers case-insensitively: the engine formats UUIDs uppercase while the
+// dashboard mints lowercase, so both spellings must correlate without leaking approvals across
+// sessions.
 export function isSameSession(
   a: string | null | undefined,
   b: string | null | undefined,

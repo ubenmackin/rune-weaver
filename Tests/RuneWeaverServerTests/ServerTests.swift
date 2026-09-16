@@ -1,7 +1,4 @@
 // Rune Weaver Tests — HTTP REST API, WebSocket, and scheduler integration tests.
-//
-// Validates loopback routing, health probes, chat interactions, memory search,
-// approval queue resolution, scheduler job CRUD, and run log recording.
 
 import Foundation
 import os
@@ -24,10 +21,6 @@ private final class ServerStubProvider: LLMProvider, Sendable {
     }
 
     /// Serves the canned answer as one finished turn.
-    /// - Parameters:
-    ///   - messages: Ignored history.
-    ///   - tools: Ignored tools.
-    /// - Returns: Stream with the canned answer.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text = answer
         return AsyncStream { continuation in
@@ -57,10 +50,6 @@ private struct ServerReadStub: Tool, Sendable {
     let permissionLevel = PermissionLevel.readOnly
 
     /// Returns a canned success.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("read-ok", callID: input.callID)
     }
@@ -78,20 +67,12 @@ private struct ServerWriteStub: Tool, Sendable {
     let permissionLevel = PermissionLevel.requiresApproval
 
     /// Returns a canned success when approved.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("write-ok", callID: input.callID)
     }
 }
 
 /// Lock-guarded flag observed across the tracker cancel boundary.
-///
-/// Cancel closures run on whatever task the tracker cancels, so the test
-/// cannot capture a mutable local. The box keeps one immutable handle while
-/// guarding the single bit behind a lock.
 private final class CancelFlag: Sendable {
     /// Guards the observed bit.
     private let stored = OSAllocatedUnfairLock(initialState: false)
@@ -628,18 +609,14 @@ struct ServerDTOTests {
             return
         }
         #expect(roundTripped == cancelMsg)
-        // Legacy typeless frames still decode for back-compat.
-        let legacyCancel = "{\"sessionID\":\"\(doneID.uuidString)\"}"
-        #expect(try JSONDecoder().decode(WSCancelMessage.self, from: Data(legacyCancel.utf8)) == cancelMsg)
 
         let cancelledFrame = WSCancelledFrame(sessionID: doneID)
         #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: JSONEncoder().encode(cancelledFrame)) == cancelledFrame)
         // The flag distinguishes real aborts from idle cancels for multiplexed views.
         let idleFrame = WSCancelledFrame(sessionID: doneID, cancelled: false)
         #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: JSONEncoder().encode(idleFrame)) == idleFrame)
-        // Frames from older engines omit the flag and still read as success.
-        let legacyCancelled = "{\"type\":\"cancelled\",\"sessionID\":\"\(doneID.uuidString)\"}"
-        #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: Data(legacyCancelled.utf8)) == cancelledFrame)
+        let cancelledWithoutFlag = "{\"type\":\"cancelled\",\"sessionID\":\"\(doneID.uuidString)\"}"
+        #expect(try JSONDecoder().decode(WSCancelledFrame.self, from: Data(cancelledWithoutFlag.utf8)) == cancelledFrame)
     }
 
     @Test

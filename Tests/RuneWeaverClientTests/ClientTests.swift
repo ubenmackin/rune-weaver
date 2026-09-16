@@ -1,7 +1,4 @@
 // Rune Weaver Tests — Client connection and transport tests.
-//
-// Validates initial connection state and WebSocket lifecycle for the
-// localhost-only client transport without requiring a live engine service.
 
 import Foundation
 @testable import RuneWeaverClient

@@ -1,10 +1,4 @@
 // Rune Weaver Tests — Narrated gated approvals with resume continuation.
-//
-// Covers the parked-approval contract for local-model narration: gated
-// `Calling ... [...]` lines file a session-tagged queue request and end
-// parked waiting on approval, an allow resumes by executing the filed call
-// plus a synthesis turn in the same session, a deny notifies that session
-// without executing, and read-only narration still runs directly.
 
 import Foundation
 import os
@@ -12,10 +6,6 @@ import os
 import Testing
 
 /// Fixture tool with a configurable permission level for parked-approval tests.
-///
-/// Read-only instances prove direct execution still holds with a queue
-/// configured, while approval-gated instances prove filing plus resume
-/// without ever running inline.
 private struct ParkedApprovalTool: Tool, Sendable {
     /// Registered tool name.
     let name: String
@@ -32,20 +22,12 @@ private struct ParkedApprovalTool: Tool, Sendable {
     let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
 
     /// Returns the canned outcome.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output echoing the call identifier.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success(output, callID: input.callID)
     }
 }
 
 /// Scripted provider replaying canned texts in call order.
-///
-/// Each `chat` call consumes the next entry so the orchestrator observes a
-/// narrated turn followed by a synthesis turn without inference. Lock-guarded
-/// for Swift 6 data-race safety across the parked turn and its resume.
 private final class ParkedApprovalLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
@@ -64,10 +46,6 @@ private final class ParkedApprovalLLM: LLMProvider, Sendable {
     }
 
     /// Replays the next canned text as a finished stream.
-    /// - Parameters:
-    ///   - messages: Ignored conversation history.
-    ///   - tools: Ignored available tools.
-    /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text: String = state.withLock { s in
             let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
@@ -89,19 +67,11 @@ private final class ParkedApprovalLLM: LLMProvider, Sendable {
 }
 
 /// Builds a read-only fixture tool.
-/// - Parameters:
-///   - name: Registered tool name.
-///   - output: Canned outcome text.
-/// - Returns: Read-only stub tool.
 private func makeParkedReadTool(name: String, output: String) -> ParkedApprovalTool {
     ParkedApprovalTool(name: name, output: output, permissionLevel: .readOnly)
 }
 
 /// Builds an approval-gated fixture tool.
-/// - Parameters:
-///   - name: Registered tool name.
-///   - output: Canned outcome text.
-/// - Returns: Gated stub tool.
 private func makeParkedGatedTool(name: String, output: String) -> ParkedApprovalTool {
     ParkedApprovalTool(name: name, output: output, permissionLevel: .requiresApproval)
 }

@@ -1,7 +1,4 @@
 // Rune Weaver Voice — Audio transcription and text-to-speech processing pipeline.
-//
-// Provides speech recognition and speech synthesis abstractions, converting
-// incoming spoken audio into text turns and model responses into synthesized speech.
 
 import Foundation
 import RuneWeaverCore
@@ -17,15 +14,6 @@ public enum VoicePipelineError: Error, Sendable, Equatable {
 }
 
 /// Speech-to-text and text-to-speech pipeline.
-///
-/// STT runs locally via Whisper (`whisper.cpp`); TTS uses the system
-/// synthesizer (macOS `say`). Push-to-talk input and AirPods/HomePod
-/// routing are handled at the client layer.
-///
-/// Voice is a Phase 6 capability: when no Whisper binary/model is
-/// configured, `transcribe(audio:)` throws
-/// `VoicePipelineError.modelUnavailable` instead of silently returning
-/// an empty string, so callers can surface setup guidance.
 public actor VoicePipeline {
     /// Supported speech-to-text backend.
     public enum STTProvider: String, Sendable {
@@ -48,9 +36,6 @@ public actor VoicePipeline {
     private let whisperBinary: String?
 
     /// Creates a voice pipeline with the configured backends.
-    /// - Parameters:
-    ///   - sttProvider: Speech-to-text backend.
-    ///   - ttsProvider: Text-to-speech backend.
     public init(
         sttProvider: STTProvider = .whisper,
         ttsProvider: TTSProvider = .system
@@ -61,13 +46,6 @@ public actor VoicePipeline {
     }
 
     /// Transcribes audio to text via the local Whisper CLI.
-    ///
-    /// Writes `audio` (16-bit PCM WAV bytes) to a temporary file and
-    /// invokes the Whisper executable. Throws `modelUnavailable` when no
-    /// binary can be found, so missing Phase 6 setup is explicit rather
-    /// than a silent empty transcript.
-    /// - Parameter audio: Raw audio bytes (WAV container).
-    /// - Returns: Transcription.
     public func transcribe(audio: [UInt8]) async throws -> String {
         guard !audio.isEmpty else {
             throw VoicePipelineError.transcriptionFailed("No audio bytes to transcribe")
@@ -108,14 +86,6 @@ public actor VoicePipeline {
     }
 
     /// Synthesizes text to audio via the macOS `say` command.
-    ///
-    /// Writes `text` to a temporary file and invokes `say -f <file>`
-    /// so that the content is never interpolated into a shell argument
-    /// list.  Renders to a temporary AIFF file with `say -o` and
-    /// returns the file bytes.  Empty input yields empty audio without
-    /// invoking the synthesizer.
-    /// - Parameter text: Text to speak.
-    /// - Returns: Raw audio bytes (AIFF container).
     public func synthesize(text: String) async throws -> [UInt8] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }

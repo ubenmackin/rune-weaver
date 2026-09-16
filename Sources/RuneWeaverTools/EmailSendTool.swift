@@ -1,26 +1,9 @@
 // Rune Weaver Tools — Approval-gated email sending over SMTP (HTML, attachments, threading).
-//
-// Provides the `email.send` plugin tool over the `python3 smtplib`
-// bridge with validation-first header-injection rejection, execution-time
-// credential resolution, workspace-guarded attachments, threaded replies,
-// and best-effort Sent archiving. HTML is the standard body with a
-// derived text fallback; the sender always defaults to the account
-// username and dry-run previews never touch the network.
 
 import Foundation
 import RuneWeaverCore
 
 /// Send arguments for the `email.send` tool.
-///
-/// Decodes the raw `ToolInput.argumentsJSON` document. `to` holds one or
-/// more bare addresses while `cc` and `bcc` hold optional lists; the
-/// total across all three is capped at twenty. Either `bodyText` or
-/// `bodyHtml` (or both) must be present: HTML-only sends derive a text
-/// fallback by stripping tags. Optional `attachmentPaths` names
-/// workspace-guarded absolute files, and optional `replyToId` plus
-/// `mailbox` threads the send as a reply. The sender is never a schema
-/// field: it always defaults to the account username so spoofed `From`
-/// values cannot enter the bridge.
 public struct EmailSendArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -45,17 +28,6 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     public let mailbox: String?
 
     /// Memberwise initializer.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - to: Recipient addresses.
-    ///   - cc: Optional CC recipients.
-    ///   - bcc: Optional BCC recipients.
-    ///   - subject: Subject header text.
-    ///   - bodyText: Optional plain-text body.
-    ///   - bodyHtml: Optional HTML body.
-    ///   - attachmentPaths: Optional workspace-guarded attachment paths.
-    ///   - replyToId: Optional replied-to message id.
-    ///   - mailbox: Optional mailbox holding the replied-to message.
     public init(
         account: String,
         to: [String],
@@ -97,11 +69,6 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes arguments, accepting the `folder` alias for `mailbox`.
-    ///
-    /// Keeps legacy payloads (`bodyText` required, no threading or
-    /// attachments) decoding alongside HTML-only and threaded payloads:
-    /// every new key is optional so absent keys stay nil.
-    /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
@@ -139,16 +106,6 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
 }
 
 /// Envelope wrapping `email.send` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the sender, recipients, subject, and body size together.
-/// Bodies never echo in full: only byte counts plus a 2000-char preview
-/// travel so a 1 MB send cannot flood context. `dryRun` distinguishes a
-/// would-send preview from a completed send; `note` carries the
-/// human-readable outcome. New keys (`attachmentPaths`,
-/// `attachmentBytes`, `inReplyTo`, `references`, `bodyPreview`,
-/// `appendWarning`) are optional so envelopes written before threading
-/// and attachments landed keep decoding.
 public struct EmailSendEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the message was sent through.
     public let account: String
@@ -205,23 +162,6 @@ public struct EmailSendEnvelope: Sendable, Equatable, Codable {
     }
 
     /// Creates a send envelope.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - from: Sender address (account username).
-    ///   - to: Recipient addresses.
-    ///   - cc: CC recipients.
-    ///   - bcc: BCC recipients.
-    ///   - subject: Subject header.
-    ///   - bodyTextBytes: Plain-body byte count.
-    ///   - bodyHtmlBytes: HTML byte count, if any.
-    ///   - dryRun: Whether this previews without sending.
-    ///   - note: Human-readable outcome note.
-    ///   - attachmentPaths: Validated attachment paths, if any.
-    ///   - attachmentBytes: Total attachment bytes, if any.
-    ///   - inReplyTo: `In-Reply-To` header, if replying.
-    ///   - references: `References` header, if replying.
-    ///   - bodyPreview: Leading body preview, if any.
-    ///   - appendWarning: Sent-append warning, if any.
     public init(
         account: String,
         from: String,
@@ -259,7 +199,7 @@ public struct EmailSendEnvelope: Sendable, Equatable, Codable {
         self.appendWarning = appendWarning
     }
 
-    /// Decodes an envelope, defaulting legacy payloads without threading keys.
+    /// Decodes an envelope, defaulting omitted threading keys to nil.
     /// - Parameter decoder: Decoder for the envelope document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -282,11 +222,6 @@ public struct EmailSendEnvelope: Sendable, Equatable, Codable {
     }
 
     /// Encodes an envelope, omitting unset threading keys.
-    ///
-    /// Legacy shape is preserved when no attachments or threading are
-    /// present: optional keys encode only when set so old readers see the
-    /// original document.
-    /// - Parameter encoder: Encoder for the envelope document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(account, forKey: .account)
@@ -309,13 +244,6 @@ public struct EmailSendEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Fail-closed validation for `email.send` inputs.
-///
-/// Mirrors the IMAP validation-first shape so Swift rejects header
-/// injection and oversized payloads before any account lookup or
-/// credential resolution. Addresses use an RFC-5322-lite pattern
-/// (bare `local@domain.tld` only, no display names or angle brackets)
-/// plus CR/LF rejection so crafted input cannot smuggle extra SMTP
-/// headers. Errors stay generic by field and never echo secret values.
 public enum EmailSendValidation: Sendable {
     /// Maximum recipients accepted per address field.
     public static let maxRecipientsPerField = 20
@@ -338,13 +266,6 @@ public enum EmailSendValidation: Sendable {
     private static let addressPattern = "^[A-Z0-9._%+\\-]+@[A-Z0-9.\\-]+\\.[A-Z]{2,}$"
 
     /// Whether an address looks like a bare mailbox.
-    ///
-    /// Trims surrounding whitespace first so padded input validates on
-    /// its content; embedded spaces, tabs, and CR/LF always fail via the
-    /// pattern. Length is capped at the path limit so overlong input
-    /// fails before reaching the bridge.
-    /// - Parameter address: Candidate address.
-    /// - Returns: True for a lite-valid bare address.
     public static func isValidEmail(_ address: String) -> Bool {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= maxAddressChars else { return false }
@@ -355,10 +276,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates one address, rejecting header injection and bad shapes.
-    /// - Parameters:
-    ///   - address: Candidate address (trimmed before checking).
-    ///   - field: Field name for the error (`to`, `cc`, or `bcc`).
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the address is not a bare mailbox.
     public static func validateAddress(_ address: String, field: String) throws {
         let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
@@ -370,16 +287,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates and normalizes one recipient list.
-    ///
-    /// Trims each entry, drops nothing silently (blank entries fail so a
-    /// trailing comma cannot hide a missing recipient), and returns the
-    /// trimmed list for the envelope and bridge.
-    /// - Parameters:
-    ///   - values: Raw addresses.
-    ///   - field: Field name for errors.
-    ///   - required: Whether at least one address is required (`to` only).
-    /// - Returns: Trimmed addresses.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the count or any entry is invalid.
     public static func validateRecipients(_ values: [String], field: String, required: Bool) throws -> [String] {
         if required, values.isEmpty {
             throw EmailIMAPError.bridgeFailed("Invalid recipients in '\(field)': provide 1-\(maxRecipientsPerField) email addresses")
@@ -401,15 +308,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates the total recipient count across to/cc/bcc.
-    ///
-    /// Per-field caps alone would allow sixty recipients; the total cap
-    /// keeps approval prompts and bridge envelopes bounded. Runs after
-    /// per-field validation so field errors win over the total.
-    /// - Parameters:
-    ///   - to: Normalized `to` addresses.
-    ///   - cc: Normalized `cc` addresses.
-    ///   - bcc: Normalized `bcc` addresses.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the total exceeds the cap.
     public static func validateTotalRecipients(to: [String], cc: [String], bcc: [String]) throws {
         let total = to.count + cc.count + bcc.count
         guard total <= maxTotalRecipients else {
@@ -418,14 +316,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates a subject header, rejecting folding and overlong lines.
-    ///
-    /// Checks the raw value for CR/LF before trimming so leading or
-    /// trailing line breaks cannot hide behind whitespace stripping,
-    /// then requires 1-998 trimmed characters. The trimmed subject is
-    /// returned so surrounding padding never reaches the wire.
-    /// - Parameter subject: Candidate subject.
-    /// - Returns: Trimmed subject.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when empty, overlong, or holding CR/LF.
     public static func validateSubject(_ subject: String) throws -> String {
         if subject.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
             throw EmailIMAPError.bridgeFailed("Invalid subject: subject must not contain CR or LF")
@@ -444,15 +334,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates a required plain body by UTF-8 byte size.
-    ///
-    /// Whitespace-only bodies fail as empty so a blank send cannot slip
-    /// through, but the raw body is preserved (not trimmed) so intentional
-    /// leading blank lines survive. Size is measured in UTF-8 bytes so
-    /// multibyte text cannot overflow the 1 MB cap via char counting.
-    /// - Parameters:
-    ///   - body: Candidate body.
-    ///   - field: Field name for errors (usually `bodyText`).
-    /// - Throws: `EmailIMAPError.bridgeFailed` when empty or over the byte cap.
     public static func validateBody(_ body: String, field: String) throws {
         let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -465,15 +346,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates an optional HTML alternative, treating blank as absent.
-    ///
-    /// Blank HTML collapses to nil so callers can pass `""` without
-    /// flipping the message to multipart; non-blank HTML is capped at
-    /// the same 1 MB byte budget as plain text.
-    /// - Parameters:
-    ///   - body: Candidate HTML, if any.
-    ///   - field: Field name for errors (usually `bodyHtml`).
-    /// - Returns: Raw HTML, or nil when omitted or blank.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when over the byte cap.
     public static func validateOptionalBody(_ body: String?, field: String) throws -> String? {
         guard let body else { return nil }
         if body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -486,14 +358,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates the combined text-plus-HTML byte budget.
-    ///
-    /// Each side is capped individually above; the combined cap keeps a
-    /// dual-part send from doubling the 1 MB envelope. HTML-only sends
-    /// check the single part, so derived text never double-counts.
-    /// - Parameters:
-    ///   - text: Effective plain body.
-    ///   - html: Effective HTML body, if any.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the sum exceeds 1 MB.
     public static func validateCombinedBody(text: String, html: String?) throws {
         let total = text.utf8.count + (html?.utf8.count ?? 0)
         guard total <= maxBodyBytes else {
@@ -502,14 +366,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Validates an optional threading header, rejecting folding.
-    ///
-    /// Blank values collapse to nil so omitted headers never reach the
-    /// wire; non-blank values must not hold CR/LF so crafted input cannot
-    /// smuggle extra headers through `In-Reply-To`/`References`.
-    /// - Parameters:
-    ///   - value: Candidate header value, if any.
-    ///   - field: Header name for errors.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the value holds CR/LF.
     public static func validateThreadingHeader(_ value: String?, field: String) throws {
         guard let value else { return }
         if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -521,16 +377,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Derives a plain-text fallback from HTML by stripping tags.
-    ///
-    /// HTML is the standard body, so HTML-only sends stay deliverable to
-    /// plain-text readers: entities for the common `&lt;`/`&gt;`/`&quot;`/`&#39;`
-    /// shapes decode first (with `&amp;` last so double-encoded
-    /// sequences decode once), then tags collapse to spaces and runs of
-    /// whitespace collapse to single spaces. Decoding before stripping
-    /// keeps decoded markup from surviving as literal tags. No markdown
-    /// templating is applied; the HTML travels untouched alongside.
-    /// - Parameter html: Source HTML.
-    /// - Returns: Derived plain text (trimmed, possibly empty when HTML held no text).
     public static func deriveText(fromHtml html: String) -> String {
         var text = html.replacingOccurrences(of: "&lt;", with: "<")
         text = text.replacingOccurrences(of: "&gt;", with: ">")
@@ -543,12 +389,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Builds the 2000-char body preview for envelopes.
-    ///
-    /// Collapses runs of whitespace to single spaces so the preview stays
-    /// one logical line, then truncates to the char cap. The full body
-    /// still sends; only the envelope preview is cut.
-    /// - Parameter body: Effective plain body.
-    /// - Returns: Preview text (empty when the body is blank).
     public static func bodyPreview(for body: String) -> String {
         let single = body.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -571,11 +411,6 @@ public enum EmailSendValidation: Sendable {
     }
 
     /// Quotes an original text body for a reply.
-    ///
-    /// Each non-empty line gains a `"> "` prefix so the reply stays
-    /// readable without markdown templating; blank lines stay blank.
-    /// - Parameter body: Original plain body.
-    /// - Returns: Quoted lines joined by newlines.
     public static func quotedOriginal(_ body: String) -> String {
         body.components(separatedBy: .newlines).map { line in
             line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "> \(line)"
@@ -584,20 +419,6 @@ public enum EmailSendValidation: Sendable {
 }
 
 /// Approval-gated `email.send` tool over SMTP.
-///
-/// Composes through the `python3 smtplib` bridge with verified TLS
-/// (explicit `smtp_host`/`smtp_port`/`smtp_security` when set, else 587
-/// STARTTLS then 465 SSL). The sender always defaults to the account
-/// username with no `From` override, so spoofed `From` values cannot send,
-/// and every send transmits immediately on approval with no scheduled or
-/// delayed send. HTML is standard with a tag-stripped text fallback;
-/// workspace-guarded attachments MIME-encode
-/// via `email.message`, and threaded replies fetch the original for
-/// `In-Reply-To`/`References`, a `Re:` subject, and a quoted body. After
-/// SMTP success the tool best-effort appends to Sent without failing the
-/// send. Declared `requiresApproval` so the graduated-trust gate prompts
-/// before any message leaves the machine. Secrets resolve at execution
-/// time and never reach logs or errors.
 public struct EmailSendTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.send"
@@ -639,11 +460,6 @@ public struct EmailSendTool: Tool, Sendable {
     private let sandboxConfig: SandboxConfig
 
     /// Creates a send tool.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - smtpGateway: SMTP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - gateway: IMAP gateway for threading and Sent appends. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Tier-3 detonation policy. Retained for compatibility and ignored for sends.
     public init(
         emailConfig: EmailConfig,
         smtpGateway: (any EmailSMTPGateway)? = nil,
@@ -657,10 +473,6 @@ public struct EmailSendTool: Tool, Sendable {
     }
 
     /// Validates, resolves credentials, and sends (or previews under dry-run).
-    /// - Parameters:
-    ///   - input: Invocation with `account`, `to`, optional `cc`/`bcc`, `subject`, `bodyText`/`bodyHtml`, optional `attachmentPaths`, `replyToId`, and `mailbox`.
-    ///   - context: Ambient execution context. `dryRun` validates and reports would-send without network use.
-    /// - Returns: JSON envelope with sender, recipients, preview, and Sent status, or a failure without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
@@ -756,10 +568,6 @@ private struct SendThreading {
 }
 
 /// Grouped Sent-copy content for the best-effort append path.
-///
-/// Groups the sender, recipients, effective subject and body, plus
-/// threading headers in one value so append helpers stay within the
-/// parameter budget, following the `EmailSMTPMessage` grouping pattern.
 private struct SendAppendContent {
     let from: String
     let to: [String]
@@ -772,11 +580,6 @@ private struct SendAppendContent {
 }
 
 /// Grouped confirmation inputs for the sent envelope.
-///
-/// Groups trimmed routing, threaded content, staged attachments, and
-/// envelope metadata in one value so the confirmation builder stays
-/// within the parameter budget, following the `EmailSMTPMessage`
-/// grouping pattern.
 private struct SentConfirmation {
     let target: EmailSendTarget
     let threading: SendThreading
@@ -789,15 +592,6 @@ private struct SentConfirmation {
 
 extension EmailSendTool {
     /// Decodes send arguments, rejecting bad shapes before any lookup.
-    ///
-    /// Runs before account resolution so malformed input reports an
-    /// arguments failure even when the password is missing. Address
-    /// shape, subject, body, attachment, and threading checks happen in
-    /// `validatedTarget` after decoding so both paths share one
-    /// fail-closed gate.
-    /// - Parameter input: Raw tool invocation.
-    /// - Returns: Decoded args.
-    /// - Throws: Failure message when decoding fails.
     private func decodedArgs(from input: ToolInput) throws -> EmailSendArgs {
         do {
             return try JSONDecoder().decode(EmailSendArgs.self, from: Data(input.argumentsJSON.utf8))
@@ -811,18 +605,6 @@ extension EmailSendTool {
     }
 
     /// Trims and fail-closed validates decoded send routing.
-    ///
-    /// Validates recipient shapes plus the 20-total cap, subject length
-    /// and header safety, at-least-one body with HTML-derived fallback and
-    /// the combined 1 MB cap, attachment path syntax (existence and sizes
-    /// wait for `stagedAttachments` so dry runs preview them), and reply
-    /// id/mailbox syntax before touching accounts or credentials so
-    /// invalid input reports field errors even when the password is
-    /// missing. Omitted `cc`/`bcc` normalize to empty lists and blank
-    /// `bodyHtml` collapses to nil (plain-only).
-    /// - Parameter args: Decoded send arguments.
-    /// - Returns: Trimmed routing ready for the bridge.
-    /// - Throws: Failure message when routing is empty or invalid.
     private func validatedTarget(from args: EmailSendArgs) throws -> EmailSendTarget {
         let accountName = args.trimmedAccount
         guard !accountName.isEmpty else {
@@ -887,14 +669,6 @@ extension EmailSendTool {
     }
 
     /// Validates attachment path syntax without touching the filesystem.
-    ///
-    /// Rejects relative paths and CR/LF early so header injection reports
-    /// before credential lookup; sandbox confinement and sizes wait for
-    /// `stagedAttachments` (filesystem) so dry runs still preview the
-    /// list without network use.
-    /// - Parameter paths: Raw attachment paths.
-    /// - Returns: Trimmed paths.
-    /// - Throws: Failure when a path is relative or holds CR/LF.
     private func validatedAttachmentSyntax(_ paths: [String]) throws -> [String] {
         var trimmed: [String] = []
         trimmed.reserveCapacity(paths.count)
@@ -915,9 +689,6 @@ extension EmailSendTool {
     }
 
     /// Validates an optional reply id against UID syntax.
-    /// - Parameter replyToId: Trimmed reply id, if any.
-    /// - Returns: Reply id, or nil when omitted.
-    /// - Throws: Failure when the id is not UID syntax.
     private func validatedReplyToId(_ replyToId: String?) throws -> String? {
         guard let replyToId else { return nil }
         try EmailIMAPValidation.validateMessageID(replyToId)
@@ -925,9 +696,6 @@ extension EmailSendTool {
     }
 
     /// Normalizes the threading mailbox, defaulting to INBOX.
-    /// - Parameter mailbox: Trimmed mailbox, if any.
-    /// - Returns: Mailbox to fetch the original from.
-    /// - Throws: Failure when the mailbox holds CR/LF or is blank.
     private func validatedMailbox(_ mailbox: String?) throws -> String {
         let value = mailbox ?? "INBOX"
         try EmailIMAPValidation.validateMailbox(value)
@@ -935,9 +703,6 @@ extension EmailSendTool {
     }
 
     /// Resolves the configured account by exact then case-insensitive name.
-    /// - Parameter accountName: Trimmed account nickname.
-    /// - Returns: Matching account.
-    /// - Throws: `EmailIMAPError.unknownAccount` when no account matches.
     private func resolvedAccount(named accountName: String) throws -> EmailAccount {
         if let account = emailConfig.account(matching: accountName) {
             return account
@@ -946,15 +711,6 @@ extension EmailSendTool {
     }
 
     /// Stages workspace-guarded attachments for the bridge.
-    ///
-    /// Each path must be absolute and satisfy the workspace guard
-    /// (deny plus allow-roots, symlinks resolved on both sides) so a
-    /// `..` or symlink escape fails closed with a clear message. Files are
-    /// capped at 10 MB each with a 25 MB total; MIME types come from the
-    /// file extension without sniffing content.
-    /// - Parameter paths: Trimmed absolute paths from validation.
-    /// - Returns: Staged bytes with filenames and MIME types.
-    /// - Throws: Failure when a path is denied by the workspace guard, is missing, or exceeds caps.
     private func stagedAttachments(paths: [String]) throws -> [StagedSendAttachment] {
         guard !paths.isEmpty else { return [] }
         var staged: [StagedSendAttachment] = []
@@ -1001,21 +757,6 @@ extension EmailSendTool {
     }
 
     /// Resolves threaded content by fetching the original when replying.
-    ///
-    /// Sets `In-Reply-To`/`References` to the replied-to id, prefixes
-    /// `Re:` when missing, and quotes the original text body beneath the
-    /// new text. HTML travels alongside with the text quote only, since
-    /// the original fetch returns decoded text. Failures to fetch the
-    /// original fail the send so a mistyped reply id never sends
-    /// unthreaded.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - replyToId: Replied-to message id, if any.
-    ///   - mailbox: Mailbox holding the original.
-    ///   - subject: Validated subject.
-    ///   - bodyText: Effective plain body.
-    ///   - bodyHtml: Effective HTML body, if any.
-    /// - Returns: Effective threaded content.
     private func threadingContext(
         credentials: ResolvedEmailCredentials,
         replyToId: String?,
@@ -1055,15 +796,6 @@ extension EmailSendTool {
     }
 
     /// Best-effort appends the sent message to the Sent folder.
-    ///
-    /// Resolves `Sent`/`Sent Items`/`Sent Messages` via `LIST` and stores
-    /// a plain RFC822 copy with `\Seen`; any miss warns instead of
-    /// failing the send so providers without a Sent folder still report
-    /// success.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - content: Grouped sender, recipients, subject, body, and threading headers.
-    /// - Returns: Warning message, or nil when archived.
     private func bestEffortSentAppend(credentials: ResolvedEmailCredentials, content: SendAppendContent) async -> String? {
         do {
             let listed = try await imapGateway.listMailboxes(credentials: credentials)
@@ -1080,13 +812,6 @@ extension EmailSendTool {
     }
 
     /// Builds a minimal RFC822 copy for the Sent folder.
-    ///
-    /// Plain headers plus the text body only; attachments ride the SMTP
-    /// MIME path and are intentionally omitted here so the best-effort
-    /// copy never re-encodes large files. Header values are already
-    /// validated CR/LF-free, so folding cannot smuggle extra headers.
-    /// - Parameter content: Grouped sender, recipients, subject, body, and threading headers.
-    /// - Returns: RFC822 bytes with `\Seen` semantics for the append path.
     private static func rawAppendMessage(_ content: SendAppendContent) -> Data {
         var lines: [String] = [
             "From: \(content.from)",
@@ -1109,12 +834,6 @@ extension EmailSendTool {
     }
 
     /// Maps a file path to a MIME type by extension without sniffing.
-    ///
-    /// Covers the common send shapes (PDF, images, text, HTML, JSON, CSV);
-    /// everything else falls back to `application/octet-stream` so the
-    /// bridge never guesses from content bytes.
-    /// - Parameter path: Absolute attachment path.
-    /// - Returns: MIME type for the part.
     private static func contentType(forPath path: String) -> String {
         let ext = (path as NSString).pathExtension.lowercased()
         switch ext {
@@ -1133,10 +852,6 @@ extension EmailSendTool {
     }
 
     /// Encodes a send envelope as a success result.
-    /// - Parameters:
-    ///   - envelope: Envelope to encode.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success result, or a failure when encoding fails.
     private func successEnvelope(_ envelope: EmailSendEnvelope, callID: String) -> ToolOutput {
         do {
             let encoder = JSONEncoder()
@@ -1149,19 +864,6 @@ extension EmailSendTool {
     }
 
     /// Builds the dry-run preview without touching the network.
-    ///
-    /// Validates attachments from the filesystem (no SMTP or IMAP calls)
-    /// and previews the sender, recipients, Re:-aware subject, 2000-char
-    /// body snippet, attachment list, and threading headers with `dryRun`
-    /// set so no caller mistakes a preview for a send. Credential
-    /// resolution already ran, so missing passwords still fail before
-    /// this preview.
-    /// - Parameters:
-    ///   - target: Trimmed routing.
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - from: Sender address (account username).
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the would-send note.
     private func dryRunEnvelope(target: EmailSendTarget, accountName: String, from: String, callID: String) -> ToolOutput {
         let staged: [StagedSendAttachment]
         do {

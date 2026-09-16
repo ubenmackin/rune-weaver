@@ -1,18 +1,9 @@
 // Rune Weaver LLM — OpenAI-compatible provider streaming and tool definitions.
-//
-// Implements chunk streaming protocols, SSE payload parsing, tool definitions,
-// HTTP client dispatch, and token usage decoders for language model endpoints.
 
 import Foundation
 import RuneWeaverCore
 
 /// A function-style tool description sent to the model.
-///
-/// ``ToolDefinition`` is the provider-layer view of a
-/// ``Tool``: the name, human-readable description, and JSON Schema
-/// the model uses to decide when and how to call it. It mirrors the
-/// OpenAI `function` object so every OpenAI-compatible backend
-/// (MLX, llama.cpp, OpenRouter, custom endpoints) shares one shape.
 public struct ToolDefinition: Sendable, Codable, Equatable {
     /// Stable machine-readable identifier (e.g. `"email.search"`).
     public let name: String
@@ -22,10 +13,6 @@ public struct ToolDefinition: Sendable, Codable, Equatable {
     public let parameters: JSONSchema
 
     /// Creates a tool definition.
-    /// - Parameters:
-    ///   - name: Stable tool identifier.
-    ///   - description: Summary of when to use this tool.
-    ///   - parameters: JSON Schema for the arguments.
     public init(name: String, description: String, parameters: JSONSchema) {
         self.name = name
         self.description = description
@@ -51,10 +38,6 @@ public struct ToolCall: Sendable, Codable, Equatable {
     public let argumentsJSON: String
 
     /// Creates a tool call.
-    /// - Parameters:
-    ///   - id: Correlation identifier.
-    ///   - name: Tool name.
-    ///   - argumentsJSON: Raw JSON arguments.
     public init(id: String, name: String, argumentsJSON: String) {
         self.id = id
         self.name = name
@@ -72,10 +55,6 @@ public struct TokenUsage: Sendable, Codable, Equatable {
     public let totalTokens: Int
 
     /// Creates token usage.
-    /// - Parameters:
-    ///   - promptTokens: Request tokens.
-    ///   - completionTokens: Generated tokens.
-    ///   - totalTokens: Total tokens.
     public init(promptTokens: Int, completionTokens: Int, totalTokens: Int) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
@@ -93,10 +72,6 @@ public struct ResponseMetadata: Sendable, Codable, Equatable {
     public let finishReason: String?
 
     /// Creates response metadata.
-    /// - Parameters:
-    ///   - model: Serving model name.
-    ///   - usage: Token accounting, if reported.
-    ///   - finishReason: Stop reason, if reported.
     public init(model: String, usage: TokenUsage? = nil, finishReason: String? = nil) {
         self.model = model
         self.usage = usage
@@ -105,46 +80,20 @@ public struct ResponseMetadata: Sendable, Codable, Equatable {
 }
 
 /// Formats session-cumulative billed token usage for chat display.
-///
-/// The chat REPL accumulates billed `totalTokens` across turns into a
-/// session total and renders it against the active provider's
-/// `ModelInfo.contextLength` window as `used/window, percent%`. The sum
-/// is cumulative billing across turns (each turn's prompt already
-/// includes history, so turns double-count shared history by design);
-/// it is not a live measure of current context-window fill.
 public enum SessionTokenDisplay: Sendable {
     /// Whole-percent share of the reference window represented by the
     /// session-billed total.
-    ///
-    /// Capped at 100: the session total is cumulative billing across turns
-    /// (each turn's prompt already includes history, so turns double-count
-    /// shared history by design) and can exceed the window (e.g.
-    /// `200000/128000`); the line still shows the raw `used/window` pair
-    /// so the overage stays visible.
-    /// - Parameters:
-    ///   - used: Session-cumulative billed tokens.
-    ///   - window: Context window in tokens from the provider config.
-    /// - Returns: Rounded percent capped at 100, or zero when the window is not positive.
     public static func percent(used: Int, window: Int) -> Int {
         guard window > 0, used > 0 else { return 0 }
         return min(100, Int((Double(used) / Double(window) * 100).rounded()))
     }
 
     /// Usage without model or parentheses for embedding in sentences.
-    /// - Parameters:
-    ///   - used: Session-cumulative billed tokens.
-    ///   - window: Context window in tokens.
-    /// - Returns: String like `12408/1000000, 1%`.
     public static func formatted(used: Int, window: Int) -> String {
         "\(used)/\(window), \(percent(used: used, window: window))%"
     }
 
     /// Full dimmed chat line with optional model prefix and parentheses.
-    /// - Parameters:
-    ///   - model: Serving model name, omitted when empty.
-    ///   - used: Session-cumulative billed tokens.
-    ///   - window: Context window in tokens.
-    /// - Returns: String like `(gpt-4o-mini · 12408/1000000, 1%)`.
     public static func label(model: String, used: Int, window: Int) -> String {
         let prefix = model.isEmpty ? "" : "\(model) · "
         return "(\(prefix)\(formatted(used: used, window: window)))"
@@ -152,11 +101,6 @@ public enum SessionTokenDisplay: Sendable {
 }
 
 /// One streamed event from a chat completion.
-///
-/// Providers that speak OpenAI-compatible SSE map each server event to
-/// one of these cases. The router-facing ``LLMResponse`` stream carries
-/// text only; consumers that need tool calls or usage should consume
-/// ``ChunkStreamingProvider/chatChunks(messages:tools:)`` directly.
 public enum LLMResponseChunk: Sendable, Equatable {
     /// Incremental model text.
     case textDelta(String)
@@ -173,9 +117,6 @@ public enum LLMProviderError: Error, Sendable, Equatable {
     /// The server could not be reached or returned a transport error.
     case unavailable(String)
     /// The server answered with a non-2xx status.
-    /// - Parameters:
-    ///   - statusCode: HTTP status code.
-    ///   - message: Server-provided detail, if any.
     case requestFailed(statusCode: Int, message: String)
     /// The server answered with bytes that could not be decoded.
     case invalidResponse(String)
@@ -195,10 +136,6 @@ public extension LLMProvider {
     }
 
     /// Whether the backend answers health checks right now.
-    ///
-    /// The default implementation optimistically returns `true`.
-    /// Concrete providers override this with a lightweight
-    /// `GET <base>/models` probe that never throws.
     func isAvailable() async -> Bool {
         true
     }
@@ -212,38 +149,13 @@ public extension LLMProvider {
 }
 
 /// An ``LLMProvider`` that natively streams ``LLMResponseChunk`` events.
-///
-/// The chunk stream is the primary provider API: it preserves tool
-/// calls, usage, and errors that the text-only ``LLMResponse`` stream
-/// cannot represent. The default ``chat(messages:tools:)``
-/// implementation maps chunks to text so the ``LLMRouter`` keeps
-/// working unchanged.
 public protocol ChunkStreamingProvider: LLMProvider {
     /// Streams chunk-level events for the given history and tools.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Stream of response chunks, ending in `done` or `error`.
     func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk>
 }
 
 public extension ChunkStreamingProvider {
     /// Streams text via ``chatChunks(messages:tools:)``.
-    ///
-    /// Text deltas yield ``LLMResponse`` deltas verbatim. Tool calls
-    /// have no text representation and are skipped here; consume
-    /// ``chatChunks(messages:tools:)`` to observe them. The terminal
-    /// `done` chunk carries the response's billed `totalTokens` (when
-    /// reported) so text-only consumers can accumulate session usage
-    /// without consuming chunks directly. Transport
-    /// `.error` chunks terminate the stream with an `isError` response
-    /// (they are never surfaced as assistant text) so failures cannot
-    /// leak into conversation history; the stream always terminates with
-    /// an `isFinished` chunk carrying `errorMessage` on failure.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tools the model may call.
-    /// - Returns: Stream of text response chunks.
     func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
         let definitions = toolDefinitions(for: tools)
         let chunks = chatChunks(messages: messages, tools: definitions)
@@ -304,10 +216,6 @@ func openAIBaseURL(from raw: String) -> String {
 }
 
 /// Decodes a tool's JSON Schema to a JSON object for request encoding.
-/// - Parameter tool: Tool definition to encode.
-/// - Returns: Schema as a JSON object.
-/// - Throws: ``LLMProviderError/invalidResponse(_:)`` when the schema
-///   is not a JSON object.
 func encodeToolParameters(_ tool: ToolDefinition) throws -> [String: Any] {
     guard let data = tool.parameters.rawValue.data(using: .utf8),
           let parsed = try? JSONSerialization.jsonObject(with: data),
@@ -321,14 +229,6 @@ func encodeToolParameters(_ tool: ToolDefinition) throws -> [String: Any] {
 }
 
 /// Builds a JSON request body for `/chat/completions`.
-/// - Parameters:
-///   - model: Model identifier.
-///   - messages: Conversation history.
-///   - tools: Tool definitions, omitted when empty.
-///   - stream: Whether to request server-sent events.
-/// - Returns: JSON-encoded request body.
-/// - Throws: ``LLMProviderError/invalidResponse(_:)`` when a tool
-///   schema is not valid JSON or the body cannot be encoded.
 func openAIChatRequestBody(
     model: String,
     messages: [Message],
@@ -378,31 +278,12 @@ func openAIChatRequestBody(
 }
 
 /// Parses one persisted assistant placeholder line into a structured call.
-///
-/// Delegates to the shared `ToolInput/parsePlaceholderLine(_:)` parser
-/// (the same parser backing episodic plumbing stripping in `MemoryEngine`)
-/// so Responses replay and episodic stripping never drift. Replaying those
-/// lines as Responses `function_call` items restores the `call_id`
-/// correlation with the following `function_call_output` items. Real
-/// provider call identifiers (for example `call_01a…` hex suffixes)
-/// contain only non-space, non-bracket characters and round-trip here.
-/// - Parameter line: Single line to inspect (leading and trailing
-///   whitespace is ignored).
-/// - Returns: Structured call, or nil when the line is not a placeholder.
 func parseResponsesPlaceholderLine(_ line: String) -> ToolCall? {
     guard let parsed = ToolInput.parsePlaceholderLine(line) else { return nil }
     return ToolCall(id: parsed.callID, name: parsed.toolName, argumentsJSON: parsed.argumentsJSON)
 }
 
 /// Splits an assistant message into structured calls plus leftover text.
-///
-/// Pure tool turns (every non-empty line parses) yield only calls.
-/// Plain assistant text yields no calls and the original content as
-/// leftover. Mixed content (leading text plus placeholder lines in the
-/// same persisted turn) yields both so no history is dropped and the
-/// next Responses body keeps every `call_id` correlated.
-/// - Parameter content: Assistant message content.
-/// - Returns: Calls in line order plus non-placeholder leftover text.
 func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], leftover: String) {
     let normalized = content
         .replacingOccurrences(of: "\r\n", with: "\n")
@@ -422,14 +303,6 @@ func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], le
 }
 
 /// Builds a JSON request body for `/responses`.
-/// - Parameters:
-///   - model: Model identifier.
-///   - messages: Conversation history, with system messages first.
-///   - tools: Tool definitions, omitted when empty.
-///   - stream: Whether to request server-sent events.
-/// - Returns: JSON-encoded request body.
-/// - Throws: ``LLMProviderError/invalidResponse(_:)`` when a tool
-///   schema is not valid JSON or the body cannot be encoded.
 func openAIResponsesRequestBody(
     model: String,
     messages: [Message],
@@ -591,7 +464,7 @@ struct OpenAIResponsesFunctionCallItemDTO: Decodable, Sendable {
     var arguments: String?
     /// Call identifier under the Responses key.
     var callId: String?
-    /// Call identifier under the legacy key.
+    /// Alternate call identifier.
     var id: String?
 
     private enum CodingKeys: String, CodingKey {
@@ -764,12 +637,6 @@ struct OpenAIToolCallAccumulator: Sendable {
 }
 
 /// Accumulates split Responses tool-call fragments into whole calls.
-///
-/// The Responses stream may split one function call across several
-/// events: an added item carrying the name, delta fragments carrying
-/// only `delta` plus `item_id`, and a done event carrying the complete
-/// arguments. Buffering by `item_id`/`call_id` reassembles split
-/// arguments instead of dropping them to empty `{}`.
 struct OpenAIResponsesToolCallAccumulator: Sendable {
     /// Buffered state per call key.
     var buffers: [String: Buffer] = [:]
@@ -792,9 +659,6 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
     }
 
     /// Ingests one stream event, buffering tool-call fragments.
-    /// - Parameters:
-    ///   - event: Decoded stream event.
-    ///   - nextIndex: Fallback index for synthesized call IDs.
     mutating func ingest(_ event: OpenAIResponsesStreamEventDTO, nextIndex: Int) {
         guard let type = event.type else { return }
         if type == "response.function_call_arguments.delta" {
@@ -862,9 +726,6 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
     }
 
     /// Ensures a buffer exists for the given key.
-    /// - Parameters:
-    ///   - key: Buffer key (`item_id` or `call_id`).
-    ///   - fallbackId: Call identifier used for new buffers.
     private mutating func ensure(key: String, fallbackId: String?) {
         if buffers[key] == nil {
             buffers[key] = Buffer(callId: fallbackId ?? key)
@@ -875,9 +736,6 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
     }
 
     /// Appends a name fragment for the given key.
-    /// - Parameters:
-    ///   - name: Name fragment.
-    ///   - key: Buffer key.
     private mutating func appendName(_ name: String, for key: String) {
         if buffers[key]?.name.isEmpty ?? true {
             buffers[key]?.name = name
@@ -889,10 +747,6 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
 }
 
 /// Minimal shared client for OpenAI-compatible backends.
-///
-/// All three bundled providers (MLX, llama.cpp, generic cloud) speak
-/// this protocol; the client centralizes request building, SSE
-/// parsing, and embeddings decoding so providers stay thin.
 struct OpenAICompatibleHTTPClient: Sendable {
     /// API root ending in `/v1` (no trailing slash).
     let baseURL: String
@@ -908,16 +762,13 @@ struct OpenAICompatibleHTTPClient: Sendable {
     let apiStyle: APIStyle
     /// Chat session identifier sent as `x-opencode-session`, when set.
     let sessionID: String?
-    /// User-Agent sent on every request. Kept in sync with the CLI version.
-    static let userAgent = "rune-weaver/0.1.0"
+    /// User-Agent sent on every request. Single-sourced through
+    /// `RuneWeaverVersion` so providers, tools, and health cannot drift.
+    static var userAgent: String {
+        RuneWeaverVersion.userAgent
+    }
 
     /// Creates a client.
-    /// - Parameters:
-    ///   - baseURL: Server URL with or without `/v1`.
-    ///   - apiKey: Bearer token, if required.
-    ///   - model: Model identifier.
-    ///   - apiStyle: Request style. Defaults to Chat Completions.
-    ///   - sessionID: Chat session identifier sent as `x-opencode-session`. Defaults to nil (header omitted).
     init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil) {
         let normalized = openAIBaseURL(from: baseURL)
         self.baseURL = normalized
@@ -925,13 +776,9 @@ struct OpenAICompatibleHTTPClient: Sendable {
         self.model = model
         self.apiStyle = apiStyle
         self.sessionID = sessionID
-        // Intent: Resolve multi-label cleartext HTTP LAN hostnames (e.g. http://nas.int.example.com:11434/v1)
-        // to their RFC 1918 / RFC 4193 private IP addresses once at client initialization time.
-        // Under macOS App Transport Security (ATS) with NSAllowsLocalNetworking = true, ATS permits
-        // cleartext connections to RFC 1918 IP literals and .local domains, but blocks cleartext to
-        // multi-label domain names even when DNS maps them to private addresses.
-        // LocalNetworking memoizes DNS resolution in a thread-safe cache with a 5-minute TTL, so repeat
-        // client instantiations do not perform redundant synchronous DNS queries on the calling executor.
+        // Intent: Resolve multi-label cleartext HTTP LAN hostnames (e.g.
+        // http://nas.int.example.com:11434/v1) to their RFC 1918 / RFC 4193 private IP addresses
+        // once at client initialization time.
         if let parsed = URL(string: normalized) {
             let target = LocalNetworking.resolvedLocalTarget(for: parsed)
             self.targetBaseURL = target.url.absoluteString
@@ -943,11 +790,6 @@ struct OpenAICompatibleHTTPClient: Sendable {
     }
 
     /// Builds an authorized JSON request.
-    /// - Parameters:
-    ///   - path: Path relative to the API root (e.g. `/chat/completions`).
-    ///   - body: JSON-encoded body.
-    ///   - timeout: Request timeout in seconds.
-    /// - Returns: Configured URL request, or nil for a malformed URL.
     func makeRequest(path: String, body: Data, timeout: TimeInterval = 120) -> URLRequest? {
         guard let url = URL(string: targetBaseURL + path) else { return nil }
         var request = URLRequest(url: url, timeoutInterval: timeout)
@@ -968,12 +810,6 @@ struct OpenAICompatibleHTTPClient: Sendable {
     }
 
     /// Streams chunks through a shared request and pump pipeline.
-    /// - Parameters:
-    ///   - path: Path relative to the API root.
-    ///   - label: Request label used in error messages.
-    ///   - makeBody: Encodes the JSON request body.
-    ///   - pump: Pumps SSE bytes into chunk events.
-    /// - Returns: Chunk stream ending in `done` or `error`.
     func makeStreamingChunks(
         path: String,
         label: String,
@@ -1044,10 +880,6 @@ struct OpenAICompatibleHTTPClient: Sendable {
     }
 
     /// Streams chat chunks for the given history and tools.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Chunk stream ending in `done` or `error`.
     func streamChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         if apiStyle == .responses {
             return streamResponsesChunks(messages: messages, tools: tools)
@@ -1061,10 +893,6 @@ struct OpenAICompatibleHTTPClient: Sendable {
     }
 
     /// Streams chunks via the Responses API for the given history and tools.
-    /// - Parameters:
-    ///   - messages: Conversation history, with system messages first.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Chunk stream ending in `done` or `error`.
     func streamResponsesChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         makeStreamingChunks(
             path: "/responses",
@@ -1140,14 +968,6 @@ struct OpenAICompatibleHTTPClient: Sendable {
 }
 
 /// Pumps SSE byte streams into chunk events.
-///
-/// Extracted from `OpenAICompatibleHTTPClient` so the client type stays
-/// within lint body-length budgets. Captures usage-only final chunks so
-/// llama-server billing is not dropped, and falls back to
-/// `prompt + completion` when `total_tokens` is omitted; that accumulation
-/// intentionally differs from the old inline path, which ignored chunks
-/// without a first choice and recorded zero when `total_tokens` was
-/// absent. Request bodies and parsing shape are otherwise unchanged.
 enum OpenAISSEPump {
     /// Reads a short error preview from an errored byte stream.
     /// - Parameter bytes: Response byte stream.
@@ -1169,25 +989,6 @@ enum OpenAISSEPump {
     }
 
     /// Applies one decoded chat SSE chunk to streaming state.
-    ///
-    /// Captures chunk-level `model` and `usage` before inspecting `choices`
-    /// so a final usage-only chunk with an empty `choices` array (as sent
-    /// by llama-server and per OpenAI convention) still records billing.
-    /// This intentionally differs from the prior inline path, which dropped usage-only
-    /// chunks via an early `guard let choice` and therefore lost the
-    /// final billed total on llama-server; the new accumulation keeps
-    /// that total by design. When `total_tokens` is omitted, the total
-    /// intentionally falls back to `prompt + completion` instead of
-    /// zero. Choice-level `finishReason`, text, and tool deltas apply
-    /// only when a first choice is present. Request bodies and parsing
-    /// shape are otherwise unchanged.
-    /// - Parameters:
-    ///   - chunk: Decoded SSE payload.
-    ///   - lastModel: Rolling serving model name to update.
-    ///   - lastUsage: Rolling token accounting to update.
-    ///   - lastFinishReason: Rolling stop reason to update.
-    ///   - toolAccumulator: Buffered tool-call fragments to update.
-    /// - Returns: Incremental text to emit, if any.
     static func ingestChatChunk(
         _ chunk: OpenAIStreamChunkDTO,
         lastModel: inout String,
@@ -1223,10 +1024,6 @@ enum OpenAISSEPump {
     }
 
     /// Pumps SSE lines into chunk events.
-    /// - Parameters:
-    ///   - bytes: Response byte stream.
-    ///   - fallbackModel: Model name when the server omits it.
-    ///   - continuation: Stream continuation to feed.
     static func pumpSSE(
         bytes: URLSession.AsyncBytes,
         fallbackModel: String,
@@ -1310,10 +1107,6 @@ enum OpenAISSEPump {
     }
 
     /// Maps one Responses event to its stream effect.
-    /// - Parameters:
-    ///   - event: Decoded stream event.
-    ///   - nextIndex: Fallback index for synthesized call IDs.
-    /// - Returns: Effect for the main pump loop to apply.
     static func effect(for event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ResponsesEventEffect {
         guard let type = event.type else {
             if let message = event.errorMessage {
@@ -1341,10 +1134,6 @@ enum OpenAISSEPump {
     }
 
     /// Extracts a tool call from a function-call event.
-    /// - Parameters:
-    ///   - event: Decoded stream event.
-    ///   - nextIndex: Fallback index for synthesized call IDs.
-    /// - Returns: Reassembled tool call, or nil when the event carries none.
     static func responsesToolCall(from event: OpenAIResponsesStreamEventDTO, nextIndex: Int) -> ToolCall? {
         guard let type = event.type else {
             return nil
@@ -1370,12 +1159,6 @@ enum OpenAISSEPump {
     }
 
     /// Converts a Responses usage block to token accounting.
-    ///
-    /// When `total_tokens` is omitted the total falls back to
-    /// `input + output` instead of zero; request bodies and parsing shape
-    /// are otherwise unchanged.
-    /// - Parameter dto: Decoded usage block.
-    /// - Returns: Token usage, or nil when absent.
     static func responsesUsage(from dto: OpenAIResponsesUsageDTO?) -> TokenUsage? {
         guard let dto else {
             return nil
@@ -1390,10 +1173,6 @@ enum OpenAISSEPump {
     }
 
     /// Pumps Responses SSE lines into chunk events.
-    /// - Parameters:
-    ///   - bytes: Response byte stream.
-    ///   - fallbackModel: Model name when the server omits it.
-    ///   - continuation: Stream continuation to feed.
     static func pumpResponsesSSE(
         bytes: URLSession.AsyncBytes,
         fallbackModel: String,

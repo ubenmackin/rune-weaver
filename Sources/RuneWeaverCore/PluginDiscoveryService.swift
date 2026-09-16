@@ -1,9 +1,4 @@
 // Rune Weaver Core — Plugin discovery, registration, and lifecycle orchestration.
-//
-// Scans `~/.runeweaver/plugins/` for rune packages, validates manifests, detects
-// file tampering, and synchronizes enabled tools with the live `ToolBus`.
-// Enforces the disabled-by-default security policy: every newly discovered plugin
-// enters the system as `discovered` and requires explicit human-in-the-loop enablement.
 
 import Foundation
 
@@ -13,9 +8,6 @@ public final class PluginDiscoveryService: Sendable {
     public let store: ToolRegistryStore
 
     /// Creates a plugin discovery service.
-    /// - Parameters:
-    ///   - pluginsDirectory: Directory where plugin folders reside.
-    ///   - store: SQLite store managing durable plugin records.
     public init(pluginsDirectory: URL, store: ToolRegistryStore) {
         self.pluginsDirectory = pluginsDirectory
         self.store = store
@@ -28,13 +20,6 @@ public final class PluginDiscoveryService: Sendable {
     }
 
     /// Scans the plugins directory, synchronizes durable records, and registers enabled tools into `ToolBus`.
-    /// - Parameters:
-    ///   - toolBus: Live engine tool bus.
-    ///   - defaultSource: Provenance recorded for newly seen plugins. Callers that
-    ///     install from the marketplace pass `"marketplace"` so fresh installs keep
-    ///     their origin instead of collapsing to `"local_disk"`; existing rows keep
-    ///     their stored source.
-    /// - Returns: Array of all loaded manifests and their current durable records.
     @discardableResult
     public func discoverAndSync(toolBus: ToolBus, defaultSource: String = "local_disk") async -> [(manifest: PluginManifest, record: PluginRecord)] {
         // Refresh store from SQLite so external mutations (e.g. from CLI) are visible
@@ -153,9 +138,6 @@ public final class PluginDiscoveryService: Sendable {
     }
 
     /// Sets or clears a user permission override for a tool within a plugin.
-    ///
-    /// Mirrors the store-level ceiling so the service fails fast on `trusted`
-    /// before any durable write or live-bus re-registration can occur.
     public func setPermissionOverride(
         id: String,
         toolName: String,
@@ -189,15 +171,10 @@ public final class PluginDiscoveryService: Sendable {
     }
 
     /// Uninstalls a plugin by removing its directory and deleting its record.
-    ///
-    /// Deletion stays confined to the plugins pen: the normalized protected-path
-    /// check must pass before anything is removed, so a symlinked root or a
-    /// crafted identifier can never redirect uninstall outside the holding pen.
     public func uninstallPlugin(id: String, toolBus: ToolBus) async throws {
-        // Snapshot declared tool names before the directory is removed: disabling
-        // only flips the enabled flag while bridge definitions stay registered for
-        // listing, so uninstall must fully unregister each tool or stale disabled
-        // entries would linger in the live registry after the files are gone.
+        // Snapshot declared tool names before the directory is removed: disabling only flips the
+        // enabled flag while bridge definitions stay registered for listing, so uninstall must
+        // fully unregister each tool or stale disabled entries would linger in the live registry...
         let toolNames = findManifest(for: id)?.manifest.tools.map(\.name) ?? []
         _ = try? await disablePlugin(id: id, toolBus: toolBus)
 

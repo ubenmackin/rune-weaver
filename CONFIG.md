@@ -1,6 +1,8 @@
 # Configuration Reference
 
-All non-sensitive settings live in `~/.runeweaver/config.toml`. Copy the example file to get started:
+All non-sensitive settings live in `~/.runeweaver/config.toml`. The DMG app and the CLI use the same file. If you run the app, skip the copy step below and fill in the Settings page in the dashboard. The page writes this file for you, so prefer the page over hand edits.
+
+Copy the example file to get started from source:
 
 ```bash
 mkdir -p ~/.runeweaver
@@ -104,6 +106,31 @@ Tier-3 detonation only: there is no host staging. Document writes use Seatbelt-c
 Archive detonation always uses the Apple Container CLI (`container`); there is no `container_runtime` key. Older files carrying the key load with the hardcoded default.
 
 Legacy staging keys (`staging_path`, `retention_days`, `max_total_bytes`, `cleanup_interval_seconds`) in older files are ignored with no crash and no migration; manually clean old dev-only staging directories.
+
+### `[browser]`
+
+Local web search via self-hosted SearXNG plus bounded page fetch. Search runs against the local SearXNG JSON API so queries never leave operator infrastructure; fetch follows server redirects manually with a per-hop allowlist. The Settings web page is the easiest way to edit these values.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `searxng_url` | string | `"http://127.0.0.1:8888"` | Base URL of the local SearXNG service (`/search` is appended). Must be an absolute http(s) URL. |
+| `search_timeout_seconds` | integer | `10` | Per-search HTTP timeout in seconds. Must be 1–120. |
+| `max_results` | integer | `10` | Maximum results per `web.search` call, bounding context fan-out. Must be 1–50. |
+
+```toml
+[browser]
+searxng_url = "http://127.0.0.1:8888"
+search_timeout_seconds = 10
+max_results = 10
+```
+
+The engine ensures SearXNG on `serve` boot and on first `web.search`: it probes the base URL, otherwise starts an existing `runeweaver-searxng` container or runs one from pinned `searxng/searxng:2025.9.1` (never `:latest`; bump alongside `SearXNGEnsurer.containerImage` and `scripts/searxng-up.sh` only after verifying the new digest) with the per-install override `~/.runeweaver/searxng/settings.yml` carrying a random Flask secret (directory `0700`, file `0600`, enforced on every ensure with fail-closed logging; the bundled `Config/searxng/settings.yml` placeholder is a template only and is never mounted) plus a loopback-only publish (`127.0.0.1:<port>:8080`, host port derived from `searxng_url`: explicit port wins, else the scheme default — 80 for http, 443 for https — matching the probe; 8888 is the default configured URL's port) (bounded to 10 seconds, single-flight in-process with container-name idempotency across serve-plus-CLI races), fails closed with guidance when still down, and leaves the container running after quit by design. To rotate the secret, delete the override file and re-ensure (or re-run `scripts/searxng-up.sh`), then recreate the container. Start it manually with `scripts/searxng-up.sh` when the engine cannot. `rune-weaver status` reports `reachable` or `unreachable` for the configured URL.
+
+`web.search` is `readOnly` against SearXNG JSON (titles, URLs, snippets, bounded by the smaller of `limit` and `max_results`). `web.fetch` is `readOnly` with a five-hop redirect chain validated by the shared allowlist on every hop, a 1 MB byte cap, `finalUrl` always populated, and a typed envelope (`ok`, `auth_required` with a `browser.navigate` hint, `unsupported`).
+
+`browser.navigate` (`readOnly`) opens a page in a fresh isolated Playwright context (no persistent profile, no cross-task storage) and returns distilled text plus snapshot refs in its envelope (`url`, `title`, `text`, `refs`, `truncated`, `authRequired`, manifest-only `downloads`). `browser.act` (`requiresApproval`) performs one validated action (click, fill, select, press, scroll) against a snapshot ref plus its URL, parking every call with target plus URL. `api.request` (`requiresApproval`) is the constrained GET/POST/PUT/DELETE path with an allowlisted header subset, 64KB body and 256KB response caps, and `ok` / `download` (manifest-only) / `preview` envelopes. Screenshots are an opt-in `includeScreenshot` on `browser.navigate` (default false), advertised only to vision-capable models and stripped from text-only history.
+
+Search health shows in the same three places: `rune-weaver status` prints `reachable` or `unreachable`, the dashboard Profile menu shows a SearXNG row with Start and Stop, and the Settings Search pane shows the same controls plus health text.
 
 ### `[email]` — `[[email.accounts]]`
 

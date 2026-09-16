@@ -1,22 +1,8 @@
 // Rune Weaver Core — Single-source WebSocket wire shapes for the engine API.
-//
-// Every client (CLI service launcher, iOS, macOS menu bar, web dashboard)
-// speaks these shapes over one localhost-only surface with no per-client
-// forks. `RuneWeaverServer` and `RuneWeaverClient` expose them via
-// typealiases so the JSON encoding never drifts between modules; `drift`
-// breaks `WSInboundKind.classify`, which tells chat frames apart by the
-// presence of `text` versus `id` plus `approved`, and cancel frames by
-// their explicit `"type": "cancel"` discriminator.
 
 import Foundation
 
 /// Chat message sent by a WebSocket client.
-///
-/// The socket accepts chat frames carrying `text` (plus the legacy
-/// `{"content":"..."}` shape for thin-client migration), or a
-/// decision message carrying `id` plus `approved`. Shapes are told apart
-/// by which required field is present so one socket carries both streamed
-/// chat and live approval decisions without a second connection.
 public struct WSChatMessage: Codable, Sendable, Equatable {
     /// Raw user text.
     public let text: String
@@ -26,32 +12,10 @@ public struct WSChatMessage: Codable, Sendable, Equatable {
     public var source: String?
 
     /// Creates a WebSocket chat message.
-    /// - Parameters:
-    ///   - text: Raw user text.
-    ///   - sessionID: Owning session. Defaults to nil (new session).
-    ///   - source: Input origin. Defaults to nil (`"websocket"`).
     public init(text: String, sessionID: UUID? = nil, source: String? = nil) {
         self.text = text
         self.sessionID = sessionID
         self.source = source
-    }
-}
-
-/// Legacy thin-client chat frame carrying `content`.
-///
-/// Accepts `{"content":"..."}` from older thin clients that predate the
-/// `{"text":"..."}` shape. The full `Message` type requires
-/// `id`/`role`/`content`/`createdAt`, so it can never decode a bare
-/// content frame; this dedicated shape keeps the legacy path live.
-/// - Parameter content: Raw user text.
-public struct WSLegacyContentMessage: Codable, Sendable, Equatable {
-    /// Raw user text.
-    public let content: String
-
-    /// Creates a legacy content message.
-    /// - Parameter content: Raw user text.
-    public init(content: String) {
-        self.content = content
     }
 }
 
@@ -65,10 +29,6 @@ public struct WSDecisionMessage: Codable, Sendable, Equatable {
     public var duration: TrustDuration?
 
     /// Creates a WebSocket decision message.
-    /// - Parameters:
-    ///   - id: Pending request identifier.
-    ///   - approved: Whether the call may run.
-    ///   - duration: Trust tier. Defaults to nil (`thisTime`).
     public init(id: UUID, approved: Bool, duration: TrustDuration? = nil) {
         self.id = id
         self.approved = approved
@@ -92,9 +52,6 @@ public struct WSStreamDelta: Codable, Sendable, Equatable {
     public var sessionID: UUID?
 
     /// Creates a stream delta.
-    /// - Parameters:
-    ///   - delta: Incremental assistant text.
-    ///   - sessionID: Owning session identifier.
     public init(delta: String, sessionID: UUID? = nil) {
         self.type = "delta"
         self.delta = delta
@@ -121,22 +78,9 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     /// Cumulative tokens for session.
     public var sessionTokens: Int?
     /// Whether this turn parked waiting on approval.
-    ///
-    /// Mirrors `OrchestratorResponse.isParked` so REST and WebSocket
-    /// consumers share one end-to-end parked contract. Older frames omit
-    /// the flag and decode as not parked.
     public var isParked: Bool = false
 
     /// Creates a stream done frame.
-    /// - Parameters:
-    ///   - text: Final assistant text.
-    ///   - sessionID: Owning session identifier.
-    ///   - toolActions: Tool invocations performed.
-    ///   - totalTokens: Billed tokens for turn.
-    ///   - modelName: Serving model name.
-    ///   - contextLength: Context window limit.
-    ///   - sessionTokens: Cumulative tokens for session.
-    ///   - isParked: Whether the turn parked waiting on approval. Defaults to false.
     public init(
         text: String,
         sessionID: UUID,
@@ -196,11 +140,6 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     }
 
     /// Creates a terminal frame from an orchestrator response.
-    ///
-    /// Single shared mapping for the response token, model, and parked
-    /// fields so the REST and WebSocket surfaces stay in sync when those
-    /// fields evolve.
-    /// - Parameter response: Completed turn to report.
     public init(from response: OrchestratorResponse) {
         self.init(
             text: response.text,
@@ -262,10 +201,6 @@ public struct WSToolEndFrame: Codable, Sendable, Equatable {
 }
 
 /// Cancellation message sent by a WebSocket client.
-///
-/// Carries the explicit `"cancel"` discriminator so
-/// `WSInboundKind.classify` recognises it without shape sniffing;
-/// decoding tolerates the legacy typeless `{"sessionID": ...}` frame.
 public struct WSCancelMessage: Codable, Sendable, Equatable {
     /// Always `"cancel"`.
     public let type: String
@@ -277,31 +212,9 @@ public struct WSCancelMessage: Codable, Sendable, Equatable {
         self.type = "cancel"
         self.sessionID = sessionID
     }
-
-    /// Coding keys for the cancel frame.
-    enum CodingKeys: String, CodingKey {
-        /// Frame discriminator.
-        case type
-        /// Session to cancel.
-        case sessionID
-    }
-
-    /// Decodes a cancel frame, defaulting a missing discriminator.
-    /// - Parameter decoder: Source decoder.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "cancel"
-        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
-    }
 }
 
 /// Cancellation confirmation frame sent by the engine over WebSocket.
-///
-/// `cancelled` tells idle cancels apart from real ones: `true` means an
-/// in-flight turn was found and aborted, `false` means nothing was running
-/// (and, for unknown or long-idle sessions, no pending mark was left to
-/// poison the next turn). Missing flags from older engines decode as
-/// `true` to keep the previous always-success shape readable.
 public struct WSCancelledFrame: Codable, Sendable, Equatable {
     /// Always `"cancelled"`.
     public let type: String
@@ -311,9 +224,6 @@ public struct WSCancelledFrame: Codable, Sendable, Equatable {
     public let cancelled: Bool
 
     /// Creates a cancelled frame.
-    /// - Parameters:
-    ///   - sessionID: Cancelled session, when known.
-    ///   - cancelled: Whether a running turn was aborted.
     public init(sessionID: UUID? = nil, cancelled: Bool = true) {
         self.type = "cancelled"
         self.sessionID = sessionID
@@ -356,15 +266,6 @@ public struct WSApprovalPrompt: Codable, Sendable, Equatable {
 }
 
 /// Approval decision broadcast sent by the engine over WebSocket.
-///
-/// Announces that one pending approval resolved so every connected view can
-/// evict it without polling. The inbox and chat badge both listen for this
-/// shape alongside the legacy `approval_resolved` alias, so the decision must
-/// stay in this shared file rather than scattering function-local copies that
-/// drift and cannot be reused by thin clients or decoded in tests.
-/// - Note: Carries the owning session when the approval was tagged so
-///   multiplexed views sharing one socket ignore decisions for other
-///   sessions; nil for untagged legacy approvals.
 public struct WSApprovalDecidedFrame: Codable, Sendable, Equatable {
     /// Always `"approval_decided"`.
     public let type: String
@@ -376,10 +277,6 @@ public struct WSApprovalDecidedFrame: Codable, Sendable, Equatable {
     public var sessionID: UUID?
 
     /// Creates an approval decision broadcast.
-    /// - Parameters:
-    ///   - id: Resolved request identifier.
-    ///   - approved: Whether the call may run.
-    ///   - sessionID: Owning session, when known. Defaults to nil.
     public init(id: UUID, approved: Bool, sessionID: UUID? = nil) {
         self.type = "approval_decided"
         self.id = id
@@ -395,15 +292,9 @@ public struct WSErrorFrame: Codable, Sendable, Equatable {
     /// Human-readable failure.
     public let message: String
     /// Owning session, when the failure belongs to one turn.
-    ///
-    /// Tagged so multiplexed views sharing one socket ignore errors for
-    /// other sessions; nil for connection-level failures with no turn.
     public var sessionID: UUID?
 
     /// Creates an error frame.
-    /// - Parameters:
-    ///   - message: Human-readable failure.
-    ///   - sessionID: Owning session, when known.
     public init(message: String, sessionID: UUID? = nil) {
         self.type = "error"
         self.message = message

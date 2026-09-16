@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <style>
+    :root {
+      --rune-color: #a855f7;
+      --dot-color: #38bdf8;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --rune-color: #c084fc;
+        --dot-color: #38bdf8;
+      }
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --rune-color: #7c3aed;
+        --dot-color: #0284c7;
+      }
+    }
+  </style>
+  <g fill="none" stroke="var(--rune-color)" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round">
+    <polygon points="12,4 19.5,12 12,20 4.5,12" />
+    <line x1="12" y1="1" x2="12" y2="23" />
+    <line x1="5" y1="5" x2="19" y2="19" />
+    <line x1="5" y1="19" x2="19" y2="5" />
+    <circle cx="12" cy="12" r="2.2" fill="var(--dot-color)" stroke="none" />
+  </g>
+</svg>

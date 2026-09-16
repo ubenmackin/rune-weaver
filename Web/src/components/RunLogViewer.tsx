@@ -229,11 +229,9 @@ export default function RunLogViewer() {
     };
   }, []);
 
-  // Poll while any run is in progress or parked awaiting approval, so
-  // blocked turns refresh without a manual reload. Both runs and approvals
-  // refresh together so pending-approval badges never go stale during poll.
-  // The effect depends on the boolean flag rather than the full runs array
-  // so the interval is not recreated (and its timer reset) on every update.
+  // Poll while any run is in progress or parked awaiting approval, so blocked turns refresh without
+  // a manual reload. Both runs and approvals refresh together so pending-approval badges never go
+  // stale during poll.
   const hasRunning = runs.some(
     (r) => r.status === "running" || r.status === "awaiting_approval",
   );

@@ -1,15 +1,8 @@
 // Rune Weaver Core — Tool execution context, JSON schemas, and argument wrappers.
-//
-// Encapsulates environmental metadata, session identifiers, raw schema
-// documents, and typed argument models supplied to tools during execution.
 
 import Foundation
 
 /// Minimal JSON Schema descriptor for a tool's input.
-///
-/// Holds the raw JSON Schema document so the LLM knows the expected
-/// function-calling arguments. Decoded lazily by callers that need
-/// structured access.
 public struct JSONSchema: Sendable, Codable, Equatable {
     /// Raw JSON Schema document (a JSON object string).
     public let rawValue: String
@@ -36,10 +29,6 @@ public struct ToolInput: Sendable, Codable, Equatable {
     public let callID: String
 
     /// Creates a tool input.
-    /// - Parameters:
-    ///   - toolName: Name of the tool being invoked.
-    ///   - argumentsJSON: Raw JSON arguments.
-    ///   - callID: Correlation identifier. Defaults to a new UUID string.
     public init(toolName: String, argumentsJSON: String, callID: String = UUID().uuidString) {
         self.toolName = toolName
         self.argumentsJSON = argumentsJSON
@@ -48,9 +37,6 @@ public struct ToolInput: Sendable, Codable, Equatable {
 }
 
 /// Ambient context available to a tool while it executes.
-///
-/// Secrets are injected at execution time via this context and are
-/// never part of the LLM prompt.
 public struct ToolContext: Sendable, Equatable {
     /// Identifier of the owning conversation/session.
     public let conversationID: UUID
@@ -58,9 +44,6 @@ public struct ToolContext: Sendable, Equatable {
     public let dryRun: Bool
 
     /// Creates an execution context.
-    /// - Parameters:
-    ///   - conversationID: Owning conversation identifier.
-    ///   - dryRun: Whether to avoid mutating state.
     public init(conversationID: UUID, dryRun: Bool = false) {
         self.conversationID = conversationID
         self.dryRun = dryRun
@@ -71,14 +54,6 @@ public struct ToolContext: Sendable, Equatable {
 
 public extension ToolInput {
     /// Builds the assistant placeholder stored when a turn contains only tool calls.
-    ///
-    /// Single shared builder for the CLI chat loop and `Orchestrator` so the
-    /// same semantic event persists identical working and episodic content
-    /// regardless of entry point. Each call renders as
-    /// `Calling <name> <single-line arguments> [<callID>]` joined by
-    /// newlines, falling back to `Calling tool…` for an empty batch.
-    /// - Parameter calls: Tool calls needing a parent assistant note.
-    /// - Returns: Placeholder content for the assistant turn.
     static func placeholderContent(for calls: [ToolInput]) -> String {
         guard !calls.isEmpty else { return "Calling tool…" }
         let lines = calls.map { call in
@@ -88,15 +63,6 @@ public extension ToolInput {
     }
 
     /// Collapses whitespace and truncates text for single-line display.
-    ///
-    /// Single shared inline helper for persisted placeholders and CLI
-    /// display so both entry points compact text identically. Callers
-    /// pass an explicit `limit` (tool arguments use 160, tool results
-    /// use 300) so display budgets never diverge through a default.
-    /// - Parameters:
-    ///   - text: Text to compact.
-    ///   - limit: Maximum characters before truncation.
-    /// - Returns: Single-line text, suffixed with `…` when truncated.
     static func inline(_ text: String, limit: Int) -> String {
         let singleLine = text
             .replacingOccurrences(of: "\n", with: " ")
@@ -107,16 +73,6 @@ public extension ToolInput {
     }
 
     /// Parses one persisted assistant placeholder line into a structured input.
-    ///
-    /// Single shared placeholder parser for episodic plumbing stripping
-    /// (`MemoryEngine`) and Responses replay (`RuneWeaverLLM`): each call
-    /// renders via `placeholderContent(for:)` as
-    /// `Calling <name> <single-line arguments> [<callID>]`. Ordinary prose
-    /// starting with "Calling " (e.g. "Calling the bank tomorrow") never
-    /// parses because the full bracketed call-identifier shape is required.
-    /// - Parameter line: Single line to inspect (leading and trailing
-    ///   whitespace is ignored).
-    /// - Returns: Structured input, or nil when the line is not a placeholder.
     static func parsePlaceholderLine(_ line: String) -> ToolInput? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("Calling ") else { return nil }

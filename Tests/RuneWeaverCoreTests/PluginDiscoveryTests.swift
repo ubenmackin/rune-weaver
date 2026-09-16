@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Plugin discovery and disabled-by-default lifecycle.
-//
-// Tests end-to-end plugin scanning, disabled-by-default registration,
-// human-in-the-loop enablement, ToolBus synchronization, tamper quarantine,
-// and permission overrides.
 
 import Foundation
 @testable import RuneWeaverCore

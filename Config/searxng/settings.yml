@@ -1,0 +1,48 @@
+# Rune Weaver — Bundled SearXNG settings template for local web search.
+#
+# Template only: the `secret_key` below is a placeholder and must never be
+# used as an operational Flask session secret. On first ensure the engine
+# (`SearXNGEnsurer`) and `scripts/searxng-up.sh` generate a random per-install
+# key into `~/.runeweaver/searxng/settings.yml` (the preferred override path)
+# and mount that read-only at `/etc/searxng/settings.yml` instead.
+# Keeps JSON output enabled for `web.search` while staying local-first:
+# no third-party search vendor ever sees queries.
+#
+# Rotation: delete `~/.runeweaver/searxng/settings.yml` and re-run ensure (or
+# the script) to mint a fresh key, then recreate the `runeweaver-searxng`
+# container so SearXNG picks it up. Alternatively replace the override's
+# `secret_key` by hand and recreate the container.
+
+general:
+  debug: false
+  instance_name: "Rune Weaver SearXNG"
+
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "change-me-generate-per-install-secret"
+  limiter: false
+  image_proxy: false
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: brave
+    engine: brave
+    shortcut: br
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  pool_connections: 20

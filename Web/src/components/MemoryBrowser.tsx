@@ -143,10 +143,9 @@ export default function MemoryBrowser() {
     setPendingDeleteFact(null);
   }
 
-  // Stable keys without positional index: duplicates of the same
-  // source+content share a base key and are disambiguated by occurrence
-  // within that group, so filtering an unrelated row never remounts the
-  // survivors. Computed per render from current order only.
+  // Stable keys without positional index: duplicates of the same source+content share a base key
+  // and are disambiguated by occurrence within that group, so filtering an unrelated row never
+  // remounts the survivors. Computed per render from current order only.
   const seenBaseKeys = new Map<string, number>();
   function resultKey(result: MemoryResult): string {
     const base = baseResultKey(result);
@@ -213,13 +212,7 @@ export default function MemoryBrowser() {
         <div className="memory-results-container">
           <h4>Search Results ({results.length})</h4>
           <div className="memory-results-list">
-            {/* TEMPORARY: MemoryResult has no stable backend id yet. Keys use
-                stable bounded identity only (source + 53-bit content hash plus
-                a metadata fingerprint, with an occurrence suffix for
-                exact-duplicate collisions), never the positional index, full
-                content, or unstable score, so reorder/filter never remounts
-                identical rows. When the backend adds result.id, use
-                key={result.id}. */}
+            {/* TEMPORARY: MemoryResult has no stable backend id yet. */}
             {results.map((result) => (
               <div className="card memory-result-card" key={resultKey(result)}>
                 <div className="memory-card-header">

@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Component tests for honest pending indicators,
-// ghost-chip suppression, and debug identifier visibility.
-// Verifies session and run badges filter the approvals inbox by owning
-// session, narration without a structured record yields no running chip,
-// and the run detail view surfaces session and tool call identifiers.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

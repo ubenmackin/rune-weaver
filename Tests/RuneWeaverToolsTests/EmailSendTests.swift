@@ -55,9 +55,6 @@ private struct StubSMTPGateway: EmailSMTPGateway, Sendable {
     let box: SendBox?
 
     /// Creates a stub gateway.
-    /// - Parameters:
-    ///   - failure: Bridge failure to throw.
-    ///   - box: Send capture box.
     init(failure: String? = nil, box: SendBox? = nil) {
         self.failure = failure
         self.box = box
@@ -142,21 +139,12 @@ private struct StubSendIMAPGateway: EmailIMAPGateway, Sendable {
     }
 
     /// Returns empty hits (unused by send tests).
-    func search(credentials _: ResolvedEmailCredentials, query _: String, limit _: Int) async throws -> [EmailSearchHit] {
+    func search(credentials _: ResolvedEmailCredentials, mailbox _: String, query _: String, limit _: Int) async throws -> [EmailSearchHit] {
         []
     }
 
-    /// Returns the canned message.
-    func fetch(credentials _: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
-        box?.recordFetch()
-        guard let message else {
-            throw EmailIMAPError.bridgeFailed("Message \(messageID) not found")
-        }
-        return message
-    }
-
     /// Returns canned attachment bytes (unused by send tests).
-    func attachment(credentials _: ResolvedEmailCredentials, messageID _: String, attachmentIndex _: Int) async throws -> EmailAttachmentData {
+    func attachment(credentials _: ResolvedEmailCredentials, mailbox _: String, messageID _: String, attachmentIndex _: Int) async throws -> EmailAttachmentData {
         throw EmailIMAPError.bridgeFailed("No attachments in send stub")
     }
 
@@ -227,10 +215,9 @@ private func sendPayload(
     return String(bytes: data, encoding: .utf8) ?? "{}"
 }
 
-/// Serialized plus `testCredentialEnvLock`: send tests install the stub
-/// account password via `setenv`, which is process-global, so this suite
-/// serializes internally and shares the cross-suite gate with the IMAP
-/// and smoke suites. `HOME` is never mutated.
+/// Serialized plus `testCredentialEnvLock`: send tests install the stub account password via
+/// `setenv`, which is process-global, so this suite serializes internally and shares the cross-
+/// suite gate with the IMAP and smoke suites. `HOME` is never mutated.
 @Suite("Email Send", .serialized)
 struct EmailSendTests {
     @Test
@@ -580,11 +567,11 @@ struct EmailSendTests {
         #expect(sslEndpoints.count == 1)
         #expect(sslEndpoints[0].port == 465)
         #expect(sslEndpoints[0].useImplicitTLS == true)
-        // Account defaults keep legacy payloads on auto without overrides.
-        let legacy = EmailAccount(name: "personal", type: "imap", host: "mail.yourdomain.com", port: 993, username: "you@yourdomain.com")
-        #expect(legacy.smtpHost == nil)
-        #expect(legacy.smtpPort == nil)
-        #expect(legacy.smtpSecurity == .auto)
+        // Account defaults keep payloads on auto without overrides.
+        let account = EmailAccount(name: "personal", type: "imap", host: "mail.yourdomain.com", port: 993, username: "you@yourdomain.com")
+        #expect(account.smtpHost == nil)
+        #expect(account.smtpPort == nil)
+        #expect(account.smtpSecurity == .auto)
     }
 
     @Test
@@ -752,9 +739,9 @@ struct EmailSendTests {
             #expect(envelope.references == "42")
             #expect(box.lastMessage?.inReplyTo == "42")
             #expect(box.lastMessage?.references == "42")
-            #expect((box.lastMessage?.subject ?? "").hasPrefix("Re:"))
-            #expect((box.lastMessage?.bodyText ?? "").contains("Will do."))
-            #expect((box.lastMessage?.bodyText ?? "").contains("> Please review the numbers."))
+            #expect(box.lastMessage?.subject.hasPrefix("Re:") == true)
+            #expect(box.lastMessage?.bodyText.contains("Will do.") == true)
+            #expect(box.lastMessage?.bodyText.contains("> Please review the numbers.") == true)
             let reparsed = try JSONDecoder().decode(EmailSendEnvelope.self, from: Data(output.content.utf8))
             #expect(reparsed.bodyPreview?.contains("Will do.") == true)
         }

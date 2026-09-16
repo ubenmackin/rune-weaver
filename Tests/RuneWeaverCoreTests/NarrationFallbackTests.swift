@@ -1,20 +1,10 @@
 // Rune Weaver Tests — Narration fallback for local models without function calling.
-//
-// Verifies text narration (`Calling <tool> {...} [...]`) converts only to
-// read-only tool calls with fresh identifiers, while approval-gated,
-// trusted, unknown, and malformed narrations stay unexecuted. Covers the
-// Orchestrator safety contract that local-model prose can never bypass
-// permission gates.
 import Foundation
 import os
 @testable import RuneWeaverCore
 import Testing
 
 /// Fixture tool with a configurable permission level for fallback tests.
-///
-/// Read-only instances prove narrated placeholders execute, while
-/// approval-gated instances prove the fallback leaves them unexecuted
-/// even when the bus would otherwise allow them.
 private struct FixtureNarrationTool: Tool, Sendable {
     /// Registered tool name.
     let name: String
@@ -31,20 +21,12 @@ private struct FixtureNarrationTool: Tool, Sendable {
     let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
 
     /// Returns the canned outcome.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output echoing the call identifier.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success(output, callID: input.callID)
     }
 }
 
 /// Scripted provider replaying canned texts in call order.
-///
-/// Each `chat` call consumes the next entry so the orchestrator observes
-/// a narrated turn followed by a final synthesis turn without inference.
-/// Access is lock-guarded for Swift 6 data-race safety.
 private final class ScriptedNarrationLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
@@ -63,10 +45,6 @@ private final class ScriptedNarrationLLM: LLMProvider, Sendable {
     }
 
     /// Replays the next canned text as a finished stream.
-    /// - Parameters:
-    ///   - messages: Ignored conversation history.
-    ///   - tools: Ignored available tools.
-    /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text: String = state.withLock { s in
             let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
@@ -122,10 +100,6 @@ private final class ScriptedChunkedTurnLLM: LLMProvider, Sendable {
 }
 
 /// Builds a read-only fixture tool.
-/// - Parameters:
-///   - name: Registered tool name.
-///   - output: Canned outcome text.
-/// - Returns: Read-only stub tool.
 private func makeNarrationReadTool(name: String, output: String) -> FixtureNarrationTool {
     FixtureNarrationTool(name: name, output: output, permissionLevel: .readOnly)
 }

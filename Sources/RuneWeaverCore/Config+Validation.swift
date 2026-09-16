@@ -1,9 +1,4 @@
 // Rune Weaver Core — Fail-closed validation for RuneWeaverConfig.
-//
-// Rejects out-of-range, malformed, or inconsistent section values before
-// they reach providers, stores, or the network, keeping a bad edit from
-// becoming silent misbehavior. Reports the offending field so
-// misconfiguration is quick to locate and fix.
 
 import Foundation
 
@@ -22,6 +17,7 @@ extension RuneWeaverConfig {
         try validateVoiceSection()
         try validateSandboxSection()
         try validateFilesSection()
+        try validateBrowserSection()
         try validateEmailSection()
         try validateHomeSection()
         try validateSchedulerSection()
@@ -175,15 +171,27 @@ extension RuneWeaverConfig {
         try Self.validateFilesPatterns(files.allowRoots, field: "files.allow_roots")
     }
 
+    private func validateBrowserSection() throws {
+        // Fail closed on a blank or relative SearXNG URL so search never
+        // fans out to an unintended host; range checks mirror the mail
+        // search caps so context budgets stay predictable. Only http/https
+        // pass here so `ftp:`/`file:`-adjacent values fail at config load
+        // instead of later in `searchRequest` via `WebURLSafety`.
+        try Self.validateHTTPURLField(browser.searxngURL, field: "browser.searxng_url")
+        if browser.searchTimeoutSeconds < 1 || browser.searchTimeoutSeconds > 120 {
+            throw ConfigError.validationError(
+                field: "browser.search_timeout_seconds", message: "must be between 1 and 120"
+            )
+        }
+        if browser.maxResults < 1 || browser.maxResults > BrowserConfig.maxAllowedResults {
+            throw ConfigError.validationError(
+                field: "browser.max_results",
+                message: "must be between 1 and \(BrowserConfig.maxAllowedResults)"
+            )
+        }
+    }
+
     /// Validates one files list for blank entries and directory escapes.
-    ///
-    /// Blank patterns would match nothing (or everything, depending on the
-    /// matcher) while `..` segments could climb out of the allowed roots,
-    /// so both fail closed with the dotted field name.
-    /// - Parameters:
-    ///   - patterns: Raw patterns to check.
-    ///   - field: Dotted field path for error reporting.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` on blank or escaping entries.
     public static func validateFilesPatterns(_ patterns: [String], field: String) throws {
         for pattern in patterns {
             let trimmed = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -199,14 +207,6 @@ extension RuneWeaverConfig {
     }
 
     /// SMTP submission ports the send path can actually dial.
-    ///
-    /// Single-sourced via `EmailConfig.allowedSubmissionPorts` (aliased by
-    /// `EmailSMTPBridge.submissionPorts` so the Swift copies cannot drift)
-    /// and mirrored by the embedded Python SMTP helper's allowlist: any
-    /// other port would validate here yet fail at send time, so validation
-    /// rejects it now for a fail-fast field error instead of a late send
-    /// failure. Keep the Python `(25, 465, 587, 2525)` check equal when
-    /// changing the shared set.
     private static var allowedSMTPPorts: Set<Int> {
         EmailConfig.allowedSubmissionPorts
     }
@@ -314,6 +314,19 @@ extension RuneWeaverConfig {
         guard let url = URL(string: value), url.scheme != nil, url.host != nil else {
             throw ConfigError.validationError(
                 field: field, message: "must be an absolute URL (e.g. http://localhost:8080)"
+            )
+        }
+    }
+
+    /// Validates an http(s) URL field, rejecting non-web schemes fail-closed.
+    private static func validateHTTPURLField(_ value: String, field: String) throws {
+        try validateURLField(value, field: field)
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https"
+        else {
+            throw ConfigError.validationError(
+                field: field, message: "must be an absolute http(s) URL (e.g. http://127.0.0.1:8888)"
             )
         }
     }

@@ -1,17 +1,9 @@
 // Rune Weaver LLM — Local llama.cpp inference server provider adapter.
-//
-// Bridges llama.cpp OpenAI-compatible server instances (default port 8081)
-// into the LLMProvider interface with streaming token and tool-call support.
 
 import Foundation
 import RuneWeaverCore
 
 /// Local provider for models served by a llama.cpp server.
-///
-/// Connects to a llama.cpp server exposing an OpenAI-compatible API
-/// (default `http://localhost:8081`). The llama.cpp server ignores
-/// the `model` field, but one is still sent because the shared
-/// OpenAI-compatible client requires it.
 public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     /// Default local llama.cpp server URL.
     public static var defaultServerURL: String {
@@ -34,6 +26,8 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     public let model: String
     /// Maximum context window in tokens.
     public let contextLength: Int
+    /// Whether the fronted model accepts vision input.
+    public let supportsVision: Bool
 
     /// Stable provider identifier used by the router and config keys.
     public var name: String {
@@ -47,23 +41,22 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
             provider: "llamacpp",
             contextLength: contextLength,
             supportsTools: true,
-            supportsEmbeddings: false
+            supportsEmbeddings: false,
+            supportsVision: supportsVision
         )
     }
 
     /// Creates a llama.cpp provider.
-    /// - Parameters:
-    ///   - serverURL: llama.cpp server URL. Defaults to `http://localhost:8081`.
-    ///   - model: Model label. Defaults to `"local-model"`.
-    ///   - contextLength: Context window. Defaults to 4096 tokens.
     public init(
         serverURL: String = LlamaCppProvider.defaultServerURL,
         model: String = LlamaCppProvider.defaultModel,
-        contextLength: Int = LlamaCppProvider.defaultContextLength
+        contextLength: Int = LlamaCppProvider.defaultContextLength,
+        supportsVision: Bool = false
     ) {
         self.serverURL = serverURL
         self.model = model
         self.contextLength = contextLength
+        self.supportsVision = supportsVision
     }
 
     /// Shared HTTP client for this provider.
@@ -78,21 +71,11 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Streams chunk-level events from the llama.cpp server.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Stream ending in `done` or `error`.
     public func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         client.streamChunks(messages: messages, tools: tools)
     }
 
     /// Embeds texts via the server's embeddings endpoint.
-    ///
-    /// Older llama.cpp servers expose `/embedding` (singular) instead
-    /// of the OpenAI-compatible `/v1/embeddings`; those servers surface
-    /// ``LLMProviderError/embeddingsUnsupported(_:)``.
-    /// - Parameter text: Texts to embed.
-    /// - Returns: One embedding vector per input text.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         try await client.requestEmbeddings(texts: text)
     }

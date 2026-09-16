@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Shared portal modal for confirmations and detail views.
-// Single source for backdrop, focus, Escape dismissal, and body portal so
-// session delete, run history clear, and run detail dialogs stay visually
-// identical without triplicating portal and keyboard handling.
 
 import { useEffect, useRef, type MouseEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";

@@ -1,17 +1,9 @@
 // Rune Weaver Core Tests — Contract tests for the embeddings seam.
-// Verifies the disabled backend, error equality, and the batch ordering
-// guarantees that semantic memory and recall depend on, using a lightweight
-// stub backend. Guards the invariants every future provider must uphold.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
 
 /// Deterministic stub returning position-tagged vectors in input order.
-///
-/// Each output vector encodes its input index alongside the input length,
-/// so order violations are directly observable in assertions. Empty input
-/// short-circuits to empty output, mirroring the batch contract without a
-/// model round-trip.
 private struct StubEmbeddingsBackend: EmbeddingsBackend, Sendable {
     /// Stable stub identifier for diagnostics.
     let modelID = "stub-embeddings"

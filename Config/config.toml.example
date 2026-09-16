@@ -75,6 +75,18 @@ allow_roots = ["~"]
 # Whether deny hits escalate to the approvals inbox (true) or fail closed.
 require_approval_on_deny = true
 
+[browser]
+# Local web search and fetch policy. Search runs against self-hosted SearXNG
+# over its JSON API so queries never leave operator infrastructure.
+# The engine ensures SearXNG on `serve` boot and first search (bounded 10s,
+# single-flight); the container stays running after quit by design.
+# Start manually with `scripts/searxng-up.sh` when the engine cannot.
+searxng_url = "http://127.0.0.1:8888"
+# Per-search HTTP timeout in seconds (1-120).
+search_timeout_seconds = 10
+# Maximum results per web.search call (1-50, bounding context fan-out).
+max_results = 10
+
 [email]
 [[email.accounts]]
 name = "icloud"

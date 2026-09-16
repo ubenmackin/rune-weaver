@@ -1,17 +1,9 @@
 // Rune Weaver LLM — Apple Silicon MLX local inference provider adapter.
-//
-// Bridges local MLX servers running Apple Silicon models (default port 8080)
-// into the LLMProvider interface with SSE chunk streaming and embeddings support.
 
 import Foundation
 import RuneWeaverCore
 
 /// Local provider for Apple Silicon models served over MLX.
-///
-/// Connects to a local MLX server exposing an OpenAI-compatible API
-/// (default `http://localhost:8080`). Text streams over
-/// `/v1/chat/completions` as server-sent events; embeddings use
-/// `/v1/embeddings` when the server enables them.
 public struct MLXProvider: ChunkStreamingProvider, Sendable {
     /// Default local MLX server URL.
     public static var defaultServerURL: String {
@@ -47,15 +39,12 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
             provider: "mlx",
             contextLength: contextLength,
             supportsTools: true,
-            supportsEmbeddings: false
+            supportsEmbeddings: false,
+            supportsVision: false
         )
     }
 
     /// Creates an MLX provider.
-    /// - Parameters:
-    ///   - serverURL: MLX server URL. Defaults to `http://localhost:8080`.
-    ///   - model: Model identifier. Defaults to `"gemma-4-9b"`.
-    ///   - contextLength: Context window. Defaults to 8192 tokens.
     public init(
         serverURL: String = MLXProvider.defaultServerURL,
         model: String = MLXProvider.defaultModel,
@@ -78,21 +67,11 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Streams chunk-level events from the MLX server.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Stream ending in `done` or `error`.
     public func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         client.streamChunks(messages: messages, tools: tools)
     }
 
     /// Embeds texts via the MLX server's embeddings endpoint.
-    ///
-    /// Many MLX chat servers leave embeddings disabled; the thrown
-    /// ``LLMProviderError`` distinguishes an unreachable server from a
-    /// missing endpoint.
-    /// - Parameter text: Texts to embed.
-    /// - Returns: One embedding vector per input text.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         try await client.requestEmbeddings(texts: text)
     }

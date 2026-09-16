@@ -1,8 +1,4 @@
 // Rune Weaver App — macOS Menu Bar State and Lifecycle Model.
-//
-// Boots the loopback engine server in-process, maintains live status
-// for the menu bar UI, handles approval decisions, and orchestrates
-// graceful shutdown.
 
 import AppKit
 import Foundation
@@ -61,12 +57,8 @@ public final class AppModel {
         }
     }
 
-    /// Builds the permission gate and served prompt from the live registry so
-    /// served turns see every registered tool including discovered runes.
-    /// The preview bus snapshots external runes before the service owns the
-    /// registry; the service syncs the same directory again on boot, keeping
-    /// both views consistent. Forwards the configured plugins directory so
-    /// custom locations get the same protected-path enforcement.
+    /// Builds the permission gate and served prompt from the live registry so served turns see
+    /// every registered tool including discovered runes.
     private func buildGateAndSystemPrompt(
         plugins: [any Tool],
         config: RuneWeaverConfig
@@ -212,6 +204,13 @@ public final class AppModel {
             var plugins: [any Tool] = []
             plugins += EmailTools.makeTools(emailConfig: config.email, sandboxConfig: config.sandbox)
             plugins += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
+            // One `[browser]` policy feeds every web-facing tool via the shared
+            // registration surface; `api.request` additionally exempts the
+            // configured LLM origins from the SSRF deny.
+            let appLLMOrigins = config.llm.providers.values.compactMap(\.serverURL)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            plugins += BuiltinToolPlugins.makeTools(browserConfig: config.browser, llmServerURLs: appLLMOrigins)
 
             let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
                 plugins: plugins,
@@ -235,7 +234,9 @@ public final class AppModel {
                     await self?.notificationManager.postApprovalNotification(req)
                     await self?.refreshPendingApprovals()
                 },
-                sandboxConfig: config.sandbox
+                sandboxConfig: config.sandbox,
+                browserConfig: config.browser,
+                llmServerURLs: appLLMOrigins
             )
 
             for tool in plugins {
@@ -312,10 +313,9 @@ public final class AppModel {
         }
     }
 
-    /// Builds a dashboard URL from a snapshot of the bind values so host text
-    /// can never inject a scheme or path, and so a concurrent edit cannot
-    /// produce a half-old address. Refuses non-loopback hosts because the
-    /// service has no authentication yet.
+    /// Builds a dashboard URL from a snapshot of the bind values so host text can never inject a
+    /// scheme or path, and so a concurrent edit cannot produce a half-old address. Refuses non-
+    /// loopback hosts because the service has no authentication yet.
     private func dashboardURL(fragment: String? = nil) -> URL? {
         let host = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         let portValue = port

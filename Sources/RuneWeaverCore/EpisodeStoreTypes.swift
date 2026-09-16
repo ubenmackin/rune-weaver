@@ -1,16 +1,8 @@
 // Rune Weaver Core — Types and summarizers for episodic memory.
-//
-// Defines episode records, query parameters, search hits, summarization
-// function types, and extractive summary utilities for episodic memory.
 
 import Foundation
 
 /// A single episodic memory record: one turn of conversation history.
-///
-/// Episodes persist in SQLite (`episodes.db` from `config.toml`) with an
-/// FTS5 index over `content` for keyword search. Old episodes are folded
-/// into per-session summaries via
-/// ``EpisodeStore/summarizeSessions(olderThan:summarizer:)``.
 public struct Episode: Sendable, Codable, Equatable, Identifiable {
     /// Unique identifier for this episode.
     public let id: UUID
@@ -26,13 +18,6 @@ public struct Episode: Sendable, Codable, Equatable, Identifiable {
     public let metadata: [String: String]
 
     /// Creates an episode.
-    /// - Parameters:
-    ///   - id: Unique identifier. Defaults to a new UUID.
-    ///   - sessionID: Owning session identifier.
-    ///   - role: Who produced the content.
-    ///   - content: Text content.
-    ///   - timestamp: Occurrence date. Defaults to now.
-    ///   - metadata: Key/value annotations. Defaults to empty.
     public init(
         id: UUID = UUID(),
         sessionID: UUID,
@@ -67,11 +52,6 @@ public struct Episode: Sendable, Codable, Equatable, Identifiable {
 }
 
 /// Rolled-up summary of one session's old episodes.
-///
-/// Produced by ``EpisodeStore/summarizeSessions(olderThan:summarizer:)``
-/// without mutating the store; see
-/// ``EpisodeStore/compactSessions(olderThan:summarizer:)`` for the
-/// destructive variant that replaces old rows with a summary episode.
 public struct EpisodeSummary: Sendable, Codable, Equatable {
     /// Session the summarized episodes belong to.
     public let sessionID: UUID
@@ -85,12 +65,6 @@ public struct EpisodeSummary: Sendable, Codable, Equatable {
     public let newest: Date
 
     /// Creates a summary.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - summary: Summary text.
-    ///   - messageCount: Folded episode count.
-    ///   - oldest: Oldest timestamp.
-    ///   - newest: Newest timestamp.
     public init(sessionID: UUID, summary: String, messageCount: Int, oldest: Date, newest: Date) {
         self.sessionID = sessionID
         self.summary = summary
@@ -109,19 +83,9 @@ public enum EpisodeStoreError: Error, Sendable, Equatable {
 }
 
 /// Summarizes a batch of episodes into short text.
-///
-/// Takes the episodes being compacted (oldest first) and returns the
-/// summary kept as an `EpisodeSummary` or a replacement system episode.
-/// - Parameter episodes: Episodes being compacted.
-/// - Returns: Summary text.
 public typealias EpisodeSummarizer = @Sendable ([Episode]) -> String
 
 /// Default extractive summarizer used when no LLM is wired in.
-///
-/// Joins the first line of each episode, truncated to a bounded length,
-/// so no data leaves the machine for summarization.
-/// - Parameter episodes: Episodes being compacted.
-/// - Returns: Summary preview.
 public func defaultEpisodeSummarizer(_ episodes: [Episode]) -> String {
     let parts = episodes.map { episode -> String in
         let firstLine = episode.content.split(separator: "\n").first.map { String($0) } ?? ""
@@ -132,19 +96,6 @@ public func defaultEpisodeSummarizer(_ episodes: [Episode]) -> String {
 }
 
 /// Builds an extractive summary from preformatted lines.
-///
-/// Joins `lines` with `"; "` and truncates to exactly
-/// `truncationLength` characters inclusive of the trailing ellipsis
-/// so callers share one truncation policy. Text at or under the limit
-/// returns unchanged with no ellipsis.
-/// Used by both the episode and session summarizers.
-/// - Parameters:
-///   - lines: Preformatted `"[role] first line"` entries.
-///   - truncationLength: Maximum characters in the returned text,
-///     including the ellipsis when truncation applies. Non-positive
-///     limits return an empty string.
-/// - Returns: Joined text, truncated to `truncationLength` characters
-///   inclusive of the ellipsis when over budget.
 func extractiveSummary(lines: [String], truncationLength: Int) -> String {
     guard truncationLength > 0 else { return "" }
     let joined = lines.joined(separator: "; ")
@@ -159,21 +110,8 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
     import SQLite3
 
     /// Shared SQLite primitives for the episode, session, scheduler, and run-log stores.
-    ///
-    /// Package-scoped (`package`) to share handle opening, statement
-    /// execution, and text binding across `RuneWeaverCore` and `RuneWeaverServer`
-    /// without exposing them publicly. Callers map failures to their domain
-    /// errors via the `unavailable`/`failure` closures.
     package enum SQLiteHelpers {
         /// Opens a database handle, creating parent directories.
-        ///
-        /// Applies the shared durability policy (`busy_timeout` plus WAL)
-        /// so every store inherits identical locking behavior without
-        /// duplicating PRAGMAs per open site.
-        /// - Parameters:
-        ///   - dbPath: SQLite file path. `~` is expanded.
-        ///   - unavailable: Maps an open failure to the caller's domain error.
-        /// - Returns: Open database handle. Caller must close it.
         package static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {
             let expanded = (dbPath as NSString).expandingTildeInPath
             let directory = (expanded as NSString).deletingLastPathComponent
@@ -202,10 +140,6 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         }
 
         /// Executes a multi-statement SQL string.
-        /// - Parameters:
-        ///   - handle: Open database handle.
-        ///   - sql: SQL to execute.
-        ///   - failure: Maps an execution failure to the caller's domain error.
         package static func exec(handle: OpaquePointer?, sql: String, failure: (String) -> some Error) throws {
             var errorMessage: UnsafeMutablePointer<CChar>?
             let status = sql.withCString { sqlite3_exec(handle, $0, nil, nil, &errorMessage) }
@@ -217,10 +151,6 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         }
 
         /// Binds optional text, mapping nil to NULL.
-        /// - Parameters:
-        ///   - statement: Prepared statement.
-        ///   - index: One-based bind index.
-        ///   - value: Text value, or nil for NULL.
         package static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
             if let value {
                 _ = value.withCString { sqlite3_bind_text(statement, index, $0, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
@@ -230,10 +160,6 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         }
 
         /// Column-text helper returning nil for NULL columns.
-        /// - Parameters:
-        ///   - statement: Stepped statement positioned on a row.
-        ///   - index: Zero-based column index.
-        /// - Returns: Column text, or nil when NULL.
         package static func columnText(_ statement: OpaquePointer?, index: Int32) -> String? {
             sqlite3_column_text(statement, index).map { String(cString: $0) }
         }

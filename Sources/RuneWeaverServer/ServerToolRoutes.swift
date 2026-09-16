@@ -1,26 +1,10 @@
 // Rune Weaver Server — Tool registry and invocation routes.
-//
-// Hosts tool listing, per-tool enable/disable toggles backed by durable
-// tool-state storage, and direct tool invocation so the main service file
-// stays within the length budget. List and toggle paths share one
-// tool-info mapping so dashboard provenance labels never diverge.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// Builds one tool listing row with the provenance rules shared by tool routes.
-///
-/// Keeps `GET /tools` and `POST /tools/:name/state` on one mapping so the
-/// dashboard never sees divergent builtin/plugin labels between list and
-/// toggle responses. Builtins stay `builtin`/`valid`; bridge tools resolve
-/// their registry record for source and tamper status, falling back to a
-/// generic plugin label when the record is missing.
-/// - Parameters:
-///   - tool: Registered tool to describe.
-///   - isEnabled: Live bus flag for the tool.
-///   - recordByPluginID: Registry records indexed by plugin identifier.
-/// - Returns: Listing row for the tool.
 func buildToolInfo(
     for tool: any Tool,
     isEnabled: Bool,
@@ -62,17 +46,6 @@ func buildToolInfo(
 }
 
 /// Validates, persists, toggles, and describes one tool state change.
-///
-/// Trims the name and rejects blanks with 400, reports unknown registered
-/// names with 404, then persists the flag before touching the live bus so a
-/// crash between the two never leaves the bus ahead of disk on the next
-/// boot. Accepts any registered name including memory tools.
-/// - Parameters:
-///   - toolName: Registered tool name.
-///   - enabled: Desired enabled flag.
-///   - context: Shared engine collaborators.
-/// - Returns: Updated listing row for the tool.
-/// - Throws: `Abort` with `.badRequest` for blank names or `.notFound` for unknown tools.
 func updateToolState(toolName: String, enabled: Bool, context: ServerContext) async throws -> ToolInfo {
     let name = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !name.isEmpty else {

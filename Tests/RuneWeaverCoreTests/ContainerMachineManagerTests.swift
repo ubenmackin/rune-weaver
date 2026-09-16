@@ -122,10 +122,9 @@ struct ContainerMachineManagerTests {
 
     @Test
     func `Machines with unknown age are treated as stale`() {
-        // Without any timestamp there is no proven youth; failing closed
-        // toward reclamation keeps untracked fleets from accumulating across
-        // restarts when the listing carries no dates and the local registry
-        // has no entry (fresh UUIDs guarantee no registry hit).
+        // Without any timestamp there is no proven youth; failing closed toward reclamation keeps
+        // untracked fleets from accumulating across restarts when the listing carries no dates and
+        // the local registry has no entry (fresh UUIDs guarantee no registry hit).
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let unknown = ContainerMachineInfo(
             name: "runeweaver-session-\(UUID().uuidString)",

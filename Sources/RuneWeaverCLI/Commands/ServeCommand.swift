@@ -1,9 +1,4 @@
 // Rune Weaver CLI — Engine API service command.
-//
-// Launches the local HTTP REST, WebSocket, and static web dashboard service
-// on loopback (127.0.0.1). Serves thin clients (iOS, macOS menu bar, web UI)
-// under single-user local machine trust without authentication in v1. Refuses
-// non-loopback bindings until authentication lands (auth-before-exposure).
 
 import ArgumentParser
 import Foundation
@@ -11,23 +6,10 @@ import Logging
 import RuneWeaverCore
 import RuneWeaverLLM
 import RuneWeaverServer
+import RuneWeaverTools
 import Vapor
 
 /// Starts the local engine API service on loopback.
-///
-/// Builds a `ServerContext` via `ServerContext.make(...)`, registers the
-/// shared plugin tools on its bus, configures a Vapor `Application` with
-/// `configureRuneWeaver(_:context:)`, and runs it so the REST routes,
-/// chat WebSocket, and static dashboard bundle serve on `127.0.0.1:8082`
-/// by default with no auth (single-user, local-machine trust). The
-/// service auto-fires scheduler cron and poll triggers in-process via
-/// `ServerSchedulerWorker` (started/stopped by `ServerSchedulerLifecycle`)
-/// sharing the single-flight `SchedulerRunLock` with the manual
-/// `POST /scheduler/jobs/:id/run` route, so overlapping fires in this
-/// process skip instead of stacking. The CLI `scheduler run` foreground
-/// loop is a separate auto-fire runner in another process with no shared
-/// lock state, so running this service and the CLI loop together can
-/// double-fire the same job — run one auto-fire runner at a time.
 struct ServeCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -70,10 +52,9 @@ struct ServeCommand: AsyncParsableCommand {
         try LoggingSystem.bootstrap(from: &env)
         let app = try await Application.make(env)
         await permissionGate.startPeriodicCleanup()
-        // Tier-3 crash-orphan prune only; there is no host staging to sweep and
-        // no staging audit tied to an old path. Document writes stage in
-        // Seatbelt-confined temp with an atomic move on approval, so boot
-        // reclamation covers only orphaned detonation machines.
+        // Tier-3 crash-orphan prune only; there is no host staging to sweep and no staging audit
+        // tied to an old path. Document writes stage in Seatbelt-confined temp with an atomic move
+        // on approval, so boot reclamation covers only orphaned detonation machines.
         let serveCleanup = SandboxCleaner.cleanup(config: loaded.config.sandbox)
         if serveCleanup.containersDestroyed > 0 || serveCleanup.staleMachinesStopped > 0 || !serveCleanup.errors.isEmpty {
             let reclaimed = serveCleanup.containersDestroyed
@@ -84,6 +65,15 @@ struct ServeCommand: AsyncParsableCommand {
             ))
         }
         await context.sandboxCleanup.start(config: loaded.config.sandbox)
+        // Ensure the local search engine before accepting turns so first searches stay warm; a down
+        // engine never blocks boot — the failure surfaces as closed guidance on the next search
+        // instead. The container is left running after quit by design.
+        do {
+            try await SearXNGEnsurer.shared.ensure(browser: loaded.config.browser)
+            print(TerminalStyle.dim("SearXNG ready at \(loaded.config.browser.searxngURL)."))
+        } catch {
+            print(TerminalStyle.dim("Search engine unavailable: \(error.localizedDescription)"))
+        }
         try await runServerLoop(
             app: app,
             context: context,
@@ -159,7 +149,9 @@ struct ServeCommand: AsyncParsableCommand {
             emailConfig: loaded.config.email,
             memoryEngine: memoryEngine,
             sandboxConfig: loaded.config.sandbox,
-            embedder: embedder
+            embedder: embedder,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm
         )
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
@@ -171,7 +163,9 @@ struct ServeCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder,
             pluginConfig: loaded.config.plugins,
-            episodesDBPath: loaded.config.memory.episodesDBPath
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm
         )
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: previewBus)
         let context = await ServerContext.make(
@@ -185,7 +179,9 @@ struct ServeCommand: AsyncParsableCommand {
             schedulerConfig: loaded.config.scheduler,
             episodesDBPath: loaded.config.memory.episodesDBPath,
             pluginConfig: loaded.config.plugins,
-            sandboxConfig: loaded.config.sandbox
+            sandboxConfig: loaded.config.sandbox,
+            browserConfig: loaded.config.browser,
+            llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm)
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)

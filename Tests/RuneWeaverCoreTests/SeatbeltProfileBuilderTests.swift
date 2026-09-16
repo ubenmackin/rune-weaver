@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Seatbelt profile generator tests.
-//
-// Covers the deny-default SBPL baseline: every profile must block by default,
-// reopen only minimal system plus explicit workspace roots for reads and
-// writes, confine staged document writes to a non-executable temp dir with an
-// atomic move on approval, retain macOS dyld launch compat, and keep
-// credential denies overriding workspace allows.
 
 import Foundation
 @testable import RuneWeaverCore

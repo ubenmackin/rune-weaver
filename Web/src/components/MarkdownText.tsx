@@ -16,10 +16,9 @@ const PreContext = createContext(false);
 type CodeProps = React.ComponentPropsWithoutRef<"code">;
 type PreProps = React.ComponentPropsWithoutRef<"pre">;
 
-// Named components keep hook usage out of the inline `components` map:
-// `MarkdownCode` reads `PreContext` to tell fenced blocks apart from
-// inline snippets, and stable identities avoid remount churn on every
-// render of the parent message.
+// Named components keep hook usage out of the inline `components` map: `MarkdownCode` reads
+// `PreContext` to tell fenced blocks apart from inline snippets, and stable identities avoid
+// remount churn on every render of the parent message.
 function CodeBlock({ className, children, ...props }: CodeProps) {
   return (
     <code className={className} {...props}>
@@ -98,11 +97,9 @@ function normalizeMarkdown(text: string): string {
   return lines.join("\n");
 }
 
-// Blocked schemes stay blocked even when attackers hide them with
-// tab/newline/null smuggling, percent-encoding, HTML entities, or
-// comment splicing, so every check runs on a camouflage-stripped copy
-// while the allowlist (secure web, validated mail, local navigation)
-// decides. Anything with another scheme stays unlinked.
+// Blocked schemes stay blocked even when attackers hide them with tab/newline/null smuggling,
+// percent-encoding, HTML entities, or comment splicing, so every check runs on a camouflage-
+// stripped copy while the allowlist (secure web, validated mail, local navigation) decides.
 function decodeUrlEntities(value: string): string {
   let out = value.replace(/&#x([0-9a-fA-F]+);?/g, (_match: string, hex: string) => {
     const code = parseInt(hex, 16);
@@ -141,12 +138,8 @@ function decodeUrlEntities(value: string): string {
   return out;
 }
 
-// Strips the hiding layers browsers ignore so `java\tscript:`,
-// `%6Aavascript:`, `&#58;`, and `java/**/script:` all surface as the
-// same blocked scheme before the allowlist decides. Controls and spaces
-// are removed for detection only (legitimate URLs never hide executable
-// schemes in whitespace), keeping the decision conservative: camouflage
-// can only turn an allowed shape into a denied one, never the reverse.
+// Strips the hiding layers browsers ignore so `java\tscript:`, `%6Aavascript:`, `&#58;`, and
+// `java/**/script:` all surface as the same blocked scheme before the allowlist decides.
 function normalizeUrlForCheck(raw: string): string {
   let working = raw.trim().replace(/\/\*.*?\*\//g, "");
   working = decodeUrlEntities(working);

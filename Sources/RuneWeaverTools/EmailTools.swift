@@ -1,30 +1,9 @@
 // Rune Weaver Tools — Email search, read, attachment, and send tools.
-//
-// Provides the `email.search`, `email.read`, `email.attachment`, and
-// `email.send` plugin tools over the `python3 imaplib`/`smtplib` bridges
-// with read-only fetches, isolated temp downloads for documents and
-// images, zero-host-mounts microVM detonation for archives, approval-gated
-// sending and archive exports, and execution-time credential resolution.
 
 import Foundation
 import RuneWeaverCore
 
 /// Read-only `email.search` tool over IMAP.
-///
-/// Searches subject, sender, and body through the `python3 imaplib`
-/// bridge and returns headers plus a short text snippet per hit.
-/// By default fans out across every selectable mailbox (via `IMAP LIST`,
-/// excluding `Noselect`/`NonExistent` flags), merges hits newest-first
-/// labeled with their mailbox, and caps at `limit`; pass `mailbox` to
-/// narrow to one folder. An empty, whitespace-only, or lone `"*"`
-/// query lists the most-recent messages via `SEARCH ALL` (newest first,
-/// capped by `limit`) instead of sending a literal `TEXT "*"` that
-/// matches nothing on iCloud.
-/// Always `readOnly`: it opens each mailbox read-only with
-/// `(BODY.PEEK[])` fetches and never mutates flags or messages.
-/// Verified live against Volcrypt IMAP (`mail.volcrypt.com:993`)
-/// and iCloud IMAP (`imap.mail.me.com:993` with an app-specific
-/// password via `EMAIL_ICLOUD_PASSWORD`).
 public struct EmailSearchTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.search"
@@ -56,30 +35,16 @@ public struct EmailSearchTool: Tool, Sendable {
     private let gateway: any EmailIMAPGateway
 
     /// Creates a search tool.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
     public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
     }
 
     /// Runs the search, resolving credentials at execution time.
-    /// - Parameters:
-    ///   - input: Invocation with `account`, `query`, optional `limit`, and optional `mailbox`.
-    ///   - context: Ambient execution context.
-    /// - Returns: JSON envelope with hits, or a failure without secrets.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-        // Smart raw pre-check plus decoded CR/LF validation before ANY
-        // account lookup or credential resolution so invalid input reports
-        // "Invalid search query" even when the password is missing. The raw
-        // check looks for unescaped JSON escapes (`\r`, `\n`, `\u000d`,
-        // `\u000a` with an odd backslash count) so legitimate queries with
-        // literal backslash+r/n (Windows paths like `C:\new\report` encoded
-        // as double backslash in JSON) pass while injection with single
-        // backslash escapes fails. Decoded checks below catch real CR/LF
-        // characters (including `\u000d` escapes decoded by the JSON parser).
-        // Never logs or echoes input values or secrets.
+        // Smart raw pre-check plus decoded CR/LF validation before ANY account lookup or credential
+        // resolution so invalid input reports "Invalid search query" even when the password is
+        // missing.
         if EmailIMAPValidation.containsEncodedCRLF(in: input.argumentsJSON) {
             return .failure(
                 EmailIMAPError.bridgeFailed("Invalid search query: query must not contain CR or LF").localizedDescription,
@@ -95,12 +60,9 @@ public struct EmailSearchTool: Tool, Sendable {
                 callID: input.callID
             )
         }
-        // Fail fast on decoded injection before touching accounts or
-        // credentials so invalid input reports "Invalid search query" even
-        // when the password is missing. Checks the raw value first (before
-        // trimming) to mirror the bridge, then the trimmed value. Catches
-        // actual CR/LF characters (including "\\u000d" escapes decoded by
-        // the JSON parser).
+        // Fail fast on decoded injection before touching accounts or credentials so invalid input
+        // reports "Invalid search query" even when the password is missing. Checks the raw value
+        // first (before trimming) to mirror the bridge, then the trimmed value.
         do {
             try EmailIMAPValidation.validateSearchQuery(args.query)
         } catch {
@@ -126,13 +88,9 @@ public struct EmailSearchTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-        // Wildcard/empty maps to ALL: a trimmed empty query or a lone "*"
-        // lists the most-recent messages instead of sending a literal
-        // TEXT "*" that matches nothing on iCloud (imap.mail.me.com:993).
-        // The normalized empty string triggers SEARCH ALL in the Python
-        // bridge; the envelope echoes the effective query so the audit
-        // shows what IMAP actually ran. Read-only, verified TLS, capped
-        // limit, and no secret logging are unchanged.
+        // Wildcard/empty maps to ALL: a trimmed empty query or a lone "*" lists the most-recent
+        // messages instead of sending a literal TEXT "*" that matches nothing on iCloud
+        // (imap.mail.me.com:993).
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query
         guard let account = emailConfig.account(matching: accountName) else {
             let available = emailConfig.accounts.map(\.name)
@@ -170,14 +128,6 @@ public struct EmailSearchTool: Tool, Sendable {
 
 extension EmailSearchTool {
     /// Searches one explicit mailbox with a clear unknown-folder error.
-    /// - Parameters:
-    ///   - account: Matched account for the envelope.
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - requested: Trimmed requested mailbox.
-    ///   - effectiveQuery: Normalized query (`""` means `SEARCH ALL`).
-    ///   - limit: Maximum hits.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope, or an unknown-mailbox failure.
     private func singleMailboxOutput(
         account: EmailAccount,
         credentials: ResolvedEmailCredentials,
@@ -210,20 +160,6 @@ extension EmailSearchTool {
     }
 
     /// Fans out across every selectable mailbox, merging newest-first.
-    ///
-    /// Per-mailbox failures are skipped so one unreadable folder never
-    /// hides the rest; when every folder fails the last error surfaces.
-    /// The envelope lists only the folders actually searched (succeeded
-    /// boxes), never folders that failed. Folder names are never
-    /// assumed: an empty `LIST` result throws a no-selectable-mailboxes
-    /// failure instead of synthesizing `INBOX`.
-    /// - Parameters:
-    ///   - account: Matched account for the envelope.
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - effectiveQuery: Normalized query (`""` means `SEARCH ALL`).
-    ///   - limit: Maximum hits.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with merged hits.
     private func fanOutOutput(
         account: EmailAccount,
         credentials: ResolvedEmailCredentials,
@@ -271,16 +207,6 @@ extension EmailSearchTool {
 }
 
 /// Read-only `email.read` tool over IMAP.
-///
-/// Returns headers plus the decoded text body. Attachment bytes are
-/// never returned: parts are listed by filename, MIME type, and byte
-/// size with a note pointing at `email.attachment` for downloads.
-/// Pass the `mailbox` labeled on the `email.search` hit to reopen
-/// messages outside `INBOX`; omitted or blank means `INBOX`.
-/// Always `readOnly`. Verified live against Volcrypt IMAP
-/// (`mail.volcrypt.com:993`) and iCloud IMAP
-/// (`imap.mail.me.com:993` with an app-specific password via
-/// `EMAIL_ICLOUD_PASSWORD`).
 public struct EmailReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.read"
@@ -311,38 +237,25 @@ public struct EmailReadTool: Tool, Sendable {
     private let gateway: any EmailIMAPGateway
 
     /// Creates a read tool.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
     public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
     }
 
     /// Reads one message, resolving credentials at execution time.
-    /// - Parameters:
-    ///   - input: Invocation with `account` and `id` (plus `messageId` aliases) and optional `mailbox`.
-    ///   - context: Ambient execution context.
-    /// - Returns: JSON envelope with headers and body, or a failure without secrets.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
-        // Decoded-only UID allowlisting happens after JSON decoding: the
-        // strict `^[0-9][0-9:,]*$` check on the decoded id rejects real
-        // CR/LF (including "\\u000d" escapes decoded by the JSON parser)
-        // before ANY account lookup or credential resolution, so invalid
-        // input reports "Invalid message id" even when the password is
-        // missing. No raw-document pre-check: legitimate ids never contain
-        // backslash escapes, and raw checks false-positive on them.
+        // Decoded-only UID allowlisting happens after JSON decoding: the strict `^[0-9][0-9:,]*$`
+        // check on the decoded id rejects real CR/LF (including "\\u000d" escapes decoded by the
+        // JSON parser) before ANY account lookup or credential resolution, so invalid input reports...
         let args: EmailReadArgs
         do {
             args = try JSONDecoder().decode(EmailReadArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure("Invalid email.read arguments: expected {\"account\": \"<name>\", \"id\": \"<message-id>\"}.", callID: input.callID)
         }
-        // Fail fast on allowlist before touching accounts or credentials
-        // so invalid input reports "Invalid message id" even when the
-        // password is missing. Checks the raw value first, then trimmed.
-        // Catches actual control characters (including "\\u000d" escapes
-        // decoded by the JSON parser).
+        // Fail fast on allowlist before touching accounts or credentials so invalid input reports
+        // "Invalid message id" even when the password is missing. Checks the raw value first, then
+        // trimmed.
         do {
             try EmailIMAPValidation.validateMessageID(args.messageID)
         } catch {
@@ -379,11 +292,7 @@ public struct EmailReadTool: Tool, Sendable {
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
-            // Reuse the found mailbox so fan-out hits stay openable. Every mailbox — explicit
-            // or the legacy-default `INBOX` for omitted or blank — is validated against the
-            // selectable list via `resolveMailboxAgainstList` with a clear unknown-folder error;
-            // folder names are never assumed so an empty `LIST` result returns a
-            // no-selectable-mailboxes failure instead of synthesizing `INBOX`.
+            // Reuse the found mailbox so fan-out hits stay openable.
             let requestedOrDefault = args.trimmedMailbox ?? "INBOX"
             let listed = try await gateway.listMailboxes(credentials: credentials)
             let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
@@ -403,24 +312,6 @@ public struct EmailReadTool: Tool, Sendable {
 }
 
 /// `email.attachment` tool over IMAP.
-///
-/// Downloads one attachment part by zero-based index into isolated
-/// temp only (never to the real filesystem) and returns the
-/// staged path with filename, MIME type, byte size, staged-file expiry,
-/// coarse MIME bucket, and a follow-up hint. Parts over the size cap
-/// are skipped without writing, returning a note instead. Pass
-/// `preview: true` to inline the first 2000 chars for small text
-/// payloads (`text/*`, `application/json` under 256 KB); binaries are
-/// never inlined. Pass the `mailbox` labeled on the `email.search` hit
-/// to fetch from folders outside `INBOX`; omitted or blank means `INBOX`.
-/// Archives (ZIP/TAR families by type or filename) never touch host
-/// staging: they detonate in a zero-host-mounts ephemeral microVM with
-/// only a manifest returned, plus `subpath` inspection and an
-/// approval-gated `saveToPath` export guarded by `FilesAccessGuard`.
-/// Declared `requiresApproval` so the graduated-trust gate prompts
-/// before any download. Reads only: it opens each mailbox read-only
-/// with `(BODY.PEEK[])` fetches and never sends mail. Secrets are
-/// resolved at execution time and never logged.
 public struct EmailAttachmentTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "email.attachment"
@@ -478,13 +369,6 @@ public struct EmailAttachmentTool: Tool, Sendable {
     private let archiveDetonator: any EmailArchiveDetonator
 
     /// Creates an attachment tool.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - gateway: IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Tier-3 detonation policy. Defaults to the built-in detonation defaults.
-    ///   - filesConfig: `[files]` policy for archive exports. Defaults to the built-in defaults.
-    ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
-    ///   - archiveDetonator: Archive detonator. Defaults to the live microVM detonator.
     public init(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
@@ -506,16 +390,6 @@ public struct EmailAttachmentTool: Tool, Sendable {
     }
 
     /// Downloads one attachment part, detonating archives in isolation.
-    ///
-    /// Documents and images keep the staged-download path with inline
-    /// payloads; archives branch to the ephemeral microVM detonator and
-    /// never touch host staging, so untrusted archive bytes cannot reach
-    /// `files.read` through the sandbox. Dry runs fetch metadata but spawn
-    /// no machines and write no files.
-    /// - Parameters:
-    ///   - input: Invocation with `account`, `id` (plus `messageId` aliases), `index` aliases, optional `mailbox`, `preview`, `subpath`, and `saveToPath`.
-    ///   - context: Ambient execution context. `dryRun` fetches but never writes or detonates.
-    /// - Returns: JSON envelope with the staged path or archive manifest, or a skip note, or a failure without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         do {
             let args = try decodedArgs(from: input)
@@ -609,9 +483,6 @@ private struct AttachmentTarget {
 
 extension EmailAttachmentTool {
     /// Decodes attachment arguments, rejecting bad ids and indexes early.
-    /// - Parameter input: Raw tool invocation.
-    /// - Returns: Decoded args.
-    /// - Throws: Failure message when decoding or validation fails.
     private func decodedArgs(from input: ToolInput) throws -> EmailAttachmentArgs {
         let args: EmailAttachmentArgs
         do {
@@ -636,19 +507,6 @@ extension EmailAttachmentTool {
     }
 
     /// Trims and re-validates decoded attachment routing.
-    ///
-    /// Omitted or blank mailboxes fall back to the legacy-default `INBOX`
-    /// string here but are validated against `LIST` downstream in `resolvedMailbox`
-    /// via `resolveMailboxAgainstList` like explicit values; folder names are never
-    /// assumed. The optional `preview` flag passes through untouched so text
-    /// previews stay opt-in and legacy calls without it behave identically.
-    /// Archive follow-ups validate fail-closed before any network or VM use:
-    /// `subpath` must be a relative in-archive path and `saveToPath` must
-    /// already satisfy the workspace guard, so a denied export never fetches
-    /// IMAP bytes or spawns a machine.
-    /// - Parameter args: Decoded attachment arguments.
-    /// - Returns: Trimmed routing.
-    /// - Throws: Failure message when routing is empty or invalid.
     private func validatedTarget(from args: EmailAttachmentArgs) throws -> AttachmentTarget {
         let accountName = args.trimmedAccount
         let messageID = args.trimmedMessageID
@@ -688,9 +546,6 @@ extension EmailAttachmentTool {
     }
 
     /// Resolves the configured account by exact then case-insensitive name.
-    /// - Parameter accountName: Trimmed account nickname.
-    /// - Returns: Matching account.
-    /// - Throws: `EmailIMAPError.unknownAccount` when no account matches.
     private func resolvedAccount(named accountName: String) throws -> EmailAccount {
         if let account = emailConfig.account(matching: accountName) {
             return account
@@ -699,19 +554,6 @@ extension EmailAttachmentTool {
     }
 
     /// Resolves the requested mailbox against the selectable list.
-    ///
-    /// Reuses the found mailbox so fan-out hits stay openable with a clear
-    /// unknown-folder error; folder names are never assumed so an empty
-    /// `LIST` result throws a no-selectable-mailboxes failure instead of
-    /// synthesizing `INBOX`. Every value — explicit or the legacy-default `INBOX`
-    /// for omitted or blank — is validated via `LIST` plus `resolveMailboxAgainstList`
-    /// (exact-first with a case-insensitive fallback) so `INBOX` and `inbox`
-    /// behave identically.
-    /// - Parameters:
-    ///   - credentials: Already-resolved credentials for the `LIST` lookup.
-    ///   - requested: Trimmed requested mailbox (`INBOX` for the legacy default).
-    /// - Returns: Canonical mailbox name.
-    /// - Throws: Unknown-mailbox failure when the folder is not selectable.
     private func resolvedMailbox(credentials: ResolvedEmailCredentials, requested: String) async throws -> String {
         let listed = try await gateway.listMailboxes(credentials: credentials)
         let available = EmailBridgeParsing.selectableMailboxes(from: listed.map { name in (flags: "", mailbox: name) })
@@ -719,12 +561,6 @@ extension EmailAttachmentTool {
     }
 
     /// Fetches attachment bytes through the gateway with shared credentials.
-    /// - Parameters:
-    ///   - credentials: Already-resolved credentials shared with mailbox resolution.
-    ///   - mailbox: Canonical mailbox holding the message.
-    ///   - messageID: Trimmed message identifier.
-    ///   - index: Zero-based attachment position.
-    /// - Returns: Downloaded bytes.
     private func fetchedAttachment(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -740,10 +576,6 @@ extension EmailAttachmentTool {
     }
 
     /// Encodes an attachment envelope as a success result.
-    /// - Parameters:
-    ///   - envelope: Envelope to encode.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success result, or a failure when encoding fails.
     private func successEnvelope(_ envelope: EmailAttachmentEnvelope, callID: String) -> ToolOutput {
         do {
             let content = try EmailBridgeParsing.encodeAttachmentEnvelope(envelope)
@@ -754,12 +586,6 @@ extension EmailAttachmentTool {
     }
 
     /// Builds the skip result for a part over the size cap.
-    /// - Parameters:
-    ///   - target: Trimmed routing.
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - fetched: Downloaded metadata for the skipped part.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the skip note.
     private func oversizedEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -783,17 +609,6 @@ extension EmailAttachmentTool {
     }
 
     /// Resolves the isolated-temp destination for a download.
-    ///
-    /// Each download owns a per-request owner-only temp dir created through
-    /// the shared staging helper, so concurrent attachments never share a
-    /// predictable folder. The dir stays covered by a Seatbelt profile allow
-    /// while remaining never-executable, and the attachments base inside it
-    /// is set `0700`; staged bytes are never executed from this location.
-    /// - Parameters:
-    ///   - target: Trimmed routing.
-    ///   - accountName: Resolved account name for the file prefix.
-    ///   - filename: Original attachment filename.
-    /// - Returns: Destination under isolated temp.
     private func stagedDestinationURL(
         target: AttachmentTarget,
         accountName: String,
@@ -822,12 +637,6 @@ extension EmailAttachmentTool {
     }
 
     /// Fails closed unless the Seatbelt profile allows the staging temp.
-    ///
-    /// The profile sanitizes paths before interpolating, so a temp dir that
-    /// vanishes from the rendered profile must never receive staged bytes;
-    /// refusing keeps confinement explicit instead of assumed.
-    /// - Parameter tempDir: Per-request staging temp to cover.
-    /// - Throws: A failure when the temp dir falls outside the profile allow.
     private func requireSeatbeltTempAllow(_ tempDir: URL) throws {
         let profile = SeatbeltProfileBuilder(allowedTempPaths: [tempDir.path]).buildProfile()
         guard profile.contains(tempDir.path) else {
@@ -836,17 +645,6 @@ extension EmailAttachmentTool {
     }
 
     /// Builds the dry-run result without writing any bytes.
-    ///
-    /// Keeps `path` nil per the `EmailAttachmentEnvelope` contract (`path`
-    /// is nil when skipped); the would-be staging path is reported in the
-    /// note instead so no caller mistakes a dry run for a staged file.
-    /// - Parameters:
-    ///   - target: Trimmed routing.
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - fetched: Downloaded metadata.
-    ///   - destination: Staging path that would have been written.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the dry-run note.
     private func dryRunEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -870,24 +668,6 @@ extension EmailAttachmentTool {
     }
 
     /// Stages document and image bytes under Seatbelt-confined isolated temp and builds the success result.
-    ///
-    /// Archives never reach here: `execute` routes them to the microVM
-    /// detonator before any host write, so this path only handles inline
-    /// payloads with a staged copy for `files.read` follow-ups. Attaches the
-    /// post-download lifecycle (expiry from the isolated-temp retention window,
-    /// coarse MIME bucket, follow-up hint, and the guarded inline preview)
-    /// so the model can act on the staged file without a second round trip.
-    /// Inline payloads stay bounded: `extractedText` truncates to the shared
-    /// preview char cap with the truncation flagged in `note`, and vision
-    /// Base64 is omitted over the vision byte cap in favor of the staged copy.
-    /// Oversized and dry-run skips keep the legacy shape with no lifecycle keys.
-    /// - Parameters:
-    ///   - target: Trimmed routing (including the caller's `preview` request).
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - fetched: Downloaded bytes to stage.
-    ///   - destination: Seatbelt-confined isolated-temp file URL.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the staged path and lifecycle hints, or a staging failure.
     private func storedEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -896,10 +676,9 @@ extension EmailAttachmentTool {
         callID: String
     ) -> ToolOutput {
         do {
-            // The destination already sits inside a per-request temp from
-            // `stagedDestinationURL`; re-assert the Seatbelt allow here so a
-            // relocated path fails closed instead of writing outside cover.
-            // Staged bytes stay readable and writable but never executable.
+            // The destination already sits inside a per-request temp from `stagedDestinationURL`;
+            // re-assert the Seatbelt allow here so a relocated path fails closed instead of writing
+            // outside cover. Staged bytes stay readable and writable but never executable.
             let requestTemp = destination.deletingLastPathComponent().deletingLastPathComponent()
             try requireSeatbeltTempAllow(requestTemp)
             try FileManager.default.createDirectory(
@@ -986,17 +765,6 @@ extension EmailAttachmentTool {
     }
 
     /// Builds the dry-run result for an archive without spawning a machine.
-    ///
-    /// Keeps the legacy skip shape (no lifecycle keys, no manifest) so a
-    /// preview never detonates untrusted bytes and never writes host files;
-    /// the note names the would-be detonation instead of a staging path so
-    /// no caller mistakes a dry run for an isolated session.
-    /// - Parameters:
-    ///   - target: Trimmed routing.
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - fetched: Downloaded metadata.
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the dry-run note.
     private func archiveDryRunEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -1019,24 +787,6 @@ extension EmailAttachmentTool {
     }
 
     /// Detonates an archive in an ephemeral microVM and builds the manifest result.
-    ///
-    /// Host staging is never touched on this path: the manifest, optional
-    /// subpath inspection payload, and optional approval-gated export are the
-    /// only data that cross back. The export stages in Seatbelt-confined
-    /// isolated temp then lands with one guard-validated atomic move at write
-    /// time (covering policy edits between validation and detonation). Entry payloads decode like direct downloads but
-    /// stay bounded: UTF-8 entries surface as `extractedText` truncated to the
-    /// shared preview char cap with the truncation flagged in `note`, image
-    /// entries surface as vision Base64 only under the vision byte cap, and
-    /// other binaries stay export-only so opaque bytes never enter
-    /// the model context. Failures carry only the filename and reason, never
-    /// entry bytes or secrets.
-    /// - Parameters:
-    ///   - target: Trimmed routing with validated `subpath`/`saveToPath`.
-    ///   - accountName: Resolved account name for the envelope.
-    ///   - fetched: Downloaded archive bytes (already capped).
-    ///   - callID: Correlation identifier.
-    /// - Returns: Success envelope with the manifest-only result, or throws for `execute` to convert.
     private func detonatedArchiveEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -1126,20 +876,6 @@ extension EmailAttachmentTool {
     }
 
     /// Exports detonated archive bytes through confined-temp staging.
-    ///
-    /// Untrusted bytes never write directly to the workspace: they stage as
-    /// one atomic file inside a per-request owner-only temp covered by a
-    /// Seatbelt profile allow, then move with one guard-validated atomic step
-    /// that re-checks live `[files]` policy at move time so edits between
-    /// validation and detonation still fail closed. Temp is discarded on any
-    /// deny or failure and never executed from.
-    /// - Parameters:
-    ///   - target: Trimmed routing with validated `subpath`/`saveToPath`.
-    ///   - fetched: Downloaded archive bytes (already capped).
-    ///   - entryData: Inspected entry bytes when `subpath` was requested.
-    ///   - saveToPath: Raw workspace destination (may contain `~`).
-    /// - Returns: Canonical destination path that was written.
-    /// - Throws: Guard denials or staging failures without leaking bytes.
     private func exportArchiveBytes(
         for target: AttachmentTarget,
         fetched: EmailAttachmentData,
@@ -1183,37 +919,11 @@ extension EmailAttachmentTool {
 }
 
 /// Factory registering the email tools on a `ToolBus`.
-///
-/// Search and read stay `readOnly` while attachment downloads and
-/// sending are `requiresApproval` so the graduated-trust gate prompts
-/// before any file is staged or message leaves the machine. All tools
-/// integrate with `EmailCredentialResolver` (environment first, Keychain
-/// service `com.runeweaver.secrets` second) so passwords never live in
-/// `config.toml` and never reach the LLM prompt. Verified live against
-/// Volcrypt IMAP (`mail.volcrypt.com:993`, account `volcrypt` via
-/// `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
-/// (`imap.mail.me.com:993`, account `icloud` via the
-/// `EMAIL_ICLOUD_PASSWORD` app-specific password) read-only with
-/// verified TLS; document and image bytes stage under isolated temp
-/// only while archives detonate in zero-host-mounts ephemeral
-/// microVMs with manifest-only returns. Sending uses verified SMTP submission (explicit overrides
-/// or 587 STARTTLS then 465 SSL) with the sender defaulting to the
-/// account username, workspace-guarded attachments, threaded replies,
-/// and a best-effort Sent copy.
 public enum EmailTools {
     /// Tool names in registration order.
     public static let toolNames = ["email.search", "email.read", "email.attachment", "email.send"]
 
     /// Builds the email tools for an email config.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Tier-3 detonation policy for `email.attachment` archives.
-    ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
-    ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
-    ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.
-    /// - Returns: Search, read, attachment, and send tools in registration order.
     public static func makeTools(
         emailConfig: EmailConfig,
         gateway: (any EmailIMAPGateway)? = nil,
@@ -1245,15 +955,6 @@ public enum EmailTools {
     }
 
     /// Registers the email tools, replacing same-named entries.
-    /// - Parameters:
-    ///   - bus: Bus receiving the tools (surfaced via `status`).
-    ///   - emailConfig: Decoded `[email]` section.
-    ///   - gateway: Shared IMAP gateway. Defaults to the `python3` subprocess bridge.
-    ///   - smtpGateway: Shared SMTP gateway for `email.send`. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Tier-3 detonation policy for `email.attachment` archives.
-    ///   - filesConfig: `[files]` policy for approval-gated archive exports. Defaults to the built-in defaults.
-    ///   - homeDirectoryURL: Home boundary override forwarded to the export guard. Defaults to nil (real home).
-    ///   - archiveDetonator: Archive detonator for `email.attachment`. Defaults to the live microVM detonator.
     public static func register(
         on bus: ToolBus,
         emailConfig: EmailConfig,

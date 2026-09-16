@@ -1,8 +1,4 @@
 // Rune Weaver Tools Tests — Email bridge and tool behavior coverage.
-//
-// Exercises the email IMAP/SMTP bridge parsing, validation gates, and tool
-// envelopes with fixture payloads and stub gateways, so wire-format drift
-// and fail-closed validation surface without a live mailbox.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -24,8 +20,8 @@ private let fetchFixtureWithAttachment = """
 }}
 """
 
-/// Legacy fetch payload without `sizeBytes`, decoding as unknown size.
-private let fetchFixtureLegacyAttachment = """
+/// Fetch payload without `sizeBytes`, decoding as unknown size.
+private let fetchFixtureMinimalAttachment = """
 {"ok": true, "message": {
   "id": "42",
   "subject": "Quarterly report",
@@ -70,9 +66,6 @@ private func testICloudEmailConfig(username: String = "user@icloud.com") -> Emai
 }
 
 /// Stub archive detonator returning canned manifests without a container runtime.
-///
-/// Keeps detonation tests hermetic: no microVM is spawned, and a canned
-/// failure proves paths (dry runs, document downloads) never detonate.
 private struct StubArchiveDetonator: EmailArchiveDetonator, Sendable {
     /// Entries returned in the manifest.
     let manifest: [EmailArchiveEntry]
@@ -104,11 +97,7 @@ private struct StubArchiveDetonator: EmailArchiveDetonator, Sendable {
 
 /// Serialized plus `testCredentialEnvLock`: `ToolsTestSupport.withTestPassword` and
 /// `ToolsTestSupport.withICloudTestPassword` (see `ToolsTestSupport.swift`) mutate the process
-/// environment via `setenv`, which is process-global and POSIX-unsafe under
-/// concurrency. `.serialized` only serializes within this suite, so the
-/// shared lock provides cross-suite exclusion with `Smoke Harness`, and each
-/// helper saves/restores the prior value instead of blind `unsetenv`.
-/// `HOME` is never mutated.
+/// environment via `setenv`, which is process-global and POSIX-unsafe under concurrency.
 @Suite("Email Tools", .serialized)
 struct EmailToolsTests {
     @Test
@@ -137,7 +126,7 @@ struct EmailToolsTests {
 
     @Test
     func `Fetch bridge payload without size decodes as unknown size`() throws {
-        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureLegacyAttachment.utf8))
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(fetchFixtureMinimalAttachment.utf8))
         #expect(message.attachments.count == 1)
         #expect(message.attachments[0].filename == "report.pdf")
         #expect(message.attachments[0].sizeBytes == nil)
@@ -1142,10 +1131,10 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Attachment args default preview to false for legacy calls`() throws {
-        // Legacy callers omit the flag, so decoding must stay opt-in rather than inlining by surprise.
-        let legacy = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
-        #expect(legacy.preview == false)
+    func `Attachment args default preview to false when omitted`() throws {
+        // When callers omit the flag, decoding defaults to false.
+        let omitted = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        #expect(omitted.preview == false)
         let requested = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0,"preview":true}"#.utf8))
         #expect(requested.preview == true)
     }
@@ -1400,8 +1389,8 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Attachment skip envelopes keep the legacy shape with no lifecycle keys`() async throws {
-        // Oversized and dry-run outcomes must not gain lifecycle keys, so old readers keep working.
+    func `Attachment skip envelopes omit lifecycle keys`() async throws {
+        // Oversized and dry-run outcomes must not gain lifecycle keys.
         let oversize = EmailAttachmentTool.maxAttachmentBytes + 1
         let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "big.bin",
@@ -1434,10 +1423,10 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Attachment legacy envelopes decode without lifecycle keys`() throws {
-        // Envelopes written before the lifecycle landed must still decode with lifecycle fields as nil.
-        let legacy = #"{"account":"personal","id":"42","index":0,"filename":"report.pdf","contentType":"application/pdf","sizeBytes":11,"path":"/tmp/report.pdf","skipped":false,"mailbox":"INBOX"}"#
-        let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(legacy.utf8))
+    func `Attachment minimal envelopes decode without lifecycle keys`() throws {
+        // Minimal envelopes decode with omitted lifecycle fields as nil.
+        let minimal = #"{"account":"personal","id":"42","index":0,"filename":"report.pdf","contentType":"application/pdf","sizeBytes":11,"path":"/tmp/report.pdf","skipped":false,"mailbox":"INBOX"}"#
+        let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(minimal.utf8))
         #expect(envelope.path == "/tmp/report.pdf")
         #expect(envelope.expiresAt == nil)
         #expect(envelope.mimeCategory == nil)
@@ -1643,9 +1632,9 @@ struct EmailToolsTests {
 
     @Test
     func `Archive attachment args decode subpath and saveToPath`() throws {
-        let legacy = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
-        #expect(legacy.trimmedSubpath == nil)
-        #expect(legacy.trimmedSaveToPath == nil)
+        let minimal = try JSONDecoder().decode(EmailAttachmentArgs.self, from: Data(#"{"account":"personal","id":"42","index":0}"#.utf8))
+        #expect(minimal.trimmedSubpath == nil)
+        #expect(minimal.trimmedSaveToPath == nil)
         let followUp = try JSONDecoder().decode(
             EmailAttachmentArgs.self,
             from: Data(#"{"account":"personal","id":"42","index":0,"subpath":"hello.txt","saveToPath":"~/workspace/hello.txt"}"#.utf8)

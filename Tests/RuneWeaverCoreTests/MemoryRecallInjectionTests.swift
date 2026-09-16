@@ -4,10 +4,6 @@ import Foundation
 import Testing
 
 /// Builds an isolated engine on a fresh temporary directory.
-///
-/// Each test gets its own episodes database, vector directory, and
-/// profile file so fixture writes never leak between tests.
-/// - Returns: Engine plus the base directory owning its files.
 private func makeRecallInjectionEngine() -> (engine: MemoryEngine, base: URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)

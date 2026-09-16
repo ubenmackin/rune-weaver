@@ -1,10 +1,4 @@
 // Rune Weaver Core Tests — Apple NaturalLanguage embeddings backend.
-//
-// Exercises the local-first sentence backend through injected lookups so
-// outcomes stay deterministic without loading the on-device model or
-// asserting on its exact floats. Scopes to contract edges: vector shape,
-// dimension learning, ordering with arity preservation and blank rejection,
-// and error mapping that lets recall choose its keyword fallback.
 
 import Foundation
 @testable import RuneWeaverCore

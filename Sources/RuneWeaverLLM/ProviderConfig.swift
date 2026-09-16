@@ -1,7 +1,4 @@
 // Rune Weaver LLM — Provider configuration models and factory constructors.
-//
-// Defines provider kinds, endpoint configurations, authentication options,
-// and factory methods constructing concrete LLMProvider instances from config.
 
 import Foundation
 import RuneWeaverCore
@@ -26,10 +23,6 @@ public struct MLXProviderOptions: Sendable, Codable, Equatable {
     public var contextLength: Int
 
     /// Creates MLX options with local-first defaults.
-    /// - Parameters:
-    ///   - serverURL: MLX server URL. Defaults to `http://localhost:8080`.
-    ///   - model: Model identifier. Defaults to `"gemma-4-9b"`.
-    ///   - contextLength: Context window. Defaults to 8192 tokens.
     public init(
         serverURL: String = MLXProvider.defaultServerURL,
         model: String = MLXProvider.defaultModel,
@@ -57,10 +50,6 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
     public var contextLength: Int
 
     /// Creates llama.cpp options with local-first defaults.
-    /// - Parameters:
-    ///   - serverURL: llama.cpp server URL. Defaults to `http://localhost:8081`.
-    ///   - model: Model label. Defaults to `"local-model"`.
-    ///   - contextLength: Context window. Defaults to 4096 tokens.
     public init(
         serverURL: String = LlamaCppProvider.defaultServerURL,
         model: String = LlamaCppProvider.defaultModel,
@@ -79,11 +68,6 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
 }
 
 /// Initialization options for ``OpenAICompatibleProvider``.
-///
-/// The API key is held in memory only. Callers resolve it from the
-/// `apiKeyEnv` variable in `config.toml` via `SecretsManager` (env
-/// first, Keychain fallback) and pass the resolved value here — raw
-/// keys never appear in config files or logs.
 public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
     /// API root (OpenRouter by default).
     public var baseURL: String
@@ -101,14 +85,6 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
     public var apiStyle: APIStyle = .chatCompletions
 
     /// Creates generic endpoint options.
-    /// - Parameters:
-    ///   - baseURL: API root. Defaults to OpenRouter.
-    ///   - apiKey: Resolved bearer token, if required.
-    ///   - model: Model identifier.
-    ///   - contextLength: Context window. Defaults to 128k tokens.
-    ///   - providerID: Router identifier. Defaults to `"openrouter"`.
-    ///   - embeddingsEnabled: Whether embeddings are supported.
-    ///   - apiStyle: Request style. Defaults to Chat Completions.
     public init(
         baseURL: String = OpenAICompatibleProvider.defaultBaseURL,
         apiKey: String? = nil,
@@ -143,17 +119,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
 }
 
 /// Builds providers from options structs and `config.toml` entries.
-///
-/// `RuneWeaverCore.ProviderConfig` already models one
-/// `[llm.providers.<name>]` entry; this factory interprets those
-/// entries (plus an already-resolved API key) into live providers so
-/// the router and dashboard share one construction path.
 public enum LLMProviderFactory: Sendable {
     /// Builds a provider from explicit options.
-    /// - Parameters:
-    ///   - kind: Backend to construct.
-    ///   - apiKey: Resolved bearer token for cloud endpoints.
-    /// - Returns: Configured provider with defaults for its kind.
     public static func makeProvider(kind: ProviderKind, apiKey: String? = nil) -> any LLMProvider {
         switch kind {
         case .mlx:
@@ -166,14 +133,6 @@ public enum LLMProviderFactory: Sendable {
     }
 
     /// Resolves a bearer token without touching the Keychain.
-    ///
-    /// The caller (or `SecretsManager`) handles Keychain fallback;
-    /// this helper only covers the non-interactive path: an explicit
-    /// value wins, otherwise the named environment variable is read.
-    /// - Parameters:
-    ///   - explicit: Directly supplied key, if any.
-    ///   - envVar: Environment variable name from `api_key_env`.
-    /// - Returns: Resolved key, or nil when absent or blank.
     public static func resolveAPIKey(explicit: String?, envVar: String?) -> String? {
         if let explicit, !explicit.isEmpty {
             return explicit
@@ -186,20 +145,6 @@ public enum LLMProviderFactory: Sendable {
     }
 
     /// Builds a provider from a `config.toml` entry.
-    ///
-    /// Kind is inferred from the entry's `providerType`, falling back
-    /// to the entry name: `"mlx"` selects ``MLXProvider``, `"llamacpp"`
-    /// selects ``LlamaCppProvider``, and anything else selects
-    /// ``OpenAICompatibleProvider``. Returns nil for disabled entries.
-    /// A nil `contextLength` (absent `context_length` key) resolves to
-    /// the backend's own default (MLX 8192, llama.cpp 4096,
-    /// OpenAI-compatible 128000) so local windows are never overstated;
-    /// an explicit value always wins.
-    /// - Parameters:
-    ///   - entryName: Key under `[llm.providers.*]`.
-    ///   - config: Decoded provider entry.
-    ///   - apiKey: Already-resolved bearer token, if any.
-    /// - Returns: Configured provider, or nil when disabled.
     public static func makeProvider(
         entryName: String,
         config: RuneWeaverCore.ProviderConfig,
@@ -233,10 +178,6 @@ public enum LLMProviderFactory: Sendable {
     }
 
     /// Builds every enabled provider in an `[llm]` section.
-    /// - Parameters:
-    ///   - llm: Decoded `[llm]` config section.
-    ///   - apiKeysByEntry: Resolved bearer tokens keyed by entry name.
-    /// - Returns: Enabled providers; order follows config iteration.
     public static func makeProviders(
         from llm: RuneWeaverCore.LLMConfig,
         apiKeysByEntry: [String: String] = [:]
@@ -246,21 +187,9 @@ public enum LLMProviderFactory: Sendable {
         }
     }
 
-    /// Selects the active provider: explicit override first (matched
-    /// against the provider name, its local aliases, then the model
-    /// name), then `default_provider`, then `fallback_provider`, then
+    /// Selects the active provider: explicit override first (matched against the provider name, its
+    /// local aliases, then the model name), then `default_provider`, then `fallback_provider`, then
     /// first enabled.
-    ///
-    /// The `local` config entry maps to the `llamacpp` backend
-    /// (`llamacpp`/`llama-cpp`/`llama_cpp`/`local` are aliases), so an
-    /// override of `local` and a default of `local` both resolve to a
-    /// `LlamaCppProvider` whose `name` is `"llamacpp"`. This is the
-    /// single shared selection path for the CLI and the menu-bar app.
-    /// - Parameters:
-    ///   - override: Explicit provider name, if any.
-    ///   - providers: Enabled providers.
-    ///   - config: Decoded `[llm]` config section.
-    /// - Returns: Selected provider, or nil when the override matches nothing.
     public static func selectProvider(
         named override: String?,
         from providers: [any LLMProvider],
@@ -284,14 +213,9 @@ public enum LLMProviderFactory: Sendable {
         return providers.first
     }
 
-    /// Whether a provider matches a configured name, including the
-    /// local-backend aliases (`llamacpp`, `llama-cpp`, `llama_cpp`,
-    /// `local` all match each other). Comparison is case-insensitive
-    /// and trims surrounding whitespace.
-    /// - Parameters:
-    ///   - provider: Candidate provider.
-    ///   - wanted: Configured or caller-supplied name.
-    /// - Returns: True when the names match directly or via alias.
+    /// Whether a provider matches a configured name, including the local-backend aliases
+    /// (`llamacpp`, `llama-cpp`, `llama_cpp`, `local` all match each other). Comparison is case-
+    /// insensitive and trims surrounding whitespace.
     public static func matchesProvider(_ provider: any LLMProvider, wanted: String) -> Bool {
         let normalized = wanted.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !normalized.isEmpty else { return false }

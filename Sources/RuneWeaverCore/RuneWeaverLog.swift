@@ -1,8 +1,4 @@
 // Rune Weaver Core — Centralized structured logging for subsystems.
-//
-// Single source of truth for Logging.Logger instances across engine
-// subsystems (stores, server, tools, memory, sandbox, scheduler).
-// Standardizes subsystem labels and provides structured logging.
 
 import Foundation
 import Logging

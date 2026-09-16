@@ -54,10 +54,9 @@ interface GroupedSessions {
 }
 
 function groupSessionsByDate(sessions: SessionSummary[] = []): GroupedSessions {
-  // Compare calendar days via date components so grouping stays correct
-  // across DST transitions, where a day is 23 or 25 hours instead of a
-  // fixed millisecond offset. Constructing midnight per calendar day keeps
-  // Today/Yesterday/Previous-7-Days boundaries on local midnights.
+  // Compare calendar days via date components so grouping stays correct across DST transitions,
+  // where a day is 23 or 25 hours instead of a fixed millisecond offset. Constructing midnight per
+  // calendar day keeps Today/Yesterday/Previous-7-Days boundaries on local midnights.
   const now = new Date();
   const todayStart = new Date(
     now.getFullYear(),
@@ -219,10 +218,8 @@ export default function SessionSidebar({
     setPendingDeleteId(null);
   }
 
-  // If currentSessionID is active but not yet persisted on server (fresh new chat),
-  // optimistically inject it so it immediately appears in the history sidebar under Today.
-  // Identity compares case-insensitively so uppercase engine IDs match the
-  // lowercase IDs minted by the dashboard without duplicating the draft.
+  // If currentSessionID is active but not yet persisted on server (fresh new chat), optimistically
+  // inject it so it immediately appears in the history sidebar under Today.
   const hasCurrentSession = sessions.some((s) => isSameSession(s.id, currentSessionID));
   // Mint the optimistic timestamp in an effect so render stays pure and the
   // draft keeps one stable instant per unseen session across re-renders.

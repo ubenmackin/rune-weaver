@@ -1,9 +1,4 @@
 // Rune Weaver Tests — Run lifecycle with approval parking and session linkage.
-//
-// Verifies the audit trail carries its owning session on every entry, parks
-// approval-gated turns as awaiting_approval instead of ok, and transitions
-// parked entries to ok, error, or denied when the inbox decision resumes the
-// same conversation.
 
 import Foundation
 import os
@@ -12,10 +7,6 @@ import os
 import Testing
 
 /// Gated fixture tool for parked lifecycle tests.
-///
-/// Approval-gated stub proving parked turns persist their session while
-/// waiting on the inbox, with an optional failure mode for error-path
-/// coverage.
 private struct LifecycleGatedTool: Tool, Sendable {
     /// Registered tool name.
     let name: String
@@ -34,10 +25,6 @@ private struct LifecycleGatedTool: Tool, Sendable {
     let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
 
     /// Creates a gated stub.
-    /// - Parameters:
-    ///   - name: Registered tool name.
-    ///   - output: Canned outcome text.
-    ///   - shouldFail: Whether execution reports failure.
     init(name: String = "stub.write", output: String = "write-ok", shouldFail: Bool = false) {
         self.name = name
         self.output = output
@@ -53,10 +40,6 @@ private struct LifecycleGatedTool: Tool, Sendable {
 }
 
 /// Scripted provider replaying canned texts in call order.
-///
-/// Each `chat` call consumes the next entry so the orchestrator observes a
-/// narrated turn followed by a synthesis turn without inference. Lock-guarded
-/// for Swift 6 data-race safety across the parked turn and its resume.
 private final class LifecycleScriptedLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "lifecycle-fixture", provider: "test", contextLength: 8192)
@@ -75,10 +58,6 @@ private final class LifecycleScriptedLLM: LLMProvider, Sendable {
     }
 
     /// Replays the next canned text as a finished stream.
-    /// - Parameters:
-    ///   - messages: Ignored conversation history.
-    ///   - tools: Ignored available tools.
-    /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text: String = state.withLock { s in
             let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
@@ -229,14 +208,14 @@ struct RunSessionLinkageTests {
         let roundTripped = try JSONDecoder().decode(RunLogEntry.self, from: JSONEncoder().encode(taggedWithSession))
         #expect(roundTripped.sessionID == sessionID)
         #expect(roundTripped.status == "awaiting_approval")
-        // Legacy payloads omit the session key entirely yet still decode.
-        let legacyJSON = try JSONEncoder().encode(tagged)
-        var legacyObject = try JSONSerialization.jsonObject(with: legacyJSON) as? [String: Any] ?? [:]
-        legacyObject.removeValue(forKey: "sessionID")
-        let legacyData = try JSONSerialization.data(withJSONObject: legacyObject)
-        let decodedLegacy = try JSONDecoder().decode(RunLogEntry.self, from: legacyData)
-        #expect(decodedLegacy.sessionID == nil)
-        #expect(decodedLegacy.message == "hi")
+        // Payloads omitting the optional session key still decode.
+        let sessionlessJSON = try JSONEncoder().encode(tagged)
+        var sessionlessObject = try JSONSerialization.jsonObject(with: sessionlessJSON) as? [String: Any] ?? [:]
+        sessionlessObject.removeValue(forKey: "sessionID")
+        let sessionlessData = try JSONSerialization.data(withJSONObject: sessionlessObject)
+        let decodedSessionless = try JSONDecoder().decode(RunLogEntry.self, from: sessionlessData)
+        #expect(decodedSessionless.sessionID == nil)
+        #expect(decodedSessionless.message == "hi")
     }
 }
 

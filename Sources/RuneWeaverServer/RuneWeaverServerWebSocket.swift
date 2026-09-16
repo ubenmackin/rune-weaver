@@ -1,10 +1,4 @@
 // Rune Weaver Server — WebSocket chat, cancel, and approval handlers.
-//
-// Serves live chat turns, mid-turn cancellation, and inline approval
-// decisions over the loopback WebSocket. Keeps per-connection task
-// tracking and frame dispatch beside the socket route so the main server
-// file stays within readability budgets while streaming keeps hub-ordered
-// sends and cooperative cancellation.
 
 import Foundation
 import os
@@ -12,11 +6,6 @@ import RuneWeaverCore
 import Vapor
 
 /// Tracks in-flight chat tasks for one WebSocket connection.
-///
-/// Chat turns spawn unstructured tasks so a later cancel frame can run
-/// while the turn is still working; the registry ties those tasks to
-/// the socket lifetime so a disconnect cancels them instead of leaving
-/// the model and tools running with nowhere to stream.
 final class ConnectionChatTasks: Sendable {
     private let tasks = OSAllocatedUnfairLock(initialState: [UUID: Task<Void, Never>]())
 
@@ -24,9 +13,6 @@ final class ConnectionChatTasks: Sendable {
     init() {}
 
     /// Tracks a chat task until it completes.
-    /// - Parameters:
-    ///   - task: In-flight chat task.
-    ///   - id: Tracking identifier removed on completion.
     func insert(_ task: Task<Void, Never>, id: UUID) {
         tasks.withLock { $0[id] = task }
     }
@@ -47,20 +33,6 @@ final class ConnectionChatTasks: Sendable {
 }
 
 /// Handles one inbound WebSocket text frame.
-///
-/// Chat frames run the orchestrator and stream the final text back as
-/// `delta` chunks plus a `done` frame; decision frames resolve the
-/// matching pending approval; anything else answers with an `error`
-/// frame so the socket stays open. Cooperative with task cancellation:
-/// checks `Task.isCancelled` before work and between sends so closing
-/// the socket (or Vapor shutdown) stops the turn promptly instead of
-/// streaming into a dead connection. All sends funnel through the hub
-/// (`send(id:text:)`) so streamed deltas never race broadcast prompts.
-/// - Parameters:
-///   - text: Raw socket text frame.
-///   - connectionID: Connection identifier owning the reply.
-///   - context: Shared engine collaborators.
-///   - connectionTasks: Registry tying chat tasks to the socket lifetime.
 func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
     guard !Task.isCancelled else { return }
     switch WSInboundKind.classify(text) {
@@ -77,15 +49,6 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
 }
 
 /// Encodes an orchestrator event to its shared WebSocket wire text, if any.
-///
-/// Single shared encoder for per-connection streaming and global resume
-/// broadcasts so tool and delta frame shapes cannot drift between the two
-/// paths. Approval events return nil because they fan out via
-/// `broadcastApproval` instead of a text frame.
-/// - Parameters:
-///   - event: Orchestrator progress event to encode.
-///   - sessionID: Owning session for scoped frames.
-/// - Returns: Encoded JSON text, or nil for approval and unencodable events.
 func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
     switch event {
     case let .toolStarted(toolName, callID, argumentsJSON):
@@ -106,16 +69,6 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
 }
 
 /// Dispatches an orchestrator event to a connected WebSocket client.
-///
-/// Filed narrated approvals broadcast live to every connected socket so
-/// dashboards surface the inbox prompt without polling, matching the
-/// structured gate broadcast path. All other events send to the owning
-/// connection only.
-/// - Parameters:
-///   - event: Orchestrator progress event to dispatch.
-///   - connectionID: Connection identifier owning the reply.
-///   - sessionID: Owning session for scoped frames.
-///   - context: Shared engine collaborators owning the hub.
 func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID: UUID, context: ServerContext) async {
     guard !Task.isCancelled else {
         return
@@ -130,14 +83,6 @@ func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID:
 }
 
 /// Broadcasts an orchestrator event to every connected WebSocket client.
-///
-/// Resume path for parked narrated approvals: the resumed turn runs detached
-/// from any one socket (REST decide or another tab's decision), so its tool
-/// and delta frames broadcast globally instead of replying on the owning
-/// connection like live chat streaming does. Every frame stays tagged with
-/// its owning `sessionID` and multiplexed views ignore frames for other
-/// sessions, so the broadcast never leaks one session's resumed output into
-/// another view; untagged approval prompts fan out via `broadcastApproval`.
 func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
     guard !Task.isCancelled else {
         return
@@ -166,13 +111,8 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     let sessionID = message.sessionID ?? UUID()
     let source = (message.source ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
-    // Register before spawning so a fast turn can never finish before its
-    // slot exists; the box bridges the cancel action to the task created
-    // just below. Completion cleanup is token-checked and await-ordered
-    // (no fire-and-forget unregister), so a stale completion never
-    // deletes a newer turn's registration for the same session. The task
-    // also registers with the connection lifetime so a disconnect cancels
-    // it instead of leaving work running with nowhere to stream.
+    // Register before spawning so a fast turn can never finish before its slot exists; the box
+    // bridges the cancel action to the task created just below.
     let taskBox = TurnTaskBox()
     let registration = await context.activeTurns.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
     let trackingID = UUID()
@@ -195,10 +135,9 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
                 return
             }
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked approval-gated turns persist as awaiting_approval instead
-            // of ok so the inbox decision can transition the same session entry.
-            // The per-turn parked flag keeps a stale prior park in this
-            // session from mis-marking a fresh normal turn.
+            // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
+            // decision can transition the same session entry. The per-turn parked flag keeps a
+            // stale prior park in this session from mis-marking a fresh normal turn.
             let parked = response.isParked
             let parkedStatus = if parked {
                 "awaiting_approval"
@@ -247,10 +186,6 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
 }
 
 /// Cancels an in-flight chat turn over WebSocket.
-///
-/// Reports whether a running turn was actually aborted so clients can tell
-/// an idle cancel apart from a real one; idle cancels for unknown or
-/// long-idle sessions leave no pending mark behind to poison the next turn.
 func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, context: ServerContext) async {
     var cancelled = false
     if let sid = message.sessionID {
@@ -265,17 +200,6 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
 }
 
 /// Resolves an approval decision received over WebSocket.
-///
-/// Captures the tagged session and call identifier before resolving so a
-/// narrated parked turn can resume in the same conversation with its owning
-/// run, mirroring the REST decide route. Structured waits resolve through
-/// the bus handler alone; tagged narrations additionally continue via the
-/// orchestrator resume path with the outcome joining the run log for live
-/// dashboard refresh.
-/// - Parameters:
-///   - message: Inbound decision frame.
-///   - connectionID: Connection identifier owning the reply.
-///   - context: Shared engine collaborators owning approvals and runs.
 func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, context: ServerContext) async {
     guard !Task.isCancelled else {
         return
@@ -304,11 +228,6 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
 }
 
 /// Sends one WebSocket error frame through the hub, best-effort.
-/// - Parameters:
-///   - message: Human-readable failure.
-///   - connectionID: Connection identifier owning the reply.
-///   - context: Shared engine collaborators.
-///   - sessionID: Owning session, when the failure belongs to one turn.
 func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, sessionID: UUID? = nil) async {
     if Task.isCancelled {
         return

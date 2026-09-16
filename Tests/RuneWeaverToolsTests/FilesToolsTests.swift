@@ -1,14 +1,4 @@
 // Rune Weaver Tools Tests — File tools (files.read, files.grep, files.glob), shared guard, and Seatbelt staging.
-//
-// Covers the read-only file tools and the centralised deny policy:
-// sensitive pattern hits fail with an approval hint and never leak bytes,
-// symlinked and dot-segment escapes resolve to the same denial, line
-// windows truncate with a flag, oversized files honour the byte ceiling,
-// binaries refuse with a note, grep prunes denied subtrees while capping
-// matches with 200-char previews, and glob rejects `..` escapes while
-// returning pruned, sorted paths with a result cap. Seatbelt temp staging
-// confines document writes to a non-executable temp dir with a
-// guard-validated atomic move on approval and removal on deny or failure.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -16,11 +6,6 @@ import Foundation
 import Testing
 
 /// Isolated filesystem helpers for the files suites.
-///
-/// Each test pins the guard home boundary to a fresh `home/` directory
-/// under a unique temp base so outside-home and symlink tests stay
-/// deterministic even though the real temp directory itself lives outside
-/// the real home. Bases are removed best-effort after each test.
 private enum FilesTestSupport {
     /// Creates a fresh temp base with an isolated fake home.
     /// - Returns: Base directory plus the fake home boundary.
@@ -41,10 +26,6 @@ private enum FilesTestSupport {
     }
 
     /// Writes UTF-8 text, creating parents.
-    /// - Parameters:
-    ///   - text: Text to write.
-    ///   - url: Destination file URL.
-    /// - Throws: Filesystem errors.
     static func write(_ text: String, at url: URL) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(),

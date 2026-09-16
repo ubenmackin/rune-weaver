@@ -1,8 +1,4 @@
 // Rune Weaver Core — Subprocess bridge executing non-native runes via JSON-RPC.
-//
-// Wraps Python scripts and external binaries in an isolated child process communicating
-// via JSON-RPC 2.0 over stdin/stdout. Sanitizes environment variables, enforces timeouts,
-// caps maximum output size, and terminates orphaned child processes on turn cancellation.
 
 import Foundation
 import os
@@ -26,16 +22,12 @@ public struct SubprocessToolBridge: Tool, Sendable {
     public let timeoutSeconds: TimeInterval
     /// Maximum allowed stdout byte count before the child is killed (defaults to 1 MB).
     public let maxOutputBytes: Int
-    /// Explicit opt-out permitting unsandboxed execution when the platform
-    /// sandbox is missing. Defaults to false so plugin code never inherits
-    /// host privileges silently; bypassing confinement must be a deliberate
-    /// choice at the construction site.
+    /// Explicit opt-out permitting unsandboxed execution when the platform sandbox is missing.
+    /// Defaults to false so plugin code never inherits host privileges silently; bypassing
+    /// confinement must be a deliberate choice at the construction site.
     public let allowUnsandboxedExecution: Bool
 
     /// Creates a subprocess bridge tool.
-    ///
-    /// External runes can never resolve to `trusted`: attempts throw instead
-    /// of producing a silently escalated tool.
     public init(
         pluginID: String,
         declaration: PluginToolDeclaration,
@@ -151,10 +143,9 @@ public struct SubprocessToolBridge: Tool, Sendable {
         requestData: Data,
         input: ToolInput
     ) async throws -> ToolOutput {
-        // Track the child in a Sendable box so cancellation reaches it even when
-        // the Process is created on a background queue inside runSubprocess.
-        // Without this box a cancelled turn would leak the subprocess until the
-        // timeout fires.
+        // Track the child in a Sendable box so cancellation reaches it even when the Process is
+        // created on a background queue inside runSubprocess. Without this box a cancelled turn
+        // would leak the subprocess until the timeout fires.
         let processBox = ProcessBox()
         let invocation = SubprocessInvocation(
             executableURL: executableURL,
@@ -364,11 +355,6 @@ public struct SubprocessToolBridge: Tool, Sendable {
 }
 
 /// One-shot gate ensuring a subprocess continuation resumes exactly once.
-///
-/// The timeout task and the worker completion race from unstructured
-/// dispatch queues; whichever finishes first wins and the loser is dropped.
-/// Uses the same `OSAllocatedUnfairLock` discipline as `WSResumeOnce` so the
-/// gate stays `Sendable` across `@Sendable` async closures.
 private final class SubprocessResumeOnce: Sendable {
     private struct State: Sendable {
         var continuation: CheckedContinuation<ToolOutput, Error>?

@@ -1,23 +1,10 @@
 // Rune Weaver Core Tests — Embedding backfill with dimension discipline.
-//
-// Covers giving keyword-only semantic rows vectors without losing identity:
-// backfill preserves fact identifiers, metadata, and creation order, leaves
-// already-embedded rows alone, refuses to mix store and backend widths
-// without an explicit reset, isolates per-row width rejections as skips, and
-// throws the same reset guidance when a pass rejects every pending row.
-// Scoped to the engine backfill path so the CLI reindex command inherits the
-// same guarantees.
 
 import Foundation
 @testable import RuneWeaverCore
 import Testing
 
 /// Deterministic vector producer with a separately advertised width.
-///
-/// The advertised `dimension` drives the precheck while `width` drives the
-/// produced vectors, so tests can model both aligned backends (both set and
-/// equal) and unknown backends (advertised nil) whose rows still mismatch
-/// per-row at upsert time.
 private struct BackfillStubBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking rows as test-embedded.
     let modelID = "test-backfill"
@@ -27,9 +14,6 @@ private struct BackfillStubBackend: EmbeddingsBackend, Sendable {
     let width: Int
 
     /// Creates a stub backend.
-    /// - Parameters:
-    ///   - dimension: Advertised width, if known.
-    ///   - width: Produced vector width.
     init(dimension: Int?, width: Int) {
         self.dimension = dimension
         self.width = width
@@ -45,10 +29,6 @@ private struct BackfillStubBackend: EmbeddingsBackend, Sendable {
 }
 
 /// Vector producer whose width varies by input text.
-///
-/// Models a backend that violates the single-width assumption per row so a
-/// pass can mix matching and mismatched rows, exercising per-row skip
-/// isolation without turning the whole pass into a systematic mismatch.
 private struct VaryingWidthBackfillBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking rows as test-embedded.
     let modelID = "test-backfill-varying"
@@ -70,10 +50,6 @@ private struct VaryingWidthBackfillBackend: EmbeddingsBackend, Sendable {
 }
 
 /// Builds an isolated engine on a fresh temporary directory.
-///
-/// Each test gets its own episodes database, vector directory, and profile
-/// file so fixture writes never leak between tests.
-/// - Returns: Engine plus the base directory owning its files.
 private func makeBackfillEngine() -> (engine: MemoryEngine, base: URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -99,7 +75,7 @@ struct MemoryBackfillTests {
         _ = try await engine.storeProfileFact(content: "I live in Portland", source: "chat")
         let before = await engine.allSemanticFacts()
         #expect(before.count == 2)
-        #expect(try before.allSatisfy { try $0.embedding.isEmpty })
+        #expect(before.filter { !$0.embedding.isEmpty }.isEmpty)
         let idsBefore = Set(before.map(\.id))
         let metadataBefore = Dictionary(uniqueKeysWithValues: before.map { ($0.id, $0.metadata) })
         let createdBefore = Dictionary(uniqueKeysWithValues: before.map { ($0.id, $0.createdAt) })
@@ -198,10 +174,9 @@ struct MemoryBackfillTests {
         let (engine, base) = makeBackfillEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // The store holds a width-2 vector while the backend advertises no
-        // width and produces per-text widths. A width-3 row mismatches at
-        // upsert time and must skip, while a width-2 row still embeds, so the
-        // pass mixes both outcomes without aborting.
+        // The store holds a width-2 vector while the backend advertises no width and produces per-
+        // text widths. A width-3 row mismatches at upsert time and must skip, while a width-2 row
+        // still embeds, so the pass mixes both outcomes without aborting.
         let seeded = try await engine.storeSemantic(
             fact: "My dog is named Biscuit",
             embedding: [1.0, 2.0],
@@ -230,10 +205,9 @@ struct MemoryBackfillTests {
         let (engine, base) = makeBackfillEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // The backend advertises no width, so the upfront guard cannot fire,
-        // yet every pending row mismatches the store's width-2 vector. That is
-        // a systematic disagreement, not per-row noise, so it must surface the
-        // reset guidance instead of a silent all-skip.
+        // The backend advertises no width, so the upfront guard cannot fire, yet every pending row
+        // mismatches the store's width-2 vector. That is a systematic disagreement, not per-row
+        // noise, so it must surface the reset guidance instead of a silent all-skip.
         _ = try await engine.storeSemantic(
             fact: "My dog is named Biscuit",
             embedding: [1.0, 2.0],

@@ -1,8 +1,4 @@
 // Rune Weaver Tests — Scheduler engine, cron parsing, and poll rule tests.
-//
-// Validates cron expression syntax parsing, range handling, step intervals,
-// poll rule evaluation, config validation, and single-flight execution
-// semantics within the core scheduler component.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -82,10 +78,6 @@ private struct SchedulerReadStub: Tool, Sendable {
     let permissionLevel = PermissionLevel.readOnly
 
     /// Returns a canned success.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("read-ok", callID: input.callID)
     }
@@ -103,10 +95,6 @@ private struct SchedulerWriteStub: Tool, Sendable {
     let permissionLevel = PermissionLevel.requiresApproval
 
     /// Returns a canned success when approved.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("write-ok", callID: input.callID)
     }
@@ -121,13 +109,6 @@ private func utcCalendar() -> Calendar {
 }
 
 /// Builds a UTC date from components.
-/// - Parameters:
-///   - year: Year.
-///   - month: Month.
-///   - day: Day.
-///   - hour: Hour.
-///   - minute: Minute.
-/// - Returns: Date in UTC.
 private func utcDate(year: Int, month: Int, day: Int, hour: Int, minute: Int) -> Date {
     var components = DateComponents()
     components.year = year

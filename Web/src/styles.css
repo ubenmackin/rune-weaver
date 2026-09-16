@@ -3039,3 +3039,236 @@ button.danger:hover:not(:disabled) {
   }
 }
 
+/* ==========================================================================
+   Browser Navigate Extras (final URL, redirects, auth, snapshot, thumbnail)
+   ========================================================================== */
+
+/* Compact navigate summary sits below the row header so the final URL and
+ * redirect count stay visible without expanding arguments and outputs. */
+.browser-navigate-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.chat-tool-pill .browser-navigate-summary {
+  padding: 6px 8px;
+  border-top: 1px solid #2c2c38;
+}
+
+.browser-final-url-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.browser-final-url-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.browser-final-url {
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: #e2e8f0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-redirect-count {
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* AUTH REQUIRED reuses the pending-approval amber tokens so gated navigations
+ * and parked approvals share one visual language without inline styles. */
+.auth-required-badge {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 6px;
+  white-space: nowrap;
+  width: fit-content;
+}
+
+.tool-action-badge .auth-required-badge {
+  margin-left: 6px;
+  font-size: 10px;
+}
+
+.chat-tool-toggle .auth-required-badge {
+  margin-left: 6px;
+  font-size: 10px;
+}
+
+.browser-navigate-details {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+/* Collapsed redirect chain and text snapshot use native details so the row
+ * stays compact until the reader explicitly expands each section. */
+.browser-chain-details,
+.browser-snapshot-details {
+  background: #0f0f14;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.browser-chain-details summary,
+.browser-snapshot-details summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.browser-chain-details summary:hover,
+.browser-snapshot-details summary:hover {
+  color: #ffffff;
+}
+
+.browser-chain-list {
+  margin: 6px 0 2px 18px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.browser-chain-item {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #cfcfe0;
+  word-break: break-all;
+}
+
+.browser-chain-url {
+  overflow-wrap: anywhere;
+}
+
+.browser-chain-status {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.browser-snapshot-body {
+  margin: 6px 0 2px 0;
+  padding: 8px;
+  background: #0d0d12;
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.browser-screenshot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.browser-thumbnail-btn {
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0;
+}
+
+.browser-thumbnail-btn:hover {
+  border-color: var(--border-focus);
+}
+
+.browser-thumbnail {
+  width: 120px;
+  height: 68px;
+  object-fit: cover;
+  display: block;
+  background: #0d0d12;
+}
+
+.browser-screenshot-hash {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.browser-lightbox-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 60;
+  padding: 24px;
+}
+
+.browser-lightbox-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 12px;
+  max-width: min(880px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.browser-lightbox-close {
+  align-self: flex-end;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.browser-lightbox-close:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+}
+
+.browser-lightbox-image {
+  max-width: 100%;
+  max-height: calc(100vh - 140px);
+  border-radius: 8px;
+  object-fit: contain;
+  background: #0d0d12;
+}
+

@@ -23,7 +23,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Email read — iCloud IMAP search/read (read-only) | 3 Email | done-verified | `email.search`/`email.read` list, read, and summarize iCloud IMAP from chat; read-only via `BODY.PEEK`/`readonly=True`, verified TLS. |
 | Email attachment download | 3 Email | done-verified | `email.attachment` stages attachment bytes under `sandbox/attachments` with a 10 MB cap after an approval prompt; oversize parts skip with a note. |
 | Apple Mail native read | 3 Email | planned | List, read, and summarize Apple Mail native messages from chat. |
-| Email send with approval | 3 Email | planned | Compose and send email only after an explicit approval prompt; every send is logged. |
+| Email send with approval | 3 Email | done-verified | Compose and send email only after an explicit approval prompt; every send is logged. |
 | Playwright browser tool plus multi-step email-to-web flows | 4 Browser plus Multi-step | planned | Navigate, read, and fill pages in a sandboxed context; an email link to web confirm runs end to end. |
 | HomeKit control | 5 Home plus Comms | planned | List and control HomeKit accessories and scenes from chat with approval. |
 | Home Assistant control | 5 Home plus Comms | planned | Query and control Home Assistant entities via URL plus token from chat with approval. |

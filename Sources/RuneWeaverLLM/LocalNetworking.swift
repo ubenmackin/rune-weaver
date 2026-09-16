@@ -1,31 +1,13 @@
 // Rune Weaver LLM — Portable LAN Resolution under App Transport Security.
-//
-// Resolves cleartext HTTP local-network endpoints with multi-label hostnames
-// to RFC 1918 / RFC 4193 private IP addresses, transparently rewriting request
-// targets while preserving the Host header. Ensures self-hosted LLM endpoints
-// on private LANs work out-of-the-box under NSAllowsLocalNetworking without
-// compromising default-deny ATS security on the public Internet.
 
 import Darwin
 import Foundation
 import os
 
 /// Helpers for resolving private local network endpoints under Apple App Transport Security (ATS).
-///
-/// ATS permits cleartext HTTP to RFC 1918 / RFC 4193 private IP addresses and `.local`
-/// mDNS names when `NSAllowsLocalNetworking` is enabled in `Info.plist`. However, ATS
-/// treats multi-label hostnames with dots (e.g. `nas.int.example.com` or `ollama.lan`)
-/// as external Internet domains, blocking cleartext even when DNS points to a private LAN IP.
-///
-/// This module resolves multi-label local hostnames to their private IP addresses at request
-/// time and preserves the original `Host` header, allowing Rune Weaver to communicate with
-/// any self-hosted LLM on a private home or office network without weakening ATS globally
-/// or hardcoding domain names into the application bundle.
 public enum LocalNetworking {
     /// Checks whether an IPv4 address string falls into an RFC 1918 private range,
     /// loopback (127.0.0.0/8), or link-local (169.254.0.0/16).
-    /// - Parameter ipAddress: IPv4 address string (e.g. "192.168.1.50").
-    /// - Returns: True when the address is private, loopback, or link-local.
     public static func isPrivateIPv4Address(_ ipAddress: String) -> Bool {
         var addr = in_addr()
         guard inet_pton(AF_INET, ipAddress, &addr) == 1 else { return false }
@@ -55,8 +37,6 @@ public enum LocalNetworking {
 
     /// Checks whether an IPv6 address string falls into an RFC 4193 Unique Local range (fc00::/7),
     /// link-local (fe80::/10), or loopback (::1).
-    /// - Parameter ipAddress: IPv6 address string.
-    /// - Returns: True when the address is private, loopback, or link-local.
     public static func isPrivateIPv6Address(_ ipAddress: String) -> Bool {
         var clean = ipAddress
         if clean.hasPrefix("["), clean.hasSuffix("]") {
@@ -99,11 +79,6 @@ public enum LocalNetworking {
     }
 
     /// Thread-safe in-memory cache for resolved private IP addresses.
-    ///
-    /// Caches resolution results across the process lifetime to eliminate blocking DNS latency
-    /// on repeated HTTP client instantiations. Cached entries expire after the configured TTL
-    /// (default 300 seconds), ensuring IP migrations or DNS updates take effect without requiring
-    /// process restarts.
     private final class DNSCache: Sendable {
         private let entries = OSAllocatedUnfairLock(initialState: [String: DNSCacheEntry]())
         let defaultTTL: TimeInterval
@@ -144,13 +119,6 @@ public enum LocalNetworking {
     }
 
     /// Resolves a hostname to a private IP address if it points to an RFC 1918 / RFC 4193 host.
-    ///
-    /// Results are memoized in an `OSAllocatedUnfairLock`-guarded cache for the specified TTL (default 300 seconds)
-    /// to eliminate blocking DNS queries on repeated HTTP client creations.
-    /// - Parameters:
-    ///   - host: Hostname to resolve (e.g. "nas.int.example.com").
-    ///   - ttl: Maximum age in seconds of a cached DNS resolution result.
-    /// - Returns: The resolved private IP address string, or nil if the host does not resolve to a private IP.
     public static func resolvePrivateIP(for host: String, ttl: TimeInterval = 300) -> String? {
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -210,13 +178,6 @@ public enum LocalNetworking {
 
     /// Rewrites a cleartext HTTP URL to use its resolved RFC 1918 / RFC 4193 private IP,
     /// returning the rewritten URL along with the original `Host` header to preserve virtual host routing.
-    ///
-    /// If the URL is HTTPS, loopback, `.local`, already a private IP, or resolves to a public IP,
-    /// the URL is returned unchanged with a nil host header.
-    /// - Parameters:
-    ///   - url: Endpoint URL to inspect.
-    ///   - resolver: Optional resolver closure for testing or custom resolution; defaults to `resolvePrivateIP(for:)`.
-    /// - Returns: Tuple of effective target URL and optional original Host header to set on requests.
     public static func resolvedLocalTarget(
         for url: URL,
         resolver: (String) -> String? = { resolvePrivateIP(for: $0) }

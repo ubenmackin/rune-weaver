@@ -1,11 +1,4 @@
 // Rune Weaver Tools Tests — Embeddings-backed memory recall tests.
-//
-// Proves the vector seam preserves today's keyword behavior while adding
-// semantic ranking: paraphrase queries with no shared tokens still surface
-// the nearby fact when a producer is configured, and a failing producer
-// never loses the write because storage falls back to keyword-only rows.
-// Scoped to the tool seam (remember/recall) plus the engine recall helper
-// so future local and hosted producers inherit the same guarantees.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -13,11 +6,6 @@ import Foundation
 import Testing
 
 /// Embeddings producer with scripted vectors for deterministic recall.
-///
-/// Returns one canned vector per input text so tests control cosine
-/// geometry without loading a model or asserting on its floats. Unknown
-/// texts map to the orthogonal fallback so only explicitly scripted rows
-/// rank highly.
 private struct ControlledEmbeddingsBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking rows as test-embedded.
     let modelID: String = "test-controlled"
@@ -37,10 +25,6 @@ private struct ControlledEmbeddingsBackend: EmbeddingsBackend, Sendable {
 }
 
 /// Embeddings producer that always fails, exercising the keyword fallback.
-///
-/// Every batch throws a generic error rather than a backend-specific case
-/// so the test proves callers treat all embedding failures alike and keep
-/// today's keyword path.
 private struct FailingEmbeddingsBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking rows as never-embedded.
     let modelID: String = "test-failing"
@@ -62,10 +46,9 @@ struct EmbeddingsMemoryTests {
         let (engine, base) = try ToolsTestSupport.makeIsolatedMemoryEngine()
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
 
-        // Geometry is fully controlled: the dog fact and its paraphrase
-        // share one direction while the physics fact sits orthogonal, so a
-        // cosine query for the paraphrase must prefer the dog fact even
-        // though neither fact shares a token with the query.
+        // Geometry is fully controlled: the dog fact and its paraphrase share one direction while
+        // the physics fact sits orthogonal, so a cosine query for the paraphrase must prefer the
+        // dog fact even though neither fact shares a token with the query.
         let dogFact = "My dog is named Biscuit"
         let physicsFact = "Quantum field theory is fascinating"
         let paraphrase = "canine companion"

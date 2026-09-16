@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Plugin security and tampering verification.
-//
-// Tests cryptographic SHA-256 tree hashing, transient cache filtering,
-// tamper detection across file modifications, and write guardrails protecting
-// plugin directories from unauthorized agent tampering.
 
 import Foundation
 @testable import RuneWeaverCore

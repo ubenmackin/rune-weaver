@@ -1,17 +1,9 @@
 // Rune Weaver Tools — Email arg/envelope models and bridge wire formats.
-//
-// Defines the `email.search`/`email.read`/`email.attachment` argument shapes,
-// result envelopes, attachment lifecycle hints, and strict bridge payload
-// parsing, keeping model-facing contracts and IMAP subprocess wire formats
-// in one place so tools share decoding without touching the network.
 
 import Foundation
 import RuneWeaverCore
 
 /// Shared mailbox-name normalization for email args and envelopes.
-///
-/// Centralizes trimming and the legacy `INBOX` default so arg structs
-/// and envelope payloads stay consistent without triplicated logic.
 public enum EmailMailboxNormalization: Sendable {
     /// Trims an optional mailbox, returning nil when omitted or blank.
     /// - Parameter value: Raw mailbox value, if any.
@@ -23,12 +15,6 @@ public enum EmailMailboxNormalization: Sendable {
     }
 
     /// Normalizes a mailbox to a non-empty canonical value.
-    ///
-    /// Trims surrounding whitespace and falls back to the legacy
-    /// `INBOX` default when the value is nil, empty, or blank so
-    /// legacy payloads without a mailbox keep decoding.
-    /// - Parameter value: Raw mailbox value, if any.
-    /// - Returns: Trimmed mailbox, or `INBOX` when blank.
     public static func normalizedMailbox(_ value: String?) -> String {
         guard let trimmed = trimmed(value), !trimmed.isEmpty else { return "INBOX" }
         return trimmed
@@ -36,14 +22,6 @@ public enum EmailMailboxNormalization: Sendable {
 }
 
 /// Search arguments for the `email.search` tool.
-///
-/// Decodes the raw `ToolInput.argumentsJSON` document. `limit` is
-/// optional and clamped to `1...50` (defaulting to `10`) so the IMAP
-/// bridge never fetches an unbounded mailbox slice. An empty,
-/// whitespace-only, or lone `"*"` query lists the most-recent messages
-/// via `SEARCH ALL` (newest first) instead of a literal text match.
-/// `mailbox` is optional: omitted or blank searches every selectable
-/// mailbox and merges hits newest-first; a value narrows to one folder.
 public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -60,11 +38,6 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public static let maxLimit = 50
 
     /// Memberwise initializer with limit clamping.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - query: Free-text query.
-    ///   - limit: Maximum hits. Clamped to `1...50`.
-    ///   - mailbox: Optional mailbox narrowing to one folder.
     public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil) {
         self.account = account
         self.query = query
@@ -109,13 +82,6 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
 }
 
 /// Read arguments for the `email.read` tool.
-///
-/// Accepts the message identifier under `id` (canonical) plus the
-/// `messageId`, `message_id`, and `uid` aliases so model-generated
-/// calls keep working when the field name drifts. Accepts an optional
-/// `mailbox` (plus the `folder` alias) reusing the mailbox labeled on
-/// `email.search` hits so messages outside `INBOX` stay openable;
-/// omitted or blank means `INBOX`.
 public struct EmailReadArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -125,10 +91,6 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
     public let mailbox: String?
 
     /// Memberwise initializer.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - messageID: IMAP UID of the message.
-    ///   - mailbox: Optional mailbox holding the message.
     public init(account: String, messageID: String, mailbox: String? = nil) {
         self.account = account
         self.messageID = messageID
@@ -188,11 +150,6 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
 }
 
 /// One `email.search` hit: headers plus a short text snippet.
-///
-/// The snippet is the leading plain-text body collapsed to a single
-/// line (at most 200 characters). It never contains attachment bytes.
-/// `mailbox` labels the folder holding the message so `email.read`
-/// and `email.attachment` can reopen it by passing the same mailbox.
 public struct EmailSearchHit: Sendable, Equatable, Codable {
     /// IMAP UID of the message (sequence fallback when the server omits UIDs).
     public let id: String
@@ -208,13 +165,6 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     public let mailbox: String
 
     /// Creates a search hit.
-    /// - Parameters:
-    ///   - id: IMAP UID of the message.
-    ///   - subject: Decoded subject.
-    ///   - from: Decoded sender.
-    ///   - date: Raw date header.
-    ///   - snippet: Leading body text.
-    ///   - mailbox: Mailbox holding the message. Defaults to `INBOX` for legacy payloads.
     public init(id: String, subject: String, from: String, date: String, snippet: String, mailbox: String = "INBOX") {
         self.id = id
         self.subject = subject
@@ -233,7 +183,7 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         case mailbox
     }
 
-    /// Decodes a hit, defaulting legacy payloads without `mailbox` to `INBOX`.
+    /// Decodes a hit, defaulting omitted `mailbox` to `INBOX`.
     /// - Parameter decoder: Decoder for the hit document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -260,10 +210,6 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
 }
 
 /// Attachment metadata for `email.read`.
-///
-/// `email.read` never downloads attachment bytes. Each part is listed
-/// here by filename, MIME type, and decoded byte size so the model can
-/// name what is available and `email.attachment` can fetch it by index.
 public struct EmailAttachmentInfo: Sendable, Equatable, Codable {
     /// Original filename (or `unnamed-attachment` when absent).
     public let filename: String
@@ -273,10 +219,6 @@ public struct EmailAttachmentInfo: Sendable, Equatable, Codable {
     public let sizeBytes: Int?
 
     /// Creates attachment metadata.
-    /// - Parameters:
-    ///   - filename: Original filename.
-    ///   - contentType: MIME type.
-    ///   - sizeBytes: Decoded byte size. Defaults to nil (unknown).
     public init(filename: String, contentType: String, sizeBytes: Int? = nil) {
         self.filename = filename
         self.contentType = contentType
@@ -285,13 +227,6 @@ public struct EmailAttachmentInfo: Sendable, Equatable, Codable {
 }
 
 /// Full message returned by `email.read`.
-///
-/// `body` holds decoded plain text (HTML is stripped to text when no
-/// plain part exists). Attachment bytes are never included; listed
-/// parts appear in `attachments` with `attachmentsDeferred` set and a
-/// human-readable `attachmentsNote`. `attachmentsDeferred` keeps its
-/// legacy wire name for compatibility but means "listed, fetchable via
-/// `email.attachment`" rather than skipped-and-unavailable.
 public struct EmailFullMessage: Sendable, Equatable, Codable {
     /// IMAP UID of the message.
     public let id: String
@@ -307,22 +242,12 @@ public struct EmailFullMessage: Sendable, Equatable, Codable {
     public let body: String
     /// Listed attachment parts (empty when none).
     public let attachments: [EmailAttachmentInfo]
-    /// Whether attachments are listed (true when `attachments` is non-empty). Legacy wire name kept for compatibility.
+    /// Whether attachments are listed (true when `attachments` is non-empty).
     public let attachmentsDeferred: Bool
     /// Human-readable listing note (nil when no attachments are listed).
     public let attachmentsNote: String?
 
     /// Creates a full message.
-    /// - Parameters:
-    ///   - id: IMAP UID.
-    ///   - subject: Decoded subject.
-    ///   - from: Decoded sender.
-    ///   - to: Decoded recipients.
-    ///   - date: Raw date header.
-    ///   - body: Decoded plain-text body.
-    ///   - attachments: Listed attachment parts.
-    ///   - attachmentsDeferred: Whether attachments are listed (legacy wire name for listed state).
-    ///   - attachmentsNote: Human-readable listing note.
     public init(
         id: String,
         subject: String,
@@ -364,12 +289,6 @@ public struct EmailFullMessage: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `email.search` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the account, query, hit count, and hits together.
-/// `mailbox` echoes the requested narrowing (nil means every selectable
-/// mailbox); `mailboxes` lists the folders actually searched; each hit
-/// carries its own `mailbox` so `email.read` can reopen it.
 public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     /// Account nickname that was searched.
     public let account: String
@@ -385,12 +304,6 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
     public let mailboxes: [String]?
 
     /// Creates a search envelope.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - query: Query that was run.
-    ///   - messages: Hits, newest first.
-    ///   - mailbox: Requested mailbox narrowing. Defaults to nil (every selectable mailbox).
-    ///   - mailboxes: Folders actually searched. Defaults to nil for legacy callers.
     public init(account: String, query: String, messages: [EmailSearchHit], mailbox: String? = nil, mailboxes: [String]? = nil) {
         self.account = account
         self.query = query
@@ -402,11 +315,6 @@ public struct EmailSearchEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `email.read` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives headers, the text body, and the attachment listing note
-/// together. `mailbox` echoes the folder the message was read from so
-/// `email.attachment` can reuse it.
 public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the message was read from.
     public let account: String
@@ -424,7 +332,7 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     public let body: String
     /// Listed attachment parts.
     public let attachments: [EmailAttachmentInfo]
-    /// Whether attachments are listed (legacy wire name for listed state).
+    /// Whether attachments are listed.
     public let attachmentsDeferred: Bool
     /// Human-readable listing note (nil when nothing is listed).
     public let attachmentsNote: String?
@@ -446,10 +354,6 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
     }
 
     /// Creates a read envelope from a decoded message.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - message: Decoded message.
-    ///   - mailbox: Mailbox the message was read from. Defaults to `INBOX` for legacy callers.
     public init(account: String, message: EmailFullMessage, mailbox: String = "INBOX") {
         self.account = account
         self.id = message.id
@@ -464,7 +368,7 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
         self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
     }
 
-    /// Decodes a read envelope, defaulting legacy payloads without `mailbox` to `INBOX`.
+    /// Decodes a read envelope, defaulting omitted `mailbox` to `INBOX`.
     /// - Parameter decoder: Decoder for the envelope document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -501,22 +405,6 @@ public struct EmailReadEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Arguments for the `email.attachment` tool.
-///
-/// Accepts the message identifier under `id` (canonical) plus the
-/// `messageId`, `message_id`, and `uid` aliases so model-generated
-/// calls keep working when the field name drifts. Accepts the part
-/// position under `index` (canonical) plus `attachmentIndex` and
-/// `attachment_index` so callers can name the field either way. The
-/// index is zero-based into the `email.read` attachment list. Accepts
-/// an optional `mailbox` (plus the `folder` alias) reusing the mailbox
-/// labeled on `email.search` hits; omitted or blank means `INBOX`.
-/// `preview` is optional (defaults to false): when true and the part is
-/// a small text payload, the success envelope inlines the leading text.
-/// `subpath` names one file inside a detonated archive for inspection
-/// without staging anything to the host; `saveToPath` names the
-/// workspace destination for an approval-gated export of that entry
-/// (or the raw archive when no subpath is given). Both stay nil for
-/// documents and images, which return inline payloads directly.
 public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.
     public let account: String
@@ -534,14 +422,6 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     public let saveToPath: String?
 
     /// Memberwise initializer.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - messageID: IMAP UID of the message.
-    ///   - attachmentIndex: Zero-based attachment position.
-    ///   - mailbox: Optional mailbox holding the message.
-    ///   - preview: Whether to inline a text preview.
-    ///   - subpath: Relative entry path inside a detonated archive.
-    ///   - saveToPath: Workspace destination for an approval-gated archive export.
     public init(account: String, messageID: String, attachmentIndex: Int, mailbox: String? = nil, preview: Bool = false, subpath: String? = nil, saveToPath: String? = nil) {
         self.account = account
         self.messageID = messageID
@@ -607,9 +487,9 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
         }
         mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
             ?? container.decodeIfPresent(String.self, forKey: .folder)
-        // Optional preview flag keeps legacy payloads decoding with no inline text.
+        // Optional preview flag defaults to false.
         preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
-        // Archive follow-ups stay optional so legacy download-only payloads keep decoding;
+        // Archive follow-ups stay optional;
         // blank strings collapse downstream via the trimmed helpers rather than here.
         subpath = try container.decodeIfPresent(String.self, forKey: .subpath)
         saveToPath = try container.decodeIfPresent(String.self, forKey: .saveToPath)
@@ -642,10 +522,6 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
 }
 
 /// One downloaded attachment with its bytes.
-///
-/// Returned by the IMAP gateway for `email.attachment`. The bytes are
-/// held in memory only until the tool stages them under the sandbox
-/// staging area; they are never logged and never sent to the LLM.
 public struct EmailAttachmentData: Sendable, Equatable {
     /// Original filename (or `unnamed-attachment` when absent).
     public let filename: String
@@ -657,11 +533,6 @@ public struct EmailAttachmentData: Sendable, Equatable {
     public let data: Data
 
     /// Creates downloaded attachment bytes.
-    /// - Parameters:
-    ///   - filename: Original filename.
-    ///   - contentType: MIME type.
-    ///   - sizeBytes: Decoded byte size.
-    ///   - data: Decoded attachment bytes.
     public init(filename: String, contentType: String, sizeBytes: Int, data: Data) {
         self.filename = filename
         self.contentType = contentType
@@ -687,10 +558,6 @@ public struct EmailArchiveEntry: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `email.attachment` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the staged path, extracted text, multimodal image payload,
-/// or archive session manifest together with attachment metadata.
 public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
     /// Account nickname the attachment was fetched from.
     public let account: String
@@ -855,13 +722,6 @@ public struct EmailAttachmentEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Post-download lifecycle for staged `email.attachment` files.
-///
-/// Centralizes the coarse MIME bucket, the retention-window expiry, the
-/// human follow-up hint, and the guarded inline text preview so the
-/// tool and its tests share one definition of "previewable". Size caps
-/// stay conservative: binaries are never inlined even when tiny, and
-/// text is only inlined well below the 10 MB download cap so a preview
-/// request cannot balloon the tool output.
 public enum EmailAttachmentLifecycle: Sendable {
     /// Maximum bytes eligible for an inline preview (256 KB).
     public static let maxPreviewBytes = 256 * 1024
@@ -873,21 +733,10 @@ public enum EmailAttachmentLifecycle: Sendable {
     public static let maxArchiveSubpathChars = 1024
     /// Fallback retention window in days when the caller passes a non-positive value.
     ///
-    /// Keeps expiry math total without coupling to detonation policy;
-    /// matches the historic staged-file default so existing envelopes keep
-    /// a stable horizon.
+    /// Keeps expiry math total without coupling to detonation policy.
     public static let defaultRetentionDays = 14
 
     /// Returns the coarse MIME bucket for a content type.
-    ///
-    /// Matching is case-insensitive on the bare type (parameters such as
-    /// `; charset=utf-8` are stripped): exact `application/pdf` maps to
-    /// `pdf`, any `image/*` to `image`, any `text/*` plus `application/json`
-    /// to `text`, known archive types (ZIP/TAR/GZIP families) to `archive`,
-    /// and everything else to `other` so follow-up hints stay predictable
-    /// without an exhaustive type table.
-    /// - Parameter contentType: Raw MIME type, possibly with parameters.
-    /// - Returns: `pdf`, `image`, `text`, `archive`, or `other`.
     public static func mimeCategory(for contentType: String) -> String {
         let base = contentType.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
             .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
@@ -912,15 +761,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Returns whether an attachment part must detonate inside a microVM.
-    ///
-    /// Content types missed by the sender (notably `application/octet-stream`
-    /// for renamed ZIPs) still detonate when the filename carries an archive
-    /// suffix, so a mislabeled archive can never slip into host staging.
-    /// Matching is case-insensitive on both inputs.
-    /// - Parameters:
-    ///   - contentType: Raw MIME type, possibly with parameters.
-    ///   - filename: Original attachment filename.
-    /// - Returns: True for archive content types or archive filename suffixes.
     public static func isArchive(contentType: String, filename: String) -> Bool {
         if mimeCategory(for: contentType) == "archive" {
             return true
@@ -933,16 +773,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Validates an archive subpath without touching any filesystem.
-    ///
-    /// Subpaths name entries inside the quarantined archive, never host
-    /// files, so absolute paths and `..` segments fail closed even though
-    /// the detonation VM would contain them: the check keeps traversal
-    /// payloads from ever reaching the VM command line as ambiguous paths.
-    /// Callers pass the result as a single argv element (never interpolated
-    /// into shell text) with `--` separating flags from the name.
-    /// - Parameter subpath: Raw caller-supplied entry path.
-    /// - Returns: Trimmed entry path.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when empty, overlong, absolute, escaping, or holding control bytes.
     public static func validateArchiveSubpath(_ subpath: String) throws -> String {
         let trimmed = subpath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
@@ -965,11 +795,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Maps an archive entry path to the coarse MIME bucket.
-    ///
-    /// Extension-based so manifest entries carry a useful category without
-    /// sniffing entry bytes on the host; unknown suffixes stay `other`.
-    /// - Parameter path: Relative entry path inside the archive.
-    /// - Returns: `pdf`, `image`, `text`, `archive`, or `other`.
     public static func archiveEntryCategory(forPath path: String) -> String {
         let lower = path.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if lower.hasSuffix(".pdf") {
@@ -988,17 +813,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Returns whether a part may be inlined as text.
-    ///
-    /// Only `text/*` (including `text/csv`) and `application/json` count
-    /// as previewable, and only while both the reported size and the
-    /// actual bytes stay under the 256 KB preview cap. Binaries (PDF,
-    /// images, archives, office docs) are never previewable even when
-    /// tiny, so their bytes never enter the model context.
-    /// - Parameters:
-    ///   - contentType: Raw MIME type.
-    ///   - sizeBytes: Reported decoded size.
-    ///   - dataCount: Actual byte count.
-    /// - Returns: True when an inline preview is allowed.
     public static func isPreviewable(contentType: String, sizeBytes: Int, dataCount: Int) -> Bool {
         let base = contentType.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: true)
             .first.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() } ?? ""
@@ -1008,13 +822,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Builds the inline preview for an eligible payload.
-    ///
-    /// Decodes strictly as UTF-8 (returning nil when the bytes are not
-    /// valid text) and truncates to the first 2000 chars. The truncation
-    /// flag distinguishes a full inline body from a cut one so callers
-    /// know when `files.read` holds more.
-    /// - Parameter data: Decoded attachment bytes (already known previewable and under cap).
-    /// - Returns: Preview text plus whether it was truncated, or nil when the bytes are not UTF-8 text.
     public static func inlinePreview(for data: Data) -> (text: String, truncated: Bool)? {
         guard let text = String(data: data, encoding: .utf8) else { return nil }
         if text.count > maxPreviewChars {
@@ -1024,15 +831,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Returns the staged-file expiry for a retention window.
-    ///
-    /// Adds whole days (86400 s each) to `now` so expiry math stays a
-    /// pure function of the configured window, keeping tests deterministic
-    /// without touching the clock. Non-positive windows fall back to the
-    /// shared default instead of expiring immediately.
-    /// - Parameters:
-    ///   - now: Reference date (defaults to now).
-    ///   - retentionDays: Configured retention window in days.
-    /// - Returns: Expiry date.
     public static func expiryDate(from now: Date = Date(), retentionDays: Int) -> Date {
         let days = retentionDays > 0 ? retentionDays : Self.defaultRetentionDays
         return now.addingTimeInterval(TimeInterval(days * 86400))
@@ -1049,13 +847,6 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Builds the human follow-up hint for an attachment outcome.
-    /// - Parameters:
-    ///   - path: Staged sandbox path, if any.
-    ///   - expiresAt: ISO-8601 expiry string, if any.
-    ///   - mimeCategory: Coarse bucket from `mimeCategory(for:)`.
-    ///   - previewTruncated: Whether the inline preview was cut (nil when no preview).
-    ///   - archiveSessionId: Session identifier for the ephemeral archive detonation microVM.
-    /// - Returns: Human hint for model next steps.
     public static func nextStepsHint(
         path: String? = nil,
         expiresAt: String? = nil,
@@ -1095,11 +886,6 @@ public enum EmailAttachmentLifecycle: Sendable {
 }
 
 /// Pure JSON parsing for the IMAP bridge payloads.
-///
-/// These helpers decode exactly what the `python3 imaplib` subprocess
-/// prints on stdout, so fixture tests can cover the wire format
-/// without a live mailbox. They never touch the network and never see
-/// credentials.
 public enum EmailBridgeParsing {
     /// Bridge `search` response shape.
     struct SearchResponse: Decodable {
@@ -1156,9 +942,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Decodes a bridge `search` stdout payload.
-    /// - Parameter data: Raw stdout bytes from the bridge.
-    /// - Returns: Hits, newest first.
-    /// - Throws: Decoding errors or bridge-reported failures.
     public static func parseSearchPayload(_ data: Data) throws -> [EmailSearchHit] {
         let response = try JSONDecoder().decode(SearchResponse.self, from: data)
         if !response.ok {
@@ -1168,9 +951,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Decodes a bridge `fetch` stdout payload.
-    /// - Parameter data: Raw stdout bytes from the bridge.
-    /// - Returns: Decoded message.
-    /// - Throws: Decoding errors or bridge-reported failures.
     public static func parseFetchPayload(_ data: Data) throws -> EmailFullMessage {
         let response = try JSONDecoder().decode(FetchResponse.self, from: data)
         if !response.ok {
@@ -1183,14 +963,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Encodes search hits as the `email.search` tool output document.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - query: Query that was run.
-    ///   - messages: Hits, newest first.
-    ///   - mailbox: Requested mailbox narrowing. Defaults to nil (every selectable mailbox).
-    ///   - mailboxes: Folders actually searched. Defaults to nil for legacy callers.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeSearchEnvelope(account: String, query: String, messages: [EmailSearchHit], mailbox: String? = nil, mailboxes: [String]? = nil) throws -> String {
         let envelope = EmailSearchEnvelope(account: account, query: query, messages: messages, mailbox: mailbox, mailboxes: mailboxes)
         let encoder = JSONEncoder()
@@ -1200,12 +972,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Encodes a message as the `email.read` tool output document.
-    /// - Parameters:
-    ///   - account: Account nickname.
-    ///   - message: Decoded message.
-    ///   - mailbox: Mailbox the message was read from. Defaults to `INBOX` for legacy callers.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeReadEnvelope(account: String, message: EmailFullMessage, mailbox: String = "INBOX") throws -> String {
         let envelope = EmailReadEnvelope(account: account, message: message, mailbox: mailbox)
         let encoder = JSONEncoder()
@@ -1215,16 +981,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Decodes a bridge `attachment` stdout payload.
-    ///
-    /// Decodes base64 strictly (no `ignoreUnknownCharacters`) so corrupt
-    /// payloads fail instead of silently dropping bytes, and verifies a
-    /// reported `sizeBytes` against the actual decoded length, failing on
-    /// mismatch. Python-enforced oversize skips (no bytes with
-    /// `oversize` set) decode to empty data with the reported size so the
-    /// caller still reports the skip without ever materializing the bytes.
-    /// - Parameter data: Raw stdout bytes from the bridge.
-    /// - Returns: Downloaded attachment bytes.
-    /// - Throws: Decoding errors or bridge-reported failures.
     public static func parseAttachmentPayload(_ data: Data) throws -> EmailAttachmentData {
         let response: AttachmentResponse
         do {
@@ -1270,16 +1026,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Encodes an attachment result as the `email.attachment` tool output document.
-    ///
-    /// Encodes the full post-download lifecycle (`path`, `expiresAt`,
-    /// `mimeCategory`, `nextSteps`, plus the guarded inline `preview`)
-    /// alongside the legacy metadata. Skipped envelopes omit the
-    /// lifecycle keys so oversized and dry-run outcomes keep the legacy
-    /// wire shape, while legacy payloads without lifecycle keys still
-    /// decode with those fields as nil.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeAttachmentEnvelope(_ envelope: EmailAttachmentEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -1288,9 +1034,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Decodes a bridge `list` stdout payload.
-    /// - Parameter data: Raw stdout bytes from the bridge.
-    /// - Returns: Selectable mailbox names in server order.
-    /// - Throws: Decoding errors or bridge-reported failures.
     public static func parseListPayload(_ data: Data) throws -> [String] {
         let response = try JSONDecoder().decode(ListResponse.self, from: data)
         if !response.ok {
@@ -1308,11 +1051,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Decodes a bridge `append` stdout payload.
-    ///
-    /// Best-effort Sent copies surface failures as `bridgeFailed` so the
-    /// send tool can warn without failing the send.
-    /// - Parameter data: Raw stdout bytes from the bridge.
-    /// - Throws: Decoding errors or bridge-reported failures.
     public static func parseAppendPayload(_ data: Data) throws {
         let response = try JSONDecoder().decode(AppendResponse.self, from: data)
         if !response.ok {
@@ -1321,13 +1059,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Filters a raw `LIST` mailbox list to selectable folders.
-    ///
-    /// Mirrors the bridge exclusion (`is_selectable` in Python): entries whose flags contain
-    /// `noselect` or `nonexistent` as case-insensitive substrings are dropped so
-    /// namespace placeholders never enter the fan-out. Matching is
-    /// case-insensitive substring matching, mirroring the Python bridge.
-    /// - Parameter entries: Raw `(flags, mailbox)` pairs from the bridge or fixtures.
-    /// - Returns: Selectable mailbox names in the given order.
     public static func selectableMailboxes(from entries: [(flags: String, mailbox: String)]) -> [String] {
         entries.compactMap { entry in
             let lowered = entry.flags.lowercased()
@@ -1340,14 +1071,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Resolves a requested mailbox against the selectable list.
-    ///
-    /// Exact matches win first so case-sensitive servers keep `Archive`
-    /// and `archive` distinct; a case-insensitive fallback keeps `inbox`
-    /// usable for `INBOX` per RFC 3501. Never logs or echoes secrets.
-    /// - Parameters:
-    ///   - requested: Trimmed requested mailbox.
-    ///   - available: Selectable mailboxes in server order.
-    /// - Returns: Canonical mailbox name, or nil when unknown.
     public static func resolveMailbox(_ requested: String, among available: [String]) -> String? {
         if available.contains(requested) {
             return requested
@@ -1357,17 +1080,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Resolves a requested mailbox against an already-listed selectable list.
-    ///
-    /// Centralizes `LIST` validation so every tool shares one path: folder names are never
-    /// assumed, an empty list throws a no-selectable-mailboxes failure, and matching is
-    /// exact-first with a case-insensitive fallback (see `resolveMailbox`). The legacy-default
-    /// `INBOX` for omitted or blank mailboxes is also routed through this helper with
-    /// `requested: "INBOX"` so defaults validate like explicit values.
-    /// - Parameters:
-    ///   - requested: Trimmed requested mailbox (`"INBOX"` for the legacy default).
-    ///   - available: Selectable mailboxes in server order.
-    /// - Returns: Canonical mailbox name.
-    /// - Throws: Unknown-mailbox failure when the list is empty or has no match.
     public static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
         guard !available.isEmpty else {
             throw unknownMailboxError(requested: requested, available: available)
@@ -1379,10 +1091,6 @@ public enum EmailBridgeParsing {
     }
 
     /// Builds the unknown-mailbox failure without secrets.
-    /// - Parameters:
-    ///   - requested: Unknown requested mailbox.
-    ///   - available: Selectable mailboxes in server order.
-    /// - Returns: Human-readable failure naming the available folders.
     public static func unknownMailboxError(requested: String, available: [String]) -> EmailIMAPError {
         if available.isEmpty {
             return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (no selectable mailboxes found)")
@@ -1392,13 +1100,6 @@ public enum EmailBridgeParsing {
 }
 
 /// Merges per-mailbox search hits newest-first.
-///
-/// Each mailbox already returns hits newest-first by UID order; across
-/// mailboxes UIDs are not comparable, so the merge sorts by the parsed
-/// `Date` header descending (RFC 2822 plus ISO-8601 fallbacks) and
-/// truncates to `limit`. Hits with unparseable or empty dates keep
-/// their relative order after dated hits so the merge never drops
-/// results. Mailbox labels are preserved for `email.read` reuse.
 public enum EmailSearchMerge: Sendable {
     /// Parses an RFC 2822 or ISO-8601 `Date` header.
     private static func rfc2822Dates(_ string: String) -> Date? {
@@ -1434,10 +1135,6 @@ public enum EmailSearchMerge: Sendable {
     }
 
     /// Merges per-mailbox hits newest-first, capped by `limit`.
-    /// - Parameters:
-    ///   - groups: Per-mailbox hits in search order (each newest-first).
-    ///   - limit: Maximum hits to keep. Clamped to at least 1.
-    /// - Returns: Merged hits newest-first, mailbox labels preserved.
     public static func mergedNewestFirst(_ groups: [[EmailSearchHit]], limit: Int) -> [EmailSearchHit] {
         let capped = max(1, limit)
         let indexed = groups.flatMap(\.self).enumerated().map { (index: $0.offset, hit: $0.element) }

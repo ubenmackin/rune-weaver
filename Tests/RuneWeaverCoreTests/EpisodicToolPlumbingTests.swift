@@ -1,19 +1,10 @@
 // Rune Weaver Tests — Episodic tool plumbing between working and durable memory.
-//
-// Verifies per-turn episodic mirroring keeps clean assistant text plus one
-// compact tool record without placeholder lines, call identifiers, or call
-// argument JSON. Covers the MemoryEngine and Orchestrator contract that
-// working history stays replayable while the episodes mirror stays readable.
 import Foundation
 import os
 @testable import RuneWeaverCore
 import Testing
 
 /// Builds an isolated engine on a fresh temporary directory.
-///
-/// Each test gets its own episodes database, vector directory, and profile
-/// file so fixture writes never leak between tests.
-/// - Returns: Engine plus the base directory owning its files.
 private func makeToolPlumbingEngine() -> (engine: MemoryEngine, base: URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -42,20 +33,12 @@ private struct FixturePlumbingTool: Tool, Sendable {
     let permissionLevel = PermissionLevel.readOnly
 
     /// Returns the canned outcome.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output echoing the call identifier.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success(output, callID: input.callID)
     }
 }
 
 /// Scripted provider replaying canned texts in call order.
-///
-/// Each `chat` call consumes the next entry so orchestration loops observe
-/// a tool round followed by a final synthesis turn without real inference.
-/// Access is lock-guarded for Swift 6 data-race safety.
 private final class ScriptedPlumbingLLM: LLMProvider, Sendable {
     /// Stable test model metadata.
     let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
@@ -74,10 +57,6 @@ private final class ScriptedPlumbingLLM: LLMProvider, Sendable {
     }
 
     /// Replays the next canned text as a finished stream.
-    /// - Parameters:
-    ///   - messages: Ignored conversation history.
-    ///   - tools: Ignored available tools.
-    /// - Returns: Stream yielding one finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text: String = state.withLock { s in
             let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
@@ -99,10 +78,6 @@ private final class ScriptedPlumbingLLM: LLMProvider, Sendable {
 }
 
 /// Slow fixture tool giving the test a window to cancel mid-turn.
-///
-/// Sleeps before returning so a cancellation issued while the tool runs
-/// still lands after the side effect, exercising the audit-preserving
-/// cancel path instead of the clean rollback path.
 private struct SlowPlumbingTool: Tool, Sendable {
     /// Registered tool name.
     let name: String
@@ -121,10 +96,6 @@ private struct SlowPlumbingTool: Tool, Sendable {
     let permissionLevel = PermissionLevel.readOnly
 
     /// Sleeps briefly then returns the canned outcome.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output echoing the call identifier.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         onStart?()
         try? await Task.sleep(nanoseconds: 500_000_000)

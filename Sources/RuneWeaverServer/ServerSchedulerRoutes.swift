@@ -1,39 +1,15 @@
 // Rune Weaver Server — Scheduler routes and parked-turn resume helpers.
-//
-// Hosts scheduler job CRUD plus manual run routes and the shared
-// parked-approval helpers so the main service file stays within the length
-// budget. Chat, scheduler auto-fire, and approval decide paths share one
-// parked check and one resume lifecycle through these helpers.
 
 import Foundation
 import RuneWeaverCore
 import Vapor
 
 /// Whether a session currently has a parked narrated turn awaiting approval.
-///
-/// Consults the orchestrator's parked gated narrations so chat and scheduler
-/// entry points share one parked check instead of re-filtering the inbox at
-/// each call site. Structured gate waits that block the turn never park here.
-/// New turns must prefer their own `OrchestratorResponse.isParked` flag over
-/// this session-wide lookup so a stale parked approval from a prior turn
-/// cannot mis-mark a fresh normal turn as awaiting approval.
-/// - Parameters:
-///   - sessionID: Owning session to inspect.
-///   - context: Shared engine collaborators owning parked narrations.
-/// - Returns: True when the session owns at least one parked approval.
 func isParkedTurn(sessionID: UUID, context: ServerContext) async -> Bool {
     await context.orchestrator.isSessionParked(sessionID)
 }
 
 /// Broadcasts filed narrated approvals for a parked turn.
-///
-/// Mirrors the structured gate broadcast path so narrated parks emit live
-/// approval prompts without polling: each pending queue entry whose call
-/// identifier appears in the parked response is announced to connected
-/// sockets. Normal turns never broadcast.
-/// - Parameters:
-///   - response: Completed turn carrying filed gated call identifiers.
-///   - context: Shared engine collaborators owning the queue and hub.
 func broadcastParkedApprovals(for response: OrchestratorResponse, context: ServerContext) async {
     guard response.isParked else {
         return
@@ -49,17 +25,6 @@ func broadcastParkedApprovals(for response: OrchestratorResponse, context: Serve
 }
 
 /// Finds the awaiting run owning a resumed parked batch by call overlap.
-///
-/// Lists awaiting runs in the resumed session and prefers the entry whose
-/// tool actions overlap the decided call or the resumed batch call
-/// identifiers, falling back to the newest awaiting run for legacy entries
-/// without call identifiers. Keeps multiple awaiting runs in one session
-/// from resolving the wrong entry.
-/// - Parameters:
-///   - resumed: Resume response carrying the batch call identifiers.
-///   - decidedCallID: Call identifier of the just-decided approval, if known.
-///   - context: Shared engine collaborators owning the run log.
-/// - Returns: Owning awaiting run, or nil when none is awaiting.
 func awaitingParkedRun(
     for resumed: OrchestratorResponse,
     decidedCallID: String?,
@@ -88,15 +53,6 @@ func awaitingParkedRun(
 }
 
 /// Finds the stranded awaiting run for a failed resume by call overlap.
-///
-/// Scopes the lookup to the failed session only and prefers the entry
-/// overlapping the decided call identifier, falling back to the newest
-/// awaiting run so one failure cannot flip unrelated sessions.
-/// - Parameters:
-///   - sessionID: Owning session of the failed approval.
-///   - decidedCallID: Call identifier of the failed approval, if known.
-///   - context: Shared engine collaborators owning the run log.
-/// - Returns: Stranded awaiting run, or nil when none is awaiting.
 func strandedParkedRun(
     sessionID: UUID,
     decidedCallID: String?,
@@ -117,16 +73,6 @@ func strandedParkedRun(
 }
 
 /// Resolves the final run status for a resumed narrated approval.
-///
-/// Single denials land as denied so the audit trail distinguishes an explicit
-/// refusal from a tool failure; batched denies with prior allows resolve by
-/// their executed outcomes since synthesis already covered the batch. Allows
-/// land as error when any executed call reported failure (including a missing
-/// tool with no action), otherwise ok.
-/// - Parameters:
-///   - approved: Whether the inbox allowed the call.
-///   - resumed: Resume response carrying executed actions.
-/// - Returns: Final run status.
 func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> String {
     if !approved, resumed.toolActions.isEmpty {
         return "denied"
@@ -141,31 +87,6 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
 }
 
 /// Resumes a narrated parked approval in its tagged session, best-effort.
-///
-/// Runs after the inbox decision so the parked turn continues without
-/// blocking the decide response: an allow executes the filed call, while a
-/// deny records the denial in that session. One LLM round can park several
-/// gated narrations; the session's awaiting_approval run stays awaiting
-/// while siblings remain and transitions to ok, error, or denied only after
-/// the last sibling synthesizes once, keeping one lifecycle per parked turn
-/// and falling back to a fresh entry when the parked run already resolved.
-/// Broadcasts so dashboard views refresh without polling. Shared by the REST
-/// decide route and the WebSocket decision handler so both surfaces resume
-/// identically. A resume throw only ever touches the failed session's own
-/// awaiting run; unrelated sessions keep their parked lifecycle untouched.
-/// Awaiting runs are matched by call-identifier overlap so multiple awaiting
-/// runs in one session resolve the owning entry instead of the newest.
-/// - Parameters:
-///   - id: Approval request identifier that parked the turn.
-///   - approved: Whether the inbox allowed the call.
-///   - context: Shared engine collaborators owning the session and logs.
-///   - sessionID: Owning session of the failed approval, when known. Scopes
-///     the stranded-run fallback so one failure cannot flip other sessions'
-///     parked runs to error. Defaults to nil, in which case the fallback
-///     attempts the approvals lookup and otherwise only logs.
-///   - decidedCallID: Call identifier of the decided approval, when known.
-///     Scopes awaiting-run matching to the owning entry. Defaults to nil,
-///     in which case batch call overlap plus newest fallback applies.
 func resumeNarratedApproval(
     id: UUID,
     approved: Bool,
@@ -313,14 +234,6 @@ private func recordResumedRun(
 }
 
 /// Builds a locale-stable per-run title for a scheduler job.
-///
-/// Combines the job name with the fire timestamp so each independent run
-/// session stays human-scannable in history while remaining deterministic
-/// across locales.
-/// - Parameters:
-///   - job: Job being executed.
-///   - startTime: Fire time used for the timestamp.
-/// - Returns: Run title for the session.
 func schedulerRunTitle(for job: SchedulerJob, at startTime: Date) -> String {
     let formatter = DateFormatter()
     formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -330,18 +243,6 @@ func schedulerRunTitle(for job: SchedulerJob, at startTime: Date) -> String {
 }
 
 /// Creates an isolated per-run scheduler session for a job fire.
-///
-/// Each execution gets a fresh `UUID()` stamped `source: "scheduler"` so
-/// auto-fire and manual runs stay isolated from interactive chat and from
-/// each other. Continuity across runs flows through scheduled background
-/// prompting plus `run_logs` job linkage, not shared episodic history.
-/// Shared by the auto-fire worker and the manual run route so both entry
-/// points format titles and stamp sessions identically.
-/// - Parameters:
-///   - job: Job being executed.
-///   - startTime: Fire time used for the title timestamp.
-///   - conversations: Session owner.
-/// - Returns: New per-run session identifier.
 func makeSchedulerRunSession(job: SchedulerJob, startTime: Date, conversations: ConversationManager) async -> UUID {
     let sessionID = UUID()
     let runTitle = schedulerRunTitle(for: job, at: startTime)
@@ -411,18 +312,6 @@ func registerSchedulerCRUDRoutes(_ app: Application) {
 }
 
 /// Registers the manual scheduler job run route.
-///
-/// Manual entry point alongside in-process auto-fire: the service exposes CRUD
-/// plus this single-flight `POST .../run` entry point and auto-fires cron and
-/// poll triggers via `ServerSchedulerWorker` on the shared `SchedulerRunLock`.
-/// The CLI `scheduler run` foreground loop is a separate auto-fire runner in
-/// another process with its own `SchedulerEngine.running` lock and no shared
-/// state, so concurrent service plus CLI runners can double-fire the same job —
-/// run one auto-fire runner at a time. Concurrent runs for the same job inside
-/// this process are rejected with `409`. Run completion is broadcast via
-/// WebSocket to the dashboard and native Web Notifications, intentionally
-/// superseding Script Editor (`osascript`) dialogs.
-/// - Parameter app: Application receiving the route.
 func registerSchedulerRunRoute(_ app: Application) {
     let jobs = app.grouped(PathComponent.constant(ServerPaths.scheduler), PathComponent.constant(ServerPaths.jobs))
     jobs.post(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.run)) { req async throws -> OrchestratorResponse in
@@ -468,10 +357,9 @@ func registerSchedulerRunRoute(_ app: Application) {
                 source: "scheduler"
             ))
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked scheduler turns remain as awaiting_approval like chat turns,
-            // resolving through the same inbox resume path in their session.
-            // The per-turn parked flag keeps a stale prior park in this
-            // session from mis-marking a fresh normal turn.
+            // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
+            // the same inbox resume path in their session. The per-turn parked flag keeps a stale
+            // prior park in this session from mis-marking a fresh normal turn.
             await broadcastParkedApprovals(for: response, context: context)
             let parkedStatus = if response.isParked {
                 "awaiting_approval"

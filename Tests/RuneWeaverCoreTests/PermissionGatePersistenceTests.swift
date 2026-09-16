@@ -16,10 +16,6 @@ struct PermissionGatePersistenceTests {
     }
 
     /// Counts every row in `trust_grants`, including expired rows.
-    ///
-    /// Filtered loads hide expired grants, so only a raw row count can
-    /// distinguish the reaper physically deleting a row from the load
-    /// query merely filtering it out.
     private func rawTrustGrantRowCount(dbPath: String) -> Int {
         #if canImport(SQLite3)
             let path = (dbPath as NSString).expandingTildeInPath

@@ -1,22 +1,10 @@
 // Rune Weaver Core — Conversation turns, message roles, and context helpers.
-//
-// Represents discrete message turns (system, user, assistant, tool), tool call
-// associations, and prompt composition helpers passed to LLM providers.
 
 import Foundation
 
 /// A single turn in a conversation history.
-///
-/// Messages are the unit of context passed to an ``LLMProvider``.
-/// They persist in working memory for the session and are mirrored clean
-/// into episodic memory every turn for session resume (user/final text
-/// verbatim plus compact tool records, narration/placeholders skipped).
 public struct Message: Sendable, Codable, Equatable, Identifiable {
     /// Prefix marking the rolling summary of truncated turns.
-    ///
-    /// Single source of truth shared by `ConversationManager.history(for:)`
-    /// (which prepends the summary) and `[Message].withSystemPrompt(_:)`
-    /// (which preserves it) so the marker never drifts.
     public static let rollingSummaryPrefix = "Earlier in this conversation:"
 
     /// Conversation role for this message.
@@ -40,22 +28,11 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     /// Tool-call identifier this message answers, if `role == .tool`.
     public let toolCallID: String?
     /// Whether a `tool`-role message represents a failure.
-    ///
-    /// Persisted alongside the result so history clients render past
-    /// failures as errors instead of success; nil for non-tool roles
-    /// and for rows written before the flag existed.
     public let isError: Bool?
     /// Creation timestamp.
     public let createdAt: Date
 
     /// Creates a new message.
-    /// - Parameters:
-    ///   - id: Unique identifier. Defaults to a new UUID.
-    ///   - role: Who produced the message.
-    ///   - content: Text content.
-    ///   - toolCallID: Tool-call identifier, for tool results.
-    ///   - isError: Whether a tool result represents a failure. Defaults to nil.
-    ///   - createdAt: Creation date. Defaults to now.
     public init(
         id: UUID = UUID(),
         role: Role,
@@ -75,19 +52,6 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
 
 public extension [Message] {
     /// Returns the history with the system prompt first, without duplication.
-    ///
-    /// This is the single dedup helper shared by the orchestrator and the
-    /// CLI chat loop: an identical leading system message is kept as-is, a
-    /// stale leading system message is replaced (never stacked), and an
-    /// empty/nil prompt leaves the history untouched. A rolling summary
-    /// injected by `ConversationManager.history(for:)` (a leading `system`
-    /// message starting with `Message/rollingSummaryPrefix`) is always
-    /// preserved: the prompt is prepended ahead of it instead of
-    /// replacing it. When the history is `[summary, stalePrompt, ...]`
-    /// the stale prompt at `[1]` is dropped so repeated calls never
-    /// accumulate stacked prompts.
-    /// - Parameter prompt: Developer instructions to ensure, if any.
-    /// - Returns: Messages for the next LLM call.
     func withSystemPrompt(_ prompt: String?) -> [Message] {
         guard let prompt, !prompt.isEmpty else {
             return self

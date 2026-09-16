@@ -5,11 +5,8 @@ import { useEffect, useRef } from "react";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 
-// Typed inbound frames mirroring the engine wire shapes so dashboard views
-// narrow a parsed payload with a typed union. The generic member stays
-// outside the union so literal narrowing (`data.type === "approval"`) keeps
-// working; forward-compatible event types (run lifecycle) are read through
-// an explicit `WSGenericFrame` cast at the call site instead.
+// Typed inbound frames mirroring the engine wire shapes so dashboard views narrow a parsed payload
+// with a typed union.
 export interface WSStreamDelta {
   type: "delta";
   delta: string;
@@ -89,11 +86,8 @@ export type WSIncomingFrame =
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
-// Validates an inbound payload before it reaches typed handlers so malformed
-// engine frames never enter view state. Known terminal shapes check their
-// required fields; forward-compatible broadcasts (run lifecycle,
-// approval_* removals) pass through on their string type for consumers to
-// narrow via record checks. Arrays, null, strings, and typeless records drop.
+// Validates an inbound payload before it reaches typed handlers so malformed engine frames never
+// enter view state.
 function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
   if (!isRecord(value)) return false;
   if (typeof value.type !== "string") return false;
@@ -113,10 +107,9 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
         (value.result == null || isRecord(value.result))
       );
     case "done":
-      // Text and the parked flag are both optional for back-compat: older
-      // engines omit them when streamed deltas already carry the reply or
-      // when the turn was never parked, and the view finalizes from its
-      // accumulated snapshot while treating a missing flag as not parked.
+      // Text and the parked flag are both optional for back-compat: older engines omit them when
+      // streamed deltas already carry the reply or when the turn was never parked, and the view
+      // finalizes from its accumulated snapshot while treating a missing flag as not parked.
       return (
         (value.text === undefined || typeof value.text === "string") &&
         typeof value.sessionID === "string" &&
@@ -251,12 +244,9 @@ class SharedWebSocketClient {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
   }
 
-  // Test-only reset that clears subscribers and drops the cached socket so
-  // suites start from a detached singleton without reaching into privates.
-  // Gated to the test bundle so production never tears down the shared
-  // connection; outside tests this is a no-op. Listeners clear before the
-  // best-effort close so a stubbed close cannot notify a stale view; the
-  // reconnect timer clears after close because the close handler schedules it.
+  // Test-only reset that clears subscribers and drops the cached socket so suites start from a
+  // detached singleton without reaching into privates. Gated to the test bundle so production never
+  // tears down the shared connection; outside tests this is a no-op.
   public resetForTesting(): void {
     // Guard test-only surface: production must never reset the shared socket.
     if (import.meta.env.MODE !== "test") return;

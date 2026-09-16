@@ -48,15 +48,9 @@ interface InFlightTurn {
 
 const MAX_MESSAGES = 200;
 
-// Interim waiting placeholder prefix for parked approval turns.
-//
-// The engine composes parked text without a structured history flag
-// (`waitingOnApprovalMessage`: "Waiting for approval to run ..."), so live
-// updates and history reconstruction key interim detection on this prefix.
-// Prefer the structured `isParked` flag wherever the wire carries it (done
-// frames, REST responses); this prefix covers only history lines and
-// in-flight placeholders that predate structured state. A server wording
-// change silently breaks dedup, so every call site shares this constant.
+// Interim waiting placeholder prefix for parked approval turns. The engine composes parked text
+// without a structured history flag (`waitingOnApprovalMessage`: "Waiting for approval to run
+// ..."), so live updates and history reconstruction key interim detection on this prefix.
 const WAITING_PREFIX = "Waiting for approval";
 
 // Per-session cached cumulative token total so a reload hydrates the status
@@ -114,10 +108,9 @@ export function approvalsForSession(
   });
 }
 
-// Bounds inactivity during a WebSocket-started turn: a socket
-// that drops with no subsequent activity must not strand the input
-// disabled forever. Reset on each tool execution, streaming delta,
-// or approval prompt so multi-turn tool chains never time out while active.
+// Bounds inactivity during a WebSocket-started turn: a socket that drops with no subsequent
+// activity must not strand the input disabled forever. Reset on each tool execution, streaming
+// delta, or approval prompt so multi-turn tool chains never time out while active.
 const TURN_TIMEOUT_MS = 300_000;
 
 interface ChatViewProps {
@@ -125,11 +118,6 @@ interface ChatViewProps {
 }
 
 // Indexes server-derived per-message groups by parent message ID.
-//
-// Single source for history correlation: the server groups tool actions
-// by assistant message (`GET /sessions/:id/tool-actions`), so the client
-// never reimplements the placeholder shape and only hides lines covered
-// by the authoritative call identifiers.
 export function toolActionMap(
   groups: SessionMessageToolActions[] | undefined,
 ): Map<string, ToolAction[]> {
@@ -149,11 +137,8 @@ export function reconstructMessages(
     isError?: boolean | null;
     createdAt?: string | number;
   }> = [],
-  // Authoritative server-derived actions keyed by parent message ID (from
-  // `GET /sessions/:id/tool-actions` via `toolActionMap`). History renders
-  // solely from this record plus raw prose: a line is hidden only when it
-  // references a covered call identifier, so prose containing `]` or
-  // spaces cannot misrender and uncovered text stays visible.
+  // Authoritative server-derived actions keyed by parent message ID (from `GET /sessions/:id/tool-
+  // actions` via `toolActionMap`).
   structuredByMessageID?: Map<string, ToolAction[]> | Record<string, ToolAction[]>,
 ): MessageItem[] {
   const getStructured = (messageID: string | undefined): ToolAction[] | undefined => {
@@ -407,10 +392,9 @@ export default function ChatView({ health }: ChatViewProps) {
     );
   }, []);
 
-  // Reconciles the badge with the authoritative inbox so approvals decided
-  // in another tab do not linger as stale amber badges. Terminal turn
-  // frames and run lifecycle broadcasts trigger it; failures keep the
-  // prior inbox instead of flashing the badge off on errors.
+  // Reconciles the badge with the authoritative inbox so approvals decided in another tab do not
+  // linger as stale amber badges. Terminal turn frames and run lifecycle broadcasts trigger it;
+  // failures keep the prior inbox instead of flashing the badge off on errors.
   const refreshApprovals = useCallback(() => {
     void listApprovals()
       .then((response) => {
@@ -423,11 +407,9 @@ export default function ChatView({ health }: ChatViewProps) {
       });
   }, []);
 
-  // Decides one inline approval without blocking the chat input or sibling
-  // rows: each row tracks its own in-flight decision so concurrent approvals
-  // stay actionable, matching the inbox per-row pattern. The row evicts
-  // locally on success for instant feedback, then reconciles with the server
-  // so cross-tab decisions converge instead of reappearing.
+  // Decides one inline approval without blocking the chat input or sibling rows: each row tracks
+  // its own in-flight decision so concurrent approvals stay actionable, matching the inbox per-row
+  // pattern.
   const handleDecideApproval = useCallback(
     async (id: string, approved: boolean, duration: TrustDuration) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
@@ -510,10 +492,9 @@ export default function ChatView({ health }: ChatViewProps) {
       const argumentsJSON = rawArgumentsJSON;
       setPending(true);
       pendingRef.current = true;
-      // Evict only this batch's waiting placeholder (same callID) or
-      // uncorrelated waiting with no tool actions; other parked batches in
-      // the same session keep their placeholders so resuming one never wipes
-      // the other. Non-waiting duplicates still evict by callID overlap.
+      // Evict only this batch's waiting placeholder (same callID) or uncorrelated waiting with no
+      // tool actions; other parked batches in the same session keep their placeholders so resuming
+      // one never wipes the other. Non-waiting duplicates still evict by callID overlap.
       setMessages((prev) =>
         prev.filter((m) => {
           if (m.role !== "assistant") return true;
@@ -598,10 +579,9 @@ export default function ChatView({ health }: ChatViewProps) {
       pendingRef.current = true;
       const rawDelta: unknown = data.delta;
       const deltaText = typeof rawDelta === "string" ? rawDelta : "";
-      // Deltas carry no batch correlation, so they must not evict parked
-      // batches' waiting placeholders (which carry their batch callIDs);
-      // batch-specific eviction belongs to tool_start/done callID overlap.
-      // Only generic waiting with no tool actions is safe to replace here.
+      // Deltas carry no batch correlation, so they must not evict parked batches' waiting
+      // placeholders (which carry their batch callIDs); batch-specific eviction belongs to
+      // tool_start/done callID overlap.
       setMessages((prev) =>
         prev.filter((m) => {
           if (m.role !== "assistant") return true;
@@ -721,14 +701,9 @@ export default function ChatView({ health }: ChatViewProps) {
         toolActions: finalActions.length > 0 ? finalActions : undefined,
       };
       setMessages((prev) => {
-        // Terminal dedup stays batch-scoped: evict only placeholders whose
-        // batch overlaps this turn's actions, plus generic waiting with no
-        // correlation. Other parked batches in the same session keep their
-        // placeholders so completing one resume never wipes the other. An
-        // empty terminal (denied resume with no executed actions) carries no
-        // batch correlation, so it falls back to replacing generic waiting
-        // only; batch-specific waiting for the denied call clears via its
-        // tool_start overlap or the next overlapping done.
+        // Terminal dedup stays batch-scoped: evict only placeholders whose batch overlaps this
+        // turn's actions, plus generic waiting with no correlation. Other parked batches in the
+        // same session keep their placeholders so completing one resume never wipes the other.
         const base = !isParked
           ? prev.filter((m) => {
               if (m.role !== "assistant") return true;
@@ -908,10 +883,9 @@ export default function ChatView({ health }: ChatViewProps) {
     };
   }, []);
 
-  // Track unresolved approvals so sessions blocked on a gated tool show an
-  // honest amber badge; a single effect on the active session covers both
-  // mount and switches, so no double fetch fires on mount. Failures leave
-  // the prior inbox intact instead of flashing the badge off on errors.
+  // Track unresolved approvals so sessions blocked on a gated tool show an honest amber badge; a
+  // single effect on the active session covers both mount and switches, so no double fetch fires on
+  // mount. Failures leave the prior inbox intact instead of flashing the badge off on errors.
   useEffect(() => {
     let cancelled = false;
     listApprovals()
@@ -1071,10 +1045,9 @@ export default function ChatView({ health }: ChatViewProps) {
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
       if (isParked) {
-        // Parked REST turns (WS closed) wait on inbox approval: refresh
-        // immediately so the header shows the amber waiting state instead of
-        // appearing completed, while the waiting text above keeps the pending
-        // UI honest without relying on an unrelated poll.
+        // Parked REST turns (WS closed) wait on inbox approval: refresh immediately so the header
+        // shows the amber waiting state instead of appearing completed, while the waiting text
+        // above keeps the pending UI honest without relying on an unrelated poll.
         refreshApprovals();
       }
     } catch (failure) {

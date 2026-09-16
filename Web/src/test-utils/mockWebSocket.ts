@@ -1,7 +1,4 @@
 // Rune Weaver Dashboard — Shared WebSocket stub and frame dispatch helpers.
-// Single source for the MockWebSocket stub used by ChatView suites so frame
-// capture, sent-frame recording, and nullable-handler dispatch stay identical
-// across tests without copy-pasting the stub per case.
 
 import { act } from "@testing-library/react";
 import { resetSharedSocket as resetProdSharedSocket } from "../hooks/useSharedWebSocket";
@@ -20,10 +17,9 @@ export function createMockWebSocketCapture(): MockWebSocketCapture {
   return { onMessage: null, sentFrames: [] };
 }
 
-// Builds the stub WebSocket class bound to one capture. The constructor
-// attaches asynchronously to mirror real connection timing, and send/close
-// mirror the minimal surface the shared client probes (readyState, onopen,
-// onclose, onmessage).
+// Builds the stub WebSocket class bound to one capture. The constructor attaches asynchronously to
+// mirror real connection timing, and send/close mirror the minimal surface the shared client probes
+// (readyState, onopen, onclose, onmessage).
 export function createMockWebSocket(capture: MockWebSocketCapture): new () => unknown {
   return class MockWebSocket {
     static CONNECTING = 0;
@@ -69,10 +65,9 @@ export async function dispatchFrameOrThrow(
   });
 }
 
-// Canonical test-only reset location so suites detach the shared singleton
-// through test utilities instead of importing test hooks from the production
-// bundle directly. Delegates to the gated shared-client reset, which no-ops
-// outside the test bundle.
+// Canonical test-only reset location so suites detach the shared singleton through test utilities
+// instead of importing test hooks from the production bundle directly. Delegates to the gated
+// shared-client reset, which no-ops outside the test bundle.
 export function resetSharedSocket(): void {
   resetProdSharedSocket();
 }
