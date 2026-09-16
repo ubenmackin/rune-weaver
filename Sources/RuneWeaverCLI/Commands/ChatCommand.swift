@@ -1,28 +1,13 @@
 // Rune Weaver CLI — Interactive chat session and REPL command.
-//
-// Hosts the terminal conversation loop linking the LLM router, tool bus,
-// conversation persistence, and memory mirroring. Streams assistant turns,
-// executes tool calls under the permission gate, and handles session resume
-// plus cooperative SIGINT cancellation so turns park cleanly at the prompt.
 
 import ArgumentParser
 import Foundation
 import os
 import RuneWeaverCore
 import RuneWeaverLLM
+import RuneWeaverTools
 
 /// Cooperative SIGINT state for the chat REPL.
-///
-/// Tripped by the `SIGINT` dispatch source and polled by the REPL loop,
-/// the streaming drain, and the tool-execution path. State lives in the
-/// shared `CLILockedValue` box so every access runs inside `withLock`,
-/// keeping it data-race free under Swift 6 concurrency without manual
-/// lock handling. A tripped flag during an assistant turn means cancel
-/// the turn and return to the prompt; a tripped flag at the prompt means
-/// exit. Turn cancellation consumes the flag via `reset()` or
-/// `consume()` so the next prompt starts clean.
-/// - Note: Internal (not `private`) so `ChatInterruptTests` can exercise
-///   the flag via `@testable` import; all mutation stays inside `withLock`.
 final class ChatInterruptState: Sendable {
     /// Lock-guarded delivery flag.
     private let flag = CLILockedValue(false)
@@ -38,9 +23,6 @@ final class ChatInterruptState: Sendable {
     }
 
     /// Clears a delivered SIGINT so the next prompt starts clean.
-    ///
-    /// Called after a cancelled turn returns to the prompt; a later
-    /// SIGINT at the prompt still trips the flag again and exits.
     func reset() {
         flag.withLock { $0 = false }
     }
@@ -57,10 +39,6 @@ final class ChatInterruptState: Sendable {
 }
 
 /// Outcome of one assistant turn.
-///
-/// Returned by the interrupt-aware turn helpers so the REPL can tell a
-/// completed turn (stay in the loop) from a SIGINT-cancelled turn
-/// (reset the flag and return to the prompt).
 enum ChatTurnOutcome: Sendable, Equatable {
     /// The turn finished and persisted normally.
     case completed
@@ -69,16 +47,6 @@ enum ChatTurnOutcome: Sendable, Equatable {
 }
 
 /// Cooperative cancellation policy for assistant turns.
-///
-/// Single predicate behind every interrupt check so streaming, tool
-/// execution, and prompt handling agree: a tripped flag aborts the
-/// in-flight LLM stream, aborts the tool loop before the next execution,
-/// and exits the REPL when observed at the prompt.
-/// Turn cancellation is consumed via `consumeTurnCancellation(_:)` (or
-/// `reset()`) so the next prompt starts clean while a second SIGINT at
-/// the prompt still exits.
-/// - Note: Internal (not `private`) so `ChatInterruptTests` can exercise
-///   the policy via `@testable` import.
 enum ChatTurnInterrupt {
     /// Whether the shared SIGINT flag has been delivered.
     /// - Parameter interrupt: Shared SIGINT flag.
@@ -96,11 +64,6 @@ enum ChatTurnInterrupt {
 }
 
 /// Centralized SIGINT installation shared by chat REPL sessions.
-///
-/// Installs the ignore plus dispatch-source handler once and restores
-/// the prior handler when the last session exits, so concurrent REPLs
-/// never race on the global signal disposition. Every registered state
-/// is tripped on SIGINT; sessions unregister on exit.
 private final class ChatSignalManager: Sendable {
     /// Shared installation for the process.
     static let shared = ChatSignalManager()
@@ -117,10 +80,6 @@ private final class ChatSignalManager: Sendable {
     private let queue = DispatchQueue(label: "com.runeweaver.chat-sigint")
 
     /// Snapshot captured under lock for deferred signal restoration.
-    ///
-    /// Replaces a three-member tuple so the uninstall path stays within
-    /// the `large_tuple` lint budget without splitting the locked
-    /// critical section.
     private struct SignalRestorePlan {
         /// Whether the source was torn down and the prior handler needs restoring.
         let shouldRestore: Bool
@@ -185,12 +144,6 @@ private final class ChatSignalManager: Sendable {
 }
 
 /// Maps a REPL answer to a graduated-trust tier.
-///
-/// Accepts the numbered menu (`1`–`5`), tier names, and `y`/`yes` as a
-/// one-shot approval for compatibility with the old binary prompt.
-/// Anything else (including empty input) denies the call.
-/// - Parameter answer: Raw trimmed user input, if any.
-/// - Returns: The chosen tier, or nil to deny.
 private func chatTrustDuration(for answer: String?) -> TrustDuration? {
     switch (answer ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
     case "1", "once", "this time", "only this time", "y", "yes":
@@ -209,43 +162,6 @@ private func chatTrustDuration(for answer: String?) -> TrustDuration? {
 }
 
 /// Interactive chat session with the agent.
-///
-/// Loads `config.toml`, selects an LLM provider (with `--provider`
-/// overriding `llm.default_provider`), and enters a read-eval-print loop.
-/// Email plugins (`email.search`, `email.read`, `email.attachment`) and memory plugins
-/// (`remember_fact`, `recall_memories`) register at startup via
-/// `CLIShared.makeToolBus(pluginTools())` and are sent to the model as
-/// `ToolDefinition`s every turn. Email search and read are `readOnly`
-/// and memory tools are `trusted` per the owner memory-write trust ruling,
-/// so those families run without approval prompts, while
-/// `email.attachment` is `requiresApproval` and stages downloads under
-/// the sandbox staging area (`attachments/` subdirectory, 10 MB cap);
-/// their results feed back into
-/// the next LLM round so the assistant summarizes them in conversation.
-/// Email is verified live against Volcrypt IMAP (`mail.volcrypt.com:993`,
-/// account `volcrypt` via `EMAIL_VOLCRYPT_PASSWORD`) and iCloud IMAP
-/// (`imap.mail.me.com:993`, account `icloud` via the
-/// `EMAIL_ICLOUD_PASSWORD` app-specific password) in the environment or
-/// Keychain service `com.runeweaver.secrets`: reads only, no send path,
-/// secrets never printed or logged, attachments listed with
-/// filename/MIME/size and downloaded via `email.attachment` into the
-/// sandbox staging area (10 MB cap, approval required). Configured email accounts print at startup
-/// (name plus `username@host:port`, never secrets) so the model and the
-/// user know which nickname to use. Every user turn also runs automatic
-/// recall (bounded `recall`, with the query embedded best-effort so the
-/// vector ranks semantic hits by cosine similarity when an embeddings
-/// backend is configured, falling back to keyword overlap): top matches
-/// inject as source-labeled,
-/// token-bounded system context, skipped when nothing scores above
-/// threshold. Assistant tokens stream back with a typewriter effect,
-/// requested tool calls are shown inline (yellow) with their results, and
-/// `requiresApproval` tools prompt for confirmation before running.
-/// Prompts use line editing on a TTY (left/right in-place edits, up/down
-/// through prior prompts persisted in `~/.runeweaver/history/chat_history`
-/// outside episodic memory).
-/// Ctrl+C during an assistant turn cancels the turn immediately and returns
-/// to the prompt; Ctrl+C at the prompt, EOF, `/exit`, and `/quit` all shut
-/// the session down gracefully.
 struct ChatCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -312,15 +228,9 @@ struct ChatCommand: AsyncParsableCommand {
             memoryConfig: loaded.config.memory,
             memoryEngine: memoryEngine
         )
-        // Email search/read are `readOnly` and memory tools are `trusted`
-        // per the owner memory-write trust ruling, so both bypass the
-        // approval handler by design (see `ToolBus.execute`): the handler
-        // below only fires for `requiresApproval` tools (including
-        // `email.attachment`), so find-and-summarize and remember/recall
-        // run prompt-free with memory writes audit-logged.
-        // Resolve the embeddings producer once from config so every turn
-        // shares one backend; nil keeps the keyword-only path when vectors
-        // are disabled or the selector is unknown.
+        // Email search/read are `readOnly` and memory tools are `trusted` per the owner memory-
+        // write trust ruling, so both bypass the approval handler by design (see
+        // `ToolBus.execute`): the handler below only fires for `requiresApproval` tools (including...
         let embedder = EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: providers)
@@ -341,7 +251,9 @@ struct ChatCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder,
             pluginConfig: loaded.config.plugins,
-            episodesDBPath: loaded.config.memory.episodesDBPath
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm
         )
         await toolBus.setApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
@@ -376,6 +288,7 @@ struct ChatCommand: AsyncParsableCommand {
 
         print(TerminalStyle.dim("Connected to \(active.name) (\(active.modelInfo.name)). Session \(sessionID.uuidString)."))
         print(TerminalStyle.dim("Type /help for commands, /exit to quit. Ctrl+C shuts down gracefully."))
+        try await warmSearchEngine(browser: loaded.config.browser)
         // Default system prompt is composed from the live registry so the
         // model sees every registered tool; an explicit --system-prompt
         // still overrides it verbatim via SystemPromptComposer.resolve.
@@ -397,10 +310,19 @@ struct ChatCommand: AsyncParsableCommand {
         await permissionGate.stopPeriodicCleanup()
     }
 
+    /// Warms the local search engine on boot so first searches stay fast.
+    private func warmSearchEngine(browser: BrowserConfig) async throws {
+        do {
+            try await SearXNGEnsurer.shared.ensure(browser: browser)
+            print(TerminalStyle.dim("SearXNG ready at \(browser.searxngURL)."))
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            print(TerminalStyle.dim("Search engine unavailable: \(error.localizedDescription)"))
+        }
+    }
+
     /// Parses `--session` into a UUID, starting fresh when omitted.
-    /// - Parameter raw: Raw `--session` value, if any.
-    /// - Returns: Session identifier to use.
-    /// - Throws: `ValidationError` when the value is not a UUID.
     private func resolveSessionID(_ raw: String?) throws -> UUID {
         guard let raw, !raw.isEmpty else { return UUID() }
         guard let id = UUID(uuidString: raw) else {
@@ -410,11 +332,6 @@ struct ChatCommand: AsyncParsableCommand {
     }
 
     /// Prepares and hydrates working conversation history from episodic storage.
-    /// - Parameters:
-    ///   - sessionID: Current chat session identifier.
-    ///   - memoryConfig: Memory configuration containing storage paths.
-    ///   - memoryEngine: Episodic memory engine to hydrate from.
-    /// - Returns: Initialized conversation manager.
     private func initializeConversations(
         sessionID: UUID,
         memoryConfig: MemoryConfig,
@@ -445,11 +362,6 @@ struct ChatCommand: AsyncParsableCommand {
 }
 
 /// Shared dependencies for one chat REPL session.
-///
-/// Bundles the REPL collaborators so turn helpers stay within the
-/// parameter budget while keeping call sites readable. The session token
-/// total accumulates `totalTokens` across turns for the usage display.
-/// - Note: File-private; only the REPL helpers in this file construct it.
 private struct ChatTurnContext: Sendable {
     /// Session and history owner.
     let conversations: ConversationManager
@@ -464,27 +376,12 @@ private struct ChatTurnContext: Sendable {
     /// Shared engine receiving one episode per turn.
     let memoryEngine: MemoryEngine
     /// Optional embeddings producer for vector-ranked recall and tool writes.
-    ///
-    /// Resolved once from config at startup so every turn shares one
-    /// backend; nil keeps the keyword-only path.
     let embedder: (any EmbeddingsBackend)?
     /// Session-cumulative billed tokens rendered via `SessionTokenDisplay`.
     let sessionTokens: CLILockedValue<Int>
 }
 
 /// Builds the session trailer line for one assistant turn.
-///
-/// Accumulates the turn's billed total into the session counter only
-/// when the backend reported usage, then always formats the
-/// session-cumulative label with the serving model name so the trailer
-/// prints after every assistant message (each LLM round inside the tool
-/// loop, which satisfies the every-turn intent) even when usage is absent.
-/// - Parameters:
-///   - modelName: Serving model name from the stream (`meta.model`), falling back to `modelInfo.name`.
-///   - sessionTokens: Session-cumulative billed token counter.
-///   - turnTotalTokens: Turn's billed total, if the backend reported usage.
-///   - window: Context window from `modelInfo`.
-/// - Returns: Trailer label for dimmed display.
 enum ChatSessionTrailer {
     /// Formats the trailer and advances the session counter when needed.
     static func line(
@@ -504,26 +401,6 @@ enum ChatSessionTrailer {
 }
 
 /// Runs the read-eval-print loop until EOF, `/exit`, or SIGINT at the prompt.
-///
-/// SIGINT is observed via the shared `ChatSignalManager` (block-based
-/// dispatch source, no C handler globals) tripping a lock-boxed flag
-/// polled by the loop, which is data-race free under Swift 6
-/// concurrency. Installation is reference-counted and restores the
-/// prior handler when the last session exits. Standard-input reads
-/// suspend on a background queue via `ChatLineEditing.readLine(prompt:)`
-/// so the cooperative pool is never blocked. Prompts use Bestline line
-/// editing when attached to a TTY (left/right in-place edits, up/down
-/// history) with history persisted across sessions in
-/// `~/.runeweaver/history/chat_history`, outside episodic memory; piped
-/// input falls back to plain `readLine`. SIGINT during an assistant turn
-/// cancels the turn immediately (the in-flight stream is abandoned, the
-/// tool loop stops, and the partial turn is discarded) and returns to
-/// the prompt within the same interaction; SIGINT at the prompt exits.
-/// The cancelled turn consumes its flag via `reset()` so a second SIGINT
-/// at the prompt still exits via `ChatTurnInterrupt.isCancelled`.
-/// - Parameters:
-///   - provider: Active LLM backend serving completions.
-///   - context: Shared REPL dependencies for this session.
 private func runChatREPL(
     provider: any LLMProvider,
     context: ChatTurnContext
@@ -597,10 +474,9 @@ private func runChatREPL(
                 interrupt: interrupt
             )
             if outcome == .cancelled {
-                // The turn already discarded its partial working-memory writes
-                // and printed its cancellation notice. Consume the flag so the
-                // loop returns to the prompt within the same interaction; a
-                // second SIGINT at the prompt still exits.
+                // The turn already discarded its partial working-memory writes and printed its
+                // cancellation notice. Consume the flag so the loop returns to the prompt within
+                // the same interaction; a second SIGINT at the prompt still exits.
                 interrupt.reset()
                 continue
             }
@@ -620,30 +496,11 @@ private func runChatREPL(
 }
 
 /// Reports episodic mirror failures as a dim warning on standard error.
-///
-/// Single handler passed with `.report` to the shared
-/// `MemoryEngine.mirrorTurn(_:...)` helper so the failure message stays
-/// single-sourced in `RuneWeaverCore`.
 private let chatMirrorFailureHandler: @Sendable (String) -> Void = { message in
     cliPrintError(TerminalStyle.dim(message))
 }
 
 /// Stores an explicit remember request and acknowledges it.
-///
-/// Shares acknowledgement text with the orchestrator via
-/// `MemoryEngine.rememberAcknowledgementText(for:stored:)` so every caller
-/// stores the same assistant turn. The acknowledgement is recorded in
-/// working memory and mirrored to episodic memory like any other turn;
-/// empty or punctuation-only facts print usage after the turn is mirrored,
-/// and storage failures print a dim note without touching the LLM path.
-/// Vector-backed writes use the shared embedder with keyword-only fallback;
-/// cancellation propagates without storing a downgraded row.
-/// - Parameters:
-///   - fact: Stripped fact text.
-///   - engine: Shared memory engine for the session.
-///   - conversations: Session and history owner.
-///   - sessionID: Current session identifier.
-///   - embedder: Optional embeddings producer for vector-backed writes.
 private func chatStoreRememberedFact(
     _ fact: String,
     engine: MemoryEngine,
@@ -670,19 +527,6 @@ private func chatStoreRememberedFact(
 }
 
 /// Appends a remember request to working memory and stores the fact.
-///
-/// Shared by the REPL and slash-command paths so `remember` and
-/// `/remember` behave identically. Every turn is recorded in working
-/// and episodic memory, including the acknowledgement assistant turn;
-/// empty or punctuation-only requests still print usage after both turns
-/// are mirrored. Cancellation propagates without storing a downgraded row.
-/// - Parameters:
-///   - input: Raw user input preserved as the working-memory turn.
-///   - fact: Stripped fact text from the remember parser.
-///   - conversations: Session and history owner.
-///   - sessionID: Current session identifier.
-///   - engine: Shared engine for episodic and fact storage.
-///   - embedder: Optional embeddings producer for vector-backed writes.
 private func appendUserAndHandleRemember(
     input: String,
     fact: String,
@@ -711,14 +555,6 @@ private enum REPLAction {
 }
 
 /// Handles `/`-prefixed REPL commands.
-/// - Parameters:
-///   - input: Raw trimmed user input.
-///   - conversations: Session and history owner.
-///   - sessionID: Current session identifier.
-///   - memoryEngine: Shared engine for `/remember` captures.
-///   - sessionTokens: Session-cumulative billed counter reset on `/clear`.
-///   - embedder: Optional embeddings producer for vector-backed remember.
-/// - Returns: The loop action, or nil when `input` is not a command.
 private func handleSlashCommand(
     _ input: String,
     conversations: ConversationManager,
@@ -770,20 +606,6 @@ private func handleSlashCommand(
 }
 
 /// Runs one assistant turn, dispatching to the chunk or text path.
-///
-/// Resolves automatic recall once per user turn so chunked and text
-/// backends share one stable injection; tool rounds reuse the same
-/// recall message without re-querying. Forwards the shared interrupt
-/// flag so both paths cancel identically and report `.cancelled` for
-/// the REPL to consume.
-/// - Parameters:
-///   - provider: Active LLM backend.
-///   - context: Shared REPL dependencies for this session.
-///   - query: Current user message used as the recall query.
-///   - interrupt: Shared SIGINT flag polled during streaming and tools.
-/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
-/// - Throws: `CancellationError` from recall or the delegated turn path so
-///   task cancellation propagates instead of degrading the turn.
 private func runAssistantTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,
@@ -810,9 +632,6 @@ private func runAssistantTurn(
 // MARK: - Chunked turn helpers
 
 /// Pre-turn snapshot plus tool-round budget for one chunked turn.
-///
-/// Bundles the working-memory snapshot used for SIGINT rollback with the
-/// round counter so turn helpers stay within the parameter budget.
 private struct ChunkedTurnProgress: Sendable {
     /// Working-memory snapshot restored on cancellation.
     let snapshot: [Message]
@@ -821,9 +640,6 @@ private struct ChunkedTurnProgress: Sendable {
 }
 
 /// Accumulated chunk-stream result for one LLM round.
-///
-/// Collects text, structured calls, usage, serving model, and terminal
-/// error so the drain loop stays out of the turn driver.
 private struct ChunkedTurnDraft: Sendable {
     /// Accumulated assistant text.
     var text: String
@@ -838,15 +654,6 @@ private struct ChunkedTurnDraft: Sendable {
 }
 
 /// Drains one chunk stream into a draft.
-///
-/// Polls the shared interrupt each chunk; a tripped flag breaks the drain
-/// so the caller discards the partial draft without persisting it.
-/// - Parameters:
-///   - provider: Chunk-streaming LLM backend.
-///   - definitions: Tool definitions sent to the model.
-///   - history: Conversation history for this round.
-///   - interrupt: Shared SIGINT flag polled per chunk.
-/// - Returns: Accumulated text, calls, usage, model, and error.
 private func drainChunkedStream(
     provider: any ChunkStreamingProvider,
     definitions: [ToolDefinition],
@@ -882,16 +689,6 @@ private func drainChunkedStream(
 }
 
 /// Rolls working memory back and reports cancellation.
-///
-/// Restores the pre-turn snapshot so partial notes and tool messages are
-/// discarded with no episodic mirror of the partial turn. Callers snapshot
-/// `sessionTokens` before the trailer and restore it when this returns
-/// `.cancelled` so the session total never advances on a cancelled turn.
-/// - Parameters:
-///   - context: Shared REPL dependencies for this session.
-///   - snapshot: Pre-turn working-memory snapshot.
-///   - withLeadingNewline: Whether to print a blank line first.
-/// - Returns: `.cancelled` for the REPL to consume.
 private func cancelChunkedTurn(
     context: ChatTurnContext,
     snapshot: [Message],
@@ -906,16 +703,6 @@ private func cancelChunkedTurn(
 }
 
 /// Handles a chunked round with no structured calls via the narrated fallback.
-///
-/// Stores final text directly when no narrated placeholder qualifies;
-/// otherwise runs one read-only tool round under the shared budget.
-/// - Parameters:
-///   - text: Latest assistant text.
-///   - tools: Available tools for narration parsing.
-///   - context: Shared REPL dependencies for this session.
-///   - interrupt: Shared SIGINT flag polled around execution.
-///   - progress: Snapshot plus round counter, advanced on tool execution.
-/// - Returns: Outcome to return, or nil to continue the tool loop.
 private func handleChunkedNarratedTurn(
     text: String,
     tools: [any Tool],
@@ -957,14 +744,6 @@ private func handleChunkedNarratedTurn(
 }
 
 /// Handles a chunked round with structured calls under the shared budget.
-///
-/// - Parameters:
-///   - text: Latest assistant text.
-///   - calls: Structured tool calls in stream order.
-///   - context: Shared REPL dependencies for this session.
-///   - interrupt: Shared SIGINT flag polled around execution.
-///   - progress: Snapshot plus round counter, advanced on tool execution.
-/// - Returns: Outcome to return, or nil to continue the tool loop.
 private func handleChunkedStructuredTurn(
     text: String,
     calls: [ToolCall],
@@ -991,56 +770,6 @@ private func handleChunkedStructuredTurn(
 }
 
 /// Runs one assistant turn via chunk streaming with tool-call visibility.
-///
-/// Text deltas print as they arrive (typewriter effect); model-requested
-/// tool calls print in yellow, execute via the bus, and show their results
-/// inline before the next LLM round. Automatic recall runs once per user
-/// turn (bounded `recall`, with the query embedded best-effort so the
-/// vector ranks semantic hits by cosine similarity when an embeddings
-/// backend is configured, falling back to keyword overlap; source-labeled
-/// and token-bounded) and the same injected system context is reused across
-/// tool rounds without re-querying; below-threshold turns send no recall.
-/// Up to `maxToolIterations` tool rounds run, followed by one final
-/// synthesis turn so the last tool results are always answered; when the
-/// synthesis turn still requests tools the loop stops with an exceeded
-/// notice without executing the extra calls. When a turn yields text but
-/// zero structured calls, narrated `Calling ... [...]` placeholder lines
-/// fall back to read-only executions with fresh call identifiers via the
-/// shared `OrchestratorToolLoop.narratedToolCalls(from:tools:)` policy
-/// while invalid argument JSON and approval-gated tools stay unexecuted.
-/// Working memory always keeps
-/// the full assistant note via the shared
-/// `OrchestratorToolLoop.assistantNoteContent(text:calls:)` policy
-/// (truncated arguments, name, and call identifier) so tool results keep
-/// their parent for LLM replay. Episodic memory stays clean by skipping
-/// interim assistant notes and mirroring each meaningful tool execution
-/// as one compact `"Used <tool>: <outcome>"` record via the shared
-/// `OrchestratorToolLoop.episodicToolRecord(toolName:result:)` policy with
-/// no placeholder lines, call identifiers, or call-argument JSON, so
-/// keyword search stays free of tool-call mechanics and empty turns.
-/// The session trailer always prints after each LLM round (each assistant
-/// message inside the `while true` tool loop, which satisfies the
-/// after-every-turn intent) using the serving model name when the stream
-/// reports it (falling back to the provider model name) and the
-/// session-cumulative total, advancing the counter only when the round
-/// reported usage. SIGINT cancellation polls `interrupt` before each LLM
-/// round, inside the chunk drain, before the trailer, and around every
-/// tool execution: a
-/// tripped flag abandons the in-flight stream (breaking the `for await`
-/// releases the provider continuation and cancels the underlying request),
-/// stops the tool loop without waiting for remaining tools or retries,
-/// rolls working memory back to the pre-turn snapshot so the partial
-/// assistant note and any tool messages from this turn are discarded with
-/// no episodic mirror of the partial text and no trailer advance, and
-/// returns `.cancelled` for the REPL to consume.
-/// - Parameters:
-///   - provider: Chunk-streaming LLM backend.
-///   - context: Shared REPL dependencies for this session.
-///   - query: Current user message used as the recall query.
-///   - interrupt: Shared SIGINT flag polled during streaming and tools.
-/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
-/// - Throws: `CancellationError` from recall, streaming, or tool execution
-///   so task cancellation propagates instead of degrading the turn.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
     context: ChatTurnContext,
@@ -1068,10 +797,9 @@ private func runChunkedTurn(
             history: history,
             interrupt: interrupt
         )
-        // Abort the in-flight request immediately: breaking the `for await`
-        // releases the provider continuation and cancels the underlying
-        // request, and the partial text and calls below are discarded
-        // without persisting, mirroring, or advancing the session total.
+        // Abort the in-flight request immediately: breaking the `for await` releases the provider
+        // continuation and cancels the underlying request, and the partial text and calls below are
+        // discarded without persisting, mirroring, or advancing the session total.
         if ChatTurnInterrupt.isCancelled(interrupt) {
             return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: true)
         }
@@ -1128,20 +856,6 @@ private func runChunkedTurn(
 }
 
 /// Executes chunked tool inputs, printing results and mirroring episodic records.
-///
-/// Checks the shared interrupt flag before each execution and after each
-/// in-flight execution: a tripped flag stops the loop immediately without
-/// persisting that tool's result, so the caller can discard the partial
-/// turn and return to the prompt instead of waiting for remaining tools.
-/// Working memory keeps the full placeholder so the next Responses body
-/// can replay every `function_call` with its matching output. Episodic
-/// memory skips interim assistant notes entirely so narration and
-/// placeholder call mechanics never reach the store.
-/// - Parameters:
-///   - inputs: Tool inputs to execute.
-///   - context: Shared REPL dependencies for this session.
-///   - interrupt: Shared SIGINT flag polled before and after each tool.
-/// - Returns: True when SIGINT tripped and remaining tools were skipped.
 private func executeChunkedInputs(
     _ inputs: [ToolInput],
     context: ChatTurnContext,
@@ -1176,10 +890,6 @@ private func executeChunkedInputs(
 }
 
 /// Accumulated text-only stream result for one LLM round.
-///
-/// Collects text, terminal error, and billed usage so the drain loop stays
-/// out of the turn driver.
-/// - Note: File-private; only the text turn helpers in this file construct it.
 private struct TextTurnDraft: Sendable {
     /// Accumulated assistant text.
     var text: String
@@ -1190,17 +900,6 @@ private struct TextTurnDraft: Sendable {
 }
 
 /// Drains one text-only stream into a draft.
-///
-/// Polls the shared interrupt each chunk; a tripped flag breaks the drain
-/// so the caller discards the partial draft without persisting it. Text
-/// deltas print as they arrive and the terminal billed total is recorded
-/// without breaking early so trailing usage and error chunks are observed.
-/// - Parameters:
-///   - provider: Active LLM backend.
-///   - history: Conversation history for this round.
-///   - tools: Tools the model may call.
-///   - interrupt: Shared SIGINT flag polled per chunk.
-/// - Returns: Accumulated text, error, and billed tokens.
 private func drainTextStream(
     provider: any LLMProvider,
     history: [Message],
@@ -1239,37 +938,6 @@ private func drainTextStream(
 }
 
 /// Runs one assistant turn via the text-only stream with the shared narrated tool loop.
-///
-/// The text-only `LLMProvider.chat` stream carries no structured tool calls,
-/// so each turn falls back to the shared
-/// `OrchestratorToolLoop.narratedToolCalls(from:tools:)` policy exactly like
-/// `runChunkedTurn` and `Orchestrator.resolveToolCalls`: narrated
-/// `Calling ... [...]` lines become read-only executions with fresh call
-/// identifiers while invalid argument JSON and approval-gated tools stay
-/// unexecuted. Up to `maxToolIterations` tool rounds run with the same
-/// `isLimitExceeded` budget, the same `assistantNoteContent` working-memory
-/// placeholder, and the same `episodicToolRecord` episodic mirroring as the
-/// chunked path, followed by continued synthesis rounds so tool results are
-/// answered. Automatic recall injects the same source-labeled system context
-/// as the chunked path. Billed usage
-/// reported on the terminal `LLMResponse` chunk accumulates into the same
-/// session total and renders the same session-billed usage line as the
-/// chunked path; the trailer always prints with the provider model name,
-/// leaving the session total unchanged when the backend reports no usage.
-/// SIGINT cancellation mirrors `runChunkedTurn`: the flag is polled before
-/// each round, after the stream drains, before the trailer, and around
-/// every tool execution;
-/// a tripped flag abandons the in-flight stream, discards the partial
-/// turn without persisting or mirroring it, and returns `.cancelled`
-/// without waiting for further rounds or retries.
-/// - Parameters:
-///   - provider: Active LLM backend.
-///   - context: Shared REPL dependencies for this session.
-///   - query: Current user message used as the recall query.
-///   - interrupt: Shared SIGINT flag polled during streaming and tools.
-/// - Returns: `.cancelled` when SIGINT tripped, else `.completed`.
-/// - Throws: `CancellationError` from recall, streaming, or tool execution
-///   so task cancellation propagates instead of degrading the turn.
 private func runTextTurn(
     provider: any LLMProvider,
     context: ChatTurnContext,

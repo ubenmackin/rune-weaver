@@ -1,8 +1,4 @@
 // Rune Weaver CLI — Plugin and rune lifecycle management commands.
-//
-// Provides terminal commands for listing installed and discovered plugins,
-// enabling runes with human approval and cryptographic hash verification,
-// disabling runes, triggering filesystem rescans, and verifying plugin integrity.
 
 import ArgumentParser
 import Foundation

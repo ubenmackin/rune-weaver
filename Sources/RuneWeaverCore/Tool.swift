@@ -1,14 +1,6 @@
 // Rune Weaver Core — Tool capability protocol and invocation interface.
-//
-// Defines the primary Tool protocol that all native and external plugins
-// implement to advertise function calling schemas, trust levels, and execution logic.
 
 /// A capability plugin the agent can invoke.
-///
-/// Each tool is a self-contained module that declares its identity
-/// (`name`, `description`), its function-calling contract
-/// (`inputSchema`), its trust requirement (`permissionLevel`), and
-/// its handler (`execute(input:context:)`).
 public protocol Tool: Sendable {
     /// Stable machine-readable identifier (e.g. `"email.search"`).
     var name: String { get }
@@ -20,9 +12,5 @@ public protocol Tool: Sendable {
     var permissionLevel: PermissionLevel { get }
 
     /// Runs the tool.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: The tool result.
     func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput
 }

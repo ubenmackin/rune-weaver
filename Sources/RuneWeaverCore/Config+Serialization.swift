@@ -1,9 +1,4 @@
 // Rune Weaver Core — TOML serialization for RuneWeaverConfig.
-//
-// Renders the validated configuration back to a canonical config.toml
-// document so bootstrap seeds, migrations, and dashboard edits round-trip
-// without drift. Emits spec-valid quoted strings and stable section order
-// so serialized output always reparses to an equivalent snapshot.
 
 import Foundation
 
@@ -13,9 +8,6 @@ import Foundation
 
 extension RuneWeaverConfig {
     /// Quotes a string for TOML output.
-    ///
-    /// Control characters use spec-valid basic-string escapes so rendered
-    /// values always reparse instead of emitting raw control bytes.
     public static func tomlQuoted(_ value: String) -> String {
         var out = "\""
         for character in value {
@@ -43,17 +35,13 @@ extension RuneWeaverConfig {
     }
 
     /// Renders this configuration as canonical TOML.
-    ///
-    /// Providers sort by name so repeated saves stay diff-stable; only
-    /// `api_key_env` names persist (secret values resolve at runtime via
-    /// `SecretsManager`), email accounts persist identity fields only, and
-    /// home integrations persist with `token_env` names only.
     public func renderTOML() -> String {
         var lines: [String] = ["# Rune Weaver configuration", ""]
         lines += renderEngineTOML()
         lines += renderLLMTOML()
         lines += renderServicesTOML()
         lines += renderFilesTOML()
+        lines += renderBrowserTOML()
         lines += renderEmailTOML()
         lines += renderHomeTOML()
         lines += renderSchedulerTOML()
@@ -144,6 +132,16 @@ extension RuneWeaverConfig {
     private static func tomlStringArray(_ values: [String]) -> String {
         guard !values.isEmpty else { return "[]" }
         return "[" + values.map { tomlQuoted($0) }.joined(separator: ", ") + "]"
+    }
+
+    private func renderBrowserTOML() -> [String] {
+        [
+            "[browser]",
+            "searxng_url = \(Self.tomlQuoted(browser.searxngURL))",
+            "search_timeout_seconds = \(browser.searchTimeoutSeconds)",
+            "max_results = \(browser.maxResults)",
+            ""
+        ]
     }
 
     private func renderEmailTOML() -> [String] {

@@ -1,22 +1,19 @@
 // Rune Weaver CLI — Subsystem status inspection and diagnostic commands.
 //
-// Provides CLI commands to probe provider reachability, memory statistics, and active tools.
+// Provides CLI commands to probe provider reachability, search health, memory statistics, and active tools.
 
 import ArgumentParser
 import Foundation
 import RuneWeaverCore
 import RuneWeaverLLM
+import RuneWeaverTools
 
-/// Shows system status: LLM providers, memory stats, and active tools.
-///
-/// Provider reachability is probed live; memory stats are read from the
-/// configured SQLite episode store, vector store, and user profile.
-/// Secret values are never printed — only key variable names from config.
+/// Shows system status: LLM providers, search, memory stats, and active tools.
 struct StatusCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
         commandName: "status",
-        abstract: "Show system status: LLM providers, memory stats, and active tools."
+        abstract: "Show system status: LLM providers, search, memory stats, and active tools."
     )
 
     /// Config file path override.
@@ -70,13 +67,34 @@ struct StatusCommand: AsyncParsableCommand {
             memoryEngine: engine,
             sandboxConfig: config.sandbox,
             pluginConfig: config.plugins,
-            episodesDBPath: config.memory.episodesDBPath
+            episodesDBPath: config.memory.episodesDBPath,
+            browserConfig: config.browser,
+            llmConfig: config.llm
         )
         let toolNames = await toolBus.toolNames().sorted()
         if toolNames.isEmpty {
             print(TerminalStyle.dim("  no plugin tools registered in this CLI process"))
         } else {
             print("  active: \(toolNames.joined(separator: ", "))")
+        }
+
+        print("")
+        print("Search:")
+        // Single-sourced through the `[browser]` schema so status reports
+        // the same URL the search tool dials; reachability reuses the
+        // ensurer probe so boot, search, and status agree on up vs down.
+        let searchURL = config.browser.searxngURL
+        let searchReachable = await SearXNGEnsurer.isReachable(baseURL: searchURL)
+        let searchDot = searchReachable ? TerminalStyle.success("●") : TerminalStyle.error("○")
+        let searchState = searchReachable ? "reachable" : "unreachable"
+        print("  \(searchDot) SearXNG — \(searchState) (\(searchURL))")
+        if !searchReachable {
+            print(
+                TerminalStyle.dim(
+                    "  Start with scripts/searxng-up.sh or `container start \(SearXNGEnsurer.containerName)`; "
+                        + "the container stays running after quit."
+                )
+            )
         }
     }
 }

@@ -1,8 +1,4 @@
 // Rune Weaver Server — In-memory scheduler job registry and CRUD store.
-//
-// Manages runtime scheduler job definitions, bridging to and from durable
-// `config.toml` representations. Enforces job name uniqueness, trigger validation,
-// and bounded job capacity while exposing CRUD operations for REST clients.
 
 import Foundation
 import RuneWeaverCore
@@ -11,22 +7,6 @@ import RuneWeaverCore
 #endif
 
 /// One scheduled job: a cron-like trigger and/or an email-arrival poll rule plus the prompt to run.
-///
-/// SQLite persistence (`episodes.db` / `scheduler_jobs` table) is the primary durable
-/// source of truth for scheduled jobs; ``SchedulerStore`` is the REST runtime registry bridging
-/// to that database. `config.toml [[scheduler.jobs]]` is used solely as an initial bootstrap seed
-/// when the database has no jobs, avoiding dual-maintenance disconnects. Cron-like triggers use
-/// a five-field expression (`minute hour day month weekday`, e.g. `"0 8 * * *"` for daily at 08:00)
-/// or a named shortcut (`@hourly`, `@daily`, `@weekly`). Poll triggers watch
-/// one `[email.accounts]` entry for previously unseen arrivals
-/// (`pollAccount` plus optional `pollQuery`/`pollMailbox`, polled every
-/// `pollIntervalSeconds`). A job fires on either trigger when both are set;
-/// disabled jobs are kept but never run. Each headless fire runs under a
-/// fresh per-run session (new `UUID()` per execution, stamped
-/// `source "scheduler"` and titled `"name (timestamp)"`) so executions stay
-/// isolated from interactive chat and from each other; continuity across
-/// runs flows through scheduled background prompting plus `run_logs` job
-/// linkage instead of one shared episodic session per job name.
 public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     /// Stable job identifier.
     public let id: UUID
@@ -54,19 +34,6 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     public var updatedAt: Date
 
     /// Creates a scheduler job.
-    /// - Parameters:
-    ///   - id: Job identifier. Defaults to a new UUID.
-    ///   - name: Human-readable name.
-    ///   - schedule: Cron-like expression. Empty for poll-only jobs.
-    ///   - prompt: Prompt executed on fire.
-    ///   - enabled: Whether the job fires. Defaults to true.
-    ///   - pollAccount: Poll account nickname. Defaults to nil (cron-only).
-    ///   - pollQuery: Poll query. Defaults to nil.
-    ///   - pollMailbox: Poll mailbox. Defaults to nil.
-    ///   - pollIntervalSeconds: Seconds between polls. Defaults to nil.
-    ///   - pollLimit: Maximum hits per poll. Defaults to nil (`defaultLimit`).
-    ///   - createdAt: Creation date. Defaults to now.
-    ///   - updatedAt: Update date. Defaults to now.
     public init(
         id: UUID = UUID(),
         name: String,
@@ -107,10 +74,6 @@ public struct SchedulerJob: Sendable, Codable, Equatable, Identifiable {
     }
 
     /// Email poll rule for this job, when configured.
-    ///
-    /// Delegates to the shared stored-fields helper so the registry and
-    /// durable row decoding share one blank-account and default mapping.
-    /// - Returns: Poll rule, or nil for cron-only jobs.
     public var pollRule: EmailPollRule? {
         EmailPollRule.ruleForStoredFields(
             pollAccount: pollAccount,
@@ -144,16 +107,6 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
     public var pollLimit: Int?
 
     /// Creates a new-job payload.
-    /// - Parameters:
-    ///   - name: Human-readable name.
-    ///   - schedule: Cron-like expression. Empty for poll-only jobs.
-    ///   - prompt: Prompt executed on fire.
-    ///   - enabled: Whether the job fires. Defaults to nil (treated as true).
-    ///   - pollAccount: Poll account nickname. Defaults to nil.
-    ///   - pollQuery: Poll query. Defaults to nil.
-    ///   - pollMailbox: Poll mailbox. Defaults to nil.
-    ///   - pollIntervalSeconds: Seconds between polls. Defaults to nil.
-    ///   - pollLimit: Maximum hits per poll. Defaults to nil.
     public init(
         name: String,
         schedule: String,
@@ -178,15 +131,6 @@ public struct NewSchedulerJob: Sendable, Codable, Equatable {
 }
 
 /// Payload for `PUT /scheduler/jobs/:id`. Every field is optional.
-///
-/// Poll clear-vs-omit contract: `nil` leaves the field alone (omit =
-/// no-change). A blank string (`""` or whitespace) clears that poll string
-/// to `nil` (blank → nil normalization, so `""` never persists as a dead
-/// `pollQuery=""` row on cron-only jobs). `pollIntervalSeconds` has no
-/// blank form, so `clearPoll: true` clears the whole poll trigger
-/// (account, query, mailbox, and interval) to `nil`; when `clearPoll` is
-/// true any non-nil poll fields in the same payload are applied after the
-/// clear so callers can atomically replace the trigger.
 public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     /// New name, if renamed.
     public var name: String?
@@ -213,17 +157,6 @@ public struct UpdateSchedulerJob: Sendable, Codable, Equatable {
     public var clearPoll: Bool?
 
     /// Creates an update payload.
-    /// - Parameters:
-    ///   - name: New name, if renamed.
-    ///   - schedule: New schedule, if rescheduled.
-    ///   - prompt: New prompt, if changed.
-    ///   - enabled: New enabled flag, if toggled.
-    ///   - pollAccount: New poll account, if changed (`""` clears).
-    ///   - pollQuery: New poll query, if changed (`""` clears).
-    ///   - pollMailbox: New poll mailbox, if changed (`""` clears).
-    ///   - pollIntervalSeconds: New poll interval, if changed.
-    ///   - pollLimit: New poll limit, if changed.
-    ///   - clearPoll: When true, clears the poll trigger first.
     public init(
         name: String? = nil,
         schedule: String? = nil,
@@ -258,11 +191,6 @@ public enum SchedulerStoreError: Error, Sendable, Equatable {
 }
 
 /// In-memory CRUD store for scheduler jobs backed by SQLite persistence.
-///
-/// Runtime owner of job state for the service surface (REST CRUD plus
-/// manual `POST .../run`). The service never auto-fires cron or poll
-/// triggers; the CLI `scheduler run` foreground loop is the sole auto-fire
-/// runner. Durable state lives in SQLite (`episodes.db` / `scheduler_jobs` table).
 public actor SchedulerStore {
     /// Maximum jobs kept in the store to bound memory and avoid unbounded resource consumption.
     public static let maxJobs = 100
@@ -279,11 +207,6 @@ public actor SchedulerStore {
     }
 
     /// Creates a job from a REST payload.
-    /// - Parameter input: New-job payload.
-    /// - Returns: The stored job.
-    /// - Throws: `SchedulerStoreError/invalidField(_:)` when a required
-    ///   field is blank, a trigger is malformed, or the trimmed name is
-    ///   already taken by another job.
     @discardableResult
     public func create(_ input: NewSchedulerJob) async throws -> SchedulerJob {
         guard jobs.count < Self.maxJobs else {
@@ -332,37 +255,16 @@ public actor SchedulerStore {
     }
 
     /// Lists every job, oldest first.
-    ///
-    /// Memory-only snapshot of the runtime registry; durable state is
-    /// adopted via `bootstrap(from:)` and `load(from:dbPath:)`.
-    /// - Returns: All jobs sorted by creation date.
     public func list() async -> [SchedulerJob] {
         jobs.values.sorted { $0.createdAt < $1.createdAt }
     }
 
     /// Looks up one job.
-    ///
-    /// Memory-only read of the runtime registry.
-    /// - Parameter id: Job identifier.
-    /// - Returns: The job, or nil when unknown.
     public func job(id: UUID) async -> SchedulerJob? {
         jobs[id]
     }
 
     /// Updates one job, touching `updatedAt` on change.
-    ///
-    /// Poll fields follow the clear-vs-omit contract documented on
-    /// ``UpdateSchedulerJob``: nil leaves the field alone, `""` clears
-    /// that poll string to nil, and `clearPoll: true` clears the whole
-    /// poll trigger before applying any non-nil poll fields in the same
-    /// payload.
-    /// - Parameters:
-    ///   - id: Job identifier.
-    ///   - input: Fields to change; nil fields are left alone.
-    /// - Returns: The updated job.
-    /// - Throws: `SchedulerStoreError/unknownJob(_:)` when the job is
-    ///   unknown, or `invalidField` when a supplied field is blank, a
-    ///   trigger is malformed, or the new name is already taken.
     @discardableResult
     public func update(id: UUID, _ input: UpdateSchedulerJob) async throws -> SchedulerJob {
         guard var existing = jobs[id] else {
@@ -466,33 +368,11 @@ public actor SchedulerStore {
     }
 
     /// Number of stored jobs.
-    ///
-    /// Memory-only count of the runtime registry.
-    /// - Returns: Job count.
     public func count() async -> Int {
         jobs.count
     }
 
     /// Validates required job fields plus trigger shape.
-    ///
-    /// REST-specific checks (non-blank name and prompt) stay local;
-    /// trigger shape (cron parsing, poll presence, poll interval) delegates
-    /// to the single shared `SchedulerJobConfig.validate()` so the store
-    /// and `config.toml` validation cannot drift. Poll state is atomic:
-    /// when the normalized account is nil/blank, a non-nil query, mailbox,
-    /// interval, or limit is rejected instead of persisting as dead state on
-    /// cron-only jobs (which `pollRule`/`toSchedulerConfig()` would
-    /// otherwise silently drop on export).
-    /// - Parameters:
-    ///   - name: Job name candidate.
-    ///   - schedule: Schedule candidate (empty for poll-only jobs).
-    ///   - prompt: Prompt candidate.
-    ///   - pollAccount: Poll account candidate, if any.
-    ///   - pollQuery: Poll query candidate, if any.
-    ///   - pollMailbox: Poll mailbox candidate, if any.
-    ///   - pollIntervalSeconds: Poll interval candidate, if any.
-    ///   - pollLimit: Poll limit candidate, if any.
-    /// - Throws: `SchedulerStoreError/invalidField(_:)` when blank or malformed.
     private static func validated(
         name: String,
         schedule: String,
@@ -547,11 +427,6 @@ public actor SchedulerStore {
     }
 
     /// Maps shared scheduler validation to store errors.
-    ///
-    /// Single-sourced via `SchedulerConfigError/displayDetail` so the
-    /// store and config messages cannot drift.
-    /// - Parameter error: Shared config validation failure.
-    /// - Returns: Equivalent store field error.
     private static func mapSchedulerConfigError(_ error: SchedulerConfigError) -> SchedulerStoreError {
         .invalidField(error.displayDetail)
     }
@@ -566,30 +441,12 @@ public actor SchedulerStore {
     }
 
     /// Creates a store seeded from configuration without touching disk.
-    ///
-    /// Seeds memory only and never touches disk: actor initializers cannot
-    /// suspend, so synchronous SQLite reads here would block the
-    /// cooperative pool at startup. Disk hydration lives in
-    /// `bootstrap(from:)`; prefer `load(from:dbPath:)` whenever durable
-    /// state matters.
-    /// - Parameters:
-    ///   - config: Scheduler section seeding memory until `bootstrap(from:)` adopts disk state.
-    ///   - dbPath: Optional SQLite path for durable persistence.
     public init(from config: SchedulerConfig = .empty, dbPath: String? = nil) {
         self.dbPath = dbPath
         self.jobs = Self.seedInMemory(from: config)
     }
 
     /// Loads a store hydrated from durable SQLite state.
-    ///
-    /// Creates the store, then suspends on the shared serial store queue
-    /// to adopt persisted jobs (or persist the config seed when the
-    /// database is empty), so startup disk I/O never blocks the
-    /// cooperative pool.
-    /// - Parameters:
-    ///   - config: Scheduler section used only as an initial bootstrap seed if the DB is empty.
-    ///   - dbPath: Optional SQLite path for durable persistence.
-    /// - Returns: Store reflecting durable state.
     public static func load(from config: SchedulerConfig = .empty, dbPath: String? = nil) async -> SchedulerStore {
         let store = SchedulerStore(dbPath: dbPath)
         await store.bootstrap(from: config)
@@ -597,13 +454,6 @@ public actor SchedulerStore {
     }
 
     /// Hydrates runtime state from durable SQLite state.
-    ///
-    /// Adopts persisted jobs when present; otherwise persists the config
-    /// seed so later restarts observe it. Without a `dbPath` the runtime
-    /// registry is simply the config seed. Durable reads observe
-    /// cancellation so shutdown never blocks on disk I/O; durable writes
-    /// run to completion so seed and CRUD state always lands.
-    /// - Parameter config: Bootstrap seed for an empty database.
     public func bootstrap(from config: SchedulerConfig) async {
         guard let dbPath else {
             jobs = Self.seedInMemory(from: config)
@@ -647,12 +497,6 @@ public actor SchedulerStore {
     }
 
     /// Loads persisted jobs from the given SQLite database path.
-    ///
-    /// Suspends on the shared serial store queue so the blocking read
-    /// never occupies the cooperative pool and never races concurrent
-    /// writes torn. Cancellable so shutdown never blocks on disk I/O.
-    /// - Parameter dbPath: SQLite database file path.
-    /// - Returns: Persisted scheduler jobs.
     public static func persistedJobs(from dbPath: String) async -> [SchedulerJob] {
         #if canImport(SQLite3)
             await (try? SQLiteSerialIO.run {
@@ -664,15 +508,6 @@ public actor SchedulerStore {
     }
 
     /// Replaces the runtime registry with `config.toml [[scheduler.jobs]]`.
-    ///
-    /// Jobs sharing a trimmed name with an existing entry keep their runtime `id`
-    /// and `createdAt` so in-flight REST references stay stable across a
-    /// config reload; renamed or new entries get fresh identifiers.
-    /// Duplicate config names are ignored keep-first on the trimmed name
-    /// so a duplicated `config.toml` cannot fork the runtime registry
-    /// (duplicates are rejected at validation time; this is
-    /// defense-in-depth).
-    /// - Parameter config: Scheduler section to sync from.
     public func sync(from config: SchedulerConfig) {
         var byName: [String: SchedulerJob] = [:]
         for job in jobs.values {
@@ -700,10 +535,6 @@ public actor SchedulerStore {
     }
 
     /// Exports the runtime registry as a config section for persistence.
-    ///
-    /// Memory-only snapshot; use the result to write `[[scheduler.jobs]]`
-    /// back to `config.toml` so REST-created jobs survive restart.
-    /// - Returns: Scheduler config mirroring the stored jobs.
     public func toSchedulerConfig() async -> SchedulerConfig {
         await SchedulerConfig(jobs: list().map { $0.toJobConfig() })
     }
@@ -711,17 +542,6 @@ public actor SchedulerStore {
 
 public extension SchedulerJob {
     /// Creates a runtime job from a `config.toml` entry.
-    ///
-    /// Bridges the name-keyed config model to the UUID-keyed REST model:
-    /// a nil or blank config `schedule` becomes `""` (poll-only), and a
-    /// nil poll rule leaves every poll field nil (cron-only). The config
-    /// name is trimmed (same as `create`) so `" foo "` and `"foo"` map to
-    /// one runtime name instead of forking the registry.
-    /// - Parameters:
-    ///   - config: Config entry to bridge.
-    ///   - id: Runtime identifier. Defaults to a new UUID.
-    ///   - createdAt: Creation date. Defaults to now.
-    ///   - updatedAt: Update date. Defaults to now.
     init(from config: SchedulerJobConfig, id: UUID = UUID(), createdAt: Date = Date(), updatedAt: Date = Date()) {
         let trimmedName = normalizedSchedulerJobName(config.name)
         let schedule = EmailPollRule.storedSchedule(from: config.schedule)
@@ -743,10 +563,6 @@ public extension SchedulerJob {
     }
 
     /// Converts this runtime job to a `config.toml` entry.
-    ///
-    /// Delegates schedule and poll mapping to the shared helpers so blank
-    /// handling matches durable row decoding exactly.
-    /// - Returns: Equivalent config entry.
     func toJobConfig() -> SchedulerJobConfig {
         let scheduleValue: String? = EmailPollRule.configSchedule(from: schedule)
         let pollValue: EmailPollRule? = pollRule
@@ -762,10 +578,6 @@ public extension SchedulerJob {
 
 public extension SchedulerJobConfig {
     /// Creates a config entry from a runtime job.
-    ///
-    /// Bridges the UUID-keyed REST model back to the name-keyed config
-    /// model for persistence.
-    /// - Parameter job: Runtime job to bridge.
     init(from job: SchedulerJob) {
         self = job.toJobConfig()
     }

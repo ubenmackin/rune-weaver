@@ -1,19 +1,9 @@
 // Rune Weaver Tools — Long-term memory plugin tools for recall and persistence.
-//
-// Exposes the `remember_fact` and `recall_memories` tools over the memory engine
-// with audit-logged writes and calibrated merged recall. Lets the model persist
-// user facts and retrieve episodic, semantic, and profile hits without touching
-// storage directly.
 
 import Foundation
 import RuneWeaverCore
 
 /// Audit event recorded for every `remember_fact` write.
-///
-/// The audit trail is local-only (`~/.runeweaver/logs/memory-audit.jsonl`
-/// by default): it carries the fact text, its category, the owning
-/// conversation, and the stored fact identifier so later review can
-/// reconstruct what the model asked to remember and when.
 public struct MemoryAuditEvent: Sendable, Codable, Equatable {
     /// Name of the tool that performed the write (`remember_fact`).
     public let toolName: String
@@ -29,13 +19,6 @@ public struct MemoryAuditEvent: Sendable, Codable, Equatable {
     public let timestamp: Date
 
     /// Creates an audit event.
-    /// - Parameters:
-    ///   - toolName: Tool that performed the write.
-    ///   - text: Stored fact text.
-    ///   - category: Category recorded on the write. Defaults to nil.
-    ///   - conversationID: Owning conversation identifier.
-    ///   - factID: Stored fact identifier. Defaults to nil.
-    ///   - timestamp: Record time. Defaults to now.
     public init(
         toolName: String,
         text: String,
@@ -54,19 +37,9 @@ public struct MemoryAuditEvent: Sendable, Codable, Equatable {
 }
 
 /// Audit sink invoked for every `remember_fact` write.
-///
-/// Injected by callers that need to observe writes (tests, CLI audit
-/// views). When no handler is set the tool falls back to the local
-/// JSONL file audit via ``FileMemoryAuditLog`` so every write is still
-/// recorded. Dry runs never invoke the handler because no write occurs.
 public typealias MemoryAuditHandler = @Sendable (MemoryAuditEvent) -> Void
 
 /// Local JSONL audit log for memory writes.
-///
-/// Appends one JSON object per `remember_fact` write to
-/// `~/.runeweaver/logs/memory-audit.jsonl` (overridable per call).
-/// Writes are best-effort and serialized on a private queue: failures
-/// are swallowed so auditing never fails the tool call.
 public enum FileMemoryAuditLog {
     /// Serial queue ordering audit appends.
     private static let queue = DispatchQueue(label: "com.runeweaver.memory.audit", qos: .utility)
@@ -79,9 +52,6 @@ public enum FileMemoryAuditLog {
     }
 
     /// Appends an event as one JSON line, best-effort.
-    /// - Parameters:
-    ///   - event: Audit event to record.
-    ///   - fileURL: Destination file. Defaults to `defaultLogURL()`.
     public static func append(_ event: MemoryAuditEvent, to fileURL: URL? = nil) {
         guard let data = try? JSONEncoder().encode(event) else { return }
         var line = data
@@ -111,11 +81,6 @@ public enum FileMemoryAuditLog {
 }
 
 /// Arguments for the `remember_fact` tool.
-///
-/// Accepts the fact text under `text` (canonical) plus the `fact` and
-/// `content` aliases so model-generated calls keep working when the
-/// field name drifts. `category` is optional and recorded as the fact
-/// source.
 public struct RememberFactArgs: Sendable, Equatable, Decodable {
     /// Fact text to store.
     public let text: String
@@ -123,9 +88,6 @@ public struct RememberFactArgs: Sendable, Equatable, Decodable {
     public let category: String?
 
     /// Memberwise initializer.
-    /// - Parameters:
-    ///   - text: Fact text to store.
-    ///   - category: Optional category. Defaults to nil.
     public init(text: String, category: String? = nil) {
         self.text = text
         self.category = category
@@ -174,9 +136,6 @@ public struct RememberFactArgs: Sendable, Equatable, Decodable {
 }
 
 /// Arguments for the `recall_memories` tool.
-///
-/// `limit` is optional and clamped to `1...50` (defaulting to `5`) so
-/// recall never fans out an unbounded per-tier read.
 public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     /// Free-text query matched against episodic and profile memory.
     public let query: String
@@ -189,9 +148,6 @@ public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     public static let maxLimit = 50
 
     /// Memberwise initializer with limit clamping.
-    /// - Parameters:
-    ///   - query: Free-text query.
-    ///   - limit: Maximum results. Clamped to `1...50`.
     public init(query: String, limit: Int = defaultLimit) {
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
@@ -218,10 +174,6 @@ public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
 }
 
 /// Envelope wrapping `remember_fact` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the stored text, its category, identifier, and source
-/// together.
 public struct RememberFactEnvelope: Sendable, Equatable, Codable {
     /// Stored fact text (trimmed).
     public let text: String
@@ -233,11 +185,6 @@ public struct RememberFactEnvelope: Sendable, Equatable, Codable {
     public let source: String
 
     /// Creates a remember envelope.
-    /// - Parameters:
-    ///   - text: Stored fact text.
-    ///   - category: Recorded category, if any.
-    ///   - id: Stored fact identifier.
-    ///   - source: Source recorded on the profile fact.
     public init(text: String, category: String?, id: String, source: String) {
         self.text = text
         self.category = category
@@ -258,11 +205,6 @@ public struct MemoryHit: Sendable, Equatable, Codable {
     public let metadata: [String: String]
 
     /// Creates a memory hit.
-    /// - Parameters:
-    ///   - content: Hit content.
-    ///   - score: Relevance score.
-    ///   - source: Originating tier.
-    ///   - metadata: Key/value annotations. Defaults to empty.
     public init(content: String, score: Double, source: String, metadata: [String: String] = [:]) {
         self.content = content
         self.score = score
@@ -282,9 +224,6 @@ public struct MemoryHit: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `recall_memories` tool output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model
-/// receives the query, hit count, and ranked hits together.
 public struct RecallMemoriesEnvelope: Sendable, Equatable, Codable {
     /// Query that was run.
     public let query: String
@@ -294,9 +233,6 @@ public struct RecallMemoriesEnvelope: Sendable, Equatable, Codable {
     public let memories: [MemoryHit]
 
     /// Creates a recall envelope.
-    /// - Parameters:
-    ///   - query: Query that was run.
-    ///   - memories: Hits, best first.
     public init(query: String, memories: [MemoryHit]) {
         self.query = query
         self.memories = memories
@@ -305,14 +241,8 @@ public struct RecallMemoriesEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Pure JSON encoding for the memory tool output documents.
-///
-/// Mirrors `EmailBridgeParsing`: envelopes encode with sorted keys so
-/// fixture tests can assert on stable output without a live store.
 public enum MemoryToolEncoding {
     /// Encodes a remember envelope as the tool output document.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeRememberEnvelope(_ envelope: RememberFactEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -321,9 +251,6 @@ public enum MemoryToolEncoding {
     }
 
     /// Encodes a recall envelope as the tool output document.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeRecallEnvelope(_ envelope: RecallMemoriesEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -333,21 +260,6 @@ public enum MemoryToolEncoding {
 }
 
 /// `remember_fact` tool: persists one fact to long-lived memory.
-///
-/// Stores `text` preferring a vector-backed row via
-/// `MemoryEngine.storeSemantic` when an embedder is configured, falling
-/// back to a keyword-only row via `MemoryEngine.storeProfileFact` on any
-/// embedding or dimension failure so writes stay durable. Either path
-/// mirrors the fact into the user profile so both `recall` and profile
-/// display surface it. The optional `category` is recorded as the fact
-/// source (defaulting to `"tool"`). Every successful write is
-/// audit-logged via the injected handler or the local JSONL file;
-/// `dryRun` previews without storing or auditing.
-///
-/// Always `trusted`: single-user owner memory writes are explicitly
-/// blessed per the owner memory-write trust ruling, so the model can
-/// remember without approval prompts while every write stays
-/// audit-logged.
 public struct RememberFactTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "remember_fact"
@@ -371,20 +283,9 @@ public struct RememberFactTool: Tool, Sendable {
     /// Audit sink for successful writes. Defaults to nil (file audit).
     private let audit: MemoryAuditHandler?
     /// Optional embeddings producer for vector-backed writes.
-    ///
-    /// Nil preserves the keyword-only path so existing call sites behave
-    /// identically; when set, writes prefer a vector row and fall back to
-    /// keyword-only on any embedding or dimension failure so embeddings
-    /// never fail the write.
     private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a remember tool.
-    /// - Parameters:
-    ///   - engine: Shared memory engine for profile and vector stores.
-    ///   - audit: Audit sink for successful writes. Defaults to nil,
-    ///     which appends to the local JSONL audit file.
-    ///   - embedder: Optional embeddings producer for vector-backed writes.
-    ///     Defaults to nil (keyword-only).
     public init(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) {
         self.engine = engine
         self.audit = audit
@@ -392,11 +293,6 @@ public struct RememberFactTool: Tool, Sendable {
     }
 
     /// Stores the fact, audit-logging every write.
-    /// - Parameters:
-    ///   - input: Invocation with `text` and optional `category`.
-    ///   - context: Ambient execution context.
-    /// - Returns: JSON envelope with the stored fact, or a failure
-    ///   without secrets.
     public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args: RememberFactArgs
         do {
@@ -435,11 +331,6 @@ public struct RememberFactTool: Tool, Sendable {
     }
 
     /// Records one successful write to the audit sink or file.
-    /// - Parameters:
-    ///   - text: Stored fact text.
-    ///   - category: Recorded category, if any.
-    ///   - conversationID: Owning conversation identifier.
-    ///   - factID: Stored fact identifier.
     private func recordAudit(text: String, category: String?, conversationID: UUID, factID: String) {
         let event = MemoryAuditEvent(
             toolName: name,
@@ -457,18 +348,6 @@ public struct RememberFactTool: Tool, Sendable {
 }
 
 /// `recall_memories` tool: searches episodic, semantic, and profile memory.
-///
-/// Recalls via `MemoryEngine.recall`, which merges episodic FTS hits,
-/// semantic hits, and profile keyword hits best-first, so the model
-/// recovers past turns and stored facts. When an embedder is configured
-/// the query is embedded best-effort and semantic hits rank by cosine
-/// similarity; otherwise (or on any embedding failure) semantic search
-/// uses keyword overlap, so recall works with zero ML dependencies.
-/// Read-only in effect: it never mutates stores and ignores `dryRun`.
-///
-/// Always `trusted`: owner memory reads are explicitly blessed per the
-/// owner memory-write trust ruling alongside `remember_fact`, so the
-/// model can recall without approval prompts.
 public struct RecallMemoriesTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "recall_memories"
@@ -490,30 +369,15 @@ public struct RecallMemoriesTool: Tool, Sendable {
     /// Shared memory engine serving recall.
     private let engine: MemoryEngine
     /// Optional embeddings producer for vector-ranked recall.
-    ///
-    /// Nil preserves the keyword-only path so existing call sites behave
-    /// identically; when set, the query is embedded best-effort and the
-    /// vector ranks semantic hits by cosine similarity, falling back to
-    /// nil (keyword overlap) on any embedding failure.
     private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a recall tool.
-    /// - Parameters:
-    ///   - engine: Shared memory engine for episodic and profile stores.
-    ///   - embedder: Optional embeddings producer for vector-ranked recall.
-    ///     Defaults to nil (keyword-only).
     public init(engine: MemoryEngine, embedder: (any EmbeddingsBackend)? = nil) {
         self.engine = engine
         self.embedder = embedder
     }
 
     /// Searches memory and returns ranked hits.
-    /// - Parameters:
-    ///   - input: Invocation with `query` and optional `limit`.
-    ///   - context: Ambient execution context.
-    /// - Returns: JSON envelope with ranked memories, or a failure.
-    /// - Throws: `CancellationError` when the enclosing task is cancelled; the
-    ///   abort propagates instead of degrading to a tool failure.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: RecallMemoriesArgs
         do {
@@ -525,10 +389,9 @@ public struct RecallMemoriesTool: Tool, Sendable {
         guard !query.isEmpty else {
             return .failure("Invalid recall_memories arguments: 'query' must not be empty.", callID: input.callID)
         }
-        // Embed the query best-effort when a producer is configured: vector
-        // hits then rank by cosine similarity while keyword tiers stay
-        // unchanged, and any embedding failure keeps today's keyword path.
-        // Cancellation propagates so a cancelled recall never degrades.
+        // Embed the query best-effort when a producer is configured: vector hits then rank by
+        // cosine similarity while keyword tiers stay unchanged, and any embedding failure keeps
+        // today's keyword path. Cancellation propagates so a cancelled recall never degrades.
         let embedding: [Float]? = if let embedder {
             try await embedder.embedQuery(query)
         } else {
@@ -550,24 +413,11 @@ public struct RecallMemoriesTool: Tool, Sendable {
 }
 
 /// Factory registering the LLM-invokable memory tools on a `ToolBus`.
-///
-/// Both tools are `trusted` per the owner memory-write trust ruling so
-/// chat runs them without approval prompts; `remember_fact` writes are
-/// audit-logged. The shared `MemoryEngine` must be the same instance
-/// the chat loop mirrors turns into so working, episodic, and profile
-/// views stay consistent.
 public enum MemoryTools {
     /// Tool names in registration order.
     public static let toolNames = ["remember_fact", "recall_memories"]
 
     /// Builds the memory tools for a shared engine.
-    /// - Parameters:
-    ///   - engine: Shared memory engine for profile and episodic stores.
-    ///   - audit: Audit sink for `remember_fact` writes. Defaults to
-    ///     nil (local JSONL file audit).
-    ///   - embedder: Optional embeddings producer forwarded to both tools.
-    ///     Defaults to nil (keyword-only).
-    /// - Returns: Remember and recall tools in registration order.
     public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) -> [any Tool] {
         let remember: any Tool = RememberFactTool(engine: engine, audit: audit, embedder: embedder)
         let recall: any Tool = RecallMemoriesTool(engine: engine, embedder: embedder)
@@ -575,14 +425,6 @@ public enum MemoryTools {
     }
 
     /// Registers the memory tools, replacing same-named entries.
-    /// - Parameters:
-    ///   - bus: Bus receiving the tools (surfaced via `status` and sent
-    ///     to the model as tool definitions every chat turn).
-    ///   - engine: Shared memory engine for profile and episodic stores.
-    ///   - audit: Audit sink for `remember_fact` writes. Defaults to
-    ///     nil (local JSONL file audit).
-    ///   - embedder: Optional embeddings producer forwarded to both tools.
-    ///     Defaults to nil (keyword-only).
     public static func register(on bus: ToolBus, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) async {
         for tool in makeTools(engine: engine, audit: audit, embedder: embedder) {
             await bus.register(tool: tool)

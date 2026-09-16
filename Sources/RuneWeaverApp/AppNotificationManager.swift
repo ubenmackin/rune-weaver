@@ -1,7 +1,4 @@
 // Rune Weaver App — Native macOS Notification Manager.
-//
-// Manages UNUserNotificationCenter notifications, actionable categories
-// for tool approvals (Approve / Deny), and scheduler run completion alerts.
 
 import Foundation
 import RuneWeaverCore

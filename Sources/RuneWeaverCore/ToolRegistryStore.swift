@@ -1,9 +1,4 @@
 // Rune Weaver Core — SQLite persistence for installed and discovered plugins.
-//
-// Maintains the durable registry of runes in `episodes.db` (`plugin_registry` table).
-// Tracks discovery metadata, enabled/disabled states, cryptographic integrity hashes,
-// and user permission overrides. Discovered plugins start disabled by default
-// until explicitly enabled by a human in the loop.
 
 import Foundation
 #if canImport(SQLite3)
@@ -117,10 +112,6 @@ public actor ToolRegistryStore {
     }
 
     /// Records or updates a discovered plugin.
-    ///
-    /// If the plugin is already recorded, preserves its current status and
-    /// permission overrides unless the version changed or it was tampered.
-    /// New plugins always start as `.discovered` (disabled).
     public func recordDiscovered(
         id: String,
         name: String,
@@ -135,11 +126,9 @@ public actor ToolRegistryStore {
             existing.version = version
             existing.updatedAt = Date()
 
-            // A hash mismatch after approval quarantines the rune; the comparison
-            // itself lives in the security helper so store and verifier share
-            // one case-handling rule instead of drifting duplicates.
-            // If hashing failed (currentHash == nil) or the hash mismatched,
-            // fail closed and quarantine the plugin as tampered.
+            // A hash mismatch after approval quarantines the rune; the comparison itself lives in
+            // the security helper so store and verifier share one case-handling rule instead of
+            // drifting duplicates.
             if existing.status == .enabled, let recordedHash = existing.integrityHash {
                 if let currentHash {
                     if !PluginSecurity.hashesEqual(recordedHash, currentHash) {
@@ -201,11 +190,6 @@ public actor ToolRegistryStore {
     }
 
     /// Sets or clears a permission override for a tool within a plugin.
-    ///
-    /// External runes can never escalate to `trusted`; the manifest parser
-    /// already rejects that level at install time, and the store rejects it
-    /// again here so a tampered database row cannot promote a community tool
-    /// past human approval.
     public func setPermissionOverride(
         id: String,
         toolName: String,

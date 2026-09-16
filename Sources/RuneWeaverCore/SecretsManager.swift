@@ -1,8 +1,4 @@
 // Rune Weaver Core — Secure credentials manager with Keychain and environment fallback.
-//
-// Manages sensitive tokens and secrets via macOS Keychain services with
-// fallback to process environment variables. Guarantees secrets are never
-// logged or written into configuration files.
 
 import Foundation
 
@@ -11,9 +7,6 @@ import Foundation
 #endif
 
 /// Errors thrown by ``SecretsManager``.
-///
-/// These errors carry only key names and status codes — secret values
-/// are never embedded in them.
 public enum SecretsError: Error, Sendable, Equatable {
     /// The key or secret was empty.
     case invalidInput(reason: String)
@@ -24,13 +17,6 @@ public enum SecretsError: Error, Sendable, Equatable {
 }
 
 /// macOS Keychain-backed secrets with environment variable fallback.
-///
-/// Lookup order in ``SecretsManager/retrieve(key:service:)``:
-/// 1. `ProcessInfo.processInfo.environment[key]` — Docker/vault injection.
-/// 2. macOS Keychain item `(service, key)`.
-///
-/// Writes always go to the Keychain. Secrets are never logged, never
-/// included in error messages, and never written to `config.toml`.
 public actor SecretsManager {
     /// Default Keychain service namespace for all RuneWeaver secrets.
     public static let defaultService = "com.runeweaver.secrets"
@@ -48,10 +34,6 @@ public actor SecretsManager {
     // MARK: - Store / retrieve
 
     /// Stores a secret in the Keychain, updating any existing item.
-    /// - Parameters:
-    ///   - key: Account name within `service` (e.g. `OPENROUTER_API_KEY`).
-    ///   - service: Keychain service. Defaults to this manager's service.
-    ///   - secret: Secret value. Never logged.
     public func store(key: String, service: String? = nil, secret: String) throws {
         let namespace = service ?? self.service
         guard !key.isEmpty else {
@@ -86,14 +68,6 @@ public actor SecretsManager {
     }
 
     /// Retrieves a secret, checking the environment first.
-    ///
-    /// Environment variables take precedence so Docker/vault-injected
-    /// secrets work without Keychain entries. Returns `nil` when the
-    /// secret exists in neither place.
-    /// - Parameters:
-    ///   - key: Account name, also used as the environment variable name.
-    ///   - service: Keychain service. Defaults to this manager's service.
-    /// - Returns: The secret, or `nil` when not found.
     public func retrieve(key: String, service: String? = nil) throws -> String? {
         guard !key.isEmpty else {
             throw SecretsError.invalidInput(reason: "key must not be empty")
@@ -132,9 +106,6 @@ public actor SecretsManager {
     }
 
     /// Deletes a secret from the Keychain. Missing items are a no-op.
-    /// - Parameters:
-    ///   - key: Account name.
-    ///   - service: Keychain service. Defaults to this manager's service.
     public func delete(key: String, service: String? = nil) throws {
         guard !key.isEmpty else {
             throw SecretsError.invalidInput(reason: "key must not be empty")
@@ -159,27 +130,12 @@ public actor SecretsManager {
 
     /// Resolves an `api_key_env`-style reference: environment variable
     /// first, then the Keychain under the same name.
-    ///
-    /// `ProviderConfig.apiKeyEnv`, `HomeAssistantConfig.tokenEnv`, and
-    /// `EmailAccount.passwordEnvVar` flow through here so TOML only names
-    /// the variable while the value itself comes from the environment or
-    /// Keychain.
-    /// - Parameters:
-    ///   - envVar: Environment variable name (and Keychain key).
-    ///   - service: Keychain service. Defaults to this manager's service.
-    /// - Returns: The secret, or `nil` when `envVar` is `nil`/unset.
     public func resolve(_ envVar: String?, service: String? = nil) throws -> String? {
         guard let envVar, !envVar.isEmpty else { return nil }
         return try retrieve(key: envVar, service: service)
     }
 
     /// Reads the live process environment for `key`.
-    ///
-    /// Uses `getenv` so values installed with `setenv` after launch are
-    /// visible. `ProcessInfo.processInfo.environment` is a launch-time
-    /// snapshot and misses such updates. Never logs the value.
-    /// - Parameter key: Environment variable name.
-    /// - Returns: Value, or `nil` when unset or not valid UTF-8.
     private nonisolated func liveEnvironmentValue(for key: String) -> String? {
         key.withCString { cKey in
             guard let cValue = getenv(cKey) else { return nil }

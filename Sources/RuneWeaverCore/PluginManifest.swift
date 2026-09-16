@@ -1,9 +1,4 @@
 // Rune Weaver Core — Plugin manifest specification, parsing, and validation.
-//
-// Defines the contract for third-party, community, and agent-generated runes.
-// Validates declared tool names, schemas, entrypoints, and security boundaries.
-// Enforces that external plugins may never declare `trusted` permission level,
-// preserving owner memory and explicit human approvals as the sole trust roots.
 
 import Foundation
 
@@ -198,10 +193,9 @@ public struct PluginManifest: Sendable, Codable, Equatable {
                 reason: "Plugin ID '\(id)' contains invalid characters. Only alphanumeric, '.', '-', and '_' are allowed."
             )
         }
-        // The character allowlist alone still permits "." and "..", which would
-        // resolve to the pen itself or its parent when used as a directory name.
-        // Reject them explicitly so manifest validation holds even when a caller
-        // forgets the route-level containment check.
+        // The character allowlist alone still permits "." and "..", which would resolve to the pen
+        // itself or its parent when used as a directory name. Reject them explicitly so manifest
+        // validation holds even when a caller forgets the route-level containment check.
         if id == "." || id == ".." || id.contains("..") || id.contains("/") || id.contains("\\") {
             throw PluginManifestError.invalidField(
                 field: "id",

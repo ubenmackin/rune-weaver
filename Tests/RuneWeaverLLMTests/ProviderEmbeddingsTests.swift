@@ -1,9 +1,4 @@
 // Rune Weaver LLM Tests — Provider-backed embeddings adapter tests.
-//
-// Covers the opt-in `provider` embeddings path that reuses the chat router's
-// priority order and fallthrough: a failing first provider yields to the next,
-// total failure surfaces as a backend error, and endpoint-absent conditions
-// stay retryable as unavailable so callers can fall back to keyword recall.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -23,19 +18,12 @@ private struct StubEmbeddingsProvider: LLMProvider, Sendable {
     }
 
     /// Creates a stub.
-    /// - Parameters:
-    ///   - providerName: Router-visible name.
-    ///   - result: Embeddings outcome to replay.
     init(_ providerName: String, result: Result<[[Float]], LLMProviderError>) {
         self.providerName = providerName
         self.result = result
     }
 
     /// Unused chat path; embeddings tests never drive chat.
-    /// - Parameters:
-    ///   - messages: Ignored history.
-    ///   - tools: Ignored tools.
-    /// - Returns: Immediately finished stream.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         AsyncStream { $0.finish() }
     }
@@ -54,10 +42,6 @@ private struct StubEmbeddingsProvider: LLMProvider, Sendable {
 }
 
 /// Stub provider that always reports cancellation.
-///
-/// Models an in-flight cancellation surfacing through a provider so the router
-/// and adapter cancellation carve-outs can be verified without a real task or
-/// network call.
 private struct CancellingEmbeddingsProvider: LLMProvider, Sendable {
     /// Router-visible provider name.
     let providerName: String
@@ -68,10 +52,6 @@ private struct CancellingEmbeddingsProvider: LLMProvider, Sendable {
     }
 
     /// Unused chat path; cancellation tests never drive chat.
-    /// - Parameters:
-    ///   - messages: Ignored history.
-    ///   - tools: Ignored tools.
-    /// - Returns: Immediately finished stream.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         AsyncStream { $0.finish() }
     }

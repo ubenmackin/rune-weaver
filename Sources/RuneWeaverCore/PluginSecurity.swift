@@ -1,9 +1,4 @@
 // Rune Weaver Core — Plugin security boundaries, cryptographic hashing, and tamper detection.
-//
-// Calculates deterministic SHA-256 directory tree hashes for plugin packages.
-// Provides tamper verification against approved hashes to invalidate modified plugins.
-// Enforces filesystem write restrictions preventing automated tools or compromised prompts
-// from directly mutating installed plugins or runtime configuration.
 
 import CryptoKit
 import Foundation
@@ -22,16 +17,6 @@ public enum PluginSecurity {
     ]
 
     /// Calculates a deterministic SHA-256 tree hash of all files in a plugin directory.
-    ///
-    /// Every entry is gathered recursively, filtered only for transient caches, and
-    /// sorted by relative POSIX path. Hidden dotfiles stay in the digest because an
-    /// attacker can hide executable payload behind a leading dot that a manifest
-    /// never names directly. Each record is length-framed so adjacent path and
-    /// content bytes cannot be re-split into a colliding entry, and symlink
-    /// destinations plus POSIX mode bits are folded in so target swaps or
-    /// permission escalations invalidate the recorded approval hash.
-    /// - Parameter directoryURL: Absolute URL to the plugin directory.
-    /// - Returns: Lowercase hex SHA-256 string, or nil if the directory is unreadable.
     public static func calculateDirectoryHash(at directoryURL: URL) -> String? {
         let fileManager = FileManager.default
         var isDir: ObjCBool = false
@@ -195,22 +180,11 @@ public enum PluginSecurity {
     }
 
     /// Compares two hex digests without regard to case.
-    ///
-    /// Single-sources the approval-hash comparison so the registry store and
-    /// the integrity verifier cannot drift on case handling.
-    /// - Parameters:
-    ///   - lhs: First digest.
-    ///   - rhs: Second digest.
-    /// - Returns: True when both digests match ignoring case.
     public static func hashesEqual(_ lhs: String, _ rhs: String) -> Bool {
         lhs.caseInsensitiveCompare(rhs) == .orderedSame
     }
 
     /// Verifies whether the files in a plugin directory match the recorded approval hash.
-    /// - Parameters:
-    ///   - directoryURL: Directory to inspect.
-    ///   - expectedHash: The SHA-256 digest recorded when the human approved the plugin.
-    /// - Returns: True if current files match the expected hash; false if modified or unreadable.
     public static func verifyIntegrity(at directoryURL: URL, expectedHash: String) -> Bool {
         guard let currentHash = calculateDirectoryHash(at: directoryURL) else {
             return false
@@ -219,19 +193,10 @@ public enum PluginSecurity {
     }
 
     /// Checks whether a target file URL points inside a protected engine path.
-    ///
-    /// The agent is prohibited from writing directly to `~/.runeweaver/plugins/`
-    /// or `~/.runeweaver/config.toml`. Tool proposals must stage in `pending_plugins/`
-    /// first to require human approval in the inbox.
-    /// - Parameters:
-    ///   - targetURL: Candidate path for file creation or modification.
-    ///   - pluginsDir: Configured root plugins directory.
-    /// - Returns: True if the path is protected and direct writes must be blocked.
     public static func isProtectedPath(targetURL: URL, pluginsDir: URL? = nil) -> Bool {
-        /// Normalize through symlink resolution plus standardization so a
-        /// symlinked plugins root or ".." segments cannot escape the prefix
-        /// check, and require a "/" boundary so a sibling such as
-        /// ".../plugins2" never matches the protected pen.
+        /// Normalize through symlink resolution plus standardization so a symlinked plugins root or
+        /// ".." segments cannot escape the prefix check, and require a "/" boundary so a sibling
+        /// such as ".../plugins2" never matches the protected pen.
         func normalizedPath(_ url: URL) -> String {
             url.resolvingSymlinksInPath().standardizedFileURL.path
         }

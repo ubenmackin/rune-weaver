@@ -1,9 +1,4 @@
 // Rune Weaver Server — Shared REST and WebSocket contracts for the engine API.
-//
-// Every client (iOS, macOS menu bar, web dashboard) speaks these shapes
-// over one localhost-only surface with no per-client forks and no auth.
-// Route paths live in ``ServerPaths`` so handlers and tests share one
-// source of truth.
 
 import Foundation
 import RuneWeaverCore
@@ -35,6 +30,14 @@ public enum ServerPaths {
     public static let jobs = "jobs"
     /// Manual job run subpath under `/scheduler/jobs/:id`.
     public static let run = "run"
+    /// Search group serving the local SearXNG lifecycle.
+    public static let search = "search"
+    /// Search health subpath under `/search`.
+    public static let searchHealth = "health"
+    /// Search ensure subpath under `/search`.
+    public static let searchEnsure = "ensure"
+    /// Search stop subpath under `/search`.
+    public static let searchStop = "stop"
     /// Run log group.
     public static let runs = "runs"
     /// Sessions group.
@@ -56,21 +59,16 @@ public enum ServerPaths {
     /// Marketplace install subpath.
     public static let install = "install"
     /// Engine API version served on `/health`.
-    public static let apiVersion = "0.1.0"
+    /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
+    /// and providers cannot drift.
+    public static var apiVersion: String {
+        RuneWeaverVersion.current
+    }
 }
 
 /// Shared trimming-plus-default helpers for REST and WebSocket DTOs.
-///
-/// Single-sources the blank-to-default logic shared by `ChatRequest`,
-/// `ToolCallRequest`, `StoreFactRequest`, `ApprovalDecisionRequest`, and
-/// `WSDecisionMessage` so trimming and defaults never drift between call
-/// sites.
 public enum DTODefaults {
     /// Trims an optional string, falling back when blank.
-    /// - Parameters:
-    ///   - value: Raw optional value.
-    ///   - defaultValue: Fallback when `value` is nil or blank.
-    /// - Returns: Trimmed value, or `defaultValue` when blank.
     public static func blankToDefault(_ value: String?, default defaultValue: String) -> String {
         let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? defaultValue : trimmed
@@ -120,22 +118,24 @@ public struct HealthResponse: Content, Equatable {
     public let provider: String?
     /// Active context window limit.
     public let contextLength: Int?
+    /// Whether the configured SearXNG URL answered (populated when known).
+    public let searchReachable: Bool?
+    /// Configured SearXNG base URL that was probed, when known.
+    public let searchURL: String?
+    /// Collapsed search status (`"running"`, `"stopped"`, or nil when unknown).
+    public let searchStatus: String?
 
     /// Creates a health response.
-    /// - Parameters:
-    ///   - status: Health status. Defaults to `"ok"`.
-    ///   - engine: Engine display name. Defaults to `"Rune Weaver"`.
-    ///   - version: API version. Defaults to `ServerPaths/apiVersion`.
-    ///   - model: Active model name. Defaults to nil.
-    ///   - provider: Active provider name. Defaults to nil.
-    ///   - contextLength: Active context limit. Defaults to nil.
     public init(
         status: String = "ok",
         engine: String = "Rune Weaver",
         version: String = ServerPaths.apiVersion,
         model: String? = nil,
         provider: String? = nil,
-        contextLength: Int? = nil
+        contextLength: Int? = nil,
+        searchReachable: Bool? = nil,
+        searchURL: String? = nil,
+        searchStatus: String? = nil
     ) {
         self.status = status
         self.engine = engine
@@ -143,6 +143,9 @@ public struct HealthResponse: Content, Equatable {
         self.model = model
         self.provider = provider
         self.contextLength = contextLength
+        self.searchReachable = searchReachable
+        self.searchURL = searchURL
+        self.searchStatus = searchStatus
     }
 }
 
@@ -163,10 +166,6 @@ public struct ChatRequest: Content, Equatable {
     public var source: String?
 
     /// Creates a chat request.
-    /// - Parameters:
-    ///   - text: Raw user text.
-    ///   - sessionID: Owning session. Defaults to nil (new session).
-    ///   - source: Input origin. Defaults to nil (`"api"`).
     public init(text: String, sessionID: UUID? = nil, source: String? = nil) {
         self.text = text
         self.sessionID = sessionID
@@ -406,11 +405,6 @@ public struct MarketplaceResponse: Content, Equatable {
 }
 
 /// Request to install a rune from the marketplace.
-///
-/// The download URL rides along as display provenance only and is validated
-/// as a well-formed https URL. The service scaffolds a disabled-by-default
-/// stub from the curated catalog instead of fetching remote content, so the
-/// loopback service never acts as a fetch oracle for crafted URLs.
 public struct InstallMarketplacePluginRequest: Content, Equatable {
     public let id: String
     public let downloadURL: String?
@@ -431,10 +425,6 @@ public struct ToolCallRequest: Content, Equatable {
     public var callID: String?
 
     /// Creates a tool call request.
-    /// - Parameters:
-    ///   - toolName: Name of the tool to run.
-    ///   - argumentsJSON: Raw JSON arguments. Defaults to nil (`"{}"`).
-    ///   - callID: Correlation identifier. Defaults to nil (new UUID).
     public init(toolName: String, argumentsJSON: String? = nil, callID: String? = nil) {
         self.toolName = toolName
         self.argumentsJSON = argumentsJSON
@@ -455,10 +445,6 @@ public struct ToolCallRequest: Content, Equatable {
 }
 
 /// Tool enable/disable request for `POST /tools/:name/state`.
-///
-/// Carries only the desired flag so any registered tool — builtin or plugin,
-/// including memory tools — toggles through one shape. Unknown names surface
-/// as 404 at the route layer while the durable store itself stays name-agnostic.
 public struct UpdateToolStateRequest: Content, Equatable {
     /// Whether the named tool should be enabled on the live bus.
     public let enabled: Bool
@@ -480,9 +466,6 @@ public struct MemorySearchResponse: Content, Equatable {
     public let memories: [MemoryResult]
 
     /// Creates a memory search response.
-    /// - Parameters:
-    ///   - query: Query that was run.
-    ///   - memories: Hits, best first.
     public init(query: String, memories: [MemoryResult]) {
         self.query = query
         self.memories = memories
@@ -502,11 +485,6 @@ public struct FactsResponse: Content, Equatable {
     public let episodeCount: Int
 
     /// Creates a facts response.
-    /// - Parameters:
-    ///   - facts: Profile facts.
-    ///   - preferences: Preferences.
-    ///   - semanticCount: Semantic fact count.
-    ///   - episodeCount: Episode count.
     public init(facts: [UserFact], preferences: [Preference], semanticCount: Int, episodeCount: Int) {
         self.facts = facts
         self.preferences = preferences
@@ -523,9 +501,6 @@ public struct StoreFactRequest: Content, Equatable {
     public var source: String?
 
     /// Creates a store-fact request.
-    /// - Parameters:
-    ///   - content: Fact text to store.
-    ///   - source: Origin label. Defaults to nil (`"api"`).
     public init(content: String, source: String? = nil) {
         self.content = content
         self.source = source
@@ -561,9 +536,6 @@ public struct ApprovalDecisionRequest: Content, Equatable {
     public var duration: TrustDuration?
 
     /// Creates a decision request.
-    /// - Parameters:
-    ///   - approved: Whether the call may run.
-    ///   - duration: Trust tier. Defaults to nil (`thisTime`).
     public init(approved: Bool, duration: TrustDuration? = nil) {
         self.approved = approved
         self.duration = duration
@@ -586,10 +558,6 @@ public struct ApprovalDecisionResponse: Content, Equatable {
     public let duration: TrustDuration
 
     /// Creates a decision response.
-    /// - Parameters:
-    ///   - id: Request identifier.
-    ///   - approved: Whether the call may run.
-    ///   - duration: Trust tier recorded.
     public init(id: UUID, approved: Bool, duration: TrustDuration) {
         self.id = id
         self.approved = approved
@@ -627,16 +595,181 @@ public struct RunLogsResponse: Content, Equatable {
     }
 }
 
+/// Search engine health response for `GET /search/health`.
+/// Encodes both `baseURL` (canonical) and `url` plus `status` so dashboard
+/// clients reading either contract keep the custom port instead of falling
+/// back to the default.
+public struct SearchHealthResponse: Content, Equatable {
+    /// Whether the SearXNG base URL answered with 2xx/3xx.
+    public let reachable: Bool
+    /// Configured SearXNG base URL that was probed.
+    public let baseURL: String
+    /// Container name backing the lifecycle, when managed.
+    public let containerName: String
+    /// Alias of `baseURL` for dashboard clients expecting `url`.
+    public let url: String
+    /// Collapsed status (`"running"` when reachable, else `"stopped"`).
+    public let status: String
+
+    /// Creates a health response.
+    public init(reachable: Bool, baseURL: String, containerName: String, url: String? = nil, status: String? = nil) {
+        self.reachable = reachable
+        self.baseURL = baseURL
+        self.containerName = containerName
+        self.url = url ?? baseURL
+        self.status = status ?? (reachable ? "running" : "stopped")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reachable
+        case baseURL
+        case containerName
+        case url
+        case status
+    }
+
+    /// Decodes tolerantly across `baseURL`/`url` shapes.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reachable = try container.decode(Bool.self, forKey: .reachable)
+        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        let alias = try container.decodeIfPresent(String.self, forKey: .url)
+        let resolved = base ?? alias ?? ""
+        baseURL = resolved
+        url = alias ?? resolved
+        containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+    }
+
+    /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(reachable, forKey: .reachable)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(url, forKey: .url)
+        try container.encode(containerName, forKey: .containerName)
+        try container.encode(status, forKey: .status)
+    }
+}
+
+/// Search engine ensure response for `POST /search/ensure`.
+public struct SearchEnsureResponse: Content, Equatable {
+    /// Whether the engine answers after the ensure attempt.
+    public let reachable: Bool
+    /// Configured SearXNG base URL that was ensured.
+    public let baseURL: String
+    /// Whether a start was attempted during this call.
+    public let started: Bool
+    /// Alias of `baseURL` for dashboard clients expecting `url`.
+    public let url: String
+    /// Collapsed status (`"running"` when reachable, else `"stopped"`).
+    public let status: String
+
+    /// Creates an ensure response.
+    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil) {
+        self.reachable = reachable
+        self.baseURL = baseURL
+        self.started = started
+        self.url = url ?? baseURL
+        self.status = status ?? (reachable ? "running" : "stopped")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case reachable
+        case baseURL
+        case started
+        case url
+        case status
+    }
+
+    /// Decodes tolerantly across `baseURL`/`url` shapes.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reachable = try container.decode(Bool.self, forKey: .reachable)
+        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        let alias = try container.decodeIfPresent(String.self, forKey: .url)
+        let resolved = base ?? alias ?? ""
+        baseURL = resolved
+        url = alias ?? resolved
+        started = try container.decodeIfPresent(Bool.self, forKey: .started) ?? false
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+    }
+
+    /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(reachable, forKey: .reachable)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(url, forKey: .url)
+        try container.encode(started, forKey: .started)
+        try container.encode(status, forKey: .status)
+    }
+}
+
+/// Search engine stop response for `POST /search/stop`.
+public struct SearchStopResponse: Content, Equatable {
+    /// Whether the container is stopped (honest re-probe: false when the engine still answers).
+    public let stopped: Bool
+    /// Container name that was stopped.
+    public let containerName: String
+    /// Whether the engine answers after the stop (honest re-probe; true when the stop failed or the engine still answers).
+    public let reachable: Bool
+    /// Configured SearXNG base URL for dashboard fallback display.
+    public let baseURL: String
+    /// Alias of `baseURL` for dashboard clients expecting `url`.
+    public let url: String
+    /// Collapsed status (honest re-probe: `"running"` when still reachable, else `"stopped"`).
+    public let status: String
+
+    /// Creates a stop response.
+    public init(stopped: Bool, containerName: String, reachable: Bool = false, baseURL: String = "", url: String? = nil, status: String? = nil) {
+        self.stopped = stopped
+        self.containerName = containerName
+        self.reachable = reachable
+        self.baseURL = baseURL
+        self.url = url ?? baseURL
+        self.status = status ?? (reachable ? "running" : "stopped")
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case stopped
+        case containerName
+        case reachable
+        case baseURL
+        case url
+        case status
+    }
+
+    /// Decodes tolerantly so dashboard `SearchHealthResponse` shapes still parse.
+    /// An absent `stopped` derives from the honest `reachable` probe instead
+    /// of optimistically assuming stopped on shape drift.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reachable = try container.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
+        stopped = try container.decodeIfPresent(Bool.self, forKey: .stopped) ?? !reachable
+        containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
+        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        let alias = try container.decodeIfPresent(String.self, forKey: .url)
+        let resolved = base ?? alias ?? ""
+        baseURL = resolved
+        url = alias ?? resolved
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+    }
+
+    /// Encodes the full shape so health-style readers keep working.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(stopped, forKey: .stopped)
+        try container.encode(containerName, forKey: .containerName)
+        try container.encode(reachable, forKey: .reachable)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(url, forKey: .url)
+        try container.encode(status, forKey: .status)
+    }
+}
+
 /// WebSocket wire shapes, single-sourced from `RuneWeaverCore`.
-///
-/// `WSChatMessage`, `WSLegacyContentMessage`, `WSDecisionMessage`,
-/// `WSStreamDelta`, `WSStreamDone`, `WSApprovalPrompt`, and `WSErrorFrame`
-/// are canonical in `RuneWeaverCore/WSWire.swift` and aliased here (and in
-/// `RuneWeaverClient`) so the JSON encoding never drifts between modules;
-/// drift breaks `WSInboundKind.classify`.
 public typealias WSChatMessage = RuneWeaverCore.WSChatMessage
-/// Legacy thin-client chat frame, single-sourced from core.
-public typealias WSLegacyContentMessage = RuneWeaverCore.WSLegacyContentMessage
 /// Approval decision frame, single-sourced from core.
 public typealias WSDecisionMessage = RuneWeaverCore.WSDecisionMessage
 /// Streamed chat delta, single-sourced from core.
@@ -657,11 +790,6 @@ public typealias WSCancelMessage = RuneWeaverCore.WSCancelMessage
 public typealias WSCancelledFrame = RuneWeaverCore.WSCancelledFrame
 
 /// Classifies one inbound WebSocket text frame.
-///
-/// Chat frames carry `text`; decision frames carry `id` plus `approved`;
-/// cancel frames carry `type: "cancel"`.
-/// Frames carrying none of these decode as `unknown` so the socket can answer
-/// with an error frame instead of dropping the connection.
 public enum WSInboundKind: Sendable, Equatable {
     /// A chat message with user text.
     case chat(WSChatMessage)
@@ -677,27 +805,17 @@ private struct WSCancelFramePeek: Codable, Sendable {
     let type: String?
     let sessionID: UUID?
     let text: String?
-    let content: String?
     let id: UUID?
 }
 
 public extension WSInboundKind {
     /// Classifies raw socket text into a chat, decision, cancel, or unknown kind.
-    ///
-    /// Chat takes precedence when user text is present: a frame carrying
-    /// both `text` and `type: "cancel"` routes to chat so the turn is
-    /// never dropped, while an explicit cancel without text routes to
-    /// cancel. Then tries the legacy `{"content":"..."}` shape, then the
-    /// decision shape (it requires `id` plus `approved`). A typeless
-    /// `{"sessionID":...}` frame with no chat or decision fields falls
-    /// back to cancel for thin-client migration.
     /// - Parameter text: Raw socket text frame.
     /// - Returns: The inbound kind, or `unknown` when no shape decodes.
     static func classify(_ text: String) -> WSInboundKind {
         guard let data = text.data(using: .utf8) else { return .unknown }
         let peek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data)
         let hasText = !(peek?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
-            || !(peek?.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data),
            !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
@@ -706,23 +824,8 @@ public extension WSInboundKind {
         if peek?.type == "cancel", !hasText {
             return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
         }
-        if hasText {
-            // Text-bearing frames with an explicit cancel discriminator but
-            // blank or undecodable chat text fall through to unknown rather
-            // than cancelling, so ambiguous frames never drop a user turn
-            // nor trigger an unintended cancel.
-            if let legacy = try? JSONDecoder().decode(WSLegacyContentMessage.self, from: data),
-               !legacy.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            {
-                return .chat(WSChatMessage(text: legacy.content))
-            }
-            if peek?.type == "cancel" {
-                return .unknown
-            }
-        } else if let legacy = try? JSONDecoder().decode(WSLegacyContentMessage.self, from: data) {
-            if !legacy.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return .chat(WSChatMessage(text: legacy.content))
-            }
+        if hasText, peek?.type == "cancel" {
+            return .unknown
         }
         if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
             return .decision(decision)
@@ -730,37 +833,16 @@ public extension WSInboundKind {
         if peek?.type == "cancel" {
             return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
         }
-        // Legacy typeless cancel: only when the frame carries a session
-        // without any chat or decision payload, so text-bearing frames
-        // never misroute here.
-        if let legacyPeek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data),
-           legacyPeek.type == nil,
-           let sid = legacyPeek.sessionID,
-           legacyPeek.text == nil,
-           legacyPeek.content == nil,
-           legacyPeek.id == nil
-        {
-            return .cancel(WSCancelMessage(sessionID: sid))
-        }
         return .unknown
     }
 }
 
 /// Splits final assistant text into streamed delta chunks.
-///
-/// Single helper shared by the WebSocket chat path and tests so streamed
-/// and REST chat stay consistent: text is sliced by character count into
-/// non-empty deltas, and empty text yields no deltas (only the done frame).
 public enum WSStreaming {
     /// Default characters per delta frame.
     public static let defaultChunkSize = 200
 
     /// Splits text into non-empty delta chunks.
-    /// - Parameters:
-    ///   - text: Final assistant text.
-    ///   - chunkSize: Characters per chunk. Defaults to 200. Non-positive
-    ///     sizes yield the whole text as one chunk when non-empty.
-    /// - Returns: Non-empty delta chunks in order.
     public static func deltas(for text: String, chunkSize: Int = defaultChunkSize) -> [String] {
         guard !text.isEmpty else { return [] }
         guard chunkSize > 0 else { return [text] }
@@ -817,9 +899,6 @@ public struct SessionMessageToolActions: Content, Equatable {
     public let actions: [ToolAction]
 
     /// Creates a per-message actions row.
-    /// - Parameters:
-    ///   - messageID: Parent assistant message identifier.
-    ///   - actions: Tool calls derived from that message.
     public init(messageID: UUID, actions: [ToolAction]) {
         self.messageID = messageID
         self.actions = actions
@@ -827,10 +906,6 @@ public struct SessionMessageToolActions: Content, Equatable {
 }
 
 /// Structured tool-action history for `GET /sessions/:id/tool-actions`.
-///
-/// Lets history clients render past tool activity from authoritative
-/// server-derived records instead of re-parsing assistant placeholder
-/// lines with fragile cross-language regular expressions.
 public struct SessionToolActionsResponse: Content, Equatable {
     /// Owning session identifier.
     public let sessionID: UUID
@@ -840,9 +915,6 @@ public struct SessionToolActionsResponse: Content, Equatable {
     public let count: Int
 
     /// Creates a tool-actions response.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - actions: Per-message actions, oldest first.
     public init(sessionID: UUID, actions: [SessionMessageToolActions]) {
         self.sessionID = sessionID
         self.actions = actions
@@ -871,13 +943,9 @@ public struct CancelChatResponse: Content, Equatable {
 }
 
 /// Settings snapshot for `GET /settings` and `PUT /settings`.
-///
-/// Carries no secret values: providers expose only `apiKeyEnv` variable
-/// names and email accounts expose identity fields only, with passwords
-/// and keys resolved at runtime via `SecretsManager` so TOML and JSON
-/// never carry credentials. The sandbox surface is Tier-3 detonation only;
-/// legacy staging keys in older dashboard payloads decode as unknown keys
-/// and are ignored instead of failing the request.
+/// Carries both `browser*` (canonical `[browser]` keys) and `search*`
+/// dashboard aliases with identical values so either contract reads without
+/// falling back to defaults.
 public struct SettingsResponse: Content, Equatable {
     public let engineName: String
     public let logLevel: String
@@ -897,6 +965,12 @@ public struct SettingsResponse: Content, Equatable {
     public let filesDenyPatterns: [String]
     public let filesAllowRoots: [String]
     public let filesRequireApprovalOnDeny: Bool
+    public let browserSearxngURL: String
+    public let browserSearchTimeoutSeconds: Int
+    public let browserMaxResults: Int
+    public let searchSearxngURL: String
+    public let searchTimeoutSeconds: Int
+    public let searchMaxResults: Int
     public let emailAccounts: [EmailAccount]
     public let pluginsDir: String
     public let pluginsMarketplaceIndexURL: String
@@ -922,6 +996,12 @@ public struct SettingsResponse: Content, Equatable {
         self.filesDenyPatterns = config.files.denyPatterns
         self.filesAllowRoots = config.files.allowRoots
         self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
+        self.browserSearxngURL = config.browser.searxngURL
+        self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
+        self.browserMaxResults = config.browser.maxResults
+        self.searchSearxngURL = config.browser.searxngURL
+        self.searchTimeoutSeconds = config.browser.searchTimeoutSeconds
+        self.searchMaxResults = config.browser.maxResults
         self.emailAccounts = config.email.accounts
         self.pluginsDir = config.plugins.pluginsDir
         self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
@@ -931,11 +1011,8 @@ public struct SettingsResponse: Content, Equatable {
 }
 
 /// Request payload to update settings via `PUT /settings`.
-///
-/// Persisting requires a restart before live provider routing, the
-/// orchestrator system prompt, and memory paths pick the new values up;
-/// the route saves and validates the file but never hot-swaps running
-/// collaborators, so clients must surface restart-required guidance.
+/// Accepts both `browser*` (canonical) and `search*` (dashboard alias) keys;
+/// the canonical key wins when both are present so either contract writes.
 public struct UpdateSettingsRequest: Content, Equatable {
     public let engineName: String?
     public let logLevel: String?
@@ -955,6 +1032,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let filesDenyPatterns: [String]?
     public let filesAllowRoots: [String]?
     public let filesRequireApprovalOnDeny: Bool?
+    public let browserSearxngURL: String?
+    public let browserSearchTimeoutSeconds: Int?
+    public let browserMaxResults: Int?
+    public let searchSearxngURL: String?
+    public let searchTimeoutSeconds: Int?
+    public let searchMaxResults: Int?
     public let emailAccounts: [EmailAccount]?
     public let pluginsDir: String?
     public let pluginsMarketplaceIndexURL: String?
@@ -979,6 +1062,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         filesDenyPatterns: [String]? = nil,
         filesAllowRoots: [String]? = nil,
         filesRequireApprovalOnDeny: Bool? = nil,
+        browserSearxngURL: String? = nil,
+        browserSearchTimeoutSeconds: Int? = nil,
+        browserMaxResults: Int? = nil,
+        searchSearxngURL: String? = nil,
+        searchTimeoutSeconds: Int? = nil,
+        searchMaxResults: Int? = nil,
         emailAccounts: [EmailAccount]? = nil,
         pluginsDir: String? = nil,
         pluginsMarketplaceIndexURL: String? = nil,
@@ -1002,6 +1091,12 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.filesDenyPatterns = filesDenyPatterns
         self.filesAllowRoots = filesAllowRoots
         self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
+        self.browserSearxngURL = browserSearxngURL
+        self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
+        self.browserMaxResults = browserMaxResults
+        self.searchSearxngURL = searchSearxngURL
+        self.searchTimeoutSeconds = searchTimeoutSeconds
+        self.searchMaxResults = searchMaxResults
         self.emailAccounts = emailAccounts
         self.pluginsDir = pluginsDir
         self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
@@ -1010,18 +1105,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
 
     /// Applies this update onto a loaded config, preserving every field
     /// the request omits.
-    ///
-    /// An empty `fallbackProvider` clears the fallback to nil so the
-    /// dashboard `(None)` option round-trips; a present `providers` map
-    /// replaces the stored map wholesale (absent means keep), and secrets
-    /// never flow through here — only `apiKeyEnv` names and password-less
-    /// email accounts. A present `memoryEmbeddingBackend` must name a
-    /// known backend (`apple`, `provider`, `none`) so invalid strings fail
-    /// here instead of persisting and silently degrading recall later.
-    /// File lists fail closed on blank patterns and `..` escapes so a
-    /// crafted dashboard payload cannot smuggle a directory traversal into
-    /// the persisted policy.
-    /// - Throws: `ConfigError.validationError` for an unknown embedding backend or invalid file patterns.
     public func apply(to config: inout RuneWeaverConfig) throws {
         applyEngine(to: &config.engine)
         applyLLM(to: &config.llm)
@@ -1030,6 +1113,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyVoice(to: &config.voice)
         applySandbox(to: &config.sandbox)
         try applyFiles(to: &config.files)
+        applyBrowser(to: &config.browser)
         applyEmail(to: &config.email)
         applyPlugins(to: &config.plugins)
     }
@@ -1114,6 +1198,18 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let filesRequireApprovalOnDeny {
             files.requireApprovalOnDeny = filesRequireApprovalOnDeny
+        }
+    }
+
+    private func applyBrowser(to browser: inout BrowserConfig) {
+        if let browserSearxngURL = browserSearxngURL ?? searchSearxngURL {
+            browser.searxngURL = browserSearxngURL
+        }
+        if let browserSearchTimeoutSeconds = browserSearchTimeoutSeconds ?? searchTimeoutSeconds {
+            browser.searchTimeoutSeconds = browserSearchTimeoutSeconds
+        }
+        if let browserMaxResults = browserMaxResults ?? searchMaxResults {
+            browser.maxResults = browserMaxResults
         }
     }
 

@@ -1,18 +1,9 @@
 // Rune Weaver LLM — Generic OpenAI-compatible API endpoint provider.
-//
-// Bridges OpenAI-compatible APIs (OpenRouter, cloud gateways, local endpoints)
-// into the LLMProvider interface with token streaming and tool-calling support.
 
 import Foundation
 import RuneWeaverCore
 
 /// Generic provider for any OpenAI-compatible endpoint.
-///
-/// Covers cloud hosts (OpenRouter, OpenAI, custom gateways) and any
-/// self-hosted OpenAI-compatible server. The base URL and API key are
-/// fully configurable; the key is held in memory only and never
-/// logged. Resolve it via `SecretsManager` (env first, Keychain
-/// fallback) before constructing this provider.
 public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     /// Default base URL (OpenRouter).
     public static var defaultBaseURL: String {
@@ -58,20 +49,12 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
             provider: providerID,
             contextLength: contextLength,
             supportsTools: true,
-            supportsEmbeddings: embeddingsEnabled
+            supportsEmbeddings: embeddingsEnabled,
+            supportsVision: true
         )
     }
 
     /// Creates a generic OpenAI-compatible provider.
-    /// - Parameters:
-    ///   - baseURL: API root. Defaults to OpenRouter.
-    ///   - apiKey: Bearer token, if required. Never logged or persisted.
-    ///   - model: Model identifier.
-    ///   - contextLength: Context window. Defaults to 128k tokens.
-    ///   - providerID: Router identifier. Defaults to `"openrouter"`.
-    ///   - embeddingsEnabled: Whether to advertise embeddings support.
-    ///   - apiStyle: Request style. Defaults to Chat Completions.
-    ///   - sessionID: Chat session identifier sent as `x-opencode-session`. Defaults to nil (header omitted).
     public init(
         baseURL: String = OpenAICompatibleProvider.defaultBaseURL,
         apiKey: String? = nil,
@@ -93,12 +76,6 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Shared HTTP client for this provider.
-    ///
-    /// Constructed as a lightweight, stack-allocated value struct on demand.
-    /// Internal HTTP requests route through `URLSession.shared`, ensuring
-    /// TCP connection pooling, HTTP/2 multiplexing, and TLS session resumption
-    /// are fully preserved across calls, while DNS resolution for LAN targets
-    /// is memoized by `LocalNetworking`.
     var client: OpenAICompatibleHTTPClient {
         OpenAICompatibleHTTPClient(baseURL: baseURL, apiKey: apiKey, model: model, apiStyle: apiStyle, sessionID: sessionID)
     }
@@ -110,10 +87,6 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Streams chunk-level events from the endpoint.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    /// - Returns: Stream ending in `done` or `error`.
     public func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         client.streamChunks(messages: messages, tools: tools)
     }

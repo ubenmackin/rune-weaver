@@ -1,22 +1,9 @@
 // Rune Weaver Server — Static web dashboard bundle resolution and delivery.
-//
-// Discovers and serves pre-built React + TypeScript + Vite dashboard assets
-// (`Web/dist`) from the engine process on the loopback origin. Serves hashed
-// static assets with caching headers and provides SPA fallback to index.html
-// for client-side routing without a runtime Node server.
 
 import Foundation
 import Vapor
 
 /// Static dashboard bundle served by the engine process.
-///
-/// The web dashboard is a React plus TypeScript plus Vite app compiled
-/// with npm to a static bundle (`Web/dist`). The engine serves that
-/// bundle on the same loopback origin as the JSON API, so the dashboard
-/// uses relative `fetch` calls with no runtime Node server and no CORS.
-/// There is no authentication in v1: loopback-only binding is the
-/// protection boundary, and remote access must wait for auth before any
-/// non-loopback bind or off-machine exposure.
 public struct DashboardBundle: Sendable, Equatable {
     /// Bundle directory containing `index.html` plus hashed assets, or
     /// nil when the bundle was never built.
@@ -39,20 +26,6 @@ public struct DashboardBundle: Sendable, Equatable {
     public static let bundleHeader = "X-RuneWeaver-Dashboard"
 
     /// Resolves the bundle directory without failing when Node/npm never ran.
-    ///
-    /// Candidate order: the `RUNEWEAVER_DASHBOARD_DIR` environment
-    /// override first, then the `Bundle.main` web resources for the packaged
-    /// app, then `<cwd>/Web/dist`, then the package-relative `Web/dist`
-    /// derived from this source file. The first candidate containing
-    /// `index.html` wins; when none qualifies the returned bundle has a nil
-    /// directory so callers serve the stub that reports the missing build
-    /// instead of failing silently.
-    /// - Parameters:
-    ///   - fileManager: Filesystem accessor. Defaults to shared.
-    ///   - environment: Environment values. Defaults to the process
-    ///     environment.
-    /// - Returns: Bundle pointing at the built directory, or at nil when
-    ///   no candidate contains `index.html`.
     public static func resolve(
         fileManager: FileManager = .default,
         environment: [String: String] = ProcessInfo.processInfo.environment
@@ -79,10 +52,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Whether a directory holds a built bundle.
-    /// - Parameters:
-    ///   - url: Candidate directory.
-    ///   - fileManager: Filesystem accessor. Defaults to shared.
-    /// - Returns: True when `index.html` exists inside `url`.
     public static func isBundleDirectory(_ url: URL, fileManager: FileManager = .default) -> Bool {
         let index = url.appendingPathComponent("index.html", isDirectory: false)
         return fileManager.fileExists(atPath: index.path)
@@ -108,10 +77,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Placeholder page served for `GET /` when `Web/dist` is missing.
-    ///
-    /// Reports the missing Node build inline so a browser never sees a
-    /// silent 404. The page carries no API keys and makes no network
-    /// calls.
     public static var stubHTML: String {
         """
         <!doctype html>
@@ -146,6 +111,9 @@ public struct DashboardBundle: Sendable, Equatable {
         if lower.hasSuffix(".json") || lower.hasSuffix(".map") {
             return "application/json; charset=utf-8"
         }
+        if lower.hasSuffix(".webmanifest") {
+            return "application/manifest+json; charset=utf-8"
+        }
         if lower.hasSuffix(".svg") {
             return "image/svg+xml"
         }
@@ -171,13 +139,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Sanitizes a request path into path components.
-    ///
-    /// Leading slashes are ignored; empty components and `"."` are
-    /// normalized away, and `%2F`-smuggled separators are rejected. Paths
-    /// with a component exactly equal to `".."` are rejected as unsafe.
-    /// - Parameter requestPath: Raw remainder after the leading `/`.
-    /// - Returns: Safe components, or nil when the path traverses above
-    ///   the bundle directory.
     public static func sanitizedComponents(for requestPath: String) -> [String]? {
         var trimmed = requestPath.trimmingCharacters(in: .whitespacesAndNewlines)
         while trimmed.hasPrefix("/") {
@@ -205,16 +166,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// File URL for a request path when that exact file exists.
-    ///
-    /// Symlinks are resolved for both the bundle directory and the
-    /// candidate, and the canonical candidate must stay inside the
-    /// canonical directory; otherwise nil is returned so a symlinked
-    /// `Web/dist` entry can never serve files outside the bundle.
-    /// - Parameters:
-    ///   - requestPath: Raw remainder after the leading `/`.
-    ///   - fileManager: Filesystem accessor. Defaults to shared.
-    /// - Returns: Existing file URL, or nil when missing, unsafe, escaping
-    ///   the bundle via symlink, or when no bundle is available.
     public func localFileURL(for requestPath: String, fileManager: FileManager = .default) -> URL? {
         guard let directoryURL, let components = Self.sanitizedComponents(for: requestPath) else { return nil }
         guard !components.isEmpty else { return nil }
@@ -234,15 +185,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// File URL for the bundle entry point.
-    ///
-    /// Symlinks are resolved for both the bundle directory and the
-    /// candidate, and the canonical candidate must stay inside the
-    /// canonical directory; otherwise nil is returned so a symlinked
-    /// `index.html` can never escape the bundle (same containment as
-    /// `localFileURL(for:)`).
-    /// - Parameter fileManager: Filesystem accessor. Defaults to shared.
-    /// - Returns: `index.html` URL, or nil when no bundle is available or
-    ///   the resolved entry point escapes the bundle via symlink.
     public func indexFileURL(fileManager: FileManager = .default) -> URL? {
         guard let directoryURL, Self.isBundleDirectory(directoryURL, fileManager: fileManager) else { return nil }
         let candidate = directoryURL.appendingPathComponent("index.html", isDirectory: false)
@@ -258,12 +200,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Whether a request path looks like a client-side route.
-    ///
-    /// Extensionless paths (e.g. `/approvals`) fall back to `index.html`
-    /// so the dashboard router owns them; paths with an extension fall
-    /// through to 404 so missing assets never masquerade as the app.
-    /// - Parameter requestPath: Raw remainder after the leading `/`.
-    /// - Returns: True when the last component has no file extension.
     public static func isClientRoute(_ requestPath: String) -> Bool {
         guard let components = sanitizedComponents(for: requestPath), !components.isEmpty else { return false }
         guard let last = components.last else { return false }
@@ -271,16 +207,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Builds the HTTP response for one dashboard request path.
-    ///
-    /// Available bundles serve the exact file, fall back to `index.html`
-    /// for extensionless client routes, and answer 404 JSON otherwise.
-    /// Missing bundles serve the stub HTML for `/` and `index.html` and
-    /// answer 503 JSON with the build hint otherwise, so the missing
-    /// Node build is reported instead of failing silently.
-    /// - Parameters:
-    ///   - requestPath: Raw remainder after the leading `/`.
-    ///   - fileManager: Filesystem accessor. Defaults to shared.
-    /// - Returns: Response to return from the route handler.
     public func response(for requestPath: String, fileManager: FileManager = .default) -> Response {
         guard bundleAvailable(using: fileManager) else {
             let trimmed = requestPath.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -337,13 +263,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Reads a file URL into a 200 response.
-    /// - Parameters:
-    ///   - url: File to serve. A 500 JSON response is returned when nil
-    ///     or unreadable.
-    ///   - bundleState: Value for the bundle header.
-    ///   - cacheControl: Cache header value. Defaults to `no-cache`.
-    ///   - fileManager: Filesystem accessor used to resolve the bundle header on failure. Defaults to shared.
-    /// - Returns: File response.
     private func fileResponse(at url: URL?, bundleState: String, cacheControl: String = "no-cache", fileManager: FileManager = .default) -> Response {
         guard let url, let data = try? Data(contentsOf: url) else {
             return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
@@ -360,11 +279,6 @@ public struct DashboardBundle: Sendable, Equatable {
     }
 
     /// Builds a small JSON error response.
-    /// - Parameters:
-    ///   - status: HTTP status.
-    ///   - message: Error message.
-    ///   - fileManager: Filesystem accessor used to resolve the bundle header. Defaults to shared.
-    /// - Returns: JSON error response.
     private func jsonError(status: HTTPResponseStatus, message: String, fileManager: FileManager = .default) -> Response {
         let payload: Data
         do {

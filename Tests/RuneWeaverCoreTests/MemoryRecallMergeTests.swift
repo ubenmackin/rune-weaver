@@ -1,20 +1,9 @@
 // Rune Weaver Core Tests — Merge-rank regression coverage for recall tiers.
-//
-// Pins how episodic, semantic, and profile hits interleave when recall merges
-// them: paraphrased semantic facts must survive episodic keyword volume,
-// exact keyword queries must stay episodic-first, and automatic injection must
-// fire only when a hit clears the shared threshold. Scoped to the
-// MemoryEngine recall merge so tier calibration cannot silently shift ranking
-// or injection without a failing test.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
 
 /// Builds an isolated engine on a fresh temporary directory.
-///
-/// Each test gets its own episodes database, vector directory, and profile
-/// file so fixture writes never leak between tests.
-/// - Returns: Engine plus the base directory owning its files.
 private func makeRecallMergeEngine() -> (engine: MemoryEngine, base: URL) {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -27,12 +16,6 @@ private func makeRecallMergeEngine() -> (engine: MemoryEngine, base: URL) {
 }
 
 /// Deterministic paraphrase stand-in for vector recall.
-///
-/// Maps the paraphrase under test to a near-identical vector so cosine sits
-/// just under 1.0: high enough to model a true paraphrase, low enough that an
-/// unscaled episodic rank of 1.0 would still win without calibration.
-/// Unrelated queries map to an orthogonal vector so cosine is 0 and the
-/// store filters them, keeping the "no match" path honest.
 private struct MergeParaphraseStubBackend: EmbeddingsBackend, Sendable {
     /// Stable identifier marking vectors as test fixtures.
     let modelID = "merge-paraphrase-stub"
@@ -60,10 +43,9 @@ struct MemoryRecallMergeTests {
         let (engine, base) = makeRecallMergeEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // The stored fact shares no tokens with the paraphrase query, so the
-        // keyword fallback cannot recall it: only vector similarity can. The
-        // episodic rows each carry one query token, so FTS returns them and
-        // the merge must prefer meaning over literal overlap.
+        // The stored fact shares no tokens with the paraphrase query, so the keyword fallback
+        // cannot recall it: only vector similarity can. The episodic rows each carry one query
+        // token, so FTS returns them and the merge must prefer meaning over literal overlap.
         _ = try await engine.storeSemantic(
             fact: "My cats are Miso and Soba",
             embedding: [1.0, 0.0],
@@ -98,10 +80,9 @@ struct MemoryRecallMergeTests {
         let (engine, base) = makeRecallMergeEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Exact keyword queries must not flip when semantic scaling changes:
-        // the episodic turn holds the literal address while the semantic row
-        // only shares common words like "my", so episodic stays first even
-        // though both tiers match.
+        // Exact keyword queries must not flip when semantic scaling changes: the episodic turn
+        // holds the literal address while the semantic row only shares common words like "my", so
+        // episodic stays first even though both tiers match.
         try await engine.storeEpisodic(content: "My email address is ada@example.com")
         _ = try await engine.storeSemantic(
             fact: "My cats are Miso and Soba",
@@ -131,10 +112,9 @@ struct MemoryRecallMergeTests {
         let (engine, base) = makeRecallMergeEngine()
         defer { try? FileManager.default.removeItem(at: base) }
 
-        // Five episodic rows all match the query through FTS, which is the
-        // volume that previously buried the semantic tier. The semantic hit
-        // stays recallable through vectors despite zero token overlap, so the
-        // merge must keep it inside the bounded top results.
+        // Five episodic rows all match the query through FTS, which is the volume that previously
+        // buried the semantic tier. The semantic hit stays recallable through vectors despite zero
+        // token overlap, so the merge must keep it inside the bounded top results.
         _ = try await engine.storeSemantic(
             fact: "My cats are Miso and Soba",
             embedding: [1.0, 0.0],

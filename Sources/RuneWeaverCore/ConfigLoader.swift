@@ -1,9 +1,4 @@
 // Rune Weaver Core — Hot-reloading config.toml loader with snapshot semantics.
-//
-// Holds the last validated snapshot behind a lock so readers always see a
-// consistent configuration even while the file watcher reloads. Invalid
-// reloads keep the previous good snapshot and surface through onError, so
-// a broken edit never replaces working config.
 
 import Foundation
 import os
@@ -11,12 +6,6 @@ import os
 // MARK: - Hot-reloading loader
 
 /// Loads `config.toml` and keeps the snapshot fresh via a file watcher.
-///
-/// The loader holds the last validated snapshot. Call ``ConfigLoader/load()``
-/// to re-read on demand, or ``ConfigLoader/startWatching()`` to reload
-/// automatically when the file changes. Invalid reloads keep the previous
-/// good snapshot and report the error through `onError` instead of
-/// replacing working config with a broken one.
 public final class ConfigLoader: Sendable {
     /// File being watched.
     public let fileURL: URL
@@ -53,11 +42,6 @@ public final class ConfigLoader: Sendable {
     }
 
     /// Creates a loader and performs the initial load.
-    ///
-    /// A missing file yields ``RuneWeaverConfig/default``; an existing
-    /// but invalid file throws.
-    /// - Parameter fileURL: Config file. Defaults to
-    ///   `~/.runeweaver/config.toml`.
     public init(fileURL: URL? = nil) throws {
         let resolved = fileURL ?? RuneWeaverConfig.defaultConfigFileURL()
         self.fileURL = resolved
@@ -89,13 +73,6 @@ public final class ConfigLoader: Sendable {
 
     /// Starts hot-reloading. Safe to call repeatedly; the second call
     /// is a no-op. Set `onChange`/`onError` before calling.
-    ///
-    /// Creation is serialized: a lock-guarded `isStartingWatch` flag is
-    /// set synchronously so concurrent callers collapse into one watcher
-    /// instead of each passing the `source == nil` check and leaking a
-    /// `DispatchSource` plus file descriptor. All `source` /
-    /// `fileDescriptor` mutations happen under the lock on the watcher
-    /// queue.
     public func startWatching() {
         let shouldStart = state.withLock { state -> Bool in
             guard state.source == nil, !state.isStartingWatch else { return false }

@@ -1,26 +1,8 @@
 // Rune Weaver Tools — Embedded Python IMAP subprocess script source.
-//
-// Generates the hardened Python helper script executed via subprocess
-// to perform read-only IMAP mailbox queries, message fetches, and attachment extraction.
 
 import Foundation
 
 /// Embedded `python3 imaplib` helper.
-///
-/// Reads one `EmailIMAPBridgeRequest` JSON object from stdin and
-/// prints one JSON response to stdout (`{"ok":true,...}` or
-/// `{"ok":false,"error":"..."}`). The mailbox is opened read-only and
-/// every fetch uses `(BODY.PEEK[])` so messages stay unseen even when
-/// the server ignores the read-only open. TLS is always verified via
-/// `ssl.create_default_context()` (fail closed) with a 30-second
-/// connect timeout. Search rejects CR/LF in the query and mailbox,
-/// fetch allowlists message ids to UID syntax (`^[0-9][0-9:,]*$`),
-/// and attachment validates the part index as a non-negative integer.
-/// The `list` op reports selectable mailboxes via `IMAP LIST`,
-/// excluding `Noselect`/`NonExistent` flags. Search uses
-/// `OR SUBJECT/FROM/BODY` via `CHARSET UTF-8` with a plain fallback.
-/// An empty, whitespace-only, or lone `"*"` query maps to `SEARCH ALL`
-/// and returns the most-recent messages (UID order, newest first).
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
     static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptTail.text

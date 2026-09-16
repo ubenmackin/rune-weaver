@@ -1,8 +1,4 @@
 // Rune Weaver App — macOS Menu Bar Agent Application.
-//
-// Native menu bar extra (LSUIElement = 1) providing quick status,
-// one-click dashboard launch, interactive approval decisions,
-// scheduler status, settings link, and clean shutdown.
 
 import SwiftUI
 

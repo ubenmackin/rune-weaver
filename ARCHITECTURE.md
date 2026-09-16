@@ -195,6 +195,22 @@ public protocol Tool: Sendable {
 
 **Python Plugin Bridge**: Python tools are wrapped in a Swift → Python bridge (via PythonKit or a subprocess IPC). The Python tool runs in a sandboxed subprocess and communicates via JSON-RPC over stdin/stdout.
 
+**Built-in Web and Browser Tools**: The engine ships five registered tools on the shared `ToolBus` (the same set in CLI and serve, under one `[browser]` policy):
+
+- `web.search` (`readOnly`): static search over self-hosted SearXNG JSON (`GET <searxng_url>/search?format=json`). Arguments are `query` (required, with a `q` alias) plus `limit` (1 to 50, default 10). The returned hit count is the smaller of the caller limit and `[browser] max_results`, so the model cannot fan out unbounded context. Output is a JSON envelope (`query`, `count`, `results` with `title`, `url`, `snippet`).
+- `web.fetch` (`readOnly`): bounded single-page read. Follows at most 5 server redirects with the shared URL allowlist re-checked on every hop, refuses loopback, link-local, metadata, and private-range targets through the SSRF guard (exempting only the exact configured `searxng_url` origin), caps the download at 1 MB and returned text at 20,000 chars, and always populates `finalUrl`. Output is a typed envelope: `ok` (readable text in `content`), `auth_required` (login wall with a `browser.navigate` hint in `suggestedNext`), or `unsupported` (non-text payload or denied hop with a `reason`).
+- `browser.navigate` (`readOnly`): interactive page open over the isolated Playwright bridge. Opens the URL in a fresh browser context with no persistent profile and returns distilled text plus snapshot refs (`e1`, `e2`, ...) that are valid only with the returned URL. Login walls surface as `authRequired` with a human-login note; downloads stay manifest-only and never reach the host.
+- `browser.act` (`requiresApproval`): one validated action (click, fill, select, press, or scroll) against a `browser.navigate` snapshot ref plus the snapshot URL. Every call parks in the approvals inbox with target plus URL; dry runs validate and return a would-act preview without touching the browser. Downloads stay manifest-only.
+- `api.request` (`requiresApproval`): constrained HTTP (GET, POST, PUT, DELETE) for smoke checks and small JSON fetches, a narrow replacement for shell curl. Headers are limited to Accept, Content-Type, and Authorization; request bodies cap at 64KB and responses at 256KB truncated. Every hop re-validates with the shared allowlist plus the SSRF guard (refusing link-local, loopback except configured origins, metadata hosts, and file URLs). Text pulls return `ok`, file pulls return a manifest-only `download` without writing to the host, and dry runs return a redacted `preview` without dialing.
+
+**SearXNG lifecycle**: `SearXNGEnsurer.shared` (shared actor) keeps the local engine warm. `serve` calls `ensure` on boot and `web.search` calls it on first use; both collapse onto one in-flight attempt keyed by normalized base URL in-process (10 second budget, 500 ms polls), while racing processes serialize on the shared `runeweaver-searxng` container name. When down it starts an existing container or runs pinned `searxng/searxng:2025.9.1` (never `:latest`) with a loopback-only publish (`127.0.0.1:<port>:8080`, host port taken from `searxng_url`: explicit port wins, else the scheme default — 80 for http, 443 for https — matching the probe so publish and probe converge; 8888 is the default configured URL's port) plus a per-install `~/.runeweaver/searxng/settings.yml` carrying a random Flask secret (file `0600`, directory `0700`, enforced on every ensure with fail-closed logging; the bundled `Config/searxng/settings.yml` placeholder is never mounted), then fails closed with the `scripts/searxng-up.sh` escape hatch. The runtime is the Apple Container CLI only (`container`; Docker is unsupported). The container stays running after quit by design. `rune-weaver status` reports `reachable` or `unreachable` for the configured URL.
+
+**Navigate/act isolation**: navigate and act share one Playwright gateway but never share state. Each call opens a fresh isolated context with no persistent profile, no stored credentials, and no cross-task storage, then closes it before returning. Act re-navigates to the snapshot URL and re-resolves the ref, so no handle or cookie outlives the call and refs from one snapshot never act on another page.
+
+**Screenshot and vision gate**: `browser.navigate` carries an opt-in `includeScreenshot` flag (default false). Captures downscale to a 1280px longest edge, re-encode to bounded JPEG under 500KB held in memory for the turn only (never written to disk), and persist only a content hash in the audit trail, never pixels. The gate is model-aware: `VisionGate` strips `data:image` payloads from history for text-only models, `LLMRouter` hides `includeScreenshot` from tool schemas sent to text-only providers (`supportsVision` false) while vision-capable providers keep it, and `SystemPromptComposer` advertises the opt-in only when `supportsVision` is true.
+
+**Search health surfaces**: search health shows in three places fed by the same probe. The `status` command prints a SearXNG `reachable` or `unreachable` row for the configured URL. The dashboard Profile menu carries a SearXNG row (green or red dot, URL tooltip, Start and Stop buttons). The Settings Search pane carries the same Start and Stop plus health text, editing the `[browser]` values (`searxng_url`, `search_timeout_seconds`, `max_results`) that the tools dial. `GET /health` reports engine, model, provider, and context length; the dashboard falls back to a live search probe when the health payload carries no search fields.
+
 ### 4. Memory Engine
 
 Three tiers of memory, each backed by different storage:
@@ -239,7 +255,7 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - Tier 1/2 — Seatbelt-confinement for plugin subprocesses and document writes: downloads and edits use Seatbelt-confined temp with an atomic move into the workspace only on approval; writes to the real filesystem require explicit approval via `FilesAccessGuard` with no host staging directory
 - Tier 3 — Ephemeral microVM detonation for untrusted archives: ZIP/TAR families run in zero-host-mounts Apple Container machines with manifest-only returns (no host staging); single-entry inspection truncates text to the preview cap and caps vision payloads, exports are approval-gated through the workspace guard
 - Each detonation is ephemeral and reaped immediately; `archive_session_ttl_minutes` reclaims only crash orphans and `max_concurrent_machines` caps concurrent detonations before spawn
-- Browser automation runs in an isolated Playwright context
+- Browser navigate/act calls each run in a fresh isolated Playwright context
 - Python plugins run in subprocess sandboxes with timeouts and bounded output drains
 - Network access is logged and auditable
 
@@ -289,6 +305,7 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - Scheduler management (wizard-driven job creation, cron & poll triggers, toggle enable/disable, manual "Run Now").
 - Run history inspector with live in-progress run tracking across page loads and route changes.
 - Approvals inbox (approve-with-duration or deny gated writes).
+- Search health and policy (SearXNG URL, timeout, and result cap with Start/Stop plus health text in the Settings Search pane; matching SearXNG row with Start/Stop in the Profile menu).
 - Spec-compliant markdown rendering via `react-markdown` and `remark-gfm` with zero `dangerouslySetInnerHTML`, GFM table support, fenced code blocks with language tags, and protocol-whitelisted URL sanitization on links and images.
 - Native Web Notifications API integration and unread badge counters for background runs and pending approvals, powered by a shared WebSocket connection (`useSharedWebSocket`).
 - Served by the Vapor API layer on loopback only; no separate frontend host process.
@@ -308,12 +325,15 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 - SMTP for sending (Swift NIO or Python `smtplib`)
 - Running in Docker on Linux homelab — connect via WireGuard
 
-### Browser Automation
+### Browser Automation and Web Access
 
-- **Playwright** (Python) running in a sandboxed subprocess
-- Actions: navigate, click, fill forms, screenshot, extract content
-- Sandboxed: new browser context per task, no cross-contamination
-- Approval required for any action that submits data or clicks buttons on real websites
+Static reads and interactive browsing are separate layers with separate tools (see Tool Plugin System):
+
+- **Static search (`web.search`, read-only)**: self-hosted SearXNG over its JSON API, ensured on serve boot and first search, failing closed with the manual start hatch. Queries never leave operator infrastructure.
+- **Static fetch (`web.fetch`, read-only)**: GET-only page read with per-hop allowlist checks, SSRF guard, 5-redirect bound, 1 MB cap, and a typed `ok` / `auth_required` / `unsupported` envelope.
+- **Interactive browser (`browser.navigate` read-only plus `browser.act` approval-gated)**: **Playwright** (Python) over a subprocess bridge. Each call opens a fresh isolated context with no persistent profile or cross-task storage, then closes it. Navigate returns distilled text plus snapshot refs; act performs exactly one validated action (click, fill, select, press, scroll) against one ref plus its snapshot URL. Downloads stay manifest-only.
+- **Constrained API calls (`api.request`, approval-gated)**: narrow GET/POST/PUT/DELETE replacement for shell curl with an allowlisted header subset, body and response caps, per-hop SSRF checks, manifest-only file pulls, and dry-run previews.
+- Screenshots are opt-in per navigate call (`includeScreenshot`, default false) and gated by model vision support; text-only models never see the flag or the bytes.
 
 ### Home Automation
 
@@ -493,6 +513,11 @@ max_concurrent_machines = 3  # concurrent detonation cap, enforced before spawn
 deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]
 allow_roots = ["~"]  # allowed roots for file reads (`~` expands to home)
 require_approval_on_deny = true  # deny hits escalate to approvals inbox (true) or fail closed (false)
+
+[browser]
+searxng_url = "http://127.0.0.1:8888"  # local SearXNG base URL (`/search` is appended)
+search_timeout_seconds = 10  # per-search timeout (1-120)
+max_results = 10  # per-search result cap (1-50, bounds web.search fan-out)
 
 [email]
 [[email.accounts]]

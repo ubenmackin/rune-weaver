@@ -1,18 +1,9 @@
 // Rune Weaver Tools — IMAP mailbox access and validation over a subprocess bridge.
-//
-// Reads and searches mailboxes through the `python3 imaplib` subprocess with
-// strict payload decoding and fail-closed validation. Keeps credentials at
-// execution time and secrets out of error messages so tool calls stay safe
-// without touching the network directly.
 
 import Foundation
 import RuneWeaverCore
 
 /// Failures talking to an IMAP mailbox through the bridge.
-///
-/// Messages echo only non-sensitive fields (account name, host, port,
-/// username, mailbox, operation). Passwords and raw request documents
-/// are never included.
 public enum EmailIMAPError: Error, Sendable, Equatable {
     /// The named account is not in `EmailConfig`.
     case unknownAccount(name: String, available: [String])
@@ -44,12 +35,6 @@ extension EmailIMAPError: LocalizedError {
 }
 
 /// Fail-closed validation for IMAP bridge inputs.
-///
-/// Mirrors the embedded Python helper's allowlisting so Swift rejects
-/// malicious input before spawning the subprocess. Search queries must
-/// not contain CR/LF and message ids must match UID syntax
-/// (`^[0-9][0-9:,]*$`) so crafted input cannot inject additional IMAP
-/// commands. Errors never echo input values or secrets.
 public enum EmailIMAPValidation: Sendable {
     /// Validates a search query, rejecting CR/LF injection.
     /// - Parameter query: Free-text query to check.
@@ -61,32 +46,12 @@ public enum EmailIMAPValidation: Sendable {
     }
 
     /// Whether a search query requests every message (most-recent listing).
-    ///
-    /// A trimmed empty query, a whitespace-only query, or a lone `"*"`
-    /// wildcard maps to `SEARCH ALL` so `email.search` with `"*"`,
-    /// `""`, or `"   "` returns the most-recent messages instead of
-    /// sending a literal `TEXT "*"` that matches nothing on iCloud
-    /// (`imap.mail.me.com:993`) and some Volcrypt mailboxes. Mirrors the
-    /// Python bridge check (`if not query or query == "*"`). Never logs
-    /// or echoes input.
-    /// - Parameter query: Raw or trimmed free-text query.
-    /// - Returns: True when the query should list recent messages via `ALL`.
     public static func isAllQuery(_ query: String) -> Bool {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty || trimmed == "*"
     }
 
     /// Whether raw tool arguments contain an unescaped JSON escape for CR/LF.
-    ///
-    /// Detects `\r`, `\n`, `\u000d`, `\u000a` (hex case-insensitive) with
-    /// an odd backslash count so legitimate Windows paths (`C:\\new\\report`,
-    /// double backslash decoding to literal backslash+r/n) pass while
-    /// injection (`hello\r\nworld`, single backslash decoding to real
-    /// CR/LF) fails. Decoded checks catch real CR/LF; this raw pre-check
-    /// guarantees "Invalid search query" even when the password is missing.
-    /// Never logs or echoes input.
-    /// - Parameter rawJSON: Raw `ToolInput.argumentsJSON` document.
-    /// - Returns: True when an unescaped CR/LF escape is present.
     public static func containsEncodedCRLF(in rawJSON: String) -> Bool {
         let chars = Array(rawJSON)
         var index = 0
@@ -173,73 +138,19 @@ public enum EmailIMAPValidation: Sendable {
 }
 
 /// IMAP gateway used by the email tools.
-///
-/// The production implementation shells out to `python3 imaplib`;
-/// tests inject a stub. Search, fetch, and attachment paths stay
-/// read-only: the mailbox is opened with `readonly=True` and only
-/// `(BODY.PEEK[])` fetches are used so `\Seen` is never set even when
-/// the server ignores the read-only open. `listMailboxes` plus the
-/// `mailbox` overloads fan search out across every selectable folder;
-/// the legacy `INBOX` overloads remain for single-folder callers.
-/// `append` is the single write path, used best-effort for Sent copies
-/// after SMTP success; it never fails a send.
 public protocol EmailIMAPGateway: Sendable {
-    /// Searches subject, sender, and body for `query`.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - query: Free-text query matched against subject/sender/body (`"*"`/empty means most-recent via `ALL`).
-    ///   - limit: Maximum hits (already clamped to `1...50`).
-    /// - Returns: Hits, newest first.
-    func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit]
-
-    /// Fetches one message by UID (falling back to sequence number).
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: IMAP UID of the message.
-    /// - Returns: Headers plus text body with attachment metadata.
-    func fetch(credentials: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage
-
-    /// Fetches one attachment part by zero-based index.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: IMAP UID of the message.
-    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
-    /// - Returns: Attachment bytes with filename, MIME type, and size.
-    func attachment(
-        credentials: ResolvedEmailCredentials,
-        messageID: String,
-        attachmentIndex: Int
-    ) async throws -> EmailAttachmentData
-
     /// Lists selectable mailboxes via `IMAP LIST`, excluding non-selectable flags.
     /// - Parameter credentials: Resolved connection fields plus password.
     /// - Returns: Selectable mailbox names in server order.
     func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String]
 
     /// Searches one mailbox for `query`.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - query: Free-text query (`"*"`/empty means most-recent via `ALL`).
-    ///   - limit: Maximum hits (already clamped to `1...50`).
-    /// - Returns: Hits newest-first labeled with `mailbox`.
     func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit]
 
     /// Fetches one message from one mailbox.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - messageID: IMAP UID of the message.
-    /// - Returns: Headers plus text body with attachment metadata.
     func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
 
     /// Fetches one attachment part from one mailbox.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - messageID: IMAP UID of the message.
-    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
-    /// - Returns: Attachment bytes with filename, MIME type, and size.
     func attachment(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -248,101 +159,10 @@ public protocol EmailIMAPGateway: Sendable {
     ) async throws -> EmailAttachmentData
 
     /// Appends one RFC822 message to a mailbox with `\Seen`.
-    ///
-    /// Best-effort Sent copy after SMTP success: callers warn but never
-    /// fail the send when the mailbox is missing or the store rejects
-    /// the bytes.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Destination mailbox (resolved Sent folder).
-    ///   - rawMessage: Full RFC822 bytes to store.
     func append(credentials: ResolvedEmailCredentials, mailbox: String, rawMessage: Data) async throws
 }
 
-/// Backwards-compatible defaults so legacy stubs keep compiling.
-///
-/// Stubs that only implement the `INBOX` overloads fan out as a single
-/// `INBOX` folder: `listMailboxes` reports `["INBOX"]` and the
-/// `mailbox` overloads delegate when the mailbox is `INBOX`
-/// (case-insensitive) and otherwise report an unknown mailbox without
-/// secrets.
-public extension EmailIMAPGateway {
-    /// Defaults to a single `INBOX` folder for legacy stubs.
-    /// - Parameter credentials: Ignored resolved credentials.
-    /// - Returns: `["INBOX"]`.
-    func listMailboxes(credentials _: ResolvedEmailCredentials) async throws -> [String] {
-        ["INBOX"]
-    }
-
-    /// Delegates `INBOX` searches to the legacy overload.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Requested mailbox.
-    ///   - query: Free-text query.
-    ///   - limit: Maximum hits.
-    /// - Returns: Hits newest-first labeled with `mailbox`.
-    func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
-        guard mailbox.lowercased() == "inbox" else {
-            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
-        }
-        let hits = try await search(credentials: credentials, query: query, limit: limit)
-        return hits.map { EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: "INBOX") }
-    }
-
-    /// Delegates `INBOX` fetches to the legacy overload.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Requested mailbox.
-    ///   - messageID: IMAP UID of the message.
-    /// - Returns: Headers plus text body.
-    func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage {
-        guard mailbox.lowercased() == "inbox" else {
-            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
-        }
-        return try await fetch(credentials: credentials, messageID: messageID)
-    }
-
-    /// Delegates `INBOX` attachment fetches to the legacy overload.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Requested mailbox.
-    ///   - messageID: IMAP UID of the message.
-    ///   - attachmentIndex: Zero-based attachment position.
-    /// - Returns: Attachment bytes.
-    func attachment(
-        credentials: ResolvedEmailCredentials,
-        mailbox: String,
-        messageID: String,
-        attachmentIndex: Int
-    ) async throws -> EmailAttachmentData {
-        guard mailbox.lowercased() == "inbox" else {
-            throw EmailBridgeParsing.unknownMailboxError(requested: mailbox, available: ["INBOX"])
-        }
-        return try await attachment(credentials: credentials, messageID: messageID, attachmentIndex: attachmentIndex)
-    }
-
-    /// Fails closed for legacy stubs without Sent-append support.
-    ///
-    /// Keeps older test doubles compiling while production and new stubs
-    /// implement the write path; the send tool treats this as a
-    /// best-effort warning, never a send failure.
-    /// - Parameters:
-    ///   - credentials: Ignored resolved credentials.
-    ///   - mailbox: Requested destination mailbox.
-    ///   - rawMessage: Ignored RFC822 bytes.
-    func append(credentials _: ResolvedEmailCredentials, mailbox: String, rawMessage _: Data) async throws {
-        throw EmailIMAPError.bridgeFailed("IMAP append to '\(mailbox)' is not supported by this gateway")
-    }
-}
-
 /// Resolves the best-effort Sent mailbox from a `LIST` result.
-///
-/// Prefers `Sent`, then `Sent Items`, then `Sent Messages` with an
-/// exact-first, case-insensitive fallback so provider folder spellings
-/// keep working without assuming names. Returns nil when no candidate
-/// matches so callers warn instead of failing the send.
-/// Centralizes Sent resolution so the send tool and tests share one
-/// candidate order.
 public enum EmailSentMailbox: Sendable {
     /// Ordered Sent candidates tried against `LIST`.
     public static let candidates = ["Sent", "Sent Items", "Sent Messages"]
@@ -364,10 +184,6 @@ public enum EmailSentMailbox: Sendable {
 }
 
 /// Bridge request document sent to the Python helper over stdin.
-///
-/// Encoded as a single JSON object. The password travels only in this
-/// in-memory document and the subprocess pipe — it is never logged
-/// and never echoed in errors.
 struct EmailIMAPBridgeRequest: Encodable {
     /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, or `"append"`.
     let op: String
@@ -393,12 +209,6 @@ struct EmailIMAPBridgeRequest: Encodable {
     let rawMessageBase64: String?
 
     /// Creates a search request.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - query: Free-text query.
-    ///   - limit: Maximum hits.
-    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
-    /// - Returns: Search request for one mailbox.
     static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX") -> Self {
         Self(
             op: "search",
@@ -416,11 +226,6 @@ struct EmailIMAPBridgeRequest: Encodable {
     }
 
     /// Creates a fetch request.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: Message UID.
-    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
-    /// - Returns: Fetch request for one mailbox.
     static func fetch(credentials: ResolvedEmailCredentials, messageID: String, mailbox: String = "INBOX") -> Self {
         Self(
             op: "fetch",
@@ -438,12 +243,6 @@ struct EmailIMAPBridgeRequest: Encodable {
     }
 
     /// Creates an attachment request.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: Message UID.
-    ///   - attachmentIndex: Zero-based attachment position.
-    ///   - mailbox: Mailbox to open read-only. Defaults to `INBOX`.
-    /// - Returns: Attachment request for one mailbox.
     static func attachment(
         credentials: ResolvedEmailCredentials,
         messageID: String,
@@ -485,15 +284,6 @@ struct EmailIMAPBridgeRequest: Encodable {
     }
 
     /// Creates a Sent-append request for a best-effort Sent copy.
-    ///
-    /// The raw RFC822 bytes are built by the caller (plain headers plus
-    /// bodies) and stored with `\Seen` so the Sent copy never appears
-    /// unread. Failures are best-effort and never fail the send.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Resolved Sent mailbox (e.g. `Sent`).
-    ///   - rawMessage: Full RFC822 bytes to store.
-    /// - Returns: `append` request for one mailbox.
     static func append(credentials: ResolvedEmailCredentials, mailbox: String, rawMessage: Data) -> Self {
         Self(
             op: "append",
@@ -512,12 +302,6 @@ struct EmailIMAPBridgeRequest: Encodable {
 }
 
 /// Subprocess gateway shelling out to `python3 imaplib`.
-///
-/// Each call spawns one short-lived `python3 -c` process, writes the
-/// JSON request to its stdin, and decodes the JSON response from its
-/// stdout. No Swift IMAP dependency is needed, matching the
-/// subprocess-IPC bridge the architecture prescribes for Python-first
-/// integrations. The helper never logs credentials or request bodies.
 public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     /// Environment variable overriding the Python executable.
     public static let pythonEnvVar = "RUNEWEAVER_PYTHON_BIN"
@@ -526,9 +310,6 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     public let pythonExecutable: String?
 
     /// Creates a subprocess gateway.
-    /// - Parameter pythonExecutable: Explicit `python3` path. Defaults
-    ///   to `RUNEWEAVER_PYTHON_BIN` when set, otherwise `python3` on
-    ///   `PATH` via `/usr/bin/env`.
     public init(pythonExecutable: String? = nil) {
         if let pythonExecutable, !pythonExecutable.isEmpty {
             self.pythonExecutable = pythonExecutable
@@ -543,23 +324,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Searches via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - query: Free-text query (`"*"`/empty lists most-recent via `ALL`).
-    ///   - limit: Maximum hits.
-    /// - Returns: Hits, newest first.
-    public func search(credentials: ResolvedEmailCredentials, query: String, limit: Int) async throws -> [EmailSearchHit] {
-        try await search(credentials: credentials, mailbox: "INBOX", query: query, limit: limit)
-    }
-
     /// Searches one mailbox via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - query: Free-text query (`"*"`/empty lists most-recent via `ALL`).
-    ///   - limit: Maximum hits.
-    /// - Returns: Hits newest-first labeled with `mailbox`.
     public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
         try EmailIMAPValidation.validateSearchQuery(query)
         try EmailIMAPValidation.validateMailbox(mailbox)
@@ -601,21 +366,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Fetches via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: Message UID.
-    /// - Returns: Headers plus text body with attachment metadata.
-    public func fetch(credentials: ResolvedEmailCredentials, messageID: String) async throws -> EmailFullMessage {
-        try await fetch(credentials: credentials, mailbox: "INBOX", messageID: messageID)
-    }
-
     /// Fetches one message from one mailbox via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - messageID: Message UID.
-    /// - Returns: Headers plus text body with attachment metadata.
     public func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage {
         try EmailIMAPValidation.validateMessageID(messageID)
         try EmailIMAPValidation.validateMailbox(mailbox)
@@ -631,27 +382,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Fetches one attachment part via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - messageID: Message UID.
-    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
-    /// - Returns: Attachment bytes with filename, MIME type, and size.
-    public func attachment(
-        credentials: ResolvedEmailCredentials,
-        messageID: String,
-        attachmentIndex: Int
-    ) async throws -> EmailAttachmentData {
-        try await attachment(credentials: credentials, mailbox: "INBOX", messageID: messageID, attachmentIndex: attachmentIndex)
-    }
-
     /// Fetches one attachment part from one mailbox via the Python helper.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Mailbox to open read-only.
-    ///   - messageID: Message UID.
-    ///   - attachmentIndex: Zero-based position in the `fetch` attachment list.
-    /// - Returns: Attachment bytes with filename, MIME type, and size.
     public func attachment(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
@@ -679,15 +410,6 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     }
 
     /// Appends one RFC822 message to a mailbox with `\Seen`.
-    ///
-    /// Best-effort Sent copy: validates the mailbox and non-empty bytes
-    /// before spawning so empty appends fail without network use, then
-    /// stores via `IMAP APPEND` with verified TLS. Callers warn but never
-    /// fail the send when this throws.
-    /// - Parameters:
-    ///   - credentials: Resolved connection fields plus password.
-    ///   - mailbox: Destination mailbox (resolved Sent folder).
-    ///   - rawMessage: Full RFC822 bytes to store.
     public func append(credentials: ResolvedEmailCredentials, mailbox: String, rawMessage: Data) async throws {
         try EmailIMAPValidation.validateMailbox(mailbox)
         guard !rawMessage.isEmpty else {
@@ -706,14 +428,6 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
     }
 
     /// Runs the helper once with the given request.
-    ///
-    /// Encoding runs on the caller; the blocking spawn, stdin write,
-    /// wait, and pipe reads run off the async executor on a background
-    /// queue via `runIMAPBridgeIO(payload:pythonExecutable:)` so the
-    /// cooperative pool is never blocked.
-    /// - Parameter request: Bridge request (holds the password in memory only).
-    /// - Returns: Raw stdout bytes.
-    /// - Throws: `EmailIMAPError` without any secret value.
     func run(request: EmailIMAPBridgeRequest) async throws -> Data {
         let payload: Data
         do {

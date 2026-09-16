@@ -1,39 +1,17 @@
 // Rune Weaver Core — Semantic store maintenance for MemoryEngine.
-//
-// Houses the vector-store maintenance surface (counts, dimension reads,
-// clearing, reindexing, and embedding backfill) plus its outcome value so
-// the main engine file stays within style budgets. Backfill gives
-// keyword-only rows vectors without losing identity: it preserves fact
-// identifiers, metadata, and creation order, leaves already-embedded rows
-// alone, refuses to mix store and backend widths without an explicit reset,
-// isolates per-row width rejections as skips, and throws the same reset
-// guidance when a pass rejects every pending row (a systematic width
-// disagreement that would otherwise masquerade as a silent all-skip).
 
 import Foundation
 
 /// Outcome of one embedding-backfill pass over keyword-only rows.
-///
-/// A struct (rather than a tuple) keeps the three counts name-addressable
-/// at call sites while satisfying the tuple-arity style budget. Counts
-/// partition the pending rows: every pending row lands in exactly one
-/// bucket per pass.
 public struct EmbeddingBackfillResult: Sendable, Equatable {
     /// Rows that gained a vector and were persisted.
     public let embedded: Int
     /// Rows skipped for per-row width mismatch.
-    ///
-    /// Never fatal when at least one row embeds, but a pass that skips every
-    /// pending row is a systematic mismatch that throws instead of returning.
     public let skipped: Int
     /// Rows lost to batch-level embedding or store failures.
     public let failed: Int
 
     /// Creates a backfill outcome.
-    /// - Parameters:
-    ///   - embedded: Rows that gained a vector.
-    ///   - skipped: Rows skipped for width mismatch.
-    ///   - failed: Rows lost to embedding or store failures.
     public init(embedded: Int, skipped: Int, failed: Int) {
         self.embedded = embedded
         self.skipped = skipped
@@ -55,24 +33,11 @@ public extension MemoryEngine {
     }
 
     /// Active embedding width of the semantic store, if known.
-    ///
-    /// Derived from stored vectors (a single width wins while mixed or
-    /// empty widths clear to nil) so backfill can refuse to mix a new
-    /// backend width with an old store width instead of silently
-    /// comparing incomparable vectors.
-    /// - Returns: Store dimension, or nil when unknown or empty.
     func semanticDimension() async -> Int? {
         await semanticStoreDimension()
     }
 
     /// Clears every semantic row and resets the derived store width.
-    ///
-    /// The file persists empty first, then the in-memory width is
-    /// recomputed from disk so a stale derived width never blocks the next
-    /// backend: without the reload the old dimension would linger and
-    /// reject the first row of the new width even though the store is empty.
-    /// An init-configured expectation survives the empty.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the clear fails.
     func clearSemanticStore() async throws {
         do {
             try await semanticStoreClear()
@@ -84,13 +49,6 @@ public extension MemoryEngine {
     }
 
     /// Compacts the semantic store and revalidates its dimension.
-    ///
-    /// Reloads externally added rows, drops exact duplicates, and rewrites
-    /// the file so manual edits converge; mixed widths throw instead of
-    /// silently keeping the first width so operators notice the drift.
-    /// - Returns: Fact count after compaction.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the file is
-    ///   corrupt or stored rows have mixed widths.
     @discardableResult
     func reindexSemantic() async throws -> Int {
         do {
@@ -103,27 +61,6 @@ public extension MemoryEngine {
     }
 
     /// Gives keyword-only rows vectors while preserving identity and order.
-    ///
-    /// Only rows with empty embeddings are embedded; already-vectorized rows
-    /// are never re-embedded so stable similarities and profile mirrors keep
-    /// pointing at the same identifiers. Each replacement reuses the original
-    /// `id`, `metadata`, and `createdAt` so profile mirrors stay linked and
-    /// chronological ordering survives the rewrite. Work proceeds in batches
-    /// to bound model round-trips, and failures stay isolated: a batch-level
-    /// embedding failure marks its whole batch failed, while a per-row width
-    /// rejection counts as skipped so one stale row cannot abort the rest.
-    /// A pass that skips every pending row is not per-row noise but a
-    /// systematic store/backend disagreement, so it throws the explicit-reset
-    /// guidance instead of reporting a silent all-skip.
-    /// - Parameters:
-    ///   - embedder: Vector producer for fact contents.
-    ///   - batchSize: Texts per embedding call. Defaults to 32. Non-positive
-    ///     values clamp to one so callers never deadlock on an empty batch.
-    /// - Returns: Counts of embedded, skipped (width-mismatched), and failed rows.
-    /// - Throws: `MemoryEngineError/semanticFailed(_:)` when the store and
-    ///   backend widths differ, either from the backend's advertised width
-    ///   before any work or from every pending row being rejected at upsert
-    ///   time; the message names both widths and requires an explicit reset.
     func backfillEmbeddings(
         embedder: any EmbeddingsBackend,
         batchSize: Int = 32
@@ -201,14 +138,6 @@ public extension MemoryEngine {
     }
 
     /// Builds the explicit-reset error naming the store and backend widths.
-    ///
-    /// Single-sourced so the advertised-width guard and the all-rows-skipped
-    /// guard emit identical guidance; a nil backend width (only possible when
-    /// nothing was produced) renders as `unknown`.
-    /// - Parameters:
-    ///   - storeDimension: Width already fixed by the store.
-    ///   - backendDimension: Observed backend width, or nil when unknown.
-    /// - Returns: Guidance requiring an explicit reset.
     private static func embeddingDimensionResetError(
         storeDimension: Int,
         backendDimension: Int?

@@ -1,9 +1,4 @@
 // Rune Weaver Core — Graduated-trust permission gate and trust storage.
-//
-// Enforces the trust boundary between the agent and the real world:
-// read-only tools run freely, approval-gated tools require explicit
-// decisions with graduated-trust grants, and denied actions refuse with
-// reasons. Persists grants best-effort through a pluggable trust store.
 
 import Foundation
 #if canImport(SQLite3)
@@ -11,10 +6,6 @@ import Foundation
 #endif
 
 /// How long a graduated-trust grant lasts.
-///
-/// Offered to the user when approving a state-changing action so they
-/// are not approving the same thing forever. `thisTime` is a one-shot
-/// approval and is never persisted; `forever` never expires.
 public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     /// Approve once. No grant is stored.
     case thisTime
@@ -39,10 +30,6 @@ public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
     }
 
     /// Grant lifetime in seconds, or nil when the grant never expires.
-    ///
-    /// `thisTime` returns `0` (expires immediately, so callers treat it
-    /// as a single-use approval and skip persistence). `forever`
-    /// returns `nil` (no expiry).
     public var timeInterval: TimeInterval? {
         switch self {
         case .thisTime: 0
@@ -55,10 +42,6 @@ public enum TrustDuration: String, Sendable, Codable, Equatable, CaseIterable {
 }
 
 /// Identifies a trustable action: a tool plus an optional target.
-///
-/// Trust is stored per action per target, e.g. tool
-/// `"email.send"` with target `"dr.smith@clinic.com"`. An empty
-/// `target` means the grant covers every target for that tool.
 public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     /// Name of the tool (e.g. `"email.send"`).
     public let toolName: String
@@ -66,38 +49,27 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     public let target: String
 
     /// Creates an action descriptor.
-    /// - Parameters:
-    ///   - toolName: Name of the tool.
-    ///   - target: Action target. Defaults to `""` (all targets).
     public init(toolName: String, target: String = "") {
         self.toolName = toolName
         self.target = target
     }
 
     /// Derives a descriptor from a tool call.
-    ///
-    /// Best-effort extraction of a target from common argument keys
-    /// (`to`, `recipient`, `target`, `path`, `url`, `email`,
-    /// `address`, `destination`). Falls back to `""` when no target
-    /// can be found or the arguments are not JSON.
-    /// - Parameters:
-    ///   - toolCall: Invocation arguments.
-    ///   - tool: The tool being invoked.
-    /// - Returns: Descriptor for the call.
     public static func descriptor(for toolCall: ToolInput, tool: any Tool) -> ActionDescriptor {
-        ActionDescriptor(toolName: tool.name, target: ActionDescriptor.target(from: toolCall))
+        if tool.name == "browser.act",
+           let combined = browserActTarget(from: toolCall)
+        {
+            return ActionDescriptor(toolName: tool.name, target: combined)
+        }
+        if tool.name == "api.request",
+           let combined = apiRequestTarget(from: toolCall)
+        {
+            return ActionDescriptor(toolName: tool.name, target: combined)
+        }
+        return ActionDescriptor(toolName: tool.name, target: ActionDescriptor.target(from: toolCall))
     }
 
     /// Extracts a target string from raw tool arguments.
-    ///
-    /// Email recipients are case-insensitive and may arrive as a single
-    /// string or an array, so `to` (plus the `recipient`/`email` aliases)
-    /// normalizes to a lowercased comma-joined list. A grant for one
-    /// address then bypasses only that address while a different recipient
-    /// re-prompts. All other tools fall back to the first non-empty string
-    /// among the remaining target keys.
-    /// - Parameter toolCall: Invocation carrying `argumentsJSON`.
-    /// - Returns: The extracted target, or `""` when absent.
     public static func target(from toolCall: ToolInput) -> String {
         guard let data = toolCall.argumentsJSON.data(using: .utf8),
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -106,6 +78,15 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
             if let joined = normalizedEmailTarget(object[key]) {
                 return joined
             }
+        }
+        // Browser refs combine with the page URL so element-scoped grants
+        // never collapse across pages; the dedicated act path below adds
+        // the action verb for the same reason.
+        if let ref = stringifiedBrowserRef(in: object) {
+            if let url = trimmedString(object["url"]), !url.isEmpty {
+                return "\(ref) @ \(url)"
+            }
+            return ref
         }
         for key in ["target", "path", "url", "address", "destination"] {
             if let value = object[key] as? String {
@@ -118,15 +99,102 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         return ""
     }
 
+    /// Builds the approval target for a browser action call.
+    private static func browserActTarget(from toolCall: ToolInput) -> String? {
+        guard let data = toolCall.argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let action = trimmedString(object["action"])
+            ?? trimmedString(object["type"])
+            ?? trimmedString(object["kind"])
+        let ref = stringifiedBrowserRef(in: object)
+        let url = trimmedString(object["url"])
+            ?? trimmedString(object["page"])
+            ?? trimmedString(object["pageUrl"])
+            ?? trimmedString(object["page_url"])
+        var headParts: [String] = []
+        if let action, !action.isEmpty {
+            headParts.append(action)
+        }
+        if let ref, !ref.isEmpty {
+            headParts.append(ref)
+        }
+        let head = headParts.joined(separator: " ")
+        if !head.isEmpty, let url, !url.isEmpty {
+            return "\(head) @ \(url)"
+        }
+        if !head.isEmpty {
+            return head
+        }
+        if let url, !url.isEmpty {
+            return url
+        }
+        return nil
+    }
+
+    /// Builds the approval target for a constrained API request call.
+    private static func apiRequestTarget(from toolCall: ToolInput) -> String? {
+        guard let data = toolCall.argumentsJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        let rawMethod = trimmedString(object["method"])
+            ?? trimmedString(object["verb"])
+        let method = (rawMethod ?? "GET").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let effectiveMethod = method.isEmpty ? "GET" : method
+        let url = trimmedString(object["url"])
+            ?? trimmedString(object["uri"])
+            ?? trimmedString(object["link"])
+        let body = trimmedString(object["body"])
+            ?? trimmedString(object["payload"])
+            ?? trimmedString(object["data"])
+        guard let url, !url.isEmpty else { return nil }
+        guard let body, !body.isEmpty else {
+            return "\(effectiveMethod) \(url)"
+        }
+        let preview = apiBodyPreview(body)
+        return "\(effectiveMethod) \(url) body:\(preview)"
+    }
+
+    /// Collapses a request body to the short preview used in API targets.
+    private static func apiBodyPreview(_ body: String) -> String {
+        let single = body.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard single.count > 200 else { return single }
+        return String(single.prefix(200))
+    }
+
+    /// Trims an optional string value, collapsing blank to nil.
+    private static func trimmedString(_ value: Any?) -> String? {
+        guard let text = value as? String else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Normalizes a browser element ref from its string or integer aliases.
+    private static func stringifiedBrowserRef(in object: [String: Any]) -> String? {
+        for key in ["ref", "target", "selector", "element", "elementRef"] {
+            if let text = trimmedString(object[key]) {
+                return text
+            }
+            // Booleans bridge to NSNumber, so skip them before the numeric
+            // pass: `true` must never park as `"e1"`.
+            if object[key] is Bool {
+                continue
+            }
+            // JSON numbers arrive as NSNumber: accept integral positives
+            // only so `12` maps to `"e12"` while `12.5` or `0` falls
+            // through to fail-closed validation downstream.
+            if let boxed = object[key] as? NSNumber,
+               boxed.doubleValue == Double(boxed.intValue),
+               boxed.intValue >= 1
+            {
+                return "e\(boxed.intValue)"
+            }
+        }
+        return nil
+    }
+
     /// Normalizes an email recipient value to a lowercased target.
-    ///
-    /// Accepts a bare string (`"Dr.Smith@Clinic.com"` trims and lowercases)
-    /// or an array of strings (trims, drops blanks, lowercases, and joins
-    /// with commas). Non-string elements are ignored so a malformed array
-    /// never produces a grant-bypassing target. Returns nil when no usable
-    /// address remains so callers fall through to the next alias.
-    /// - Parameter value: Raw JSON value for `to`/`recipient`/`email`.
-    /// - Returns: Lowercased target, or nil when absent.
     private static func normalizedEmailTarget(_ value: Any?) -> String? {
         if let text = value as? String {
             let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -171,12 +239,6 @@ public struct TrustGrant: Sendable, Codable, Equatable {
     public let duration: TrustDuration
 
     /// Creates a trust grant.
-    /// - Parameters:
-    ///   - id: Grant identifier. Defaults to a new UUID.
-    ///   - actionDescriptor: The trusted action.
-    ///   - grantedAt: Creation date. Defaults to now.
-    ///   - expiresAt: Expiry date, or nil for no expiry.
-    ///   - duration: Duration tier.
     public init(
         id: UUID = UUID(),
         actionDescriptor: ActionDescriptor,
@@ -220,10 +282,6 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     /// Duration options offered to the user.
     public let suggestedDurations: [TrustDuration]
     /// Owning session for narrated parked turns, if known.
-    ///
-    /// Structured gate checks leave this untagged while the narration
-    /// fallback stamps the session so the approvals inbox can resume the
-    /// same conversation on allow or notify it on deny.
     public let sessionID: UUID?
 
     /// Coding keys for the approval prompt.
@@ -243,13 +301,6 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     }
 
     /// Creates a permission request.
-    /// - Parameters:
-    ///   - id: Request identifier. Defaults to a new UUID.
-    ///   - toolName: Name of the tool.
-    ///   - description: Human-readable summary.
-    ///   - input: Original invocation.
-    ///   - suggestedDurations: Duration options. Defaults to all tiers.
-    ///   - sessionID: Owning session for parked narration. Defaults to nil (untagged).
     public init(
         id: UUID = UUID(),
         toolName: String,
@@ -292,11 +343,6 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
 }
 
 /// Verdict returned by ``PermissionGate/checkPermission(toolCall:tool:)``.
-///
-/// `ToolBus` consults the gate before executing any tool: `allowed`
-/// runs immediately, `requiresApproval` is forwarded to connected
-/// clients (WebSocket) for a trust-tiered decision, and `denied`
-/// fails the call with the associated reason.
 public enum PermissionDecision: Sendable, Equatable {
     /// The call may run immediately.
     case allowed
@@ -307,10 +353,6 @@ public enum PermissionDecision: Sendable, Equatable {
 }
 
 /// Persistence contract for ``TrustGrant`` records.
-///
-/// The gate keeps grants in memory and mirrors them to the store
-/// best-effort; a corrupt or missing store never blocks permission
-/// checks, it simply starts from an empty grant set.
 public protocol TrustStore: Sendable {
     /// Loads all stored active grants.
     /// - Returns: Persisted grants, possibly empty.
@@ -353,9 +395,6 @@ public actor InMemoryTrustStore: TrustStore {
 }
 
 /// JSON-file ``TrustStore`` persisted under `~/.runeweaver/`.
-///
-/// Stores grants as a JSON array at `fileURL`. Missing files read as
-/// empty; writes are atomic.
 public struct FileTrustStore: TrustStore, Sendable {
     /// File URL of the JSON grant list.
     public let fileURL: URL
@@ -561,15 +600,6 @@ public struct SQLiteTrustStore: TrustStore, Sendable {
 }
 
 /// Trust boundary between the agent and the real world.
-///
-/// The gate enforces graduated trust for state-changing tools:
-/// - `readOnly` tools are always `allowed`.
-/// - `trusted` tools are `allowed` unless explicitly denied.
-/// - `requiresApproval` tools are `allowed` only when covered by a
-///   live ``TrustGrant``; otherwise a ``PermissionRequest`` is
-///   returned so `ToolBus` can forward it to connected clients via
-///   WebSocket and record the user's chosen ``TrustDuration`` with
-///   ``grantTrust(for:duration:)``.
 public actor PermissionGate {
     /// Live grants, mirrored to the store best-effort.
     private var grants: [TrustGrant] = []
@@ -580,26 +610,15 @@ public actor PermissionGate {
     /// Configured plugins directory for protected path enforcement.
     public let pluginsDir: URL?
     /// Recurring task for pruning expired grants periodically.
-    ///
-    /// Owned by the actor and cancelled only via `stopPeriodicCleanup()`;
-    /// there is intentionally no `deinit` cancel because actor-isolated
-    /// state cannot be touched from a non-isolated `deinit`.
     private var reaperTask: Task<Void, Never>?
 
     /// Creates a permission gate.
-    /// - Parameters:
-    ///   - store: Persistence backend. Defaults to nil (memory only).
-    ///   - pluginsDir: Configured plugins directory. Defaults to nil (uses default path).
     public init(store: (any TrustStore)? = nil, pluginsDir: URL? = nil) {
         self.store = store
         self.pluginsDir = pluginsDir
     }
 
     /// Loads a permission gate hydrated from durable storage, pruning expired grants on startup.
-    /// - Parameters:
-    ///   - store: Persistence backend.
-    ///   - pluginsDir: Configured plugins directory.
-    /// - Returns: Hydrated permission gate.
     public static func load(store: (any TrustStore)? = nil, pluginsDir: URL? = nil) async -> PermissionGate {
         let gate = PermissionGate(store: store, pluginsDir: pluginsDir)
         await gate.bootstrap()
@@ -620,13 +639,6 @@ public actor PermissionGate {
     }
 
     /// Starts a periodic background reaper that checks and cleans up expired grants.
-    ///
-    /// The reaper lives until `stopPeriodicCleanup()` cancels it; callers
-    /// own that shutdown pairing because the actor cannot cancel
-    /// isolated state from `deinit`.
-    /// - Parameter intervalSeconds: Cadence between checks. Defaults to 60.
-    ///   Clamped to a minimum of 0.01 seconds so sub-second test cadences
-    ///   tick as requested while guarding against zero or negative sleeps.
     public func startPeriodicCleanup(intervalSeconds: TimeInterval = 60) {
         stopPeriodicCleanup()
         let interval = max(0.01, intervalSeconds)
@@ -644,19 +656,12 @@ public actor PermissionGate {
     }
 
     /// Stops the periodic background cleanup reaper.
-    ///
-    /// Safe to call when no reaper is running; pair every
-    /// `startPeriodicCleanup()` with this on shutdown so the sleep
-    /// task does not outlive its owner.
     public func stopPeriodicCleanup() {
         reaperTask?.cancel()
         reaperTask = nil
     }
 
     /// Prunes expired grants from memory and storage.
-    ///
-    /// Runs on the actor so overlapping grant and revoke calls serialize;
-    /// the store prune is awaited, preserving disk order with call order.
     public func pruneExpiredAndPersist() async {
         let now = Date()
         grants.removeAll { $0.isExpired(at: now) }
@@ -692,18 +697,6 @@ public actor PermissionGate {
     }
 
     /// Decides whether a tool call may run.
-    ///
-    /// Expired grants are pruned on every check. Denied descriptors
-    /// return `denied` first; `readOnly`/`trusted` tools are otherwise
-    /// `allowed`; `requiresApproval` tools return `allowed` when a
-    /// live grant covers the call's descriptor (exact target match or
-    /// a tool-wide grant with an empty target), else
-    /// `requiresApproval` with a request offering every
-    /// ``TrustDuration`` tier.
-    /// - Parameters:
-    ///   - toolCall: Invocation arguments.
-    ///   - tool: The tool being invoked.
-    /// - Returns: The permission verdict.
     public func checkPermission(toolCall: ToolInput, tool: any Tool) -> PermissionDecision {
         pruneExpired()
         let descriptor = ActionDescriptor.descriptor(for: toolCall, tool: tool)
@@ -736,14 +729,6 @@ public actor PermissionGate {
     }
 
     /// Records trust for an action.
-    ///
-    /// `thisTime` approvals are one-shot and intentionally not stored.
-    /// Any existing grant for the same descriptor is replaced, then
-    /// the full grant set is awaited to storage so rapid
-    /// grant and revoke sequences commit in actor order instead of racing.
-    /// - Parameters:
-    ///   - descriptor: The action to trust.
-    ///   - duration: How long the trust lasts.
     public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
         guard duration != .thisTime else { return }
         pruneExpired()
@@ -761,11 +746,6 @@ public actor PermissionGate {
     }
 
     /// Removes trust for an action.
-    ///
-    /// Drops every grant matching the descriptor exactly, plus
-    /// tool-wide grants when `descriptor.target` is empty, then awaits
-    /// the pruned set to storage in actor order. Missing grants are a no-op.
-    /// - Parameter descriptor: The action to distrust.
     public func revokeTrust(for descriptor: ActionDescriptor) async {
         if descriptor.target.isEmpty {
             grants.removeAll { $0.actionDescriptor.toolName == descriptor.toolName }
@@ -776,13 +756,6 @@ public actor PermissionGate {
     }
 
     /// Explicitly refuses an action with a reason.
-    ///
-    /// Denied descriptors make ``checkPermission(toolCall:tool:)``
-    /// return `denied` until ``removeDenial(for:)`` or a fresh
-    /// ``grantTrust(for:duration:)`` clears them.
-    /// - Parameters:
-    ///   - descriptor: The action to refuse.
-    ///   - reason: Human-readable reason surfaced to the LLM.
     public func deny(_ descriptor: ActionDescriptor, reason: String) {
         denials[descriptor] = reason
     }
@@ -821,21 +794,12 @@ public actor PermissionGate {
     }
 
     /// Drops expired grants from memory only, without touching storage.
-    ///
-    /// Synchronous checks prune here so they never fire unordered
-    /// background saves; durability for expiries comes from the awaited
-    /// paths (`grantTrust`, `revokeTrust`, `pruneExpiredAndPersist`)
-    /// and startup `bootstrap`, keeping disk order tied to actor order.
     private func pruneExpired() {
         let now = Date()
         grants.removeAll { $0.isExpired(at: now) }
     }
 
     /// Mirrors the current grants to the store in actor order.
-    ///
-    /// Awaited by every mutating path so the actor serializes saves;
-    /// errors stay best-effort so permission checks never fail on
-    /// persistence issues.
     private func persist() async {
         guard let store else { return }
         let snapshot = grants

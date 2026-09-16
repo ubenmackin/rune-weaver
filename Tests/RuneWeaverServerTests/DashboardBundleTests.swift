@@ -1,7 +1,4 @@
 // Rune Weaver Tests — Static dashboard bundle delivery and SPA routing tests.
-//
-// Verifies dashboard directory discovery, MIME type resolution, static asset
-// serving, 404 handling, and single-page application fallback to index.html.
 
 import Foundation
 @testable import RuneWeaverServer
@@ -9,10 +6,6 @@ import Testing
 import Vapor
 
 /// Creates a temporary dashboard bundle directory for tests.
-/// - Parameters:
-///   - indexHTML: Entry point contents. Defaults to a stub page.
-///   - assets: Extra files relative to the bundle root.
-/// - Returns: Bundle directory URL for cleanup by the caller.
 private func makeBundleDirectory(
     indexHTML: String = "<html><body>dashboard</body></html>",
     assets: [String: String] = [:]
@@ -57,6 +50,8 @@ struct DashboardBundleTests {
         #expect(DashboardBundle.contentType(for: "data.json").contains("application/json"))
         #expect(DashboardBundle.contentType(for: "logo.svg").contains("image/svg+xml"))
         #expect(DashboardBundle.contentType(for: "icon.png").contains("image/png"))
+        #expect(DashboardBundle.contentType(for: "favicon.ico").contains("image/x-icon"))
+        #expect(DashboardBundle.contentType(for: "site.webmanifest").contains("application/manifest+json"))
     }
 
     @Test

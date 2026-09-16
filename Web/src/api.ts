@@ -1,8 +1,4 @@
 // Typed client for the engine JSON API.
-//
-// Same-origin by design: every path below is relative ("/health",
-// "/chat", ...) so the dashboard bundle served by the engine needs no
-// CORS and no runtime Node server. Do not introduce absolute hosts here.
 
 import { isRecord } from "./typeGuards";
 
@@ -21,11 +17,8 @@ export const trustDurationOptions: Array<{ value: TrustDuration; label: string }
   { value: "forever", label: "Forever" },
 ];
 
-// Single web source for the poll default, pinned to
-// EmailPollRule.defaultPollIntervalSeconds
-// (Sources/RuneWeaverCore/Scheduler.swift). Used for display placeholders
-// only; create/update payloads omit an empty interval so the server default
-// applies, keeping both sides pinned without silent resets.
+// Single web source for the poll default, pinned to EmailPollRule.defaultPollIntervalSeconds
+// (Sources/RuneWeaverCore/Scheduler.swift).
 export const DEFAULT_POLL_INTERVAL_SECONDS = 300;
 
 export interface HealthResponse {
@@ -35,6 +28,12 @@ export interface HealthResponse {
   model?: string;
   provider?: string;
   contextLength?: number;
+  // Search health rides along so the profile menu can render the SearXNG dot without a second round
+  // trip. Optional because older engines predate the search service; absent means unknown and
+  // renders as Unknown (gray), never as Stopped.
+  searchReachable?: boolean;
+  searchURL?: string;
+  searchStatus?: string;
 }
 
 export interface ToolResult {
@@ -148,18 +147,9 @@ export interface RunLogEntry {
   durationMs?: number | null;
 }
 
-// Parses a run timestamp from the engine wire shape into a Date.
-//
-// The engine persists run times as Unix seconds (REAL seconds since 1970 in
-// SQLite, encoded as JSON numbers) while older payloads carry ISO-8601
-// strings; very old numeric payloads may carry Unix milliseconds. Values
-// above 1e12 must be milliseconds (1e12 seconds would land in year 33658),
-// so everything else numeric is Unix seconds. There is intentionally no
-// CoreFoundation absolute-time branch: current values cluster near 1.7e9
-// Unix seconds and the 978307200 offset would misplace them by 31 years.
-// Zero, empty, non-finite, and negative inputs carry no meaningful run time,
-// so they normalize to the epoch instead of 2001-01-01 or an Invalid Date,
-// keeping time-range filters and relative display stable.
+// Parses a run timestamp from the engine wire shape into a Date. The engine persists run times as
+// Unix seconds (REAL seconds since 1970 in SQLite, encoded as JSON numbers) while older payloads
+// carry ISO-8601 strings; very old numeric payloads may carry Unix milliseconds.
 export function parseRunTimestamp(value: string | number | undefined | null): Date {
   if (value == null) return new Date(0);
   if (typeof value === "number") {
@@ -270,12 +260,9 @@ export interface UpdateSchedulerJobInput {
   schedule?: string;
   prompt?: string;
   enabled?: boolean;
-  // Poll clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine):
-  // omitted (undefined) leaves the field alone, "" clears that poll string
-  // to null (blank → null normalization), and clearPoll clears the whole
-  // poll trigger (account, query, mailbox, interval, limit) before applying
-  // any sibling poll fields. pollIntervalSeconds and pollLimit have no blank
-  // form, so clearing them alone requires clearPoll.
+  // Poll clear-vs-omit contract (mirrors UpdateSchedulerJob on the engine): omitted (undefined)
+  // leaves the field alone, "" clears that poll string to null (blank → null normalization), and
+  // clearPoll clears the whole poll trigger (account, query, mailbox, interval, limit) before...
   pollAccount?: string | null;
   pollQuery?: string | null;
   pollMailbox?: string | null;
@@ -293,10 +280,9 @@ export class ApiError extends Error {
   }
 }
 
-// Validates an orchestrator turn before it enters chat state: the engine
-// always emits text, session, and tool actions together, so a partial object
-// must never render as a completed reply. The parked flag stays optional for
-// back-compat and defaults to not parked when absent.
+// Validates an orchestrator turn before it enters chat state: the engine always emits text,
+// session, and tool actions together, so a partial object must never render as a completed reply.
+// The parked flag stays optional for back-compat and defaults to not parked when absent.
 function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   if (!isRecord(value)) return false;
   if (typeof value.text !== "string") return false;
@@ -611,10 +597,9 @@ export interface SettingsResponse {
   voiceSTTProvider: string;
   voiceWhisperModel: string;
   voiceTTSProvider: string;
-  // Tier-3 detonation policy persisted under [sandbox]: ephemeral microVMs
-  // with immediate reap; the TTL reclaims only crash orphans and the cap
-  // gates concurrent detonations. The runtime stays pinned to the Apple
-  // Container CLI server-side with no dashboard knob.
+  // Tier-3 detonation policy persisted under [sandbox]: ephemeral microVMs with immediate reap; the
+  // TTL reclaims only crash orphans and the cap gates concurrent detonations. The runtime stays
+  // pinned to the Apple Container CLI server-side with no dashboard knob.
   sandboxContainerBaseImage?: string;
   sandboxArchiveSessionTTLMinutes?: number;
   sandboxMaxConcurrentMachines?: number;
@@ -623,6 +608,15 @@ export interface SettingsResponse {
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
+  // Web search policy persisted under [browser] (searxng_url, timeout, max_results). The engine
+  // encodes both the canonical `browser*` keys and the `search*` aliases with identical values so
+  // either contract reads without falling back to defaults; older engines may carry only `browser*`.
+  browserSearxngURL?: string;
+  browserSearchTimeoutSeconds?: number;
+  browserMaxResults?: number;
+  searchSearxngURL?: string;
+  searchTimeoutSeconds?: number;
+  searchMaxResults?: number;
   emailAccounts: EmailAccountData[];
   pluginsDir: string;
   pluginsMarketplaceIndexURL: string;
@@ -649,17 +643,20 @@ export interface UpdateSettingsInput {
   filesDenyPatterns?: string[];
   filesAllowRoots?: string[];
   filesRequireApprovalOnDeny?: boolean;
+  // Dual-write both contracts so old and new engines persist the [browser] values tools dial.
+  browserSearxngURL?: string;
+  browserSearchTimeoutSeconds?: number;
+  browserMaxResults?: number;
+  searchSearxngURL?: string;
+  searchTimeoutSeconds?: number;
+  searchMaxResults?: number;
   emailAccounts?: EmailAccountData[];
   pluginsDir?: string;
   pluginsMarketplaceIndexURL?: string;
   pluginsAutoRescan?: boolean;
 }
 
-// Manual mirror of FilesConfig.defaultDenyPatterns in
-// Sources/RuneWeaverCore/Config.swift. The dashboard cannot import Swift, so
-// this hardcoded fallback is updated by hand alongside the Swift default
-// when the guard boundary changes, and shows the guard boundary before the
-// first settings fetch.
+// Manual mirror of FilesConfig.defaultDenyPatterns in Sources/RuneWeaverCore/Config.swift.
 export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
   ".env*",
   ".netrc",
@@ -677,18 +674,14 @@ export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
 // hand alongside the Swift default.
 export const DEFAULT_FILES_ALLOW_ROOTS: string[] = ["~"];
 
-// Textarea mirror of the deny defaults so the blocked-paths editor starts
-// from the same guard boundary without joining inline in every caller. An
-// empty textarea (zero parsed lines) intentionally means allow-all in scope,
-// so this default text is only for initial display and reset, never a
-// fallback that would silently re-protect a cleared list.
+// Textarea mirror of the deny defaults so the blocked-paths editor starts from the same guard
+// boundary without joining inline in every caller.
 export const DEFAULT_FILES_DENY_PATTERNS_TEXT: string =
   DEFAULT_FILES_DENY_PATTERNS.join("\n");
 
-// Parses the blocked-paths textarea into the wire shape: one glob per line,
-// trimmed, with blank lines dropped. Blank filtering keeps an emptied editor
-// as an explicit allow-all instead of persisting whitespace-only rows, and
-// the server-side guard remains the authoritative enforcer.
+// Parses the blocked-paths textarea into the wire shape: one glob per line, trimmed, with blank
+// lines dropped. Blank filtering keeps an emptied editor as an explicit allow-all instead of
+// persisting whitespace-only rows, and the server-side guard remains the authoritative enforcer.
 export function parseDenyPatternsText(text: string | undefined | null): string[] {
   if (text == null) return [...DEFAULT_FILES_DENY_PATTERNS];
   return text
@@ -697,10 +690,9 @@ export function parseDenyPatternsText(text: string | undefined | null): string[]
     .filter(Boolean);
 }
 
-// Formats a deny array for the multiline editor, falling back to the guard
-// defaults when an older engine omits the [files] section entirely. Callers
-// use this for initial display and reset so textarea and array states never
-// diverge on the default boundary.
+// Formats a deny array for the multiline editor, falling back to the guard defaults when an older
+// engine omits the [files] section entirely. Callers use this for initial display and reset so
+// textarea and array states never diverge on the default boundary.
 export function formatDenyPatternsText(
   patterns: string[] | undefined | null
 ): string {
@@ -708,16 +700,17 @@ export function formatDenyPatternsText(
   return patterns.join("\n");
 }
 
-// Manual mirrors of SandboxConfig Tier-3 defaults in
-// Sources/RuneWeaverCore/Config.swift. The dashboard cannot import Swift, so
-// these are updated by hand alongside the Swift defaults and provide the single
-// web source for sandbox fallbacks; component state must import these instead of
-// hardcoding magic numbers. Reclamation cadence stays fixed server-side via the
-// cleanup scheduler (hourly) with no dashboard knob, and detonation stays
-// pinned to the Apple Container CLI with no runtime setting.
+// Manual mirrors of SandboxConfig Tier-3 defaults in Sources/RuneWeaverCore/Config.swift.
 export const DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE = "alpine:latest";
 export const DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES = 10;
 export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;
+
+// Manual mirrors of the [search] defaults (searxng_url, timeout, max_results) pinned to
+// BrowserConfig in Sources/RuneWeaverCore/Config.swift (defaultSearxngURL, defaultMaxResults),
+// Config/config.toml.example, and CONFIG.md.
+export const DEFAULT_SEARCH_SEARXNG_URL = "http://127.0.0.1:8888";
+export const DEFAULT_SEARCH_TIMEOUT_SECONDS = 10;
+export const DEFAULT_SEARCH_MAX_RESULTS = 10;
 
 export function getSettings(): Promise<SettingsResponse> {
   return fetchJson<SettingsResponse>("/settings");
@@ -729,6 +722,58 @@ export function updateSettings(
   return fetchJson<SettingsResponse>("/settings", {
     method: "PUT",
     body: JSON.stringify(input),
+  });
+}
+
+// Web search (SearXNG) lifecycle surfaced by the engine service. The service
+// runs SearXNG in an Apple Container machine with no Docker dependency, so
+// these routes start and stop that machine rather than proxying queries.
+export interface SearchHealthResponse {
+  reachable: boolean;
+  url?: string;
+  baseURL?: string;
+  status?: string | null;
+  containerName?: string | null;
+  started?: boolean | null;
+  stopped?: boolean | null;
+}
+
+// Resolves the display URL across the dual `url`/`baseURL` contract so custom
+// ports survive regardless of which key the engine encoded.
+export function resolveSearchURL(
+  response: SearchHealthResponse | null | undefined,
+  fallback: string,
+): string {
+  if (!response) return fallback;
+  const candidate =
+    (typeof response.url === "string" && response.url.trim()) ||
+    (typeof response.baseURL === "string" && response.baseURL.trim()) ||
+    "";
+  return candidate || fallback;
+}
+
+// Reads live SearXNG reachability without touching settings: the profile
+// menu dot and the Settings search pane both poll this so Start and Stop
+// stay honest about the container state.
+export function getSearchHealth(): Promise<SearchHealthResponse> {
+  return fetchJson<SearchHealthResponse>("/search/health");
+}
+
+// Starts the SearXNG container (pulls the image on first run) and reports
+// the resulting health. Idempotent when already running.
+export function ensureSearch(): Promise<SearchHealthResponse> {
+  return fetchJson<SearchHealthResponse>("/search/ensure", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Stops the SearXNG container and reports the resulting health. Idempotent
+// when already stopped.
+export function stopSearch(): Promise<SearchHealthResponse> {
+  return fetchJson<SearchHealthResponse>("/search/stop", {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
 
@@ -752,10 +797,9 @@ export function getTools(): Promise<ToolsResponse> {
   return fetchJson<ToolsResponse>("/tools");
 }
 
-// Toggles one registered tool without touching siblings: the engine persists
-// the flag before mutating the live bus, so a builtin and a plugin tool with
-// similar prefixes never share fate and per-tool granularity (email.read vs
-// email.attachment) stays intact across restarts.
+// Toggles one registered tool without touching siblings: the engine persists the flag before
+// mutating the live bus, so a builtin and a plugin tool with similar prefixes never share fate and
+// per-tool granularity (email.read vs email.attachment) stays intact across restarts.
 export function updateToolState(name: string, enabled: boolean): Promise<ToolInfo> {
   return fetchJson<ToolInfo>(`/tools/${encodeURIComponent(name)}/state`, {
     method: "POST",
@@ -809,11 +853,7 @@ export interface MarketplaceResponse {
 
 export interface InstallMarketplacePluginRequest {
   id: string;
-  // Optional display provenance carried alongside the install. The loopback
-  // service validates well-formed https URLs here but never fetches remote
-  // content from them, scaffolding a disabled-by-default stub from the
-  // curated catalog instead so a crafted URL cannot turn install into a
-  // fetch oracle. Omitting the field installs the same quarantined stub.
+  // Optional display provenance carried alongside the install.
   downloadURL?: string;
 }
 

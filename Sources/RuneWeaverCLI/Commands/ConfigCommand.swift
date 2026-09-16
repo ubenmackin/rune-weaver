@@ -1,24 +1,10 @@
 // Rune Weaver CLI — Configuration show/set surface for config.toml.
-//
-// Human-facing inspection and mutation entry point for the effective
-// `RuneWeaverConfig`: `config show` renders every section without ever
-// revealing secret values, while `config set` updates one dotted key in
-// place. Preserves surrounding comments, ordering, and unknown sections
-// so hand edits survive automation, and delegates canonical rendering to
-// the core serializer for fresh files.
 
 import ArgumentParser
 import Foundation
 import RuneWeaverCore
 
 /// Displays and updates configuration values.
-///
-/// `rune-weaver config show` prints the effective config.
-/// `rune-weaver config set <key> <value>` updates one dotted key
-/// (e.g. `llm.default_provider`, `llm.providers.mlx.model`) while
-/// preserving every other line, comment, and unknown section in the file.
-/// Secret values are never printed and never stored in `config.toml` —
-/// only `api_key_env` variable names appear.
 struct ConfigCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -68,6 +54,11 @@ struct ConfigShowCommand: AsyncParsableCommand {
         print("tts_provider = \(config.voice.ttsProvider)")
         print("")
         printSandboxAndFilesSections(config)
+        print("")
+        print("[browser]")
+        print("searxng_url = \(config.browser.searxngURL)")
+        print("search_timeout_seconds = \(config.browser.searchTimeoutSeconds)")
+        print("max_results = \(config.browser.maxResults)")
         print("")
         print("[email] (\(config.email.accounts.count) accounts)")
         for account in config.email.accounts {
@@ -136,11 +127,6 @@ struct ConfigShowCommand: AsyncParsableCommand {
     }
 
     /// Prints the LLM provider section.
-    ///
-    /// Provider rows vary per entry with optional model, endpoint, and style
-    /// fields, so isolating the sorted loop keeps the top-level show flow
-    /// linear while preserving secret-free rendering order.
-    /// - Parameter config: Effective configuration to display.
     private func printLLMSection(_ config: RuneWeaverConfig) {
         print("[llm]")
         print("default_provider = \(config.llm.defaultProvider)")
@@ -170,11 +156,6 @@ struct ConfigShowCommand: AsyncParsableCommand {
     }
 
     /// Prints sandbox detonation and file-policy sections together.
-    ///
-    /// Both sections describe local trust boundaries for isolated detonation
-    /// and guarded reads, so grouping them keeps related policy visible in
-    /// one place without lengthening the main show flow.
-    /// - Parameter config: Effective configuration to display.
     private func printSandboxAndFilesSections(_ config: RuneWeaverConfig) {
         print("[sandbox]")
         print("container_base_image = \(config.sandbox.containerBaseImage)")
@@ -199,7 +180,12 @@ struct ConfigSetCommand: AsyncParsableCommand {
     )
 
     /// Dotted config key to update.
-    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, sandbox.container_base_image).")
+    @Argument(
+        help: ArgumentHelp(
+            "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, "
+                + "memory.embedding_model, sandbox.container_base_image, browser.searxng_url)."
+        )
+    )
     var key: String
 
     /// New value for the key.
@@ -259,11 +245,6 @@ private struct TOMLAssignment {
 }
 
 /// Maps a dotted `config set` key to its TOML section, key, and value.
-/// - Parameters:
-///   - key: Dotted key.
-///   - value: Raw new value.
-/// - Returns: TOML assignment to write.
-/// - Throws: `ValidationError` for unknown keys or mistyped values.
 private func configTOMLAssignment(for key: String, value: String) throws -> TOMLAssignment {
     let lower = key.lowercased()
     if let direct = engineTOMLAssignment(key: lower, value: value) {
@@ -279,6 +260,9 @@ private func configTOMLAssignment(for key: String, value: String) throws -> TOML
         return direct
     }
     if let direct = try sandboxTOMLAssignment(key: lower, value: value) {
+        return direct
+    }
+    if let direct = try browserTOMLAssignment(key: lower, value: value) {
         return direct
     }
     return try providerTOMLAssignment(key: key, lower: lower, value: value)
@@ -335,12 +319,6 @@ private func voiceTOMLAssignment(key lower: String, value: String) -> TOMLAssign
 }
 
 private func sandboxTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
-    // Legacy staging keys (`sandbox.staging_path`, `sandbox.retention_days`,
-    // `sandbox.max_total_bytes`, `sandbox.cleanup_interval_seconds`) have no
-    // case here on purpose: they fall through to the unknown-key error below
-    // so old keys fail closed with guidance instead of writing dead TOML.
-    // Old dev-only staging directories are left untouched for manual cleanup
-    // with no migration.
     switch lower {
     case "sandbox.container_base_image":
         TOMLAssignment(section: "sandbox", key: "container_base_image", rendered: tomlQuoted(value))
@@ -354,12 +332,6 @@ private func sandboxTOMLAssignment(key lower: String, value: String) throws -> T
 }
 
 /// Builds a validated positive-integer sandbox assignment so mistyped values fail fast with the offending key.
-/// - Parameters:
-///   - dottedKey: Dotted key for error reporting (e.g. `sandbox.archive_session_ttl_minutes`).
-///   - key: TOML key within `[sandbox]`.
-///   - value: Raw new value.
-/// - Returns: TOML assignment with a canonical integer rendering.
-/// - Throws: `ValidationError` when the value is not a positive integer.
 private func sandboxPositiveIntAssignment(dottedKey: String, key: String, value: String) throws -> TOMLAssignment {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let intValue = Int(trimmed), intValue > 0 else {
@@ -368,12 +340,35 @@ private func sandboxPositiveIntAssignment(dottedKey: String, key: String, value:
     return TOMLAssignment(section: "sandbox", key: key, rendered: String(intValue))
 }
 
+private func browserTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
+    // Browser bounds mirror validation so `config set` fails fast with the
+    // offending key instead of writing a file that fails to load.
+    switch lower {
+    case "browser.searxng_url":
+        return TOMLAssignment(section: "browser", key: "searxng_url", rendered: tomlQuoted(value))
+    case "browser.search_timeout_seconds":
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let intValue = Int(trimmed), intValue >= 1, intValue <= 120 else {
+            throw ValidationError("'browser.search_timeout_seconds' must be between 1 and 120 (got '\(value)').")
+        }
+        return TOMLAssignment(section: "browser", key: "search_timeout_seconds", rendered: String(intValue))
+    case "browser.max_results":
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let intValue = Int(trimmed), intValue >= 1, intValue <= 50 else {
+            throw ValidationError("'browser.max_results' must be between 1 and 50 (got '\(value)').")
+        }
+        return TOMLAssignment(section: "browser", key: "max_results", rendered: String(intValue))
+    default:
+        return nil
+    }
+}
+
 private func providerTOMLAssignment(key: String, lower: String, value: String) throws -> TOMLAssignment {
     let parts = lower.split(separator: ".").map(String.init)
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
-                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, "
+                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
                 + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length)."
         )
     }
@@ -414,16 +409,6 @@ private func providerFieldAssignment(section: String, field: String, key: String
 }
 
 /// Validates a provider context-window override shared by both file-edit and fresh-file paths.
-///
-/// A non-positive window would pass through to validation later with a less
-/// actionable message, so both `config set` paths fail fast here with the
-/// dotted key and the offending value. Surrounding whitespace is ignored so
-/// shell-quoted values behave like the sibling sandbox integer assignments.
-/// - Parameters:
-///   - key: Dotted key for error reporting.
-///   - value: Raw new value.
-/// - Returns: Validated positive context length.
-/// - Throws: `ValidationError` when the value is not a positive integer.
 private func providerContextLengthValue(key: String, value: String) throws -> Int {
     let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
     guard let intValue = Int(trimmed), intValue > 0 else {
@@ -433,11 +418,6 @@ private func providerContextLengthValue(key: String, value: String) throws -> In
 }
 
 /// Applies a `config set` update to an in-memory config (new-file path).
-/// - Parameters:
-///   - key: Dotted key.
-///   - value: Raw new value.
-///   - config: Config to mutate.
-/// - Throws: `ValidationError` for unknown keys or mistyped values.
 private func applyConfigValue(key: String, value: String, config: inout RuneWeaverConfig) throws {
     let lower = key.lowercased()
     if applyEngineValue(key: lower, value: value, config: &config) {
@@ -453,6 +433,9 @@ private func applyConfigValue(key: String, value: String, config: inout RuneWeav
         return
     }
     if try applySandboxValue(key: lower, value: value, config: &config) {
+        return
+    }
+    if try applyBrowserValue(key: key, lower: lower, value: value, config: &config) {
         return
     }
     try applyProviderValue(key: key, lower: lower, value: value, config: &config)
@@ -520,9 +503,6 @@ private func applyVoiceValue(key lower: String, value: String, config: inout Run
 }
 
 private func applySandboxValue(key lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
-    // Legacy staging keys have no case here on purpose so they fall through
-    // to the unknown-key error: old keys fail closed instead of writing dead
-    // state, with no migration for old dev-only staging directories.
     switch lower {
     case "sandbox.container_base_image":
         config.sandbox.containerBaseImage = value
@@ -544,11 +524,35 @@ private func applySandboxValue(key lower: String, value: String, config: inout R
     }
 }
 
+private func applyBrowserValue(key: String, lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
+    switch lower {
+    case "browser.searxng_url":
+        config.browser.searxngURL = value
+        return true
+    case "browser.search_timeout_seconds":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal >= 1, intVal <= 120 else {
+            throw ValidationError("'\(key)' must be between 1 and 120 (got '\(value)')")
+        }
+        config.browser.searchTimeoutSeconds = intVal
+        return true
+    case "browser.max_results":
+        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal >= 1, intVal <= 50 else {
+            throw ValidationError("'\(key)' must be between 1 and 50 (got '\(value)')")
+        }
+        config.browser.maxResults = intVal
+        return true
+    default:
+        return false
+    }
+}
+
 private func applyProviderValue(key: String, lower: String, value: String, config: inout RuneWeaverConfig) throws {
     let parts = lower.split(separator: ".").map(String.init)
     guard parts.count == 4, parts[0] == "llm", parts[1] == "providers" else {
         throw ValidationError(
-            "Unknown config key '\(key)'. Supported: llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length). "
+            "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
+                + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
+                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length). "
                 + "Run 'rune-weaver config show' for supported keys."
         )
     }
@@ -582,11 +586,6 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
 }
 
 /// Parses a boolean-ish value into canonical TOML `true`/`false`.
-/// - Parameters:
-///   - value: Raw value.
-///   - key: Dotted key (for error messages).
-/// - Returns: `"true"` or `"false"`.
-/// - Throws: `ValidationError` when the value is not boolean-like.
 private func tomlBool(_ value: String, key: String) throws -> String {
     switch value.lowercased() {
     case "true", "1", "yes", "on":
@@ -599,27 +598,12 @@ private func tomlBool(_ value: String, key: String) throws -> String {
 }
 
 /// Quotes a string for TOML output via the canonical core serializer.
-///
-/// Single-sourced through `RuneWeaverConfig.tomlQuoted` so CLI writes keep
-/// the same control-character escapes as dashboard and bootstrap saves and
-/// always reparse instead of drifting on edge-case strings.
-/// - Parameter value: Raw string.
-/// - Returns: Double-quoted, escaped TOML string.
 private func tomlQuoted(_ value: String) -> String {
     RuneWeaverConfig.tomlQuoted(value)
 }
 
 /// Inserts or replaces one key inside a TOML document, preserving every
 /// other line, comment, and section.
-///
-/// An existing key keeps its trailing `# comment` so intent annotations
-/// survive automated `config set` writes; only the value is replaced.
-/// - Parameters:
-///   - text: Current file contents.
-///   - section: Section header without brackets.
-///   - key: Key name within the section.
-///   - rendered: Rendered value to write.
-/// - Returns: Updated document text.
 private func upsertTOMLValue(_ text: String, section: String, key: String, rendered: String) -> String {
     var lines = text.components(separatedBy: "\n")
     let header = "[\(section)]"
@@ -683,14 +667,6 @@ private func upsertTOMLValue(_ text: String, section: String, key: String, rende
 }
 
 /// Returns a section header without its trailing `# comment`, if any.
-///
-/// A header like `[sandbox] # staged writes` is valid TOML and parses as
-/// `[sandbox]`, so matching must ignore the comment to avoid appending a
-/// duplicate section. Quoting rules match the value-comment scanner so a
-/// `#` inside quotes never splits the header; the original line is left
-/// untouched and only the comparison uses the stripped form.
-/// - Parameter trimmed: Whitespace-trimmed header line.
-/// - Returns: Header text without the trailing comment.
 private func tomlHeaderBody(_ trimmed: String) -> String {
     let comment = tomlTrailingComment(trimmed)
     guard !comment.isEmpty else {
@@ -700,12 +676,6 @@ private func tomlHeaderBody(_ trimmed: String) -> String {
 }
 
 /// Extracts the trailing `# comment` from a TOML value line, if any.
-///
-/// Scans outside quoted strings so a `#` inside `"..."` or `'...'` never
-/// splits the value; the returned suffix keeps its leading separator spaces
-/// and `#` text so callers can reattach it verbatim after replacing the value.
-/// - Parameter line: Original file line (e.g. `archive_session_ttl_minutes = 10  # minutes`).
-/// - Returns: Comment suffix (e.g. `"  # minutes"`) or `""` when no comment exists.
 private func tomlTrailingComment(_ line: String) -> String {
     var inDouble = false
     var inSingle = false
@@ -752,13 +722,6 @@ private func tomlTrailingComment(_ line: String) -> String {
 }
 
 /// Renders a full `config.toml` for freshly created files.
-///
-/// Delegates to the canonical core serializer so fresh `config set` files
-/// keep every section (sandbox detonation policy, files/email/home/scheduler/
-/// plugins, provider context lengths) instead of shedding sections the CLI
-/// never edits directly.
-/// - Parameter config: Config to render.
-/// - Returns: TOML document text.
 private func renderFullTOML(_ config: RuneWeaverConfig) -> String {
     config.renderTOML()
 }

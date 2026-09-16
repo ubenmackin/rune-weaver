@@ -17,10 +17,6 @@ private struct ReadOnlyStubTool: Tool, Sendable {
     let permissionLevel = PermissionLevel.readOnly
 
     /// Returns a canned success.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("stub-ok", callID: input.callID)
     }
@@ -38,10 +34,6 @@ private struct ApprovalStubTool: Tool, Sendable {
     let permissionLevel = PermissionLevel.requiresApproval
 
     /// Returns a canned success when approval allows the call.
-    /// - Parameters:
-    ///   - input: Invocation arguments.
-    ///   - context: Ambient execution context.
-    /// - Returns: Canned success output.
     func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         .success("stub-wrote", callID: input.callID)
     }

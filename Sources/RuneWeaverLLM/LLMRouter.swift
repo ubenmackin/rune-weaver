@@ -1,22 +1,10 @@
 // Rune Weaver LLM — Priority-ordered provider router and failover orchestrator.
-//
-// Manages local-first and cloud fallback LLM providers, health checking,
-// dynamic provider selection, and streaming chunk consumption across backends.
 
 import RuneWeaverCore
 
 /// Selects the active LLM provider and falls through on failure.
-///
-/// The router maintains a priority-ordered list of providers
-/// (local-first, cloud fallback) configured via `config.toml` or
-/// the dashboard. Concrete providers (MLX, llama.cpp, vLLM,
-/// OpenAI-compatible, Anthropic, custom) conform to
-/// ``LLMProvider`` and register here in priority order.
 public actor LLMRouter {
     /// Outcome of draining one chunk-streaming provider.
-    ///
-    /// Replaces a three-member tuple so `drainChunkedProvider` stays within
-    /// the `large_tuple` lint budget while preserving error propagation.
     private struct ChunkedDrainResult: Sendable {
         /// Whether the turn finished and the stream should terminate.
         let didFinish: Bool
@@ -35,21 +23,33 @@ public actor LLMRouter {
         self.providers = providers
     }
 
+    /// Whether the priority provider accepts vision input.
+    public func activeSupportsVision() -> Bool {
+        providers.first?.modelInfo.supportsVision ?? false
+    }
+
+    /// Whether any registered provider accepts vision input.
+    /// - Returns: True when at least one provider is vision-capable.
+    public func anySupportsVision() -> Bool {
+        providers.contains { $0.modelInfo.supportsVision }
+    }
+
+    /// History safe for one provider's capability.
+    public static func strippedMessages(_ messages: [Message], for provider: any LLMProvider) -> [Message] {
+        VisionGate.stripMessages(messages, supportsVision: provider.modelInfo.supportsVision)
+    }
+
+    /// Tool definitions safe for one provider's capability.
+    public static func visionFilteredDefinitions(_ tools: [ToolDefinition], supportsVision: Bool) -> [ToolDefinition] {
+        guard !supportsVision else { return tools }
+        return tools.map { definition in
+            guard definition.name == BrowserScreenshotPolicy.navigateToolName else { return definition }
+            let stripped = VisionSchemaFilter.strippedNavigateSchema(definition.parameters)
+            return ToolDefinition(name: definition.name, description: definition.description, parameters: stripped)
+        }
+    }
+
     /// Streams a chat completion via the first healthy provider.
-    ///
-    /// Providers are tried in priority order: unreachable providers
-    /// (failing `isAvailable()`) are skipped, and a provider whose
-    /// chunk stream reports `.error` before yielding any text falls
-    /// through to the next provider. A mid-stream `.error` after text
-    /// was already yielded terminates with an `isError` response so
-    /// callers never mistake a truncated turn for success. When every
-    /// provider fails before yielding text, the stream terminates with
-    /// the last failure. An empty provider list terminates the stream
-    /// immediately so `for await` consumers never hang.
-    /// - Parameters:
-    ///   - messages: Conversation history.
-    ///   - tools: Tools the model may call.
-    /// - Returns: Stream of response chunks.
     public func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
         let providers = self.providers
         return AsyncStream { continuation in
@@ -61,11 +61,17 @@ public actor LLMRouter {
                         break
                     }
                     guard await provider.isAvailable() else { continue }
+                    // Per-provider vision gate: text-only backends never see
+                    // image bytes even when an earlier turn captured them for
+                    // a vision-capable fallback on the same priority list.
+                    let outboundMessages = Self.strippedMessages(messages, for: provider)
+                    let supportsVision = provider.modelInfo.supportsVision
                     if let chunked = provider as? any ChunkStreamingProvider {
-                        let definitions = chunked.toolDefinitions(for: tools)
+                        let base = chunked.toolDefinitions(for: tools)
+                        let definitions = Self.visionFilteredDefinitions(base, supportsVision: supportsVision)
                         let step = await Self.drainChunkedProvider(
                             chunked,
-                            messages: messages,
+                            messages: outboundMessages,
                             tools: definitions,
                             continuation: continuation
                         )
@@ -80,8 +86,8 @@ public actor LLMRouter {
                     }
                     let step = await Self.drainStandardProvider(
                         provider,
-                        messages: messages,
-                        tools: tools,
+                        messages: outboundMessages,
+                        tools: Self.visionGatedTools(tools, supportsVision: supportsVision),
                         continuation: continuation
                     )
                     if let message = step.lastError {
@@ -100,19 +106,6 @@ public actor LLMRouter {
     }
 
     /// Drains one chunk-streaming provider, preserving mid-stream error propagation.
-    ///
-    /// Yields text deltas verbatim and ignores tool calls. A `.error`
-    /// before any text returns `shouldContinue` so the caller falls
-    /// through to the next provider; a `.error` after text was yielded
-    /// emits an `isError` response so callers never mistake a truncated
-    /// turn for success. Empty error messages become `"unknown error"`.
-    /// - Parameters:
-    ///   - provider: Chunk-streaming provider to drain.
-    ///   - messages: Conversation history.
-    ///   - tools: Tool definitions the model may call.
-    ///   - continuation: Stream receiving text and terminal chunks.
-    /// - Returns: Outcome describing whether the turn finished, the last
-    ///   failure, and whether the caller should try the next provider.
     private static func drainChunkedProvider(
         _ provider: any ChunkStreamingProvider,
         messages: [Message],
@@ -160,17 +153,6 @@ public actor LLMRouter {
     }
 
     /// Drains one text-streaming provider, preserving error propagation.
-    ///
-    /// Yields each `LLMResponse` verbatim including `isError` parts so
-    /// failures cannot leak into history as success. The stream always
-    /// terminates after the first available provider; only cancellation
-    /// leaves `didFinish` false without a failure.
-    /// - Parameters:
-    ///   - provider: Text-streaming provider to drain.
-    ///   - messages: Conversation history.
-    ///   - tools: Tools the model may call.
-    ///   - continuation: Stream receiving response parts.
-    /// - Returns: Whether the turn finished and the last failure, if any.
     private static func drainStandardProvider(
         _ provider: any LLMProvider,
         messages: [Message],
@@ -201,17 +183,17 @@ public actor LLMRouter {
         return (true, nil)
     }
 
+    /// Tools safe for one provider's capability on the text-streaming path.
+    public static func visionGatedTools(_ tools: [any Tool], supportsVision: Bool) -> [any Tool] {
+        guard !supportsVision else { return tools }
+        return tools.map { tool -> any Tool in
+            guard tool.name == BrowserScreenshotPolicy.navigateToolName else { return tool }
+            let stripped = VisionSchemaFilter.strippedNavigateSchema(tool.inputSchema)
+            return VisionGatedTool(wrapping: tool, inputSchema: stripped)
+        }
+    }
+
     /// Embeds texts via the first healthy provider, falling through on failure.
-    ///
-    /// Providers are tried in priority order, skipping unreachable ones;
-    /// per-provider errors fall through to the next provider. Cancellation is
-    /// never treated as a provider failure: a cancelled task aborts before the
-    /// next provider is consulted instead of silently trying another endpoint.
-    /// Throws the last provider error when every provider fails, or an
-    /// `unavailable` error when no provider can serve the request.
-    /// - Parameter text: Texts to embed.
-    /// - Returns: One embedding vector per input text.
-    /// - Throws: `CancellationError` when the enclosing task is cancelled.
     public func embeddings(text: [String]) async throws -> [[Float]] {
         var lastError: (any Error)?
         for provider in providers {
@@ -236,5 +218,44 @@ public actor LLMRouter {
             throw lastError
         }
         throw LLMProviderError.unavailable("No embedding providers are available")
+    }
+}
+
+/// Tool wrapper hiding the screenshot opt-in from text-only models.
+private struct VisionGatedTool: Tool, Sendable {
+    /// Wrapped tool providing identity and execution.
+    let wrapped: any Tool
+    /// Advertised schema, possibly without the screenshot opt-in.
+    let advertisedSchema: JSONSchema
+
+    /// Creates a gated view over a registered tool.
+    init(wrapping: any Tool, inputSchema: JSONSchema) {
+        self.wrapped = wrapping
+        self.advertisedSchema = inputSchema
+    }
+
+    /// Stable identifier from the wrapped tool.
+    var name: String {
+        wrapped.name
+    }
+
+    /// Description from the wrapped tool.
+    var description: String {
+        wrapped.description
+    }
+
+    /// Stripped schema for text-only prompts.
+    var inputSchema: JSONSchema {
+        advertisedSchema
+    }
+
+    /// Trust level from the wrapped tool.
+    var permissionLevel: PermissionLevel {
+        wrapped.permissionLevel
+    }
+
+    /// Runs the wrapped tool unchanged.
+    func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
+        try await wrapped.execute(input: input, context: context)
     }
 }

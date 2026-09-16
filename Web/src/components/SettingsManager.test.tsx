@@ -401,10 +401,9 @@ describe("SettingsManager", () => {
       },
     ];
 
-    // Empty initial registry proves the empty state; rescan returning a rune
-    // proves local discovery still works without any marketplace interaction.
-    // The second fetch parameter stays unused here because this path only
-    // serves GET fixtures and never inspects request bodies.
+    // Empty initial registry proves the empty state; rescan returning a rune proves local discovery
+    // still works without any marketplace interaction. The second fetch parameter stays unused here
+    // because this path only serves GET fixtures and never inspects request bodies.
     const fetchMock = vi.fn(async (url: string | URL | Request) => {
       const urlStr = String(url);
       if (urlStr.includes("/plugins/rescan")) {
@@ -490,10 +489,9 @@ describe("SettingsManager", () => {
       },
     ];
     const calls: Array<{ url: string; method?: string; body?: string }> = [];
-    // Hold the state POST open so the test can observe the pending row
-    // before the refreshed list resolves. A mutable holder keeps the
-    // resolver visible across the fetch closure without narrowing the
-    // local to null at the release site.
+    // Hold the state POST open so the test can observe the pending row before the refreshed list
+    // resolves. A mutable holder keeps the resolver visible across the fetch closure without
+    // narrowing the local to null at the release site.
     const gate: { release: (() => void) | null } = { release: null };
     const stateGate = new Promise<void>((resolve) => {
       gate.release = resolve;

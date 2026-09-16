@@ -1,10 +1,4 @@
 // Rune Weaver Core — Minimal TOML decoding for config.toml.
-//
-// Parses the engine configuration document into a typed node tree without
-// external dependencies, covering the tables, arrays-of-tables, and scalar
-// shapes the config schema uses. Decoders map the tree onto
-// `RuneWeaverConfig` so missing sections fall back to built-in defaults
-// while malformed lines fail with a line-numbered parse error.
 
 import Foundation
 
@@ -37,12 +31,6 @@ struct TOMLNode: Sendable, Equatable {
 }
 
 /// Minimal TOML parser covering the `config.toml` schema.
-///
-/// Supports comments (`#`), quoted strings, integers, floats, booleans,
-/// inline string lists (e.g. `deny_patterns = ["a", "b"]` for the files
-/// policy), `[table]` / `[dotted.table]` headers, and
-/// `[[array-of-tables]]` headers. Anything outside that subset throws a
-/// ``ConfigError/parseError(line:message:)`` naming the offending line.
 enum TOMLParser {
     private enum Target {
         case root
@@ -153,12 +141,6 @@ enum TOMLParser {
     }
 
     /// Appends a new entry for the array-of-tables at `path`.
-    /// - Parameters:
-    ///   - path: Dotted array path segments. Must be non-empty.
-    ///   - root: Document root.
-    ///   - line: 1-based line number for error reporting.
-    /// - Throws: ``ConfigError/parseError(line:message:)`` when the path
-    ///   is empty.
     private static func appendArrayNode(at path: [String], in root: inout TOMLNode, line: Int) throws {
         guard let leaf = path.last else {
             throw ConfigError.parseError(line: line, message: "malformed array-of-tables header")
@@ -185,9 +167,8 @@ enum TOMLParser {
         return try (key, scalar(rawValue, line: lineNumber))
     }
 
-    /// Splits on the first `=` outside quotes, honoring `\"` escapes
-    /// inside double-quoted (basic) strings so a value like
-    /// `"a \"=\" b"` does not mis-split. Single-quoted strings are TOML
+    /// Splits on the first `=` outside quotes, honoring `\"` escapes inside double-quoted (basic)
+    /// strings so a value like `"a \"=\" b"` does not mis-split. Single-quoted strings are TOML
     /// literals with no escapes and are scanned verbatim.
     private static func splitOnEquals(_ line: String) -> (String, String)? {
         var inDouble = false
@@ -238,17 +219,6 @@ enum TOMLParser {
     }
 
     /// Parses an inline string list such as `["a", "b"]`.
-    ///
-    /// Only quoted string elements are accepted so numbers and booleans
-    /// never coerce silently into patterns; commas inside quotes do not
-    /// split. A trailing comma is tolerated and an empty `[]` yields no
-    /// elements, matching the permissive TOML array shape used for
-    /// deny/allow lists.
-    /// - Parameters:
-    ///   - text: Raw value text including brackets.
-    ///   - line: 1-based line number for error reporting.
-    /// - Returns: String array value.
-    /// - Throws: ``ConfigError/parseError(line:message:)`` on malformed arrays.
     private static func stringArray(_ text: String, line: Int) throws -> TOMLValue {
         guard text.hasSuffix("]") else {
             throw ConfigError.parseError(line: line, message: "unterminated array: \(text)")
@@ -344,10 +314,6 @@ enum TOMLParser {
     }
 
     /// Strips a trailing `#` comment, ignoring `#` inside quotes.
-    ///
-    /// Double-quoted (basic) strings honor backslash escapes, so a value
-    /// like `"a \"#\" b"` keeps its `#`; single-quoted literal strings
-    /// have no escapes and are scanned verbatim.
     private static func stripComment(from line: String) -> String {
         var inDouble = false
         var inSingle = false
@@ -387,11 +353,6 @@ extension TOMLNode {
 
     /// Strict optional string: nil when absent, throws when present but
     /// not a string so wrong-typed values never silently default.
-    /// - Parameters:
-    ///   - key: TOML key.
-    ///   - field: Dotted field path for error reporting.
-    /// - Returns: String value, or nil when absent.
-    /// - Throws: `ConfigError.validationError` when present but not a string.
     func strictString(_ key: String, field: String) throws -> String? {
         guard let value = values[key] else { return nil }
         guard case let .string(text) = value else {
@@ -402,11 +363,6 @@ extension TOMLNode {
 
     /// Strict optional boolean: nil when absent, throws when present but
     /// not a boolean so values like `enabled="yes"` never silently become true.
-    /// - Parameters:
-    ///   - key: TOML key.
-    ///   - field: Dotted field path for error reporting.
-    /// - Returns: Boolean value, or nil when absent.
-    /// - Throws: `ConfigError.validationError` when present but not a boolean.
     func strictBool(_ key: String, field: String) throws -> Bool? {
         guard let value = values[key] else { return nil }
         guard case let .boolean(flag) = value else {
@@ -418,11 +374,6 @@ extension TOMLNode {
     /// Strict optional integer: nil when absent, throws when present but
     /// not an integer. Doubles never coerce (so `128.5` throws instead of
     /// truncating to `128`) and strings/booleans never silently default.
-    /// - Parameters:
-    ///   - key: TOML key.
-    ///   - field: Dotted field path for error reporting.
-    /// - Returns: Integer value, or nil when absent.
-    /// - Throws: `ConfigError.validationError` when present but not an integer.
     func strictInt(_ key: String, field: String) throws -> Int? {
         guard let value = values[key] else { return nil }
         guard case let .integer(number) = value else {
@@ -434,11 +385,6 @@ extension TOMLNode {
     /// Strict optional string list: nil when absent, throws when present
     /// but not an inline string array so wrong-typed values never silently
     /// clear the deny list.
-    /// - Parameters:
-    ///   - key: TOML key.
-    ///   - field: Dotted field path for error reporting.
-    /// - Returns: String list, or nil when absent.
-    /// - Throws: `ConfigError.validationError` when present but not a string array.
     func strictStringArray(_ key: String, field: String) throws -> [String]? {
         guard let value = values[key] else { return nil }
         guard case let .stringArray(items) = value else {
@@ -464,6 +410,7 @@ extension RuneWeaverConfig {
         try Self.decodeHome(root, into: &config)
         try Self.decodeScheduler(root, into: &config)
         try Self.decodePlugins(root, into: &config)
+        try Self.decodeBrowser(root, into: &config)
         self = config
     }
 
@@ -505,18 +452,6 @@ extension RuneWeaverConfig {
     }
 
     /// Decodes one `[llm.providers.<name>]` entry.
-    ///
-    /// Absent `context_length` decodes to nil (provider-default); the
-    /// factory resolves nil per backend (MLX 8192, llama.cpp 4096,
-    /// OpenAI-compatible 128000). Present-but-wrong-typed values throw
-    /// instead of silently defaulting.
-    /// - Parameters:
-    ///   - node: Parsed provider table.
-    ///   - name: Provider entry name (for error field paths).
-    /// - Returns: Decoded provider config.
-    /// - Throws: ``ConfigError/validationError(field:message:)`` when
-    ///   `api_style` names an unknown style or any present value has the
-    ///   wrong type.
     private static func decodeProvider(_ node: TOMLNode, name: String) throws -> ProviderConfig {
         let prefix = "llm.providers.\(name)"
         let apiStyle: APIStyle
@@ -576,15 +511,6 @@ extension RuneWeaverConfig {
 
     private static func decodeSandbox(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let sandbox = root.tables["sandbox"] else { return }
-        // Legacy staging keys (`staging_path`, `retention_days`,
-        // `max_total_bytes`, `cleanup_interval_seconds`) are intentionally
-        // ignored: Tier-3-only detonation has no host staging to bound, so old
-        // files carrying the keys keep loading with Tier-3 defaults instead of
-        // failing. Old dev-only staging directories are left untouched for
-        // manual cleanup with no migration.
-        // Legacy `container_runtime` is intentionally ignored: Tier 3 detonation
-        // only supports the Apple Container CLI, so old files carrying the key
-        // keep loading with the hardcoded default instead of failing.
         if let image = try sandbox.strictString("container_base_image", field: "sandbox.container_base_image") {
             config.sandbox.containerBaseImage = image
         }
@@ -742,6 +668,22 @@ extension RuneWeaverConfig {
         }
         if let autoRescan = try plugins.strictBool("auto_rescan", field: "plugins.auto_rescan") {
             config.plugins.autoRescan = autoRescan
+        }
+    }
+
+    private static func decodeBrowser(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let browser = root.tables["browser"] else { return }
+        // Absent keys keep the local-first defaults; present-but-wrong-typed
+        // values throw via the strict accessors instead of silently defaulting,
+        // and range checks land in validation so decode stays type-only.
+        if let url = try browser.strictString("searxng_url", field: "browser.searxng_url") {
+            config.browser.searxngURL = url
+        }
+        if let timeout = try browser.strictInt("search_timeout_seconds", field: "browser.search_timeout_seconds") {
+            config.browser.searchTimeoutSeconds = timeout
+        }
+        if let maxResults = try browser.strictInt("max_results", field: "browser.max_results") {
+            config.browser.maxResults = maxResults
         }
     }
 }

@@ -1,8 +1,4 @@
 // Rune Weaver Dashboard — Community Rune Marketplace Modal.
-//
-// Allows browsing, searching, and 1-click installing community rune plugins.
-// Enforces the disabled-by-default security policy: installed runes land in
-// the disabled state and require manual human review and enablement.
 
 import { useEffect, useState } from "react";
 import {
@@ -54,10 +50,9 @@ export default function RuneMarketplaceModal({
     setInstallingId(item.id);
     setError(null);
     try {
-      // The catalog URL travels as display provenance only: the service
-      // validates its https shape and scaffolds a disabled-by-default stub
-      // from the curated catalog without fetching remote content, so every
-      // 1-click install lands quarantined for human review before enablement.
+      // The catalog URL travels as display provenance only: the service validates its https shape
+      // and scaffolds a disabled-by-default stub from the curated catalog without fetching remote
+      // content, so every 1-click install lands quarantined for human review before enablement.
       await installMarketplacePlugin({
         id: item.id,
         downloadURL: item.downloadURL,

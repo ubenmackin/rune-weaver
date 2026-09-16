@@ -1,9 +1,4 @@
 // Rune Weaver Core — Conversation sessions, history, and SQLite persistence.
-//
-// Owns session lifecycle, message history, and context-window folding where
-// oldest turns collapse into a rolling summary. Persists sessions and messages
-// durably in SQLite and hydrates cache misses from disk so chat and scheduler
-// turns share one continuous history.
 
 import Foundation
 import os
@@ -13,10 +8,6 @@ import os
 #endif
 
 /// A single conversation session owned by the manager.
-///
-/// Sessions group messages for one continuous interaction. When the
-/// history outgrows the context window the oldest turns are folded
-/// into `summary` so recent context stays intact.
 public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     /// Unique identifier for this session.
     public let id: UUID
@@ -52,14 +43,6 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     }
 
     /// Creates a session.
-    /// - Parameters:
-    ///   - id: Session identifier. Defaults to a new UUID.
-    ///   - title: Human-readable title. Defaults to nil.
-    ///   - messages: Initial messages. Defaults to empty.
-    ///   - summary: Rolling summary. Defaults to nil.
-    ///   - createdAt: Creation date. Defaults to now.
-    ///   - updatedAt: Last mutation date. Defaults to now.
-    ///   - source: Originating source. Defaults to nil.
     public init(
         id: UUID = UUID(),
         title: String? = nil,
@@ -119,20 +102,9 @@ public enum ConversationManagerError: Error, Sendable, Equatable {
 }
 
 /// Summarizes dropped turns during truncation.
-///
-/// Takes the messages being evicted and returns a short summary that
-/// is kept as session state. Callers may inject an LLM-backed
-/// summarizer; the default is an extractive preview.
-/// - Parameter messages: Messages being evicted.
-/// - Returns: Summary text.
 public typealias SessionSummarizer = @Sendable ([Message]) -> String
 
 /// Default extractive summarizer used when no LLM is wired in.
-///
-/// Joins the first line of each evicted message, truncated to a
-/// bounded length, so no data leaves the machine for summarization.
-/// - Parameter messages: Messages being evicted.
-/// - Returns: Summary preview.
 public func defaultSessionSummarizer(_ messages: [Message]) -> String {
     let parts = messages.map { message -> String in
         let firstLine = message.content.split(separator: "\n").first.map(String.init) ?? ""
@@ -144,18 +116,6 @@ public func defaultSessionSummarizer(_ messages: [Message]) -> String {
 }
 
 /// Manages multiple concurrent conversation sessions.
-///
-/// The manager keeps per-session message history in memory, truncates
-/// the context window via summarization when `maxMessages` is
-/// exceeded, and mirrors conversation turns to an optional SQLite
-/// database (`episodes.db` file from `config.toml`). Where the SQLite3 module
-/// is unavailable, storage falls back to JSON files beside the
-/// database path.
-///
-/// Blocking SQLite/JSON work runs off the actor executor via the
-/// shared serial store queue (`SQLiteSerialIO`) so disk order matches actor
-/// call order and shares ordering with the episode, scheduler, and run stores
-/// in `episodes.db`, keeping actor methods suspension-friendly.
 public actor ConversationManager {
     /// Maximum messages kept in memory per session before truncation.
     public let maxMessages: Int
@@ -167,10 +127,6 @@ public actor ConversationManager {
     /// Active sessions indexed by identifier.
     private var sessions: [UUID: ConversationSession] = [:]
     /// Sessions created in-memory that have not yet been confirmed on disk.
-    ///
-    /// Preserves new sessions across concurrent disk listings until their
-    /// first persist lands, so a background list sweep cannot drop an
-    /// in-flight conversation.
     private var unpersistedIDs: Set<UUID> = []
 
     /// Default context window before summarization kicks in.
@@ -189,12 +145,6 @@ public actor ConversationManager {
     public static let maxTitleLength: Int = 200
 
     /// Creates a conversation manager.
-    /// - Parameters:
-    ///   - maxMessages: Messages kept per session before summarization.
-    ///     Defaults to 100.
-    ///   - summarizer: Function summarizing evicted messages. Defaults to
-    ///     ``defaultSessionSummarizer(_:)``.
-    ///   - episodesDBPath: SQLite database file path. Pass `nil` for memory-only.
     public init(
         maxMessages: Int = 100,
         episodesDBPath: String? = nil,
@@ -208,10 +158,6 @@ public actor ConversationManager {
     // MARK: - Sessions
 
     /// Creates a new empty session and tracks it.
-    ///
-    /// Persists the new session before returning so later deletes
-    /// cannot race an earlier write.
-    /// - Returns: The new session.
     @discardableResult
     public func createSession() async -> ConversationSession {
         let session = ConversationSession()
@@ -221,14 +167,6 @@ public actor ConversationManager {
     }
 
     /// Reads one session from disk and merges it with memory by recency.
-    ///
-    /// Centralizes the disk-read plus recency policy shared by single-session
-    /// readers so a disk copy never clobbers newer in-memory state (recent
-    /// title fills or appends whose persist has not yet drained) and a
-    /// missing disk row never clears memory. Disk failures leave memory
-    /// untouched so transient I/O never hides live state.
-    /// - Parameter id: Session identifier.
-    /// - Returns: Merged session, or the memory copy when disk is missing.
     private func readSingleMerged(id: UUID) async -> ConversationSession? {
         if let path = episodesDBPath {
             do {
@@ -267,14 +205,6 @@ public actor ConversationManager {
     }
 
     /// Returns the session, creating it when missing.
-    /// - Parameters:
-    ///   - id: Session identifier.
-    ///   - title: Optional human-readable title.
-    ///   - source: Optional originating source.
-    ///   - overwrite: When true, replaces an existing title/source instead
-    ///     of only filling blanks, so one call can upsert the scheduler
-    ///     identity with a single persist.
-    /// - Returns: The existing or newly created session.
     @discardableResult
     public func ensureSession(id: UUID, title: String? = nil, source: String? = nil, overwrite: Bool = false) async -> ConversationSession {
         if var existing = sessions[id] {
@@ -317,10 +247,9 @@ public actor ConversationManager {
                 unpersistedIDs.remove(oldest.id)
             }
         }
-        // New sessions defer disk persistence until the first message append
-        // so empty/ghost sessions are not written to episodes.db if a turn
-        // aborts before generation. Tracked in unpersistedIDs to guard against
-        // reconciliation eviction in listSessions.
+        // New sessions defer disk persistence until the first message append so empty/ghost
+        // sessions are not written to episodes.db if a turn aborts before generation. Tracked in
+        // unpersistedIDs to guard against reconciliation eviction in listSessions.
         let session = ConversationSession(id: id, title: title, source: source)
         sessions[id] = session
         unpersistedIDs.insert(id)
@@ -328,11 +257,6 @@ public actor ConversationManager {
     }
 
     /// Returns summaries of all tracked sessions, sorted by last update date descending.
-    ///
-    /// Reconciles disk state with in-memory sessions: reads all rows from SQLite,
-    /// arbitrates conflicts by recency (memory wins ties to protect pending mutations),
-    /// and drops deleted rows while preserving unpersistedIDs. Scaled for up to
-    /// `maxSessions` (500) active sessions with O(N log N) sorting.
     public func listSessions() async -> [SessionSummary] {
         if let path = episodesDBPath {
             do {
@@ -354,10 +278,9 @@ public actor ConversationManager {
                         sessions[diskSession.id] = diskSession
                     }
                 }
-                // Drop memory entries deleted by another process, but keep
-                // identifiers never confirmed on disk: new sessions without
-                // an immediate persist and appends whose persist has not
-                // drained must survive a concurrent list.
+                // Drop memory entries deleted by another process, but keep identifiers never
+                // confirmed on disk: new sessions without an immediate persist and appends whose
+                // persist has not drained must survive a concurrent list.
                 let diskIDs = Set(diskSessions.map(\.id))
                 for id in Array(sessions.keys) where !diskIDs.contains(id) && !unpersistedIDs.contains(id) {
                     sessions.removeValue(forKey: id)
@@ -382,14 +305,6 @@ public actor ConversationManager {
     }
 
     /// Updates the title of a session and persists it.
-    ///
-    /// Trims surrounding whitespace, ignores empty titles, and truncates
-    /// overlong titles to `maxTitleLength` so the sessions table and
-    /// sidebar never bloat on unbounded input.
-    /// - Parameters:
-    ///   - id: Session identifier.
-    ///   - title: New title.
-    ///   - source: Optional source.
     public func updateTitle(id: UUID, title: String, source: String? = nil) async {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -413,10 +328,6 @@ public actor ConversationManager {
     }
 
     /// Removes a session from memory and deletes the persisted row.
-    ///
-    /// Awaits the delete on the serial persistence queue so earlier
-    /// writes complete first and cannot resurrect the session.
-    /// - Parameter id: Session identifier.
     public func removeSession(id: UUID) async {
         sessions.removeValue(forKey: id)
         unpersistedIDs.remove(id)
@@ -424,11 +335,6 @@ public actor ConversationManager {
     }
 
     /// Removes all sessions from memory and the persisted store.
-    ///
-    /// Clears in-memory state and deletes persisted rows so removed
-    /// sessions do not resurrect on `loadAll`. The delete runs to
-    /// completion on the serial queue so a cancelled caller still lands
-    /// the delete.
     public func removeAllSessions() async {
         sessions.removeAll()
         unpersistedIDs.removeAll()
@@ -445,16 +351,6 @@ public actor ConversationManager {
     // MARK: - History
 
     /// Appends a message to a session, truncating when over budget.
-    ///
-    /// Missing sessions are created implicitly. Truncation folds the
-    /// oldest turns into the session summary via the configured
-    /// summarizer, preferring to keep system messages and the most
-    /// recent turns. When overflow exceeds the non-system count the
-    /// oldest kept rows are evicted as well to stay within budget,
-    /// so system messages may be evicted under overflow.
-    /// - Parameters:
-    ///   - message: Message to append.
-    ///   - sessionID: Owning session identifier.
     public func append(_ message: Message, to sessionID: UUID) async {
         var session = await ensureSession(id: sessionID)
         session.messages.append(message)
@@ -465,13 +361,6 @@ public actor ConversationManager {
     }
 
     /// Returns context-ready history for a session.
-    ///
-    /// When the session carries a summary of truncated turns it is
-    /// prepended as a `system` message so the LLM retains the gist of
-    /// evicted history. Hydrates disk-only sessions the same way
-    /// `session(id:)` does so a fresh manager observes durable state.
-    /// - Parameter sessionID: Session identifier.
-    /// - Returns: Messages for the LLM, or empty when unknown.
     public func history(for sessionID: UUID) async -> [Message] {
         guard let session = await readSingleMerged(id: sessionID) else { return [] }
         guard let summary = session.summary, !summary.isEmpty else {
@@ -482,43 +371,16 @@ public actor ConversationManager {
     }
 
     /// Raw message count for a session.
-    ///
-    /// Hydrates disk-only sessions so counts match `history(for:)`.
-    /// - Parameter sessionID: Session identifier.
-    /// - Returns: Stored message count, or zero when unknown.
     public func messageCount(for sessionID: UUID) async -> Int {
         await readSingleMerged(id: sessionID)?.messages.count ?? 0
     }
 
     /// Builds the working history with the system prompt first.
-    ///
-    /// Single shared helper for `Orchestrator` and the CLI chat loop:
-    /// an identical leading system message is kept, a stale one is
-    /// replaced, prompts are never stacked, and a rolling summary
-    /// (a leading message starting with `Message/rollingSummaryPrefix`)
-    /// is preserved ahead of the prompt via `Array.withSystemPrompt(_:)`.
-    /// Hydrates disk-only sessions via `history(for:)`.
-    /// - Parameters:
-    ///   - sessionID: Session identifier.
-    ///   - systemPrompt: Developer instructions, if any.
-    /// - Returns: Messages for the next LLM call.
     public func workingHistory(for sessionID: UUID, systemPrompt: String?) async -> [Message] {
         await history(for: sessionID).withSystemPrompt(systemPrompt)
     }
 
     /// Bulk-replaces history for session resume with truncation.
-    ///
-    /// Used when hydrating working memory from episodic storage: the
-    /// messages are set with a single persistence write, folding the
-    /// oldest turns into the session summary via the configured
-    /// summarizer when over `maxMessages` so a long prior history
-    /// never loads unbounded into working memory.
-    /// Working memory (`sessions`/`messages` tables) is the live source of
-    /// truth; the episodic `episodes` tables sharing the same file are the
-    /// durable mirror hydrated only here.
-    /// - Parameters:
-    ///   - messages: Messages in chronological order.
-    ///   - sessionID: Owning session identifier.
     public func setHistory(_ messages: [Message], for sessionID: UUID) async {
         var session = await ensureSession(id: sessionID)
         session.messages = messages
@@ -529,10 +391,6 @@ public actor ConversationManager {
     }
 
     /// Clears messages (and summary) for one session.
-    ///
-    /// Persists the cleared session before returning so the cleared
-    /// state cannot lose to a reordered earlier write.
-    /// - Parameter sessionID: Session identifier.
     public func clear(sessionID: UUID) async {
         guard var session = sessions[sessionID] else { return }
         session.messages.removeAll()
@@ -543,31 +401,11 @@ public actor ConversationManager {
     }
 
     /// Captures the raw pre-turn session state for cancellation rollback.
-    ///
-    /// Reads the stored session directly — never `history(for:)` or
-    /// `workingHistory(for:)` — so the snapshot holds raw messages plus
-    /// the rolling summary with no synthetic summary-prefix message.
-    /// Hydrates disk-only sessions like `session(id:)` so restarts keep
-    /// rollback intact.
-    /// - Parameter sessionID: Session identifier.
-    /// - Returns: Raw session copy, or nil when the session is unknown.
     public func rollbackSnapshot(for sessionID: UUID) async -> ConversationSession? {
         await readSingleMerged(id: sessionID)
     }
 
     /// Restores a rollback snapshot captured by `rollbackSnapshot(for:)`.
-    ///
-    /// Writes back raw messages and the rolling summary together, then
-    /// persists uncancellably, so a cancelled turn neither duplicates the
-    /// summary prefix nor keeps summary growth from truncated appends. The
-    /// restore stamps a fresh mutation so disk cannot resurrect cancelled
-    /// turns under recency merges. Persisting without observing
-    /// cancellation matters because the caller restores from a
-    /// `CancellationError` path where the task is already cancelled; a
-    /// cancellable persist would be skipped and disk would keep the
-    /// cancelled turn to resurrect after restart. A session deleted
-    /// mid-turn stays deleted.
-    /// - Parameter snapshot: Pre-turn session copy to restore.
     public func restoreRollbackSnapshot(_ snapshot: ConversationSession) async {
         guard sessions[snapshot.id] != nil else { return }
         var restored = snapshot
@@ -577,15 +415,6 @@ public actor ConversationManager {
     }
 
     /// Structured tool actions grouped by parent assistant message.
-    ///
-    /// Derives one `ToolAction` per persisted `Calling ... [...]`
-    /// placeholder line with the shared
-    /// `ToolInput/parsePlaceholderLine(_:)` parser and correlates each
-    /// call with its `tool`-role result by `callID`, so history clients
-    /// render without re-parsing placeholder text across languages.
-    /// Hydrates disk-only sessions; unknown sessions yield an empty map.
-    /// - Parameter sessionID: Session identifier.
-    /// - Returns: Actions keyed by parent message identifier, in stored order.
     public func toolActionsByMessage(for sessionID: UUID) async -> [UUID: [ToolAction]] {
         guard let session = await readSingleMerged(id: sessionID) else { return [:] }
         var resultsByCallID: [String: ToolResult] = [:]
@@ -617,14 +446,6 @@ public actor ConversationManager {
     // MARK: - Truncation
 
     /// Summarizes a session's oldest turns on demand.
-    ///
-    /// Keeps the newest `keeping` messages verbatim and folds the rest
-    /// into the session summary.
-    /// - Parameters:
-    ///   - sessionID: Session identifier.
-    ///   - keeping: Recent messages to keep. Defaults to `maxMessages`.
-    /// - Returns: Summary text, or nil when the session is unknown
-    ///   or already within budget.
     @discardableResult
     public func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
         guard var session = sessions[sessionID] else { return nil }
@@ -643,14 +464,6 @@ public actor ConversationManager {
     }
 
     /// Evicts oldest non-system turns when over `maxMessages`.
-    ///
-    /// Prefers non-system rows; when overflow exceeds the non-system
-    /// count the oldest kept rows are evicted as well to stay within
-    /// budget, while strictly preserving the leading system prompt
-    /// so developer/system instructions are never evicted.
-    /// - Parameters:
-    ///   - messages: In-out message buffer to truncate.
-    ///   - summary: In-out summary to extend with evicted turns.
     private func truncateIfNeeded(messages: inout [Message], summary: inout String?) {
         guard messages.count > maxMessages else { return }
         let overflow = messages.count - maxMessages
@@ -696,11 +509,6 @@ public actor ConversationManager {
     // MARK: - Persistence (SQLite with JSON fallback)
 
     /// Saves all tracked sessions to the configured store.
-    ///
-    /// Uses SQLite at `episodesDBPath` when set; otherwise this is a
-    /// no-op. Failures throw so schedulers can retry. Blocking file work
-    /// runs off the actor executor on the shared serial store queue so
-    /// disk order matches actor order.
     public func saveAll() async throws {
         guard let path = episodesDBPath else { return }
         let snapshot = Array(sessions.values)
@@ -710,11 +518,6 @@ public actor ConversationManager {
     }
 
     /// Loads sessions from the configured store, replacing memory.
-    ///
-    /// Uses SQLite at `episodesDBPath` when set; otherwise this is a
-    /// no-op. Missing files load as empty. The blocking read runs off
-    /// the actor executor on the shared serial store queue so it observes
-    /// earlier writes.
     public func loadAll() async throws {
         guard let path = episodesDBPath else { return }
         let loaded = try await SQLiteSerialIO.run {
@@ -725,12 +528,6 @@ public actor ConversationManager {
     }
 
     /// Saves one session without throwing (used after every mutation).
-    ///
-    /// Suspends on the shared serial store queue so writes complete in
-    /// actor call order; failures are ignored. Confirmed identifiers
-    /// leave the unpersisted set so later lists treat them as delete
-    /// candidates.
-    /// - Parameter session: Session to persist.
     private func persist(_ session: ConversationSession) async {
         guard let path = episodesDBPath else { return }
         let snapshot = session
@@ -747,12 +544,6 @@ public actor ConversationManager {
     }
 
     /// Saves one session without observing cancellation.
-    ///
-    /// Rollback restoring from a `CancellationError` path runs under an
-    /// already-cancelled task; a cancellable persist would be skipped and
-    /// disk would keep the cancelled turn. Runs to completion on the
-    /// serial queue instead.
-    /// - Parameter session: Session to persist.
     private func persistUncancellable(_ session: ConversationSession) async {
         guard let path = episodesDBPath else { return }
         let snapshot = session
@@ -767,10 +558,6 @@ public actor ConversationManager {
     }
 
     /// Deletes one persisted session without observing cancellation.
-    ///
-    /// Shares the rollback rationale with `persistUncancellable`: deletes
-    /// issued while the task is already cancelled must still land.
-    /// - Parameter id: Session identifier.
     private func deletePersistedSessionUncancellable(id: UUID) async {
         guard let path = episodesDBPath else { return }
         await SQLiteSerialIO.runUncancellable {
@@ -786,17 +573,8 @@ public actor ConversationManager {
 // MARK: - Session store I/O
 
 /// File and SQLite I/O for conversation sessions.
-///
-/// Prefers the SQLite `sessions` table when the SQLite3 module is
-/// available; otherwise persists each session as JSON beside the
-/// configured database path so Linux CI and hosts without SQLite
-/// headers behave identically.
 enum SessionStoreIO {
     /// Writes sessions to the store.
-    /// - Parameters:
-    ///   - sessions: Sessions to write.
-    ///   - dbPath: SQLite path (or JSON sidecar anchor).
-    ///   - merge: When true, upserts without dropping other rows.
     static func write(sessions: [ConversationSession], dbPath: String, merge: Bool = false) throws {
         #if canImport(SQLite3)
             try SQLiteSessionStore.write(sessions: sessions, dbPath: dbPath, merge: merge)
@@ -817,10 +595,6 @@ enum SessionStoreIO {
     }
 
     /// Reads a single session from the store.
-    /// - Parameters:
-    ///   - sessionID: Session identifier.
-    ///   - dbPath: SQLite path (or JSON sidecar anchor).
-    /// - Returns: Stored session, or nil when missing.
     static func readSingle(sessionID: UUID, dbPath: String) throws -> ConversationSession? {
         #if canImport(SQLite3)
             return try SQLiteSessionStore.readSingle(sessionID: sessionID, dbPath: dbPath)
@@ -830,9 +604,6 @@ enum SessionStoreIO {
     }
 
     /// Deletes one session from the store. Missing rows are a no-op.
-    /// - Parameters:
-    ///   - sessionID: Session identifier.
-    ///   - dbPath: SQLite path (or JSON sidecar anchor).
     static func delete(sessionID: UUID, dbPath: String) throws {
         #if canImport(SQLite3)
             try SQLiteSessionStore.delete(sessionID: sessionID, dbPath: dbPath)
@@ -854,17 +625,8 @@ enum SessionStoreIO {
 
 #if canImport(SQLite3)
     /// Minimal SQLite store for sessions and their messages.
-    ///
-    /// Schema:
-    /// `sessions(id TEXT PRIMARY KEY, summary TEXT, created_at REAL, updated_at REAL)`
-    /// `messages(id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_call_id TEXT, is_error INTEGER, created_at REAL)`
     enum SQLiteSessionStore {
         /// Lock-guarded record of paths already probed for migrations.
-        ///
-        /// Keeps the one-probe-per-path fast path without shared mutable
-        /// state: every access runs inside the box so Swift 6 sees no
-        /// data race, and eviction picks the sorted first entry so repeated
-        /// runs evict the same victim instead of depending on hash order.
         private final class MigrationPathCache: Sendable {
             /// Probed standardized paths guarded by OSAllocatedUnfairLock.
             private let paths = OSAllocatedUnfairLock(initialState: Set<String>())
@@ -880,13 +642,6 @@ enum SessionStoreIO {
             }
 
             /// Records a path, evicting deterministically at capacity.
-            ///
-            /// Eviction only forces a future re-probe (idempotent
-            /// `table_info` plus conditional `ALTER`), never a correctness
-            /// loss, so the sorted-first victim keeps behavior repeatable.
-            /// - Parameters:
-            ///   - key: Standardized path to record.
-            ///   - maxCapacity: Bound matching the session-cap discipline.
             func insert(_ key: String, maxCapacity: Int) {
                 paths.withLock { set in
                     if set.count >= maxCapacity, let victim = set.sorted().first {
@@ -898,35 +653,18 @@ enum SessionStoreIO {
         }
 
         /// Paths already probed for migrations in this process.
-        ///
-        /// Probing `table_info` plus conditional `ALTER` on every open
-        /// costs per-operation overhead; the cache keeps one probe per
-        /// path while reads still tolerate a failed migration via
-        /// fallback selects below. Immutable box keeps all mutation inside
-        /// `withLock`-style methods with no isolation opt-out.
         private static let migratedPaths = MigrationPathCache()
         /// Bounds the migration cache so distinct database paths never grow
         /// memory without bound, matching the session-cap discipline.
         private static let maxMigratedPaths = 500
 
         /// Standardized cache key for a database path.
-        ///
-        /// Tilde expansion alone leaves `./db`, `db`, and symlinked forms
-        /// as distinct keys; standardizing keeps one entry per file.
-        /// - Parameter dbPath: Configured database path.
-        /// - Returns: Absolute standardized path.
         private static func migrationCacheKey(_ dbPath: String) -> String {
             let expanded = (dbPath as NSString).expandingTildeInPath
             return URL(fileURLWithPath: expanded).standardizedFileURL.path
         }
 
         /// Records a migrated path, evicting deterministically at capacity.
-        ///
-        /// Eviction only forces a future re-probe (idempotent `table_info`
-        /// plus conditional `ALTER`), never a correctness loss. Runs inside
-        /// the cache box so callers never hold a lock across blocking
-        /// SQLite I/O.
-        /// - Parameter key: Standardized path to record.
         private static func noteMigrated(_ key: String) {
             migratedPaths.insert(key, maxCapacity: maxMigratedPaths)
         }
@@ -963,21 +701,13 @@ enum SessionStoreIO {
                 failure: ConversationManagerError.persistenceFailed
             )
             let cacheKey = migrationCacheKey(dbPath)
-            // Snapshot the migration cache without holding the lock across
-            // blocking SQLite I/O, so concurrent opens never block on disk
-            // work. A duplicate migration from a concurrent open is safe
-            // because the probe plus conditional `ALTER` is idempotent.
+            // Snapshot the migration cache without holding the lock across blocking SQLite I/O, so
+            // concurrent opens never block on disk work. A duplicate migration from a concurrent
+            // open is safe because the probe plus conditional `ALTER` is idempotent.
             let needsMigration = !migratedPaths.contains(cacheKey)
             if needsMigration {
-                // Best-effort migration for existing databases created without
-                // title, source, or error-flag columns. Probes `table_info`
-                // first so the expected present-column case never issues
-                // `ALTER` (and never depends on matching the localized
-                // SQLite message text); residual failures are reported by
-                // SQLite error code and tolerated by fallback reads/writes
-                // so one failed migration never fails every later read.
-                // Column names map through a literal allowlist so no
-                // interpolated identifier ever reaches SQLite.
+                // Best-effort migration for existing databases created without title, source, or
+                // error-flag columns.
                 let existingSessions = columnNames(in: .sessions, handle: handle)
                 let sessionColumnsToAdd: [(name: String, sql: String)] = [
                     ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
@@ -1017,9 +747,6 @@ enum SessionStoreIO {
         }
 
         /// Executes a multi-statement SQL string.
-        /// - Parameters:
-        ///   - handle: Open database handle.
-        ///   - sql: SQL to execute.
         private static func exec(handle: OpaquePointer?, sql: String) throws {
             try SQLiteHelpers.exec(handle: handle, sql: sql, failure: ConversationManagerError.persistenceFailed)
         }
@@ -1037,13 +764,6 @@ enum SessionStoreIO {
         }
 
         /// Lists the declared column names of a table, lowercased.
-        ///
-        /// Probes `PRAGMA table_info` so migrations only alter tables that
-        /// actually lack the column.
-        /// - Parameters:
-        ///   - table: Table to inspect (`.sessions` or `.messages`).
-        ///   - handle: Open database handle.
-        /// - Returns: Lowercased column names, empty when unreadable.
         private static func columnNames(in table: KnownTable, handle: OpaquePointer?) -> Set<String> {
             let pragmaSQL = table.pragmaSQL
             var names: Set<String> = []
@@ -1061,19 +781,11 @@ enum SessionStoreIO {
         }
 
         /// Binds optional text, mapping nil to NULL.
-        /// - Parameters:
-        ///   - statement: Prepared statement.
-        ///   - index: One-based bind index.
-        ///   - value: Text value, or nil for NULL.
         private static func bindText(_ statement: OpaquePointer?, index: Int32, value: String?) {
             SQLiteHelpers.bindText(statement, index: index, value: value)
         }
 
         /// Writes sessions, optionally preserving existing rows.
-        /// - Parameters:
-        ///   - sessions: Sessions to upsert.
-        ///   - dbPath: SQLite file path.
-        ///   - merge: When false, replaces the whole store atomically.
         static func write(sessions: [ConversationSession], dbPath: String, merge: Bool) throws {
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
@@ -1092,63 +804,22 @@ enum SessionStoreIO {
             }
         }
 
-        /// Whether a failed `prepare` means a missing column from an older schema.
-        ///
-        /// Only the `no such column` shape falls back to the legacy statement;
-        /// transient failures (`BUSY`, `NOMEM`, corrupt) must surface instead
-        /// of silently dropping `title`/`source`/`is_error`.
-        /// - Parameter handle: Open database handle.
-        /// - Returns: True when the last error reports a missing column.
-        private static func isMissingColumnError(handle: OpaquePointer?) -> Bool {
-            guard sqlite3_errcode(handle) == SQLITE_ERROR else { return false }
-            guard let message = sqlite3_errmsg(handle).map({ String(cString: $0).lowercased() }) else { return false }
-            return message.contains("no such column")
-        }
-
         /// Upserts one session and rewrites its messages.
-        /// - Parameters:
-        ///   - session: Session to store.
-        ///   - handle: Open database handle.
         private static func upsert(session: ConversationSession, handle: OpaquePointer?) throws {
             var sessionStatement: OpaquePointer?
             let sessionSQL = "INSERT INTO sessions(id, title, summary, created_at, updated_at, source) VALUES(?, ?, ?, ?, ?, ?) "
                 + "ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary, updated_at=excluded.updated_at, source=excluded.source;"
-            let legacySessionSQL = "INSERT INTO sessions(id, summary, created_at, updated_at) VALUES(?, ?, ?, ?) "
-                + "ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at;"
-            let sessionPrepare = sqlite3_prepare_v2(handle, sessionSQL, -1, &sessionStatement, nil)
-            let useLegacySession: Bool
-            if sessionPrepare == SQLITE_OK {
-                useLegacySession = false
-            } else if isMissingColumnError(handle: handle) {
-                useLegacySession = true
-            } else {
+            guard sqlite3_prepare_v2(handle, sessionSQL, -1, &sessionStatement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
-                sqlite3_finalize(sessionStatement)
-                sessionStatement = nil
-                RuneWeaverLog.stores.error(
-                    "SQLiteSessionStore: session upsert prepare failed (code \(code)); not a missing column, failing instead of dropping title/source."
-                )
                 throw ConversationManagerError.persistenceFailed("Could not prepare session upsert (code \(code))")
             }
-            if useLegacySession {
-                sqlite3_finalize(sessionStatement)
-                sessionStatement = nil
-                guard sqlite3_prepare_v2(handle, legacySessionSQL, -1, &sessionStatement, nil) == SQLITE_OK else {
-                    throw ConversationManagerError.persistenceFailed("Could not prepare session upsert")
-                }
-                bindText(sessionStatement, index: 1, value: session.id.uuidString)
-                bindText(sessionStatement, index: 2, value: session.summary)
-                sqlite3_bind_double(sessionStatement, 3, session.createdAt.timeIntervalSince1970)
-                sqlite3_bind_double(sessionStatement, 4, session.updatedAt.timeIntervalSince1970)
-            } else {
-                bindText(sessionStatement, index: 1, value: session.id.uuidString)
-                bindText(sessionStatement, index: 2, value: session.title)
-                bindText(sessionStatement, index: 3, value: session.summary)
-                sqlite3_bind_double(sessionStatement, 4, session.createdAt.timeIntervalSince1970)
-                sqlite3_bind_double(sessionStatement, 5, session.updatedAt.timeIntervalSince1970)
-                bindText(sessionStatement, index: 6, value: session.source)
-            }
             defer { sqlite3_finalize(sessionStatement) }
+            bindText(sessionStatement, index: 1, value: session.id.uuidString)
+            bindText(sessionStatement, index: 2, value: session.title)
+            bindText(sessionStatement, index: 3, value: session.summary)
+            sqlite3_bind_double(sessionStatement, 4, session.createdAt.timeIntervalSince1970)
+            sqlite3_bind_double(sessionStatement, 5, session.updatedAt.timeIntervalSince1970)
+            bindText(sessionStatement, index: 6, value: session.source)
             guard sqlite3_step(sessionStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write session \(session.id)")
             }
@@ -1156,14 +827,6 @@ enum SessionStoreIO {
         }
 
         /// Rewrites all message rows for one session.
-        ///
-        /// Delete-then-insert keeps the stored order identical to the
-        /// in-memory order without per-row diffing; the caller holds the
-        /// surrounding transaction so a mid-rewrite failure rolls back
-        /// the session row as well.
-        /// - Parameters:
-        ///   - session: Session whose messages replace stored rows.
-        ///   - handle: Open database handle.
         private static func rewriteMessages(for session: ConversationSession, handle: OpaquePointer?) throws {
             var deleteStatement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "DELETE FROM messages WHERE session_id = ?;", -1, &deleteStatement, nil) == SQLITE_OK else {
@@ -1179,37 +842,13 @@ enum SessionStoreIO {
             }
         }
 
-        /// Inserts one message row, tolerating older schemas.
-        ///
-        /// Falls back to the minimal-column statement only when the failure
-        /// reports a missing column, so transient failures still surface
-        /// instead of silently dropping the error flag.
-        /// - Parameters:
-        ///   - message: Message to store.
-        ///   - sessionID: Owning session identifier.
-        ///   - handle: Open database handle.
+        /// Inserts one message row.
         private static func insertMessage(_ message: Message, sessionID: UUID, handle: OpaquePointer?) throws {
             let messageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at) VALUES(?, ?, ?, ?, ?, ?, ?);"
-            let legacyMessageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, created_at) VALUES(?, ?, ?, ?, ?, ?);"
             var messageStatement: OpaquePointer?
-            var useLegacyMessage = false
-            if sqlite3_prepare_v2(handle, messageSQL, -1, &messageStatement, nil) != SQLITE_OK {
-                if isMissingColumnError(handle: handle) {
-                    sqlite3_finalize(messageStatement)
-                    messageStatement = nil
-                    guard sqlite3_prepare_v2(handle, legacyMessageSQL, -1, &messageStatement, nil) == SQLITE_OK else {
-                        throw ConversationManagerError.persistenceFailed("Could not prepare message insert")
-                    }
-                    useLegacyMessage = true
-                } else {
-                    let code = sqlite3_errcode(handle)
-                    sqlite3_finalize(messageStatement)
-                    messageStatement = nil
-                    RuneWeaverLog.stores.error(
-                        "SQLiteSessionStore: message insert prepare failed (code \(code)); not a missing column, failing instead of dropping is_error."
-                    )
-                    throw ConversationManagerError.persistenceFailed("Could not prepare message insert (code \(code))")
-                }
+            guard sqlite3_prepare_v2(handle, messageSQL, -1, &messageStatement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                throw ConversationManagerError.persistenceFailed("Could not prepare message insert (code \(code))")
             }
             defer { sqlite3_finalize(messageStatement) }
             bindText(messageStatement, index: 1, value: message.id.uuidString)
@@ -1217,16 +856,12 @@ enum SessionStoreIO {
             bindText(messageStatement, index: 3, value: message.role.rawValue)
             bindText(messageStatement, index: 4, value: message.content)
             bindText(messageStatement, index: 5, value: message.toolCallID)
-            if useLegacyMessage {
-                sqlite3_bind_double(messageStatement, 6, message.createdAt.timeIntervalSince1970)
+            if let isError = message.isError {
+                sqlite3_bind_int64(messageStatement, 6, isError ? 1 : 0)
             } else {
-                if let isError = message.isError {
-                    sqlite3_bind_int64(messageStatement, 6, isError ? 1 : 0)
-                } else {
-                    sqlite3_bind_null(messageStatement, 6)
-                }
-                sqlite3_bind_double(messageStatement, 7, message.createdAt.timeIntervalSince1970)
+                sqlite3_bind_null(messageStatement, 6)
             }
+            sqlite3_bind_double(messageStatement, 7, message.createdAt.timeIntervalSince1970)
             guard sqlite3_step(messageStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write message \(message.id)")
             }
@@ -1247,10 +882,6 @@ enum SessionStoreIO {
         }
 
         /// Reads a single session with its messages.
-        /// - Parameters:
-        ///   - sessionID: Session identifier.
-        ///   - dbPath: SQLite file path.
-        /// - Returns: Loaded session, or nil if missing.
         static func readSingle(sessionID: UUID, dbPath: String) throws -> ConversationSession? {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return nil }
@@ -1267,9 +898,6 @@ enum SessionStoreIO {
         }
 
         /// Deletes one session and its messages. Missing rows are a no-op.
-        /// - Parameters:
-        ///   - sessionID: Session identifier.
-        ///   - dbPath: SQLite file path.
         static func delete(sessionID: UUID, dbPath: String) throws {
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return }
@@ -1298,9 +926,6 @@ enum SessionStoreIO {
     }
 #else
     /// JSON-file fallback used where the SQLite3 module is unavailable.
-    ///
-    /// Each session is stored as `<anchor>.sessions/<id>.json` so hosts
-    /// without SQLite headers (e.g. Linux CI) persist identically.
     enum JSONSessionStore {
         /// Directory holding one JSON file per session.
         /// - Parameter dbPath: Configured database path used as anchor.
@@ -1311,11 +936,6 @@ enum SessionStoreIO {
         }
 
         /// Writes sessions as JSON files.
-        /// - Parameters:
-        ///   - sessions: Sessions to write.
-        ///   - dbPath: Anchor path for the sidecar directory.
-        ///   - merge: Ignored (files are always upserted); present for
-        ///     API parity with the SQLite store.
         static func write(sessions: [ConversationSession], dbPath: String, merge _: Bool = false) throws {
             let directoryURL = directory(dbPath: dbPath)
             do {
@@ -1350,10 +970,6 @@ enum SessionStoreIO {
         }
 
         /// Reads a single JSON session file.
-        /// - Parameters:
-        ///   - sessionID: Session identifier.
-        ///   - dbPath: Anchor path for the sidecar directory.
-        /// - Returns: Loaded session, or nil when missing.
         static func readSingle(sessionID: UUID, dbPath: String) throws -> ConversationSession? {
             let fileURL = directory(dbPath: dbPath).appendingPathComponent("\(sessionID.uuidString).json")
             guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
@@ -1367,9 +983,6 @@ enum SessionStoreIO {
         }
 
         /// Deletes one JSON session file. Missing files are a no-op.
-        /// - Parameters:
-        ///   - sessionID: Session identifier.
-        ///   - dbPath: Anchor path for the sidecar directory.
         static func delete(sessionID: UUID, dbPath: String) throws {
             let fileURL = directory(dbPath: dbPath).appendingPathComponent("\(sessionID.uuidString).json")
             guard FileManager.default.fileExists(atPath: fileURL.path) else { return }

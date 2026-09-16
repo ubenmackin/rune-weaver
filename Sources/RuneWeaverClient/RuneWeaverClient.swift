@@ -1,22 +1,9 @@
 // Rune Weaver Client — WebSocket transport to the localhost-only engine service.
-//
-// Owns connection state and chat/decision framing for every client surface
-// (iOS, macOS menu bar, web dashboard) over one shared wire shape.
-// Aliases the single-sourced `RuneWeaverCore` frames so encoding never drifts;
-// UI lives in the app targets, transport lives here.
 
 import Foundation
 import RuneWeaverCore
 
 /// WebSocket wire shapes, single-sourced from `RuneWeaverCore`.
-///
-/// The canonical `WSChatMessage`, `WSDecisionMessage`, `WSStreamDelta`,
-/// `WSStreamDone`, `WSApprovalPrompt`, and `WSErrorFrame` live in
-/// `RuneWeaverCore/WSWire.swift` and are aliased here (and in
-/// `RuneWeaverServer`) so the JSON encoding never drifts between modules;
-/// drift breaks `WSInboundKind.classify`, which tells chat frames apart by
-/// the presence of `text` versus `id` plus `approved`, and cancel frames by
-/// their explicit `"type": "cancel"` discriminator.
 public typealias ClientChatMessage = RuneWeaverCore.WSChatMessage
 /// Decision frame, single-sourced from core (`WSDecisionMessage`).
 public typealias ClientDecisionMessage = RuneWeaverCore.WSDecisionMessage
@@ -36,22 +23,6 @@ private struct ClientFramePeek: Codable {
 }
 
 /// Thin client connection to the core engine.
-///
-/// Clients (iOS, macOS menu bar, web dashboard) connect over WebSocket to
-/// the loopback-only v1 service (`127.0.0.1` with no auth, so
-/// local-process access is the protection boundary). Remote access over
-/// WireGuard VPN stays deferred until authentication lands and the service
-/// may bind beyond loopback. This type owns connection state and
-/// message transport; UI lives in the app targets.
-///
-/// The engine exposes a WebSocket endpoint at `/ws` (derived from
-/// `baseURL` by swapping `http(s)` for `ws(s)`). `connect()` performs
-/// a real WebSocket handshake verified with a ping/pong round-trip and
-/// only enters `.connected` on success. Outbound chat uses the shared
-/// `{"text": ...}` shape classified by `WSInboundKind` on the engine (one
-/// engine API, no per-client forks); inbound chat is a `delta` stream plus
-/// a terminal `done` frame, with `approval` broadcasts skipped and `error`
-/// frames terminating the turn as a transport failure.
 public actor RuneWeaverClient {
     /// Connection lifecycle state.
     public enum ConnectionState: String, Sendable {
@@ -80,11 +51,6 @@ public actor RuneWeaverClient {
     }
 
     /// Opens the WebSocket connection to the engine.
-    ///
-    /// Derives the `/ws` endpoint from `baseURL`, resumes a
-    /// `URLSessionWebSocketTask`, and verifies the handshake with a
-    /// ping/pong round-trip. Enters `.connected` only on success;
-    /// otherwise returns to `.disconnected` and records `lastError`.
     public func connect() async {
         if state == .connected || state == .connecting {
             return
@@ -125,32 +91,11 @@ public actor RuneWeaverClient {
     }
 
     /// Sends a user message and streams the reply.
-    ///
-    /// Requires an active connection: when disconnected the stream
-    /// terminates immediately. Otherwise the message content is framed as
-    /// the shared `{"text": ...}` chat shape, sent as a WebSocket text
-    /// frame, and the engine `delta`/`done` stream is consumed until the
-    /// terminal `done` frame, which is yielded as a single assistant
-    /// message. `approval` broadcasts arriving mid-turn are skipped;
-    /// `error` frames terminate the stream and record `lastError`.
-    /// Transport failures terminate the stream and record `lastError`.
-    /// - Parameter message: User message.
-    /// - Returns: Stream of assistant messages.
     public func send(_ message: Message) -> AsyncStream<Message> {
         send(text: message.content, source: "client")
     }
 
     /// Sends raw user text and streams the reply.
-    ///
-    /// Shared engine wire: outbound uses `ClientChatMessage` (`{"text": ...}`)
-    /// so `WSInboundKind.classify` sees a chat frame; inbound consumes the
-    /// `delta` stream plus the terminal `done` frame. Approval prompts are
-    /// skipped so one socket carries both streamed chat and live decisions.
-    /// - Parameters:
-    ///   - text: Raw user text.
-    ///   - sessionID: Owning session. Defaults to nil (new session).
-    ///   - source: Input origin. Defaults to `"client"`.
-    /// - Returns: Stream yielding the final assistant message.
     public func send(text: String, sessionID: UUID? = nil, source: String? = "client") -> AsyncStream<Message> {
         guard state == .connected, socketTask != nil else {
             return AsyncStream { $0.finish() }
@@ -169,14 +114,6 @@ public actor RuneWeaverClient {
     }
 
     /// Sends an approval decision for a pending request.
-    ///
-    /// Frames the decision as the shared `{"id": ..., "approved": ...}`
-    /// shape classified by `WSInboundKind` so inline WebSocket decisions
-    /// resolve the same approval queue as REST without polling.
-    /// - Parameters:
-    ///   - id: Pending request identifier.
-    ///   - approved: Whether the tool call may run.
-    ///   - duration: Trust tier. Defaults to `thisTime`.
     public func sendDecision(id: UUID, approved: Bool, duration: TrustDuration = .thisTime) async throws {
         guard let task = socketTask else {
             throw URLError(.notConnectedToInternet)
@@ -200,15 +137,6 @@ public actor RuneWeaverClient {
     }
 
     /// Runs one chat turn over an established socket.
-    ///
-    /// Sends the shared `{"text": ...}` chat frame, then consumes the
-    /// `delta` stream until the terminal `done` frame. Approval broadcasts
-    /// are skipped and `error` frames terminate the turn as a failure.
-    /// - Parameters:
-    ///   - text: Raw user text.
-    ///   - sessionID: Owning session.
-    ///   - source: Input origin.
-    ///   - continuation: Stream receiving the final assistant message.
     private func runChatTurn(
         text: String,
         sessionID: UUID?,
@@ -250,11 +178,6 @@ public actor RuneWeaverClient {
     }
 
     /// Encodes the outbound chat frame.
-    /// - Parameters:
-    ///   - text: Raw user text.
-    ///   - sessionID: Owning session.
-    ///   - source: Input origin.
-    /// - Returns: UTF-8 WebSocket text frame in the shared chat shape.
     private static func chatFrame(text: String, sessionID: UUID?, source: String?) throws -> String {
         let outbound = ClientChatMessage(text: text, sessionID: sessionID, source: source)
         let payload = try JSONEncoder().encode(outbound)
@@ -283,15 +206,6 @@ public actor RuneWeaverClient {
     }
 
     /// Handles one inbound engine frame.
-    ///
-    /// Typed `delta`/`done`/`approval`/`error` frames take precedence; a
-    /// payload without a discriminator falls back to a bare `Message` frame
-    /// from an older engine.
-    /// - Parameters:
-    ///   - replyData: Raw inbound payload.
-    ///   - accumulated: Running delta text used when `done` carries no text.
-    ///   - continuation: Stream receiving the final assistant message.
-    /// - Returns: Whether the turn finished or should continue streaming.
     private static func handleFrame(
         _ replyData: Data,
         accumulated: inout String,
@@ -305,22 +219,10 @@ public actor RuneWeaverClient {
                 continuation: continuation
             )
         }
-        // Legacy fallback: a bare `Message` frame from an older engine.
-        if let legacy = try? JSONDecoder().decode(Message.self, from: replyData) {
-            continuation.yield(legacy)
-            continuation.finish()
-            return .finished
-        }
         return .continued
     }
 
     /// Handles one discriminator-typed engine frame.
-    /// - Parameters:
-    ///   - type: Frame discriminator.
-    ///   - replyData: Raw inbound payload.
-    ///   - accumulated: Running delta text used when `done` carries no text.
-    ///   - continuation: Stream receiving the final assistant message.
-    /// - Returns: Whether the turn finished or should continue streaming.
     private static func handleTypedFrame(
         _ type: String,
         replyData: Data,
@@ -355,9 +257,6 @@ public actor RuneWeaverClient {
     }
 
     /// Derives the engine WebSocket endpoint from the base URL.
-    /// - Parameter baseURL: Engine base URL (`http(s)://host[:port][/prefix]`).
-    /// - Returns: `ws(s)` URL with `/ws` appended, or nil when `baseURL`
-    ///   has no host.
     private static func webSocketURL(for baseURL: URL) -> URL? {
         guard var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               components.host != nil

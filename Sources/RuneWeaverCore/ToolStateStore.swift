@@ -1,10 +1,4 @@
 // Rune Weaver Core — Durable per-tool enable/disable states for builtin and plugin tools.
-//
-// Persists operator toggles for any registered tool name in `episodes.db`
-// (`tool_states` table) so restarts restore the live `ToolBus` enablement
-// without re-prompting. The bus stays the runtime source of truth while
-// SQLite stays the durable one; stored rows apply on boot through the
-// existing enable/disable calls, including memory tools with no exemptions.
 
 import Foundation
 #if canImport(SQLite3)
@@ -29,11 +23,6 @@ public struct ToolState: Sendable, Codable, Equatable {
 }
 
 /// Actor managing durable per-tool enable/disable states in SQLite.
-///
-/// Backed by `episodes.db` (`tool_states` table) and funneled through the
-/// shared serial store queue so concurrent toggles never race. An absent row
-/// means no operator override exists, so callers keep the bus default
-/// (enabled) instead of inventing a stored value.
 public actor ToolStateStore {
     private let dbPath: String
     private var cached: [String: Bool] = [:]
@@ -74,11 +63,6 @@ public actor ToolStateStore {
     }
 
     /// Returns the stored flag for one tool, if an operator ever toggled it.
-    ///
-    /// A nil result means no row exists, so the caller should keep the bus
-    /// default rather than treating the tool as disabled.
-    /// - Parameter toolName: Registered tool name.
-    /// - Returns: Stored flag, or nil when no override exists.
     public func isEnabled(toolName: String) async -> Bool? {
         let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -87,13 +71,6 @@ public actor ToolStateStore {
     }
 
     /// Persists the enabled flag for any registered tool name.
-    ///
-    /// Accepts every tool name including memory tools; unknown names persist
-    /// harmlessly and simply never match a bus registration on restore.
-    /// Empty names are ignored so blank route input never creates dead rows.
-    /// - Parameters:
-    ///   - toolName: Registered tool name.
-    ///   - enabled: Whether the tool should be enabled.
     public func setEnabled(toolName: String, enabled: Bool) async {
         let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }

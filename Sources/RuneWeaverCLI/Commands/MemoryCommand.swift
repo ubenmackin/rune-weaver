@@ -8,12 +8,6 @@ import RuneWeaverCore
 import RuneWeaverLLM
 
 /// Searches semantic memory and shows what the agent knows.
-///
-/// `rune-weaver memory search <query>` recalls across episodic, semantic,
-/// and profile tiers. `rune-weaver memory facts` lists long-lived profile
-/// facts, preferences, and stored fact counts. `rune-weaver memory reindex`
-/// rebuilds the semantic index and optionally backfills embeddings for
-/// keyword-only rows.
 struct MemoryCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -44,10 +38,6 @@ struct MemorySearchCommand: AsyncParsableCommand {
     var config: String?
 
     /// Recalls memories and prints them ranked by relevance.
-    ///
-    /// Recall merges episodic, semantic, and profile tiers per tier limit,
-    /// then display is capped to the requested total so `--limit 5` never
-    /// prints more than five rows.
     mutating func run() async throws {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ValidationError("Query must not be empty.")
@@ -58,10 +48,9 @@ struct MemorySearchCommand: AsyncParsableCommand {
         let loaded = try CLIConfigLoader.loadConfig(path: config)
         let engine = CLIShared.memoryEngine(for: loaded.config.memory)
         let requested = limit
-        // Resolve the embeddings producer from config through the shared
-        // factory so every backend (`apple`, `provider`, `none`) behaves
-        // like chat and reindex; any embedding failure keeps the keyword
-        // path while cancellation propagates.
+        // Resolve the embeddings producer from config through the shared factory so every backend
+        // (`apple`, `provider`, `none`) behaves like chat and reindex; any embedding failure keeps
+        // the keyword path while cancellation propagates.
         let providers = await CLIProviderBuilder.buildProviders(from: loaded.config.llm)
         let embedder = EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
@@ -138,13 +127,6 @@ struct MemoryFactsCommand: AsyncParsableCommand {
 }
 
 /// Rebuilds the semantic index and optionally backfills embeddings.
-///
-/// Without `--embed` the command compacts the keyword store (deduplicating
-/// rows and revalidating the width) without touching vectors. With `--embed`
-/// it gives keyword-only rows vectors using the configured backend, so older
-/// installs gain similarity search without losing facts. `--reset` clears the
-/// vector store first so a new backend width never mixes with the old one;
-/// the flag itself is the confirmation, no prompt follows.
 struct MemoryReindexCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -169,12 +151,6 @@ struct MemoryReindexCommand: AsyncParsableCommand {
     var config: String?
 
     /// Rebuilds the index, backfilling vectors when requested.
-    ///
-    /// With `--embed` a disabled or unknown backend never destroys data: it
-    /// prints guidance and leaves the keyword-only store untouched, ignoring
-    /// `--reset` on that path. Without `--embed` an explicit `--reset` clears
-    /// first so the next width starts clean, and every path reports counts
-    /// plus the active dimension when done.
     mutating func run() async throws {
         guard batchSize > 0 else {
             throw ValidationError("--batch-size must be positive (got \(batchSize)).")

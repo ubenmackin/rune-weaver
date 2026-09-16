@@ -1,9 +1,4 @@
 // Rune Weaver Tests — Memory embedding backend selection.
-//
-// Covers the `[memory] embedding_backend` selector that chooses how semantic
-// recall vectors are produced. Validates the local-first default, per-value
-// TOML round-trips, and rejection of unknown backends so recall never
-// silently picks an unintended path.
 import Foundation
 @testable import RuneWeaverCore
 import Testing
@@ -109,11 +104,6 @@ struct EmbeddingsConfigTests {
 }
 
 /// Decodes one backend value, validates, renders, and re-decodes.
-///
-/// Rendering then re-parsing proves the TOML write path preserves the value
-/// instead of only the in-memory struct holding it.
-/// - Parameter backend: Backend string to round-trip.
-/// - Throws: `ConfigError` on parse or validation failure.
 private func assertBackendRoundTrips(_ backend: String) throws {
     let text = """
     [llm]

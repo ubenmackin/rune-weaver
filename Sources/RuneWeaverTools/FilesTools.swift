@@ -1,32 +1,9 @@
 // Rune Weaver Tools — Local file tools (`files.read`, `files.grep`, `files.glob`) plus Seatbelt staging.
-//
-// Exposes bounded local file reads and search to the model over the shared
-// `FilesAccessGuard` deny policy, driven by the `[files]` config section
-// (`FilesConfig` deny patterns, allow roots, and deny escalation). Reads are line-windowed (offset/limit)
-// with a byte cap and a binary sniff so oversized or non-text files fail
-// with a note instead of flooding context or leaking credential bytes.
-// Grep walks with deny pruning and skips binaries and oversized files;
-// glob lists pruned, sorted paths. Denied paths fail with an
-// approval-escalation hint and never return file content.
-//
-// Confinement is Tier-1/Tier-2 Seatbelt plus Tier-3 microVM only with no host
-// sandbox folder: remaining document writes stage in a Seatbelt-confined temp
-// dir (`SeatbeltTempStaging`) and reach the workspace via one guard-validated
-// atomic move on approval. Temp is never executed from and is removed on deny
-// or failure.
 
 import Foundation
 import RuneWeaverCore
 
 /// Arguments for the `files.read` tool.
-///
-/// `path` is required; `offset` is the 1-indexed first line to return
-/// (defaulting to 1 and clamped to at least 1 so `0` or negative values
-/// read from the top instead of failing); `limit` caps returned lines
-/// (defaulting to 2000 and clamped to `1...5000` so the model cannot fan
-/// out an unbounded read); `encoding` names the text encoding and only
-/// accepts UTF-8 variants in v1 so undecodable bytes fail cleanly rather
-/// than arriving as mojibake.
 public struct FilesReadArgs: Sendable, Equatable, Decodable {
     /// Raw file path (may contain `~`, `.`, `..`, or symlinks; resolved by the guard).
     public let path: String
@@ -45,11 +22,6 @@ public struct FilesReadArgs: Sendable, Equatable, Decodable {
     public static let defaultOffset = 1
 
     /// Memberwise initializer with offset/limit clamping.
-    /// - Parameters:
-    ///   - path: Raw file path.
-    ///   - offset: 1-indexed first line. Clamped to at least 1.
-    ///   - limit: Maximum lines. Clamped to `1...5000`.
-    ///   - encoding: Optional encoding name.
     public init(path: String, offset: Int = defaultOffset, limit: Int = defaultLimit, encoding: String? = nil) {
         self.path = path
         self.offset = max(offset, Self.defaultOffset)
@@ -89,12 +61,6 @@ public struct FilesReadArgs: Sendable, Equatable, Decodable {
 }
 
 /// Envelope wrapping `files.read` success output.
-///
-/// Encoded as the `ToolOutput.content` JSON document so the model receives
-/// the canonical path, the on-disk size, whether the view was cut short,
-/// and the selected text together. `truncated` covers both the line window
-/// (`offset`/`limit` left lines unread) and the byte cap (the file holds
-/// bytes past the 1 MB read ceiling).
 public struct FilesReadEnvelope: Sendable, Equatable, Codable {
     /// Canonical path that was read.
     public let path: String
@@ -106,11 +72,6 @@ public struct FilesReadEnvelope: Sendable, Equatable, Codable {
     public let content: String
 
     /// Creates a read envelope.
-    /// - Parameters:
-    ///   - path: Canonical path that was read.
-    ///   - sizeBytes: On-disk file size in bytes.
-    ///   - truncated: Whether the view was cut short.
-    ///   - content: Selected text.
     public init(path: String, sizeBytes: Int, truncated: Bool, content: String) {
         self.path = path
         self.sizeBytes = sizeBytes
@@ -120,11 +81,6 @@ public struct FilesReadEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `files.read` deny output.
-///
-/// Denied reads fail (never succeed) with this JSON document as the
-/// `ToolOutput.content` so the orchestrator can surface an approval path.
-/// It carries no file bytes: only the canonical path, the policy reason,
-/// and the escalation flag the model needs to ask for approval.
 public struct FilesDeniedEnvelope: Sendable, Equatable, Codable {
     /// Human-readable denial message.
     public let error: String
@@ -137,11 +93,6 @@ public struct FilesDeniedEnvelope: Sendable, Equatable, Codable {
     public let reason: String
 
     /// Creates a denied envelope.
-    /// - Parameters:
-    ///   - error: Human-readable denial message.
-    ///   - path: Canonical path that was denied.
-    ///   - approvalRequired: Escalation hint. Defaults to true.
-    ///   - reason: Policy reason.
     public init(error: String, path: String, approvalRequired: Bool = true, reason: String) {
         self.error = error
         self.path = path
@@ -151,14 +102,8 @@ public struct FilesDeniedEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Pure JSON encoding for the file tool output documents.
-///
-/// Envelopes encode with sorted keys so fixture tests can assert on stable
-/// output without touching the filesystem beyond canned reads.
 public enum FilesToolEncoding {
     /// Encodes a read envelope as the tool output document.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeReadEnvelope(_ envelope: FilesReadEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -167,9 +112,6 @@ public enum FilesToolEncoding {
     }
 
     /// Encodes a denied envelope as the tool failure document.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeDeniedEnvelope(_ envelope: FilesDeniedEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -178,12 +120,6 @@ public enum FilesToolEncoding {
     }
 
     /// Encodes a grep envelope as the tool output document.
-    ///
-    /// Sorted keys keep the match list stable for fixture assertions
-    /// without touching the filesystem beyond canned searches.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeGrepEnvelope(_ envelope: FilesGrepEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -192,11 +128,6 @@ public enum FilesToolEncoding {
     }
 
     /// Encodes a glob envelope as the tool output document.
-    ///
-    /// Sorted keys keep the path list stable for fixture assertions.
-    /// - Parameter envelope: Envelope to encode.
-    /// - Returns: JSON document for `ToolOutput.content`.
-    /// - Throws: Encoding errors.
     public static func encodeGlobEnvelope(_ envelope: FilesGlobEnvelope) throws -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -206,14 +137,6 @@ public enum FilesToolEncoding {
 }
 
 /// Read-only `files.read` tool for bounded local file reads.
-///
-/// Guards every path through `FilesAccessGuard` before touching disk:
-/// sensitive or outside-home paths fail with an `approvalRequired` hint
-/// and never return bytes. Allowed paths read at most the 1 MB ceiling,
-/// refuse NUL-containing (binary) files with a note, decode as UTF-8, and
-/// return the requested line window with a truncation flag. Read-only in
-/// effect: it never mutates the filesystem and ignores `dryRun`, matching
-/// the email read tools.
 public struct FilesReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "files.read"
@@ -245,19 +168,12 @@ public struct FilesReadTool: Tool, Sendable {
     private let filesConfig: FilesConfig
 
     /// Creates a read tool.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy forwarded to the guard. Defaults to the built-in defaults.
     public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
     }
 
     /// Reads the requested line window, enforcing the guard first.
-    /// - Parameters:
-    ///   - input: Invocation with `path` and optional `offset`, `limit`, `encoding`.
-    ///   - context: Ambient execution context (dry run is ignored; reads never mutate).
-    /// - Returns: JSON read envelope, or a failure without file bytes.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: FilesReadArgs
         do {
@@ -364,25 +280,12 @@ public struct FilesReadTool: Tool, Sendable {
     }
 
     /// Reports whether an encoding name selects the supported UTF-8 path.
-    ///
-    /// Accepts the spellings the model is likely to emit (`utf8`,
-    /// `utf-8`, `utf_8`, case-insensitive, surrounding whitespace ignored)
-    /// and rejects everything else so callers get a clear failure instead
-    /// of silently mis-decoded text.
-    /// - Parameter encoding: Raw encoding name.
-    /// - Returns: True for UTF-8 spellings.
     private func isSupportedEncoding(_ encoding: String) -> Bool {
         let normalised = encoding.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return normalised == "utf8" || normalised == "utf-8" || normalised == "utf_8"
     }
 
     /// Builds the approval-escalation failure without file bytes.
-    /// - Parameters:
-    ///   - resolvedPath: Canonical path that was denied.
-    ///   - reason: Policy reason, if any.
-    ///   - requiresApproval: Escalation hint from the guard decision (false for hard denials).
-    ///   - callID: Correlation identifier.
-    /// - Returns: Failure whose content is the denied envelope JSON.
     private func deniedOutput(resolvedPath: String, reason: String?, requiresApproval: Bool, callID: String) -> ToolOutput {
         let detail = reason ?? "Reading this path requires explicit approval."
         let envelope = FilesDeniedEnvelope(
@@ -400,15 +303,6 @@ public struct FilesReadTool: Tool, Sendable {
     }
 
     /// Reads at most the 1 MB ceiling, reporting whether bytes were left unread.
-    ///
-    /// Small files take the single-shot path; files whose stat size exceeds
-    /// the ceiling read only the leading window through a handle so a
-    /// multi-gigabyte file cannot blow memory. The `+1` probe is unnecessary
-    /// because the stat size already tells whether the ceiling cut bytes,
-    /// and the handle path caps the in-memory prefix exactly.
-    /// - Parameter url: Canonical file URL.
-    /// - Returns: Leading bytes plus whether the file holds more past the ceiling.
-    /// - Throws: Filesystem read errors.
     private func readUpToCap(at url: URL) throws -> (prefix: Data, truncated: Bool) {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
         let size: Int = if let number = attributes[.size] as? NSNumber {
@@ -443,14 +337,6 @@ public struct FilesReadTool: Tool, Sendable {
     }
 
     /// Splits decoded text into lines for windowed reads.
-    ///
-    /// Normalises Windows (`\r\n`) and legacy Mac (`\r`) endings to `\n`
-    /// first so each visual line counts once, drops the single trailing
-    /// empty slice produced by a final newline so `"a\nb\n"` counts as two
-    /// lines, and maps an empty file to zero lines so `offset: 1` yields an
-    /// empty (not single-blank-line) view.
-    /// - Parameter text: Decoded file text.
-    /// - Returns: Lines without terminators.
     private func splitLines(_ text: String) -> [String] {
         if text.isEmpty {
             return []
@@ -467,13 +353,6 @@ public struct FilesReadTool: Tool, Sendable {
 }
 
 /// Arguments for the `files.grep` tool.
-///
-/// `pattern` is a per-line regular expression kept RE2-safe so a future
-/// engine swap cannot introduce backtracking surprises; `path` accepts a
-/// file or a directory root; `include` optionally narrows candidates by
-/// filename glob (for example `*.swift`) so broad roots stay cheap;
-/// `maxResults` bounds returned matches so a noisy pattern cannot flood
-/// context.
 public struct FilesGrepArgs: Sendable, Equatable, Decodable {
     /// Regular expression matched against each text line.
     public let pattern: String
@@ -492,11 +371,6 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
     public static let maxPatternChars = 500
 
     /// Memberwise initializer with `maxResults` clamping.
-    /// - Parameters:
-    ///   - pattern: Regular expression source.
-    ///   - path: File or directory root.
-    ///   - include: Optional filename glob.
-    ///   - maxResults: Maximum matches. Clamped to `1...200`.
     public init(pattern: String, path: String, include: String? = nil, maxResults: Int = defaultMaxResults) {
         self.pattern = pattern
         self.path = path
@@ -548,9 +422,6 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
 }
 
 /// One grep hit: the canonical file, 1-indexed line, and bounded preview.
-///
-/// `preview` carries only the matching line (capped at 200 characters) so
-/// a long line cannot flood context and no neighbouring lines leak.
 public struct FilesGrepMatch: Sendable, Equatable, Codable {
     /// Canonical file path holding the match.
     public let path: String
@@ -560,10 +431,6 @@ public struct FilesGrepMatch: Sendable, Equatable, Codable {
     public let preview: String
 
     /// Creates a grep hit.
-    /// - Parameters:
-    ///   - path: Canonical file path.
-    ///   - line: 1-indexed line number.
-    ///   - preview: Bounded line preview.
     public init(path: String, line: Int, preview: String) {
         self.path = path
         self.line = line
@@ -572,10 +439,6 @@ public struct FilesGrepMatch: Sendable, Equatable, Codable {
 }
 
 /// Envelope wrapping `files.grep` success output.
-///
-/// `truncated` is true only when at least one further match existed past
-/// `maxResults`, so the model can narrow the pattern or raise the cap
-/// instead of assuming completeness.
 public struct FilesGrepEnvelope: Sendable, Equatable, Codable {
     /// Matches in sorted-path, ascending-line order.
     public let matches: [FilesGrepMatch]
@@ -583,9 +446,6 @@ public struct FilesGrepEnvelope: Sendable, Equatable, Codable {
     public let truncated: Bool
 
     /// Creates a grep envelope.
-    /// - Parameters:
-    ///   - matches: Returned matches.
-    ///   - truncated: Whether further matches existed.
     public init(matches: [FilesGrepMatch], truncated: Bool) {
         self.matches = matches
         self.truncated = truncated
@@ -593,10 +453,6 @@ public struct FilesGrepEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Arguments for the `files.glob` tool.
-///
-/// `pattern` is a glob relative to `baseDir` (`*`, `?`, `**`, `[...]`);
-/// `baseDir` defaults to the home boundary so omitted roots cannot drift
-/// to the process working directory; `maxResults` bounds returned paths.
 public struct FilesGlobArgs: Sendable, Equatable, Decodable {
     /// Glob pattern relative to `baseDir`.
     public let pattern: String
@@ -613,10 +469,6 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
     public static let maxPatternChars = 500
 
     /// Memberwise initializer with `maxResults` clamping.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - baseDir: Base directory root, if any.
-    ///   - maxResults: Maximum paths. Clamped to `1...500`.
     public init(pattern: String, baseDir: String? = nil, maxResults: Int = defaultMaxResults) {
         self.pattern = pattern
         self.baseDir = baseDir
@@ -662,10 +514,6 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
 }
 
 /// Envelope wrapping `files.glob` success output.
-///
-/// Paths are canonical absolute paths sorted lexicographically so repeated
-/// calls are deterministic; `truncated` signals that further paths existed
-/// past the cap.
 public struct FilesGlobEnvelope: Sendable, Equatable, Codable {
     /// Sorted canonical paths matching the glob.
     public let paths: [String]
@@ -673,9 +521,6 @@ public struct FilesGlobEnvelope: Sendable, Equatable, Codable {
     public let truncated: Bool
 
     /// Creates a glob envelope.
-    /// - Parameters:
-    ///   - paths: Returned paths.
-    ///   - truncated: Whether further paths existed.
     public init(paths: [String], truncated: Bool) {
         self.paths = paths
         self.truncated = truncated
@@ -683,35 +528,13 @@ public struct FilesGlobEnvelope: Sendable, Equatable, Codable {
 }
 
 /// Shared glob matching for `files.grep` include filters and `files.glob`.
-///
-/// Both tools agree on one dialect — `*` spans within a segment, `?`
-/// spans one non-separator character, `**` spans separators, `[...]`
-/// spans a character class — so an `include` filter behaves exactly like
-/// the equivalent glob pattern. Dot-dot detection lives here too so both
-/// tools reject directory escapes through the same check.
 public enum FilesGlobMatching: Sendable {
     /// Reports whether a glob tries to climb with a `..` segment.
-    ///
-    /// Splitting on `/` (ignoring empty slices from doubled separators)
-    /// keeps `...` or `a..b` legal while `..`, `a/../b`, and `../x` fail,
-    /// so legitimate dotted filenames never false-positive.
-    /// - Parameter pattern: Raw glob pattern.
-    /// - Returns: True when any `/`-separated segment equals `..`.
     public static func containsDotDot(_ pattern: String) -> Bool {
         pattern.split(separator: "/", omittingEmptySubsequences: true).contains { $0 == ".." }
     }
 
     /// Reports whether a relative path matches a glob.
-    ///
-    /// The glob compiles to an anchored regular expression on every call;
-    /// patterns here are short (capped at 500 characters upstream) and
-    /// calls are per-file, so caching would add shared state for no
-    /// measurable win. A pattern that cannot compile defensively matches
-    /// nothing rather than failing the whole search.
-    /// - Parameters:
-    ///   - pattern: Glob pattern.
-    ///   - relativePath: `/`-separated path relative to the search root.
-    /// - Returns: True on match.
     public static func matches(pattern: String, relativePath: String) -> Bool {
         let source = regexSource(fromGlob: pattern)
         guard let expression = try? NSRegularExpression(pattern: source) else {
@@ -722,14 +545,6 @@ public enum FilesGlobMatching: Sendable {
     }
 
     /// Converts a glob to an anchored regular-expression source.
-    ///
-    /// `**/` becomes an optional directory prefix (`(.*/)?`) so `**/*.txt`
-    /// matches top-level files as well as nested ones; lone `**` becomes
-    /// `.*`; `*` stays within a segment (`[^/]*`) so `*.txt` never spans
-    /// directories; `[!...]` negations translate to `[^...]` for the regex
-    /// engine while unterminated `[` stays literal instead of failing.
-    /// - Parameter pattern: Glob pattern.
-    /// - Returns: Anchored regex source.
     public static func regexSource(fromGlob pattern: String) -> String {
         var source = "^"
         let chars = Array(pattern)
@@ -800,15 +615,6 @@ public enum FilesGlobMatching: Sendable {
 }
 
 /// Read-only `files.grep` tool for regex search over local text files.
-///
-/// Every candidate — the starting root and each walked descendant — is
-/// judged by `FilesAccessGuard` before any byte is read: a denied root
-/// fails with an `approvalRequired` hint, while denied descendants are
-/// pruned silently so one secret file cannot veto a whole-tree search.
-/// Files over the 2 MB ceiling and NUL-containing (binary) or undecodable
-/// files are skipped with no match rather than failing the call, keeping
-/// noisy trees searchable. Read-only in effect: it never mutates the
-/// filesystem and ignores `dryRun`, matching the email read tools.
 public struct FilesGrepTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "files.grep"
@@ -843,19 +649,12 @@ public struct FilesGrepTool: Tool, Sendable {
     private let filesConfig: FilesConfig
 
     /// Creates a grep tool.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy forwarded to the guard. Defaults to the built-in defaults.
     public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
     }
 
     /// Searches the requested root, enforcing the guard first.
-    /// - Parameters:
-    ///   - input: Invocation with `pattern`, `path`, optional `include` and `maxResults`.
-    ///   - context: Ambient execution context (dry run is ignored; searches never mutate).
-    /// - Returns: JSON grep envelope, or a failure without file bytes.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: FilesGrepArgs
         do {
@@ -958,15 +757,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Explains why a pattern cannot run on the RE2-safe subset, if any.
-    ///
-    /// RE2 omits lookaround, backreferences, atomic groups, and possessive
-    /// quantifiers; rejecting them here (instead of at a future engine
-    /// swap) keeps patterns portable and sidesteps the catastrophic
-    /// backtracking those constructs enable. The scan skips escapes and
-    /// character classes so a literal `(?=` inside `[...]` or after `\`
-    /// never false-positives.
-    /// - Parameter pattern: Raw regex source.
-    /// - Returns: Human-readable reason, or nil when the pattern is in-subset.
     private static func re2UnsupportedReason(for pattern: String) -> String? {
         let chars = Array(pattern)
         var index = chars.startIndex
@@ -1031,16 +821,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Reports whether a file passes the optional include filter.
-    ///
-    /// Includes stay filename-oriented (`*.swift`) but also honour
-    /// slash-bearing globs (`src/*.swift`) by testing the root-relative
-    /// path as a fallback, so one flag covers both shallow and deep
-    /// filters without a second parameter.
-    /// - Parameters:
-    ///   - include: Raw include glob.
-    ///   - fileURL: Canonical candidate file.
-    ///   - root: Canonical search root (file or directory).
-    /// - Returns: True when the file should be searched.
     private func includeMatches(include: String, fileURL: URL, root: URL) -> Bool {
         let filename = fileURL.lastPathComponent
         if FilesGlobMatching.matches(pattern: include, relativePath: filename) {
@@ -1060,13 +840,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Lists searchable files under a directory, pruning guard denials.
-    ///
-    /// Denied directories prune their whole subtree via
-    /// `skipDescendants()` and denied files are skipped individually, so a
-    /// single secret path cannot veto the search. Every decision reuses
-    /// `FilesAccessGuard` — no path pattern is reimplemented here.
-    /// - Parameter root: Canonical directory root.
-    /// - Returns: Canonical allowed file URLs (directories excluded).
     private func prunedFiles(under root: URL) -> [URL] {
         var files: [URL] = []
         guard let enumerator = FileManager.default.enumerator(
@@ -1099,13 +872,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Reads a file's searchable lines, or nil when the file is skipped.
-    ///
-    /// Files over the 2 MB ceiling, NUL-containing binaries, and
-    /// non-UTF-8 bytes are skipped (nil) rather than failing the search,
-    /// so one binary in a source tree cannot sink the whole call. Line
-    /// endings normalise like `files.read` so previews count lines once.
-    /// - Parameter url: Canonical file URL.
-    /// - Returns: Lines without terminators, or nil to skip the file.
     private func searchableLines(at url: URL) -> [String]? {
         let size: Int
         do {
@@ -1149,12 +915,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Builds the approval-escalation failure without file bytes.
-    /// - Parameters:
-    ///   - resolvedPath: Canonical path that was denied.
-    ///   - reason: Policy reason, if any.
-    ///   - requiresApproval: Escalation hint from the guard decision (false for hard denials).
-    ///   - callID: Correlation identifier.
-    /// - Returns: Failure whose content is the denied envelope JSON.
     private func deniedOutput(resolvedPath: String, reason: String?, requiresApproval: Bool, callID: String) -> ToolOutput {
         let detail = reason ?? "Searching this path requires explicit approval."
         let envelope = FilesDeniedEnvelope(
@@ -1172,12 +932,6 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Caps a matching line to the preview ceiling.
-    ///
-    /// Grapheme-cluster prefixing keeps the 200-character promise in user
-    /// terms (not UTF-8 bytes or UTF-16 code units) so emoji-heavy lines
-    /// truncate without splitting a visible character.
-    /// - Parameter line: Full matching line without terminator.
-    /// - Returns: At most 200 characters of the line.
     private static func preview(_ line: String) -> String {
         guard line.count > maxPreviewChars else {
             return line
@@ -1187,14 +941,6 @@ public struct FilesGrepTool: Tool, Sendable {
 }
 
 /// Read-only `files.glob` tool for listing paths by glob.
-///
-/// The base directory and every walked descendant are judged by
-/// `FilesAccessGuard` before any path is reported: a denied base fails
-/// with an `approvalRequired` hint, while denied descendants are pruned
-/// silently so one secret file cannot veto a listing. Patterns are
-/// relative to the base and must not contain `..`, closing the classic
-/// escape where `../../secret` climbs past the boundary. Read-only in
-/// effect: it never mutates the filesystem and ignores `dryRun`.
 public struct FilesGlobTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "files.glob"
@@ -1223,19 +969,12 @@ public struct FilesGlobTool: Tool, Sendable {
     private let filesConfig: FilesConfig
 
     /// Creates a glob tool.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override forwarded to the guard. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy forwarded to the guard. Defaults to the built-in defaults.
     public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
     }
 
     /// Lists paths matching the glob, enforcing the guard first.
-    /// - Parameters:
-    ///   - input: Invocation with `pattern` and optional `baseDir` and `maxResults`.
-    ///   - context: Ambient execution context (dry run is ignored; listings never mutate).
-    /// - Returns: JSON glob envelope, or a failure without file bytes.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: FilesGlobArgs
         do {
@@ -1310,13 +1049,6 @@ public struct FilesGlobTool: Tool, Sendable {
     }
 
     /// Lists pruned descendants as root-relative and canonical pairs.
-    ///
-    /// Denied subtrees prune via `skipDescendants()` and denied files drop
-    /// individually; every decision reuses `FilesAccessGuard` so no policy
-    /// pattern lives here. Both files and directories report (the base
-    /// itself does not) so patterns like `src` can match a directory.
-    /// - Parameter root: Canonical base directory.
-    /// - Returns: Pairs of root-relative match keys and canonical absolute paths.
     private func prunedRelativePaths(under root: URL) -> [(relative: String, canonical: String)] {
         var pairs: [(relative: String, canonical: String)] = []
         guard let enumerator = FileManager.default.enumerator(
@@ -1352,12 +1084,6 @@ public struct FilesGlobTool: Tool, Sendable {
     }
 
     /// Builds the approval-escalation failure without file bytes.
-    /// - Parameters:
-    ///   - resolvedPath: Canonical path that was denied.
-    ///   - reason: Policy reason, if any.
-    ///   - requiresApproval: Escalation hint from the guard decision (false for hard denials).
-    ///   - callID: Correlation identifier.
-    /// - Returns: Failure whose content is the denied envelope JSON.
     private func deniedOutput(resolvedPath: String, reason: String?, requiresApproval: Bool, callID: String) -> ToolOutput {
         let detail = reason ?? "Listing this path requires explicit approval."
         let envelope = FilesDeniedEnvelope(
@@ -1376,18 +1102,6 @@ public struct FilesGlobTool: Tool, Sendable {
 }
 
 /// Seatbelt-confined staging for remaining document writes.
-///
-/// Stages bytes in an owner-only temp dir that the Seatbelt profile keeps
-/// writable and readable but never executable, then moves them into the
-/// workspace with one guard-validated atomic step on approval. There is no
-/// host sandbox folder: temp is the only staging area, nothing is ever
-/// executed from it, and it is removed on deny or failure with no migration
-/// for old directories.
-///
-/// Approval discipline: validate the destination through `FilesAccessGuard`
-/// at approval time (not just at stage time) so a policy change between
-/// staging and approval still fails closed, and always discard temp on any
-/// deny or filesystem failure so staged bytes never accumulate.
 public enum SeatbeltTempStaging: Sendable {
     /// Leading name component for temp directories and files.
     public static let tempPrefix = "runeweaver-doc-"
@@ -1408,28 +1122,11 @@ public enum SeatbeltTempStaging: Sendable {
     }
 
     /// Creates an owner-only temp directory for staged document writes.
-    ///
-    /// Single-sourced through the core confined-temp helper so creation stays
-    /// in one place; mode `0700` plus the Seatbelt never-execute deny hold for
-    /// every caller. Callers own cleanup via `discardTemp(at:)` on deny or failure.
-    /// - Parameter prefix: Leading name component. Defaults to `tempPrefix`.
-    /// - Returns: Newly created temp directory URL.
-    /// - Throws: Filesystem errors when creation fails.
     public static func makeTempDirectory(prefix: String = tempPrefix) throws -> URL {
         try SeatbeltProfileBuilder.makeConfinedTempDirectory(prefix: prefix)
     }
 
     /// Stages bytes as one temp file inside a confined temp directory.
-    ///
-    /// The filename is sanitized to its base name so a crafted attachment
-    /// name cannot escape the temp dir via separators, and the write is
-    /// atomic so a crash never leaves a half-written stage visible.
-    /// - Parameters:
-    ///   - bytes: Document bytes to stage.
-    ///   - filename: Original filename, reduced to a safe base name.
-    ///   - directory: Confined temp directory from `makeTempDirectory`.
-    /// - Returns: Staged temp file URL, never executed from.
-    /// - Throws: Filesystem errors when the write fails.
     public static func stageBytes(_ bytes: Data, filename: String, in directory: URL) throws -> URL {
         let base = (filename as NSString).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleaned = base.isEmpty ? "document" : base.replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "\0", with: "_")
@@ -1440,21 +1137,6 @@ public enum SeatbeltTempStaging: Sendable {
     }
 
     /// Atomically moves a staged temp file into the workspace on approval.
-    ///
-    /// Re-validates the destination through `FilesAccessGuard` at move time so
-    /// the approval decision is judged against live policy rather than a
-    /// stale stage-time check, then ensures parents and moves. A same-volume
-    /// rename is atomic; across volumes the move copies and unlinks, so
-    /// callers must treat the destination as valid only after this returns.
-    /// Temp is removed on success (consumed by the move) and best-effort
-    /// removed on any failure so denies and errors never leak staged bytes.
-    /// - Parameters:
-    ///   - tempURL: Staged temp file URL.
-    ///   - destinationPath: Raw workspace destination (may contain `~`).
-    ///   - homeDirectoryURL: Home boundary override for tests. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy. Defaults to the built-in defaults.
-    /// - Returns: Canonical destination path that was written.
-    /// - Throws: Guard denials or filesystem failures; temp is discarded on throw.
     @discardableResult
     public static func atomicMoveTempFile(
         at tempURL: URL,
@@ -1483,29 +1165,17 @@ public enum SeatbeltTempStaging: Sendable {
     }
 
     /// Best-effort removes a staged temp file or directory.
-    ///
-    /// Called on deny or failure so staged bytes never outlive their decision;
-    /// failures are swallowed because cleanup must never mask the deny itself.
-    /// - Parameter url: Temp file or directory to remove.
     public static func discardTemp(at url: URL) {
         try? FileManager.default.removeItem(at: url)
     }
 }
 
 /// Factory registering the LLM-invokable file tools on a `ToolBus`.
-///
-/// `files.read` stays `readOnly` while surfacing guard denials as
-/// approval-hint failures; the shared guard keeps future write/search
-/// tools on the same policy without duplicating patterns.
 public enum FilesTools {
     /// Tool names in registration order.
     public static let toolNames = ["files.read", "files.grep", "files.glob"]
 
     /// Builds the file tools.
-    /// - Parameters:
-    ///   - homeDirectoryURL: Home boundary override forwarded to the tools. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy forwarded to the tools. Defaults to the built-in defaults.
-    /// - Returns: Read, grep, and glob tools in registration order.
     public static func makeTools(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) -> [any Tool] {
         let read: any Tool = FilesReadTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let grep: any Tool = FilesGrepTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
@@ -1514,10 +1184,6 @@ public enum FilesTools {
     }
 
     /// Registers the file tools, replacing same-named entries.
-    /// - Parameters:
-    ///   - bus: Bus receiving the tools (surfaced via `status` and sent to the model as tool definitions every chat turn).
-    ///   - homeDirectoryURL: Home boundary override forwarded to the tools. Defaults to nil (real home).
-    ///   - filesConfig: `[files]` deny/allow policy forwarded to the tools. Defaults to the built-in defaults.
     public static func register(on bus: ToolBus, homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) async {
         for tool in makeTools(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig) {
             await bus.register(tool: tool)

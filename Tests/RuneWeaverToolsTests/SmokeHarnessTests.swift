@@ -1,8 +1,4 @@
 // Rune Weaver Tools Tests — End-to-end smoke coverage over the scripted harness.
-//
-// Replays canned model turns through the orchestrator, tool bus, and memory
-// stores to verify streaming, tool execution, and persistence compose. Catches
-// cross-component regressions without network or live provider access.
 
 import Foundation
 import os
@@ -12,10 +8,6 @@ import os
 import Testing
 
 /// One scripted model turn: text fragments plus billed usage.
-///
-/// Text fragments stream as separate `LLMResponse` deltas and the usage
-/// lands on the terminal finished chunk, mirroring chunk-level provider
-/// streams without touching the network.
 private struct SmokeTurn: Sendable {
     /// Text fragments emitted as separate deltas in order.
     let textDeltas: [String]
@@ -23,9 +15,6 @@ private struct SmokeTurn: Sendable {
     let totalTokens: Int?
 
     /// Creates a scripted turn.
-    /// - Parameters:
-    ///   - textDeltas: Text fragments emitted as separate deltas in order.
-    ///   - totalTokens: Billed tokens reported on the terminal chunk, if any.
     init(textDeltas: [String], totalTokens: Int? = nil) {
         self.textDeltas = textDeltas
         self.totalTokens = totalTokens
@@ -33,10 +22,6 @@ private struct SmokeTurn: Sendable {
 }
 
 /// Scripted provider replaying canned turns in call order.
-///
-/// Each `chat` call consumes the next turn so orchestration loops observe
-/// plain answers and multi-round tool loops without real inference. Access
-/// is lock-guarded for Swift 6 data-race safety.
 private final class SmokeScriptedProvider: LLMProvider, Sendable {
     /// Stable smoke model metadata.
     let modelInfo = ModelInfo(name: "smoke-model", provider: "smoke", contextLength: 8192)
@@ -55,15 +40,6 @@ private final class SmokeScriptedProvider: LLMProvider, Sendable {
     }
 
     /// Replays the next canned turn as chunked deltas plus terminal usage.
-    ///
-    /// Records an issue and returns an empty finished response when the
-    /// script is exhausted instead of replaying the last turn, so an
-    /// orchestrator bug performing an extra LLM round (for example a missed
-    /// `toolLoopExceeded`) fails the test without aborting the suite.
-    /// - Parameters:
-    ///   - messages: Ignored conversation history.
-    ///   - tools: Ignored available tools.
-    /// - Returns: Stream yielding one delta per fragment plus a finished chunk.
     func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let turn: SmokeTurn? = state.withLock { s in
             guard s.index < s.turns.count else {
@@ -90,20 +66,12 @@ private final class SmokeScriptedProvider: LLMProvider, Sendable {
     }
 
     /// Unused embeddings stub returning one vector per input.
-    ///
-    /// Returns one empty vector per input to preserve the `LLMProvider`
-    /// one-vector-per-input contract for any future semantic path.
-    /// - Parameter text: Ignored texts.
-    /// - Returns: One empty vector per input.
     func embeddings(text: [String]) async throws -> [[Float]] {
         Array(repeating: [Float](), count: text.count)
     }
 }
 
 /// Lock-guarded cursor replaying tool batches in resolver-call order.
-///
-/// Each resolver invocation consumes the next batch so multi-turn tool
-/// loops stay deterministic without inspecting message history.
 private final class SmokeBatchCursor: Sendable {
     private struct CursorState: Sendable {
         var batches: [[ToolInput]]
@@ -120,11 +88,6 @@ private final class SmokeBatchCursor: Sendable {
     }
 
     /// Returns the next canned batch, recording an issue when exhausted.
-    ///
-    /// Fails the test via `Issue.record` and returns `[]` on
-    /// over-consumption instead of trapping, so missed or incorrect
-    /// resolver calls surface without aborting the suite.
-    /// - Returns: Tool calls for this resolver invocation.
     func next() -> [ToolInput] {
         state.withLock { s in
             guard s.index < s.batches.count else {
@@ -139,16 +102,6 @@ private final class SmokeBatchCursor: Sendable {
 }
 
 /// Builds the production-wired stack for one smoke test.
-///
-/// Uses the shared `ToolsTestSupport.makeIsolatedMemoryEngine()` for
-/// temp-directory episodes, vectors, and profile so layout never drifts from
-/// other tool suites, then reuses the same base for conversations and sandbox
-/// so runs stay hermetic without touching `HOME` or the Keychain. The shared
-/// stub gateway and shared email config keep fixtures consistent with the
-/// unit suites.
-/// - Parameter gateway: Stub IMAP gateway for the email tools.
-/// - Returns: Base directory plus engine, conversations, bus, system prompt, and audit capture.
-/// - Throws: When the temporary base cannot be created.
 private func makeSmokeStack(gateway: any EmailIMAPGateway) async throws -> (
     base: URL,
     engine: MemoryEngine,
@@ -173,13 +126,8 @@ private func makeSmokeStack(gateway: any EmailIMAPGateway) async throws -> (
     return (base, engine, conversations, bus, systemPrompt, audit)
 }
 
-/// Serialized plus `testCredentialEnvLock`: `ToolsTestSupport.withTestPassword` installs the
-/// stub credential via process-global `setenv` (POSIX-unsafe under
-/// concurrency). `.serialized` only serializes within this suite, so the
-/// shared lock in `ToolsTestSupport.swift` provides cross-suite exclusion
-/// with `Email Tools`, saving/restoring the prior value instead of blind
-/// `unsetenv`. `HOME` is never mutated; persistence tests reuse the
-/// temporary base owning episodes, vectors, profile, and sandbox.
+/// Serialized plus `testCredentialEnvLock`: `ToolsTestSupport.withTestPassword` installs the stub
+/// credential via process-global `setenv` (POSIX-unsafe under concurrency).
 @Suite("Smoke Harness", .serialized)
 struct SmokeHarnessTests {
     @Test

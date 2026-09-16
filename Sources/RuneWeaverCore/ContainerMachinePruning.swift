@@ -1,26 +1,9 @@
 // Rune Weaver Core — Container machine TTL pruning companion.
-//
-// Extends the ephemeral detonation lifecycle with time-to-live aging and
-// crash-orphan reclamation. Keeps the core manager focused on process
-// spawning and listing while this companion owns staleness decisions and
-// the injectable prune pass shared by the sweeper and direct callers.
 
 import Foundation
 
 public extension ContainerMachineManager {
     /// Reports whether a machine has outlived its idle time-to-live.
-    ///
-    /// Aging prefers the listing timestamp and falls back to the local
-    /// creation registry, so timestamp-less listings for locally spawned
-    /// machines still expire. Machines with no timestamp from either source
-    /// are treated as stale: without a proven youth there is no safe basis to
-    /// keep an ephemeral detonation VM, and keeping it would let untracked
-    /// fleets accumulate silently across restarts.
-    /// - Parameters:
-    ///   - machine: Machine to evaluate.
-    ///   - maxAgeSeconds: Idle TTL. Ages strictly greater than this are stale.
-    ///   - now: Reference date for age checks.
-    /// - Returns: Whether the machine should be reclaimed.
     static func isStaleMachine(
         _ machine: ContainerMachineInfo,
         maxAgeSeconds: TimeInterval,
@@ -34,11 +17,6 @@ public extension ContainerMachineManager {
     }
 
     /// Filters a listing down to the machines that have outlived their TTL.
-    /// - Parameters:
-    ///   - machines: Candidate machines (already prefix-filtered by the listing).
-    ///   - maxAgeSeconds: Idle TTL.
-    ///   - now: Reference date for age checks.
-    /// - Returns: Stale subset in listing order.
     static func staleMachines(
         in machines: [ContainerMachineInfo],
         maxAgeSeconds: TimeInterval,
@@ -48,22 +26,6 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes an explicit machine list with injectable stop/delete operations.
-    ///
-    /// Exists so TTL decisions and error propagation stay unit-testable without
-    /// the container CLI: production passes inject the real `stopMachineSync`
-    /// / `deleteMachineSync`, while tests inject fakes. Stop is attempted for
-    /// every non-stopped stale machine so runtimes that require stop-before-
-    /// delete reach delete in a stoppable state; delete is attempted even when
-    /// stop fails so a stuck VM still gets a reclamation attempt. Every stop
-    /// or delete failure is recorded with the machine name instead of being
-    /// swallowed, and counts only increment on success.
-    /// - Parameters:
-    ///   - machines: Candidate machines.
-    ///   - maxAgeSeconds: Idle TTL.
-    ///   - now: Reference date for age checks.
-    ///   - stop: Stops the named machine, throwing on failure.
-    ///   - delete: Deletes the named machine, throwing on failure.
-    /// - Returns: Stop/delete counts plus per-machine failure messages.
     static func pruneMachines(
         _ machines: [ContainerMachineInfo],
         maxAgeSeconds: TimeInterval,
@@ -97,11 +59,6 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes stale or orphaned container machines synchronously.
-    ///
-    /// Every `runeweaver-`-prefixed machine is aged against the TTL; listing
-    /// failures are reported as prune errors rather than mistaken for an
-    /// already-clean fleet. The default TTL is single-sourced from the sandbox
-    /// config so the sweeper and direct callers cannot drift apart.
     static func pruneStaleMachinesSync(
         prefix: String = machinePrefix,
         maxAgeSeconds: TimeInterval = TimeInterval(SandboxConfig.defaultArchiveSessionTTLMinutes * 60),
@@ -129,9 +86,6 @@ public extension ContainerMachineManager {
     }
 
     /// Prunes stale or orphaned container machines matching the prefix.
-    ///
-    /// Default TTL is single-sourced from the sandbox config (crash-orphan
-    /// reclamation for ephemeral detonation machines).
     static func pruneStaleMachines(
         prefix: String = machinePrefix,
         maxAgeSeconds: TimeInterval = TimeInterval(SandboxConfig.defaultArchiveSessionTTLMinutes * 60),

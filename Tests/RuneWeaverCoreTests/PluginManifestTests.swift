@@ -1,8 +1,4 @@
 // Rune Weaver Core Tests — Plugin manifest validation and parsing.
-//
-// Verifies manifest deserialization, schema enforcement, path traversal rejection,
-// and security constraints preventing external runes from claiming `trusted` status
-// or impersonating internal system namespaces.
 
 import Foundation
 @testable import RuneWeaverCore

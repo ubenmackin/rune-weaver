@@ -4,6 +4,13 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import type { HealthResponse } from "../api";
 import {
+  DEFAULT_SEARCH_SEARXNG_URL,
+  ensureSearch,
+  getSearchHealth,
+  resolveSearchURL,
+  stopSearch,
+} from "../api";
+import {
   ApprovalsIcon,
   BellIcon,
   ChatIcon,
@@ -46,7 +53,28 @@ export default function TopNav({
 }: TopNavProps) {
   const [profileOpen, setProfileOpen] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
-  const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const profileButtonRef = useRef<HTMLButtonElement>(null);
+  // Live SearXNG state from explicit Start/Stop actions or a fallback probe. The /health payload
+  // carries search fields on newer engines, so this local copy only overrides when the user acts or
+  // when the engine predates those fields and a direct probe succeeds.
+  const [searchHealth, setSearchHealth] = useState<{
+    reachable: boolean;
+    url: string;
+  } | null>(null);
+  const [searchBusy, setSearchBusy] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
+  // Tri-state reachability: an explicit Start/Stop result wins, then the /health payload, otherwise
+  // unknown. Unknown renders as a gray Unknown row (never red Stopped) so older engines without
+  // search fields stay honest instead of claiming the container is down.
+  const searchReachable: boolean | null =
+    searchHealth?.reachable ?? health?.searchReachable ?? null;
+  const searchKnown = searchReachable !== null;
+  const searchRunning = searchReachable === true;
+  const searchURL =
+    resolveSearchURL(searchHealth, "") ||
+    health?.searchURL ||
+    DEFAULT_SEARCH_SEARXNG_URL;
 
   const navItems: NavItemConfig[] = [
     { id: "chat", label: "Chat", icon: ChatIcon },
@@ -55,14 +83,6 @@ export default function TopNav({
     { id: "runs", label: "Runs", icon: RunsIcon, badge: runsBadge },
     { id: "schedules", label: "Schedules", icon: SchedulesIcon },
   ];
-
-  useEffect(() => {
-    return () => {
-      if (closeTimeoutRef.current) {
-        clearTimeout(closeTimeoutRef.current);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -86,19 +106,92 @@ export default function TopNav({
     };
   }, [profileOpen]);
 
-  const handleMouseEnter = useCallback(() => {
-    if (closeTimeoutRef.current) {
-      clearTimeout(closeTimeoutRef.current);
-      closeTimeoutRef.current = null;
-    }
-    setProfileOpen(true);
+  // Escape closes the profile menu and returns focus to the trigger so
+  // keyboard users never lose place. The menu is click/keyboard driven with
+  // no hover-open path, removing the hover-plus-click toggle race.
+  useEffect(() => {
+    if (!profileOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setProfileOpen(false);
+        profileButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [profileOpen]);
+
+  // Click toggles the profile menu directly. Keyboard (Enter/Space) activates
+  // the same toggle through the native button behavior.
+  const handleProfileClick = useCallback(() => {
+    setProfileOpen((prev) => !prev);
   }, []);
 
-  const handleMouseLeave = useCallback(() => {
-    closeTimeoutRef.current = setTimeout(() => {
-      setProfileOpen(false);
-    }, 150);
-  }, []);
+  // One-shot fallback probe for engines that predate search fields on /health. Runs only when the
+  // menu opens with no health search data and no local override, so newer engines and explicit
+  // Start/Stop results are never clobbered by a background fetch.
+  useEffect(() => {
+    if (!profileOpen) return;
+    if (health?.searchReachable !== undefined) return;
+    if (health?.searchURL !== undefined) return;
+    if (searchHealth !== null) return;
+    let cancelled = false;
+    getSearchHealth()
+      .then((response) => {
+        if (cancelled) return;
+        // Empty or shape-drifted payloads (e.g. {}) carry no reachable flag:
+        // keep unknown gray instead of coercing missing to false red Stopped.
+        if (typeof response?.reachable !== "boolean") return;
+        setSearchHealth({
+          reachable: response.reachable,
+          url: resolveSearchURL(response, DEFAULT_SEARCH_SEARXNG_URL),
+        });
+        setSearchError(null);
+      })
+      .catch(() => {
+        // Unknown stays unknown (gray) on probe failure, including 404 from
+        // engines without search routes; the menu stays usable and the
+        // Settings search pane surfaces the same failure with detail.
+        if (!cancelled) setSearchError(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileOpen, health?.searchReachable, health?.searchURL, searchHealth]);
+
+  // Toggles the SearXNG container through the engine service. The result becomes the local override
+  // only on an honest boolean reachable flag; shape-drifted payloads keep the previous dot and
+  // surface an inline error instead of optimistically flipping. Failures surface inline
+  // and keep the menu open.
+  const handleToggleSearch = useCallback(async () => {
+    if (searchBusy) return;
+    setSearchBusy(true);
+    setSearchError(null);
+    try {
+      const response = searchRunning
+        ? await stopSearch()
+        : await ensureSearch();
+      // Honest tri-state: only a boolean reachable flag may move the dot, matching the
+      // fallback probe guard above; anything else keeps previous state.
+      if (typeof response?.reachable === "boolean") {
+        setSearchHealth({
+          reachable: response.reachable,
+          url: resolveSearchURL(response, searchURL),
+        });
+      } else {
+        setSearchError("Search toggle returned an unexpected response; status unchanged.");
+      }
+    } catch (error) {
+      setSearchError(
+        error instanceof Error ? error.message : "Search toggle failed"
+      );
+    } finally {
+      setSearchBusy(false);
+    }
+  }, [searchBusy, searchRunning, searchURL]);
 
   return (
     <header className="top-nav" aria-label="Main navigation">
@@ -148,20 +241,23 @@ export default function TopNav({
           <BellIcon size={16} />
         </button>
 
-        {/* Profile Dropdown */}
+        {/* Profile Dropdown: click/keyboard driven with Escape to close and
+            focus return. No hover-open path so pointer and keyboard orderings
+            toggle deterministically. */}
         <div
           ref={profileRef}
           className="profile-dropdown-container"
-          onMouseEnter={handleMouseEnter}
-          onMouseLeave={handleMouseLeave}
         >
           <button
             type="button"
-            onClick={() => setProfileOpen((prev) => !prev)}
+            ref={profileButtonRef}
+            onClick={handleProfileClick}
             className={`profile-dropdown-btn ${profileOpen ? "open" : ""} ${
               currentTab === "settings" ? "settings-active" : ""
             }`}
             aria-expanded={profileOpen}
+            aria-haspopup="menu"
+            aria-controls="profile-menu"
             aria-label="Profile and Settings menu"
           >
             <UserIcon size={16} className="profile-user-icon" />
@@ -174,7 +270,12 @@ export default function TopNav({
           </button>
 
           {profileOpen && (
-            <div className="profile-dropdown-menu" role="menu">
+            <div
+              id="profile-menu"
+              className="profile-dropdown-menu"
+              role="menu"
+              aria-label="Profile and Settings"
+            >
               <div className="profile-menu-header">
                 <div className="profile-header-user">
                   <div className="profile-avatar">
@@ -202,6 +303,84 @@ export default function TopNav({
                     {health?.provider || "Default"}
                   </span>
                 </div>
+                {/* SearXNG health sits beside Model and Provider so search status is visible
+                    without opening Settings. */}
+                <div
+                  className="profile-info-row"
+                  title={`SearXNG at ${searchURL} (${searchKnown ? (searchRunning ? "reachable" : "stopped") : "unknown"})`}
+                >
+                  <span className="info-label">SearXNG</span>
+                  <span
+                    className="info-value"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "6px",
+                    }}
+                  >
+                    <span
+                      data-testid="searxng-status-dot"
+                      aria-label={
+                        !searchKnown
+                          ? "SearXNG status unknown"
+                          : searchRunning
+                            ? "SearXNG reachable"
+                            : "SearXNG stopped"
+                      }
+                      title={`SearXNG at ${searchURL}`}
+                      className="status-dot-sm"
+                      style={{
+                        backgroundColor: !searchKnown
+                          ? "#a0aec0"
+                          : searchRunning
+                            ? "#34d399"
+                            : "#f56565",
+                        boxShadow: !searchKnown
+                          ? "0 0 5px rgba(160, 174, 192, 0.6)"
+                          : searchRunning
+                            ? "0 0 5px rgba(52, 211, 153, 0.6)"
+                            : "0 0 5px rgba(245, 101, 101, 0.6)",
+                      }}
+                    />
+                    <span data-testid="searxng-status-text">
+                      {!searchKnown ? "Unknown" : searchRunning ? "Running" : "Stopped"}
+                    </span>
+                    <button
+                      type="button"
+                      data-testid="searxng-toggle"
+                      className="ghost icon-text-btn"
+                      style={{ padding: "2px 8px", fontSize: "11px" }}
+                      title={
+                        searchRunning
+                          ? `Stop SearXNG at ${searchURL}`
+                          : `Start SearXNG at ${searchURL}`
+                      }
+                      aria-label={
+                        searchRunning ? "Stop SearXNG" : "Start SearXNG"
+                      }
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleToggleSearch();
+                      }}
+                      disabled={searchBusy}
+                    >
+                      {searchBusy
+                        ? "Working…"
+                        : searchRunning
+                          ? "Stop"
+                          : "Start"}
+                    </button>
+                  </span>
+                </div>
+                {searchError ? (
+                  <div
+                    className="muted text-sm"
+                    data-testid="searxng-error"
+                    style={{ fontSize: "11px" }}
+                  >
+                    {searchError}
+                  </div>
+                ) : null}
               </div>
 
               <div className="profile-menu-divider" />

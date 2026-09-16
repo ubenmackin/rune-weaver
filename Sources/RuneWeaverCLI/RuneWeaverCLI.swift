@@ -1,9 +1,4 @@
 // Rune Weaver CLI — Shared terminal helpers and tool-bus wiring.
-//
-// Provides terminal styling, config loading, provider selection, and the
-// single shared plugin-tool source (`CLIShared`) every subcommand builds
-// on, so `chat`, `config`, `memory`, `scheduler`, `serve`, and `status`
-// resolve configuration, secrets handling, and output styling consistently.
 
 import Foundation
 import os
@@ -12,15 +7,6 @@ import RuneWeaverLLM
 import RuneWeaverTools
 
 /// Shared terminal styling, config loading, and provider wiring.
-///
-/// The `rune-weaver` CLI links `RuneWeaverCore` directly for v1 (`chat`
-/// and `scheduler run` build their own `ToolBus` and `Orchestrator` here
-/// so terminal use works with no service running) and launches the shared
-/// engine service via `serve` for the web dashboard, iOS, and macOS
-/// clients (see the Engine-to-Service Shift in ARCHITECTURE.md). Every
-/// subcommand builds on these helpers so config resolution, secrets
-/// handling, and output styling stay consistent across `chat`, `config`,
-/// `memory`, `scheduler`, `serve`, and `status`.
 enum TerminalStyle {
     /// Whether ANSI colors may be emitted. Honors `NO_COLOR`.
     static var isColorEnabled: Bool {
@@ -28,10 +14,6 @@ enum TerminalStyle {
     }
 
     /// Wraps text in the given ANSI code.
-    /// - Parameters:
-    ///   - text: Text to style.
-    ///   - code: ANSI code (e.g. `"32;1"`).
-    /// - Returns: Styled text, or plain text when colors are disabled.
     static func wrap(_ text: String, _ code: String) -> String {
         guard isColorEnabled else { return text }
         return "\u{001B}[\(code)m\(text)\u{001B}[0m"
@@ -111,10 +93,6 @@ enum CLIConfigLoader {
 
     /// Loads the config, falling back to built-in defaults only when no
     /// file exists and no explicit path was given.
-    /// - Parameter path: Explicit `--config` value, if any.
-    /// - Returns: Loaded config and its file URL.
-    /// - Throws: ``ConfigError`` when an existing file is missing,
-    ///   unreadable, unparsable, or fails validation.
     static func loadConfig(path: String?) throws -> LoadedConfig {
         let url = configFileURL(for: path)
         if FileManager.default.fileExists(atPath: url.path) {
@@ -131,11 +109,6 @@ enum CLIConfigLoader {
 enum CLIProviderBuilder {
     /// Builds every enabled provider, resolving API keys from the
     /// environment first with a Keychain fallback via `SecretsManager`.
-    ///
-    /// Raw key values are held in memory only and are never printed or
-    /// logged.
-    /// - Parameter llm: Decoded `[llm]` config section.
-    /// - Returns: Enabled providers.
     static func buildProviders(from llm: LLMConfig) async -> [any LLMProvider] {
         let secrets = SecretsManager()
         var keysByEntry: [String: String] = [:]
@@ -150,19 +123,9 @@ enum CLIProviderBuilder {
         return LLMProviderFactory.makeProviders(from: llm, apiKeysByEntry: keysByEntry)
     }
 
-    /// Selects the active provider: `--provider` override first (matched
-    /// against the provider name, its local aliases, then the model
-    /// name), then `default_provider`, then `fallback_provider`, then
-    /// first enabled.
-    ///
-    /// Shared selection lives in `LLMProviderFactory` so the CLI and the
-    /// menu-bar app resolve the same way; this wrapper keeps existing
-    /// call sites stable.
-    /// - Parameters:
-    ///   - override: Explicit `--provider` value, if any.
-    ///   - providers: Enabled providers.
-    ///   - config: Decoded `[llm]` config section.
-    /// - Returns: Selected provider, or nil when the override matches nothing.
+    /// Selects the active provider: `--provider` override first (matched against the provider name,
+    /// its local aliases, then the model name), then `default_provider`, then `fallback_provider`,
+    /// then first enabled.
     static func selectProvider(
         named override: String?,
         from providers: [any LLMProvider],
@@ -174,23 +137,12 @@ enum CLIProviderBuilder {
     /// Whether a provider matches a configured/CLI name, including the
     /// local-backend aliases (`llamacpp`, `llama-cpp`, `llama_cpp`,
     /// `local` all match each other). Comparison is case-insensitive.
-    ///
-    /// Shared matching lives in `LLMProviderFactory`; this wrapper keeps
-    /// existing call sites stable.
-    /// - Parameters:
-    ///   - provider: Candidate provider.
-    ///   - wanted: Configured or CLI-supplied name.
-    /// - Returns: True when the names match directly or via alias.
     static func matchesProvider(_ provider: any LLMProvider, wanted: String) -> Bool {
         LLMProviderFactory.matchesProvider(provider, wanted: wanted)
     }
 }
 
 /// Compiler-checked lock-guarded box for CLI shared state.
-///
-/// Encapsulates `OSAllocatedUnfairLock` so the static itself stays an immutable
-/// `static let` and every mutation runs inside `withLock`,
-/// keeping access data-race free under Swift 6 concurrency without `nonisolated(unsafe)`.
 final class CLILockedValue<Value: Sendable>: Sendable {
     /// Guards `value`.
     private let lock: OSAllocatedUnfairLock<Value>
@@ -210,25 +162,12 @@ final class CLILockedValue<Value: Sendable>: Sendable {
 }
 
 /// Single shared store source for the CLI process.
-///
-/// `status`, `memory`, and `chat` must not each open independent
-/// `EpisodeStore` / `VectorStore` / `MemoryEngine` instances on the same
-/// files: independent snapshots can diverge within one process. All
-/// commands resolve their engine through `memoryEngine(for:)`, which
-/// vends one cached `MemoryEngine` per path pair, and build their
-/// `ToolBus` from the single `pluginTools()` source so the registry
-/// stays consistent.
 enum CLIShared {
     /// Cached engines keyed by episodes + vector paths.
-    ///
-    /// Immutable box; all access runs inside `withLock` so no
-    /// `nonisolated(unsafe)` mutable state is needed.
     private static let engines = CLILockedValue<[String: MemoryEngine]>([:])
 
     /// Returns the shared engine for the given memory config,
     /// creating and caching it on first use.
-    /// - Parameter config: Memory paths from `config.toml`.
-    /// - Returns: Shared engine for those paths.
     static func memoryEngine(for config: MemoryConfig) -> MemoryEngine {
         let key = "\(config.episodesDBPath)\0\(config.vectorDBPath)"
         return engines.withLock { cached in
@@ -241,31 +180,32 @@ enum CLIShared {
         }
     }
 
+    /// Configured LLM `server_url` values exempted from the SSRF loopback deny.
+    /// Single canonical helper for config-derived origins; all call sites
+    /// resolve through this name so the helper surface cannot drift.
+    /// - Parameter llmConfig: `[llm]` section carrying provider endpoints.
+    /// - Returns: Non-empty trimmed server URLs.
+    static func llmServerURLs(from llmConfig: LLMConfig?) -> [String] {
+        guard let llmConfig else { return [] }
+        var seen = Set<String>()
+        var ordered: [String] = []
+        for raw in llmConfig.providers.values.compactMap(\.serverURL) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
+            ordered.append(trimmed)
+        }
+        return ordered
+    }
+
     /// Built-in plugin tools registered into every CLI `ToolBus`.
-    ///
-    /// The single source of truth for the CLI registry. Email search and
-    /// read (`email.search`, `email.read`) are `readOnly` and built from
-    /// the `[email]` section, while attachment downloads
-    /// (`email.attachment`) are `requiresApproval` and stage under the
-    /// `[sandbox]` staging path; memory tools (`remember_fact`,
-    /// `recall_memories`) are built from the shared `MemoryEngine` so
-    /// chat exposes them to the model as tool definitions every turn.
-    /// Nil inputs yield no plugins for that family so legacy call sites
-    /// stay valid. Commands pass their loaded config and shared engine
-    /// instead of constructing divergent registries.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section, if any.
-    ///   - memoryEngine: Shared engine for memory tools, if any.
-    ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
-    ///   - embedder: Optional embeddings producer forwarded to the memory
-    ///     tools for vector-backed writes and vector-ranked recall. Defaults
-    ///     to nil (keyword-only).
-    /// - Returns: Tools to register.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
         sandboxConfig: SandboxConfig? = nil,
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: (any EmbeddingsBackend)? = nil,
+        browserConfig: BrowserConfig? = nil,
+        llmConfig: LLMConfig? = nil,
+        llmServerURLs: [String] = []
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -274,21 +214,20 @@ enum CLIShared {
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }
+        // One `[browser]` policy feeds every web-facing tool so CLI and serve
+        // share the same five-tool set via the shared registration surface;
+        // `api.request` additionally exempts the configured LLM origins.
+        let browser = browserConfig ?? BrowserConfig()
+        // The explicit allowlist stays first so config-derived origins only
+        // fill gaps; the distinct local names keep the array value from
+        // shadowing the type-level origin helper in this scope.
+        let baseOrigins = llmServerURLs
+        let combinedOrigins = baseOrigins + Self.llmServerURLs(from: llmConfig).filter { !baseOrigins.contains($0) }
+        tools += BuiltinToolPlugins.makeTools(browserConfig: browser, llmServerURLs: combinedOrigins)
         return tools
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
-    /// - Parameters:
-    ///   - emailConfig: Decoded `[email]` section, if any.
-    ///   - memoryEngine: Shared engine for memory tools, if any.
-    ///   - permissionGate: Graduated-trust gate, if any.
-    ///   - approvalHandler: Approval hook, if any.
-    ///   - sandboxConfig: Decoded `[sandbox]` section for `email.attachment` staging. Defaults to the built-in staging path when nil.
-    ///   - embedder: Optional embeddings producer forwarded to the memory
-    ///     tools. Defaults to nil (keyword-only).
-    ///   - pluginConfig: Decoded `[plugins]` section, if any.
-    ///   - episodesDBPath: SQLite database path where plugin state is recorded. Defaults to `~/.runeweaver/episodes.db`.
-    /// - Returns: Bus with every shared plugin registered.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
@@ -297,10 +236,21 @@ enum CLIShared {
         sandboxConfig: SandboxConfig? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
         pluginConfig: PluginConfig? = nil,
-        episodesDBPath: String? = nil
+        episodesDBPath: String? = nil,
+        browserConfig: BrowserConfig? = nil,
+        llmConfig: LLMConfig? = nil,
+        llmServerURLs: [String] = []
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
-        for tool in pluginTools(emailConfig: emailConfig, memoryEngine: memoryEngine, sandboxConfig: sandboxConfig, embedder: embedder) {
+        for tool in pluginTools(
+            emailConfig: emailConfig,
+            memoryEngine: memoryEngine,
+            sandboxConfig: sandboxConfig,
+            embedder: embedder,
+            browserConfig: browserConfig,
+            llmConfig: llmConfig,
+            llmServerURLs: llmServerURLs
+        ) {
             await bus.register(tool: tool)
         }
         if let pluginConfig {

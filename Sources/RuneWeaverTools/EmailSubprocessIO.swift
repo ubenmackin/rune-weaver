@@ -1,27 +1,10 @@
 // Rune Weaver Tools — Shared blocking-IO helper single-sourcing subprocess execution.
-//
-// Single-sources the background-queue spawn, pipe-drain, and wait path so
-// IMAP and SMTP gateways share one cooperative-pool-safe execution model.
-// Observes cancellation cooperatively and resumes exactly once, keeping
-// torn writes off the pipes.
 
 import Foundation
 import os
 import RuneWeaverCore
 
 /// Runs blocking Python subprocess I/O off the async executor.
-///
-/// Suspends the caller until the spawn, stdin write, wait, and pipe
-/// reads complete on a background queue, keeping blocking
-/// `Process.waitUntilExit()` and `readDataToEndOfFile()` off the
-/// cooperative pool. Shared by both `SubprocessIMAPGateway` and
-/// `SubprocessSMTPGateway` so blocking subprocess execution stays
-/// single-sourced.
-///
-/// Cancellation is observed cooperatively: already-cancelled tasks throw
-/// before dispatch, and in-flight helpers run to completion so the
-/// pipes never observe a torn write. The continuation resumes exactly
-/// once on the single background completion path.
 enum EmailSubprocessIO {
     final class PipeDrain: Sendable {
         private let data = OSAllocatedUnfairLock(initialState: Data())
@@ -36,13 +19,6 @@ enum EmailSubprocessIO {
     }
 
     /// Runs blocking bridge subprocess I/O off the async executor.
-    /// - Parameters:
-    ///   - scriptSource: Python script source to execute via `-c`.
-    ///   - payload: Encoded bridge request (holds the password in memory only).
-    ///   - pythonExecutable: Explicit `python3` path, or nil for `/usr/bin/env`.
-    ///   - serviceName: Service label (e.g. "IMAP" or "SMTP") for error messages.
-    /// - Returns: Raw stdout bytes.
-    /// - Throws: Whatever the blocking helper throws, or `CancellationError` when already cancelled.
     static func runBridgeIO(
         scriptSource: String,
         payload: Data,
@@ -71,19 +47,6 @@ enum EmailSubprocessIO {
     }
 
     /// Spawns the Python helper and reads its output synchronously.
-    ///
-    /// Blocking helper for `runBridgeIO`. Must run on a background queue,
-    /// never on the async executor: it calls blocking `Process.waitUntilExit()`
-    /// and `readDataToEndOfFile()`. Stdout and stderr drain on background
-    /// queues started before `waitUntilExit` so large payloads cannot
-    /// deadlock with the Python writer.
-    /// - Parameters:
-    ///   - scriptSource: Python script source to execute via `-c`.
-    ///   - payload: Encoded bridge request (holds the password in memory only).
-    ///   - pythonExecutable: Explicit `python3` path, or nil for `/usr/bin/env`.
-    ///   - serviceName: Service label (e.g. "IMAP" or "SMTP") for error messages.
-    /// - Returns: Raw stdout bytes.
-    /// - Throws: `EmailIMAPError` without any secret value.
     private static func runBridgeBlocking(
         scriptSource: String,
         payload: Data,

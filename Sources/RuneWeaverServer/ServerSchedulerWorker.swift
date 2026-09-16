@@ -1,9 +1,4 @@
 // Rune Weaver Server — In-process background scheduler worker.
-//
-// Automatically evaluates cron schedules and email poll triggers on a
-// recurring cadence, executing due jobs headless through Orchestrator with
-// single-flight locking, run audit logging, WebSocket broadcast, and native
-// notifications.
 
 import Foundation
 import Logging
@@ -39,18 +34,6 @@ public actor ServerSchedulerWorker {
     private var isStarted = false
 
     /// Creates a server scheduler worker.
-    /// - Parameters:
-    ///   - scheduler: Scheduler jobs store.
-    ///   - runs: Run execution log store.
-    ///   - hub: WebSocket broadcast hub.
-    ///   - runLock: Shared single-flight lock.
-    ///   - orchestrator: Orchestrator for turn execution.
-    ///   - conversations: Conversation history owner.
-    ///   - toolBus: Tool bus for poll checks.
-    ///   - intervalSeconds: Seconds between check ticks. Defaults to 60.
-    ///   - notifier: Notifier for fired jobs. Defaults to nil.
-    ///   - logger: Log output sink. Defaults to nil.
-    ///   - pollChecker: Custom poll observer override. Defaults to nil.
     public init(
         scheduler: SchedulerStore,
         runs: RunLogStore,
@@ -290,10 +273,9 @@ public actor ServerSchedulerWorker {
                 source: "scheduler"
             ))
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked scheduler turns remain as awaiting_approval like chat turns,
-            // resolving through the same inbox resume path in their session.
-            // The per-turn parked flag keeps a stale prior park in this
-            // session from mis-marking a fresh normal turn.
+            // Parked scheduler turns remain as awaiting_approval like chat turns, resolving through
+            // the same inbox resume path in their session. The per-turn parked flag keeps a stale
+            // prior park in this session from mis-marking a fresh normal turn.
             let parkedStatus = if response.isParked {
                 "awaiting_approval"
             } else {

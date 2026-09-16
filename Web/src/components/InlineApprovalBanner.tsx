@@ -1,10 +1,4 @@
 // Rune Weaver Dashboard — Inline session approval banner row for the chat view.
-//
-// Renders one session-scoped gated tool request directly above the chat input
-// so a parked turn can be decided without leaving the conversation. Lives as a
-// non-modal sibling of the input (never an overlay) so typing stays usable
-// while the turn waits, with unattributed or foreign-session entries staying
-// in the global approvals inbox by contract — callers filter before rendering.
 
 import { useEffect, useRef, useState } from "react";
 import {

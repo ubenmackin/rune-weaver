@@ -1,20 +1,13 @@
 // Rune Weaver Server — Loopback HTTP and WebSocket API service application.
-//
-// Configures and boots the Vapor service exposing chat endpoints, tool bus
-// execution, memory search/facts, headless approval queues, scheduler job
-// CRUD, and static dashboard assets over localhost. Enforces loopback-only
-// binding and single-user trust.
 
 import Foundation
 import NIOWebSocket
 import os
 import RuneWeaverCore
+import RuneWeaverTools
 import Vapor
 
 /// Localhost-only HTTP and WebSocket API service for Rune Weaver.
-///
-/// Fronts the core engine with Vapor, serving chat turns, tools, memory,
-/// approvals, run logs, and the static dashboard bundle on loopback.
 extension OrchestratorResponse: Content {}
 extension ToolResult: Content {}
 extension UserFact: Content {}
@@ -27,9 +20,6 @@ extension UpdateSchedulerJob: Content {}
 extension RunLogEntry: Content {}
 
 /// Actor box for Vapor `WebSocket`.
-///
-/// Wraps `WebSocket` inside an actor so all access to `socket` is isolated
-/// and thread-safe under Swift 6 strict concurrency.
 public actor WSSocketBox {
     /// Wrapped socket.
     public let socket: WebSocket
@@ -52,9 +42,6 @@ public actor WSSocketBox {
 }
 
 /// One-shot gate ensuring a WebSocket send continuation resumes exactly once.
-///
-/// The timeout race resumes from two unstructured tasks (the socket send
-/// and the sleep); whichever finishes first wins and the loser is cancelled.
 private final class WSResumeOnce: Sendable {
     private struct State: Sendable {
         var continuation: CheckedContinuation<Void, Never>?
@@ -83,30 +70,14 @@ private final class WSResumeOnce: Sendable {
 }
 
 /// Serializes outbound frames for one WebSocket connection.
-///
-/// One queue per connection: the hub fans out concurrently across
-/// connections (no head-of-line blocking) while successive sends to the
-/// same connection serialize through its queue, preserving per-connection
-/// frame order even when broadcasts and chat deltas interleave.
 private actor WSSendQueue {
     /// Sends one frame through the queue, best-effort with timeout.
-    /// - Parameters:
-    ///   - text: Text frame to send.
-    ///   - box: Boxed socket to send on.
     func send(_ text: String, to box: WSSocketBox) async {
         await wsSendWithTimeout(text, to: box)
     }
 }
 
 /// Live WebSocket connections for approval broadcasts.
-///
-/// One hub per engine process. Chat sockets register on connect and
-/// unregister on close; the approval path broadcasts every new
-/// ``PermissionRequest`` so connected clients can answer inline with a
-/// decision frame without polling REST. The hub is the sole sender on
-/// every socket: chat and error frames go through `send(id:text:)`
-/// so streamed deltas never race broadcast prompts on the
-/// same connection.
 public actor WSHub {
     /// Connected sockets indexed by connection identifier.
     private var sockets: [UUID: WSSocketBox] = [:]
@@ -118,9 +89,6 @@ public actor WSHub {
 
     /// Registers an already-boxed socket without crossing the actor
     /// boundary with a non-`Sendable` value.
-    /// - Parameters:
-    ///   - id: Connection identifier.
-    ///   - box: Boxed socket (Sendable).
     public func add(id: UUID, box: WSSocketBox) {
         sockets[id] = box
         if queues[id] == nil {
@@ -164,13 +132,6 @@ public actor WSHub {
     }
 
     /// Broadcasts one approval prompt to every connected socket.
-    ///
-    /// Best-effort concurrent fan-out across connections with a per-send
-    /// timeout so one slow or closed socket never head-of-line blocks
-    /// approvals. Sends to the same connection serialize through its
-    /// per-connection queue so successive broadcasts keep frame order.
-    /// Encoding failures and timed-out or closed sockets are skipped.
-    /// - Parameter request: Pending request to announce.
     public func broadcastApproval(_ request: PermissionRequest) async {
         guard let data = try? JSONEncoder().encode(WSApprovalPrompt(request: request)),
               let text = String(data: data, encoding: .utf8)
@@ -179,10 +140,6 @@ public actor WSHub {
     }
 
     /// Broadcasts a run log event (started or completed) to every connected socket.
-    ///
-    /// Parked approval-gated turns (`awaiting_approval`) broadcast as started
-    /// so live views keep them in-progress instead of filing a finished
-    /// notification before the inbox decision lands.
     public func broadcastRun(_ run: RunLogEntry) async {
         struct WSRunEvent: Codable {
             let type: String
@@ -196,27 +153,11 @@ public actor WSHub {
     }
 
     /// Broadcasts an arbitrary text frame to every connected socket.
-    ///
-    /// Fans out to all current connections; receiving views filter by the
-    /// frame's embedded `sessionID` so one shared socket multiplexes many
-    /// sessions without cross-session leakage. Untagged global frames
-    /// (`approval`, `run_started`, `run_completed`, `approval_decided`) reach
-    /// every view, while tagged chat frames are ignored by other sessions.
-    /// Sends to the same connection serialize through its per-connection
-    /// queue so successive broadcasts keep frame order, and concurrent
-    /// fan-out across connections avoids head-of-line blocking.
-    /// - Parameter text: Pre-encoded JSON frame to announce.
     public func broadcast(text: String) async {
         await fanOut(text)
     }
 
     /// Concurrent best-effort fan-out shared by every broadcast path.
-    ///
-    /// Snapshots the current sockets plus their per-connection queues, then
-    /// sends concurrently across connections while each connection's own
-    /// frames stay ordered through its serial queue. A slow or closed socket
-    /// resolves via its per-send timeout instead of stalling the group.
-    /// - Parameter text: Pre-encoded JSON frame to announce.
     private func fanOut(_ text: String) async {
         let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
         await withTaskGroup(of: Void.self) { group in
@@ -229,14 +170,6 @@ public actor WSHub {
     }
 
     /// Sends one text frame to the connection with the given identifier.
-    ///
-    /// No-op when the connection already closed. Routes through the
-    /// per-connection queue so per-connection frame order is preserved.
-    /// This is the sole single-send path; all chat deltas, done frames,
-    /// and error frames funnel through it.
-    /// - Parameters:
-    ///   - id: Connection identifier.
-    ///   - text: Text frame to send.
     public func send(id: UUID, text: String) async {
         guard let box = sockets[id] else { return }
         await queue(for: id).send(text, to: box)
@@ -244,16 +177,6 @@ public actor WSHub {
 }
 
 /// Holds one side of the timeout race.
-///
-/// The timeout task is created before the send task so the send winner can
-/// always cancel the sleeper; the timeout loser looks the send task up at
-/// fire time (long after the synchronous assignment), so neither direction
-/// has a forward-reference race. One holder tracks each side so outer
-/// task cancellation can cancel both. Audit note: the holder stores an optional
-/// `Task` handle synchronized via `OSAllocatedUnfairLock`; all access to
-/// `task` is serialized by the lock, `cancel` clears the handle under lock
-/// and cancels outside it, and tasks are cancelled at most (best-effort
-/// hang mitigation) rather than awaited, so no data race on the handle.
 private final class WSSendTaskHolder: Sendable {
     private let task = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
 
@@ -285,25 +208,6 @@ private final class WSResumeOnceBox: Sendable {
 }
 
 /// Sends one WebSocket text frame with a per-send timeout, best-effort.
-///
-/// Races an unstructured `send` task against a sleep without awaiting a
-/// hung send: whichever finishes first resumes and the loser is cancelled
-/// (the hung send is cancelled best-effort and left to finish in the
-/// background; the sleeper is cancelled when the send wins so no stray
-/// sleeping task lingers up to the timeout per send under broadcast
-/// fan-out) so a slow socket resolves within the timeout instead of
-/// blocking the broadcast fan-out past it. Cancelling the connection
-/// task resumes immediately through the cancellation fast-path instead
-/// of waiting out the timeout: the handler cancels both race tasks and
-/// resumes the gate so `WSHub.remove` runs promptly on socket close or
-/// shutdown. Hub-only: call
-/// `WSHub.send(id:text:)` or `WSHub.broadcastApproval`
-/// instead of calling this directly so one logical owner keeps
-/// per-connection frame order through the per-connection queues.
-/// - Parameters:
-///   - text: Text frame to send.
-///   - box: Boxed socket to send on (Sendable).
-///   - timeoutNanoseconds: Per-send timeout. Defaults to 5 seconds.
 private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanoseconds: UInt64 = 5_000_000_000) async {
     let onceBox = WSResumeOnceBox()
     let sendHolder = WSSendTaskHolder()
@@ -342,10 +246,6 @@ private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanos
 }
 
 /// Receipt binding one registered turn to its tracker slot.
-///
-/// The token identifies the registration so completion cleanup only
-/// removes its own entry; `replaced` reports whether a prior turn for
-/// the same session was superseded (and cooperatively cancelled).
 public struct TurnRegistration: Sendable, Equatable {
     /// Identity of this registration.
     public let token: UUID
@@ -353,9 +253,6 @@ public struct TurnRegistration: Sendable, Equatable {
     public let replaced: Bool
 
     /// Creates a registration receipt.
-    /// - Parameters:
-    ///   - token: Identity of the registration.
-    ///   - replaced: Whether a prior turn was replaced.
     public init(token: UUID, replaced: Bool) {
         self.token = token
         self.replaced = replaced
@@ -363,13 +260,6 @@ public struct TurnRegistration: Sendable, Equatable {
 }
 
 /// Manages in-flight chat turn tasks so they can be cancelled cooperatively.
-///
-/// A cancel arriving before its turn registers leaves a short-lived
-/// pending mark that the next register for the same session consumes
-/// immediately, so a fast cancel-before-register never gets lost. The
-/// mark is only left when the session registered recently (same narrow
-/// race window), so an idle cancel for an unknown or long-idle session
-/// reports `false` without poisoning the next genuine turn started later.
 public actor ActiveTurnTracker {
     /// One slot: registration identity plus its cooperative cancel action.
     private struct Entry {
@@ -384,60 +274,25 @@ public actor ActiveTurnTracker {
     /// Cancel marks waiting for a turn that has not registered yet.
     private var pendingCancels: [UUID: Date] = [:]
     /// Last registration per session, bounding idle-cancel poisoning.
-    ///
-    /// A pending mark is only left when the session registered within the
-    /// race window below; without recent liveness an idle cancel is just a
-    /// `false` report with no side effect on the next turn.
     private var recentRegistrations: [UUID: Date] = [:]
     /// How long a pending cancel survives before it expires.
-    ///
-    /// Kept to a tight race-bridge window so a stray cancel (no turn
-    /// behind it) cannot poison a genuinely new turn started seconds
-    /// later; the mark is consumed once by the next register either way.
     private static let pendingCancelTTL: TimeInterval = 2
 
     public init() {}
 
     /// Registers an active turn task for a session.
-    ///
-    /// A second turn for the same session supersedes the first: the prior
-    /// action is cancelled cooperatively before overwrite so it never
-    /// leaks as an un-cancellable handle.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - task: In-flight turn task to cancel on supersede or cancel.
-    /// - Returns: Receipt identifying this registration.
     @discardableResult
     public func register(sessionID: UUID, task: Task<some Sendable, some Error>) -> TurnRegistration {
         store(sessionID: sessionID, cancel: { task.cancel() })
     }
 
     /// Registers a custom cancel closure for a session.
-    ///
-    /// Supersedes any prior turn for the session exactly like
-    /// `register(sessionID:task:)`. Consumes a pending cancel left by a
-    /// fast cancel-before-register so the new turn cancels immediately.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - onCancel: Cooperative cancel action for the turn.
-    /// - Returns: Receipt identifying this registration.
     @discardableResult
     public func register(sessionID: UUID, onCancel: @Sendable @escaping () -> Void) -> TurnRegistration {
         store(sessionID: sessionID, cancel: onCancel)
     }
 
     /// Stores one entry, cancelling any prior turn for the session first.
-    ///
-    /// A pending cancel left by a fast cancel-before-register is consumed
-    /// once here: the mark is always removed, and only a fresh mark (within
-    /// the narrow race window) cancels the new turn, so a later user turn
-    /// is never held hostage by a stale cancel. Registration also stamps
-    /// session liveness so a later idle cancel can tell a plausible race
-    /// (recent registration) from a stray cancel for an unknown session.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - cancel: Cooperative cancel action for the new turn.
-    /// - Returns: Receipt identifying the new registration.
     private func store(sessionID: UUID, cancel: @Sendable @escaping () -> Void) -> TurnRegistration {
         let replaced: Bool
         if let existing = entries[sessionID] {
@@ -462,26 +317,12 @@ public actor ActiveTurnTracker {
     }
 
     /// Unregisters the turn for a session when it completes.
-    ///
-    /// Token-checked: only removes the entry when it still belongs to
-    /// this turn, so a stale completion never deletes a newer turn's
-    /// registration for the same session.
-    /// - Parameters:
-    ///   - sessionID: Owning session identifier.
-    ///   - token: Registration token from `register`.
     public func unregister(sessionID: UUID, token: UUID) {
         guard entries[sessionID]?.token == token else { return }
         entries.removeValue(forKey: sessionID)
     }
 
     /// Cancels the in-flight turn for a session.
-    ///
-    /// When no turn is registered the cancel only leaves a pending mark
-    /// when the session registered recently, preserving the fast
-    /// cancel-before-register bridge for plausible races while a stray
-    /// cancel for an unknown or long-idle session simply reports `false`
-    /// with no side effect on the next genuine turn.
-    /// - Returns: True if a task was found and cancelled.
     @discardableResult
     public func cancel(sessionID: UUID) -> Bool {
         if let entry = entries.removeValue(forKey: sessionID) {
@@ -526,20 +367,6 @@ public actor ActiveTurnTracker {
 }
 
 /// Bridges a tracker cancel action to a chat task created just after registration.
-///
-/// Registration must precede task creation so a fast turn can never finish
-/// before its slot exists; the box carries a cancel arriving in that gap
-/// and applies it once the task is set.
-///
-/// Stays a lock-guarded box instead of an actor because `ActiveTurnTracker`
-/// stores a synchronous `@Sendable () -> Void` cancel closure invoked
-/// synchronously from actor-isolated `store`/`cancel`; an actor `cancel()`
-/// would require `await`, which the synchronous closure cannot provide
-/// without hopping to an unstructured task and reopening the
-/// cancel-before-register race this box closes. Lock discipline: `NSLock`
-/// guards `cancelAction`/`cancelled` only, and the stored cancel action is
-/// copied under lock then invoked after unlock so cancellation never runs
-/// while holding the lock and cannot deadlock.
 final class TurnTaskBox: Sendable {
     private struct State: Sendable {
         var cancelAction: (@Sendable () -> Void)?
@@ -574,13 +401,6 @@ final class TurnTaskBox: Sendable {
 }
 
 /// Shared engine collaborators held in Vapor application storage.
-///
-/// Bundles every subsystem actor (`ConversationManager`, `ToolBus`,
-/// `MemoryEngine`, `PermissionGate`, `ApprovalQueue`, `SchedulerStore`,
-/// `RunLogStore`, `WSHub`, `SchedulerRunLock`, `ActiveTurnTracker`,
-/// `ToolStateStore`) plus the `Sendable`
-/// `ServerConfig` value, all held in immutable `let`s, so no field forces
-/// unchecked sharing.
 public final class ServerContext: Sendable {
     /// Loopback binding plus port.
     public let config: ServerConfig
@@ -593,9 +413,6 @@ public final class ServerContext: Sendable {
     /// Three-tier memory serving search and facts.
     public let memoryEngine: MemoryEngine
     /// Optional embeddings producer for vector-ranked memory routes.
-    ///
-    /// Threaded next to `memoryEngine` so recall and store routes share one
-    /// backend; nil preserves the keyword-only path.
     public let embedder: (any EmbeddingsBackend)?
     /// Graduated-trust gate backing approvals.
     public let permissionGate: PermissionGate
@@ -608,10 +425,6 @@ public final class ServerContext: Sendable {
     /// Live sockets receiving approval broadcasts.
     public let hub: WSHub
     /// Single-flight lock for scheduler job runs within this service process.
-    /// Guards concurrent `POST .../run` calls plus in-process auto-fire ticks
-    /// sharing one lock; it does not coordinate with the CLI foreground runner,
-    /// so service auto-fire plus CLI can double-fire — run one auto-fire runner
-    /// at a time.
     public let runLock: SchedulerRunLock
     /// Active in-flight chat turn tasks for cancellation.
     public let activeTurns: ActiveTurnTracker
@@ -627,6 +440,8 @@ public final class ServerContext: Sendable {
     public let sandboxConfig: SandboxConfig
     /// Periodic scheduler reclaiming expired and over-cap staged files.
     public let sandboxCleanup: SandboxCleanupScheduler
+    /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
+    public let browserConfig: BrowserConfig
 
     /// Creates a server context.
     public init(
@@ -648,7 +463,8 @@ public final class ServerContext: Sendable {
         pluginDiscovery: PluginDiscoveryService? = nil,
         toolStates: ToolStateStore? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig(),
-        sandboxCleanup: SandboxCleanupScheduler? = nil
+        sandboxCleanup: SandboxCleanupScheduler? = nil,
+        browserConfig: BrowserConfig = BrowserConfig()
     ) {
         self.config = config
         self.conversations = conversations
@@ -679,16 +495,10 @@ public final class ServerContext: Sendable {
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
+        self.browserConfig = browserConfig
     }
 
     /// Reapplies every persisted tool toggle onto the live bus.
-    ///
-    /// Stored rows win over registration defaults so restarts restore operator
-    /// intent: each persisted flag flows through the existing enable/disable
-    /// calls, and names with no live registration are skipped harmlessly so
-    /// stale rows never fail boot. Call again after registering builtin tools
-    /// that arrived after `make`, since those registrations reset to enabled.
-    /// - Parameter forceReload: When true, re-reads SQLite before applying.
     public func restoreToolStates(forceReload: Bool = false) async {
         let stored = await toolStates.loadAll(forceReload: forceReload)
         for (name, enabled) in stored {
@@ -701,29 +511,6 @@ public final class ServerContext: Sendable {
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
-    ///
-    /// The bus approval handler files every gated call through the shared
-    /// `ApprovalQueue/fileRequest(tool:call:)` path, broadcasts it on `hub`,
-    /// then suspends on the decision with a timeout so a forgotten approval
-    /// denies instead of hanging the HTTP/WebSocket worker forever. Callers
-    /// must register tools on the returned bus before serving.
-    /// - Parameters:
-    ///   - config: Loopback binding. Defaults to `.default`.
-    ///   - conversations: Session owner.
-    ///   - memoryEngine: Memory tiers.
-    ///   - embedder: Optional embeddings producer for memory routes and
-    ///     automatic recall. Defaults to nil (keyword-only).
-    ///   - permissionGate: Trust gate.
-    ///   - llm: LLM backend serving completions.
-    ///   - systemPrompt: Developer instructions. Defaults to nil.
-    ///   - schedulerConfig: Durable `config.toml [[scheduler.jobs]]` used
-    ///     to seed the runtime scheduler registry. Defaults to empty.
-    ///   - episodesDBPath: SQLite file path for durable run log and schedule persistence. Defaults to nil.
-    ///   - pluginConfig: Plugin configuration defining directory and options. Defaults to `.init()`.
-    ///   - notifier: Optional notifier for completed scheduler jobs. Defaults to nil.
-    ///   - onApprovalRequested: Optional async callback invoked when a tool call requires approval. Defaults to nil.
-    ///   - sandboxConfig: Sandbox staging retention configuration. Defaults to built-in staging defaults.
-    /// - Returns: Context with an approval-broadcasting bus.
     public static func make(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -737,7 +524,9 @@ public final class ServerContext: Sendable {
         pluginConfig: PluginConfig = PluginConfig(),
         notifier: (any SchedulerNotifier)? = nil,
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
-        sandboxConfig: SandboxConfig = SandboxConfig()
+        sandboxConfig: SandboxConfig = SandboxConfig(),
+        browserConfig: BrowserConfig = BrowserConfig(),
+        llmServerURLs: [String] = []
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -748,6 +537,12 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
+        // One `[browser]` policy feeds every web-facing tool so serve shares
+        // the same five-tool set as the CLI via the shared registration
+        // surface; `api.request` additionally exempts the configured LLM
+        // origins. Late builtin registration in the serve path replaces these
+        // same names, so registering here keeps direct `make` callers covered.
+        await BuiltinToolPlugins.register(on: bus, browserConfig: browserConfig, llmServerURLs: llmServerURLs)
         let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
         let tStates = ToolStateStore(dbPath: resolvedDBPath)
@@ -795,7 +590,8 @@ public final class ServerContext: Sendable {
             pluginStore: pStore,
             pluginDiscovery: pDiscovery,
             toolStates: tStates,
-            sandboxConfig: sandboxConfig
+            sandboxConfig: sandboxConfig,
+            browserConfig: browserConfig
         )
         // Reclaim crash-orphaned detonation machines once at boot so restarts
         // never inherit leaked VMs; the periodic lifecycle below keeps
@@ -863,20 +659,31 @@ private struct ServerContextKey: StorageKey {
 
 extension Application {
     /// Shared engine context for every route.
-    ///
-    /// Fails closed when queried before `configureRuneWeaver(_:context:)`
-    /// so an unconfigured service never serves empty turns from a dummy.
+    /// A missing configuration logs and serves an ephemeral fallback so one
+    /// misconfigured route cannot crash the process; routes needing a strict
+    /// 500 use `requireRuneWeaver()` instead.
     var runeWeaver: ServerContext {
         get {
-            guard let context = storage[ServerContextKey.self] else {
-                RuneWeaverLog.server.error("Application.runeWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
-                fatalError("ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
+            if let context = storage[ServerContextKey.self] {
+                return context
             }
-            return context
+            RuneWeaverLog.server.error("Application.runeWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
+            return ServerContext.fallbackUnconfigured
         }
         set {
             storage[ServerContextKey.self] = newValue
         }
+    }
+
+    /// Strict accessor failing closed with a 500 when unconfigured.
+    /// - Returns: Configured context.
+    /// - Throws: 500 Abort when no context was stored.
+    func requireRuneWeaver() throws -> ServerContext {
+        guard let context = storage[ServerContextKey.self] else {
+            RuneWeaverLog.server.error("Application.requireRuneWeaver: ServerContext not configured. Call configureRuneWeaver(_:context:) before serving.")
+            throw Abort(.internalServerError, reason: "ServerContext not configured.")
+        }
+        return context
     }
 }
 
@@ -903,10 +710,6 @@ struct ServerSchedulerLifecycle: LifecycleHandler {
 }
 
 /// Lifecycle hook running sandbox staging reclamation on a cadence.
-///
-/// Runs one audited pass at boot (covering restarts that skipped `make`)
-/// then on the configured interval; shutdown stops the sleep task so it
-/// never outlives the service. Audit entries carry only aggregate counts.
 struct SandboxCleanupLifecycle: LifecycleHandler {
     let scheduler: SandboxCleanupScheduler
     let config: SandboxConfig
@@ -922,19 +725,6 @@ struct SandboxCleanupLifecycle: LifecycleHandler {
 }
 
 /// Configures loopback binding plus every engine route.
-///
-/// Binds `127.0.0.1:8082` by default with no auth (single-user,
-/// local-machine trust; remote access deferred until auth lands; never bind
-/// non-loopback or expose via VPN/tunnel/port-forward in v1). Refuses to bind a non-loopback interface until
-/// authentication lands (auth-before-exposure). Registers REST (`/health`, `/chat`, `/tools`,
-/// `/memory`, `/approvals`, `/scheduler/jobs`, `/runs`) plus the
-/// WebSocket (`/ws`) for streamed chat and live approval prompts, plus
-/// the static dashboard bundle (`/` and assets) on the same origin with
-/// no CORS.
-/// - Parameters:
-///   - app: Vapor application to configure.
-///   - context: Shared engine collaborators.
-/// - Throws: Never; kept throwing for Vapor `configure` conventions.
 public func configureRuneWeaver(_ app: Application, context: ServerContext) throws {
     try context.config.requireLoopback()
     app.http.server.configuration.hostname = context.config.hostname
@@ -948,13 +738,6 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
 }
 
 /// Registers every engine route on the application.
-///
-/// Single surface shared by all clients with no per-client forks:
-/// health, chat, tools, memory search and facts, approvals list and
-/// decide, scheduler job CRUD plus manual run and in-process auto-fire, run
-/// logs, the chat
-/// WebSocket, and the static dashboard bundle on the same origin.
-/// - Parameter app: Application receiving the routes.
 public func registerRuneWeaverRoutes(_ app: Application) {
     registerHealthRoute(app)
     registerChatRoute(app)
@@ -966,40 +749,18 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSchedulerCRUDRoutes(app)
     registerSchedulerRunRoute(app)
     registerRunRoutes(app)
+    registerSearchRoutes(app)
     registerSettingsRoutes(app)
     registerWebSocketRoute(app)
     registerDashboardRoutes(app)
 }
 
 /// Bounds an integer limit to the closed range `minLimit...maxLimit`.
-///
-/// Single shared clamp for every query-`limit` parsing path so bound logic
-/// cannot drift between overloads. Intentionally internal (not private) so
-/// the main service routes and the scheduler routes share one bound; both
-/// live in the service module, so no wider scope is needed.
-/// - Parameters:
-///   - raw: Candidate value.
-///   - minLimit: Minimum allowed value.
-///   - maxLimit: Maximum allowed value.
-/// - Returns: Value bounded to `minLimit...maxLimit`.
 func clampLimit(_ raw: Int, min minLimit: Int, max maxLimit: Int) -> Int {
     min(max(raw, minLimit), maxLimit)
 }
 
 /// Parses the raw `limit` query string strictly.
-///
-/// Inspects the raw query string so `?limit=abc` (which Vapor decodes as
-/// nil `Int`) surfaces as `400` instead of silently falling back to the
-/// default, and out-of-range values `400` instead of silently clamping to
-/// the nearest bound. Intentionally internal (not private) so the main
-/// service routes and the scheduler routes share one parsing rule; both
-/// live in the service module, so no wider scope is needed.
-/// - Parameters:
-///   - req: Inbound request.
-///   - minLimit: Minimum allowed value.
-///   - maxLimit: Maximum allowed value.
-/// - Returns: Bounded limit, or nil when the parameter is omitted.
-/// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
 func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit: Int) throws -> Int? {
     guard let rawString = req.query[String.self, at: "limit"] else {
         return nil
@@ -1015,17 +776,6 @@ func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit: Int) t
 }
 
 /// Extracts, parses, and validates a query `limit` parameter with a fallback default.
-///
-/// Intentionally internal (not private) so the main service routes and the
-/// scheduler routes share one validation rule; both live in the service
-/// module, so no wider scope is needed.
-/// - Parameters:
-///   - req: Inbound request.
-///   - defaultLimit: Default limit when query parameter is omitted.
-///   - minLimit: Minimum allowed value. Defaults to 1.
-///   - maxLimit: Maximum allowed value.
-/// - Returns: Validated integer limit.
-/// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
 func parseQueryLimit(
     _ req: Request,
     default defaultLimit: Int,
@@ -1039,16 +789,6 @@ func parseQueryLimit(
 }
 
 /// Extracts, parses, and validates an optional query `limit` parameter.
-///
-/// Intentionally internal (not private) so the main service routes and the
-/// scheduler routes share one validation rule; both live in the service
-/// module, so no wider scope is needed.
-/// - Parameters:
-///   - req: Inbound request.
-///   - minLimit: Minimum allowed value. Defaults to 1.
-///   - maxLimit: Maximum allowed value.
-/// - Returns: Validated integer limit, or nil if omitted.
-/// - Throws: `Abort(.badRequest)` on non-integer or out-of-range input.
 func parseQueryLimit(
     _ req: Request,
     min minLimit: Int = 1,
@@ -1062,26 +802,21 @@ func parseQueryLimit(
 private func registerHealthRoute(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.health)) { req async throws -> HealthResponse in
         let modelInfo = await req.application.runeWeaver.orchestrator.modelInfo
+        let searchURL = req.application.runeWeaver.browserConfig.searxngURL
+        let searchReachable = await SearXNGEnsurer.isReachable(baseURL: searchURL)
         return HealthResponse(
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
             provider: modelInfo.provider,
-            contextLength: modelInfo.contextLength
+            contextLength: modelInfo.contextLength,
+            searchReachable: searchReachable,
+            searchURL: searchURL,
+            searchStatus: searchReachable ? "running" : "stopped"
         )
     }
 }
 
 /// Validates chat text once for REST and WebSocket.
-///
-/// Trims surrounding whitespace, rejects empty text, and enforces
-/// `ChatRequest/maxTextLength` so both entry points share one rule.
-/// Intentionally internal (not private) so the REST route and the WebSocket
-/// handler share one limit; both live in the service module, so no wider
-/// scope is needed.
-/// - Parameter raw: Raw user text.
-/// - Returns: Trimmed text safe to process.
-/// - Throws: `Abort` with `.badRequest` for empty text or
-///   `.payloadTooLarge` when over the limit.
 func validatedChatText(_ raw: String) throws -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -1094,14 +829,6 @@ func validatedChatText(_ raw: String) throws -> String {
 }
 
 /// Validates a session title once for the rename route.
-///
-/// Trims surrounding whitespace, rejects empty titles, and enforces
-/// `UpdateSessionRequest/maxTitleLength` so empty or huge titles never
-/// reach the sessions table or the sidebar.
-/// - Parameter raw: Raw title text.
-/// - Returns: Trimmed title safe to store.
-/// - Throws: `Abort` with `.badRequest` for empty titles or
-///   `.payloadTooLarge` when over the limit.
 func validatedSessionTitle(_ raw: String) throws -> String {
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else {
@@ -1123,13 +850,9 @@ private func registerChatRoute(_ app: Application) {
         let sessionID = body.resolvedSessionID
         let startTime = Date()
 
-        // Register before spawning so a fast turn can never finish before
-        // its slot exists; the box bridges a cancel arriving in that gap
-        // to the task created just below, matching `handleWebSocketChat`.
-        // Token-checked, await-ordered cleanup: every exit below awaits
-        // `unregister` with this turn's token before returning, so a stale
-        // completion never deletes a newer turn's registration and no
-        // fire-and-forget task outlives the response.
+        // Register before spawning so a fast turn can never finish before its slot exists; the box
+        // bridges a cancel arriving in that gap to the task created just below, matching
+        // `handleWebSocketChat`.
         let taskBox = TurnTaskBox()
         let registration = await context.activeTurns.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
         let chatTask: Task<OrchestratorResponse, Error> = Task {
@@ -1142,11 +865,9 @@ private func registerChatRoute(_ app: Application) {
         taskBox.set(chatTask)
 
         do {
-            // Tie the inner turn to the request lifetime so a disconnect
-            // cancels the model and tools instead of leaving them running
-            // with no client, matching the WebSocket close path. Cleanup
-            // stays token-checked: cancellation surfaces as
-            // `CancellationError` below and unregisters only this turn.
+            // Tie the inner turn to the request lifetime so a disconnect cancels the model and
+            // tools instead of leaving them running with no client, matching the WebSocket close
+            // path.
             let response = try await withTaskCancellationHandler {
                 try await chatTask.value
             } onCancel: {
@@ -1154,10 +875,9 @@ private func registerChatRoute(_ app: Application) {
             }
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
             let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            // Parked approval-gated turns persist as awaiting_approval instead
-            // of ok so the inbox decision can transition the same session entry.
-            // The per-turn parked flag keeps a stale prior park in this
-            // session from mis-marking a fresh normal turn.
+            // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
+            // decision can transition the same session entry. The per-turn parked flag keeps a
+            // stale prior park in this session from mis-marking a fresh normal turn.
             await broadcastParkedApprovals(for: response, context: context)
             let parked = response.isParked
             let parkedStatus = if parked {
@@ -1283,14 +1003,6 @@ private func registerMemoryRoutes(_ app: Application) {
 }
 
 /// Registers approvals list plus decide routes.
-///
-/// The decide route resolves the inbox entry first so structured waits
-/// resume through the bus handler, then resumes a narrated parked turn in
-/// its tagged session when one exists: an allow executes the filed call
-/// and runs a synthesis turn, while a deny records the denial in that
-/// session. Resume failures never fail the decide itself because the inbox
-/// entry is already resolved; they surface as a run-log entry instead.
-/// - Parameter app: Application receiving the routes.
 private func registerApprovalRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.approvals)) { req async throws -> ApprovalsResponse in
         let pending = await req.application.runeWeaver.approvals.list()
@@ -1333,11 +1045,6 @@ private func registerApprovalRoutes(_ app: Application) {
 }
 
 /// Registers run-log list plus entry routes.
-///
-/// The list accepts an optional session filter (`sessionID`, with `sessionId`
-/// and `session_id` tolerated) so per-conversation views scope the audit trail
-/// without scanning every entry client-side.
-/// - Parameter app: Application receiving the routes.
 private func registerRunRoutes(_ app: Application) {
     app.get(PathComponent.constant(ServerPaths.runs)) { req async throws -> RunLogsResponse in
         let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
@@ -1372,19 +1079,6 @@ private func registerRunRoutes(_ app: Application) {
 }
 
 /// Registers settings routes for reading and persisting configuration.
-///
-/// `GET /settings` answers with the non-secret `SettingsResponse` loaded
-/// from the default file (built-in defaults when absent) plus its
-/// `configPath`. A present-but-corrupt file surfaces as `400` with the
-/// `ConfigError` detail instead of silently falling back to defaults,
-/// so clients never mistake defaults for stored values. `PUT /settings` decodes `UpdateSettingsRequest`, applies
-/// it onto the loaded config (refusing to overwrite a corrupt file from
-/// defaults), validates, then saves atomically with a
-/// `.bak` backup; `ConfigError` surfaces as `400` and unexpected failures
-/// as `500`. Saving persists the file only — live providers, the
-/// orchestrator system prompt, and memory paths keep running values until
-/// restart, so clients must treat a successful save as restart-required.
-/// - Parameter app: Application receiving the routes.
 private func registerSettingsRoutes(_ app: Application) {
     let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
     settings.get { _ async throws -> SettingsResponse in
@@ -1483,18 +1177,6 @@ private func registerSessionRoutes(_ app: Application) {
 }
 
 /// Registers the chat WebSocket with live approval prompts.
-///
-/// One connection task registers on the hub before consuming a serial
-/// `AsyncStream` of inbound frames, so chat turns stay ordered and
-/// `remove` always runs after `add` in the same task (no stale
-/// sockets). Each frame is awaited serially in the `for await` loop so
-/// per-connection frame order is preserved by design; chat turns run as
-/// tracked unstructured tasks so a later cancel frame still runs while
-/// the turn works, and the close handler cancels every tracked task so
-/// a disconnect never leaves the model or tools running. The close
-/// handler finishes the stream and cancels the stored task handle so no
-/// per-message tasks leak.
-/// - Parameter app: Application receiving the route.
 private func registerWebSocketRoute(_ app: Application) {
     app.webSocket(PathComponent.constant(ServerPaths.websocket)) { req, webSocket in
         let context = req.application.runeWeaver
@@ -1528,15 +1210,6 @@ private func registerWebSocketRoute(_ app: Application) {
 }
 
 /// Registers the static dashboard bundle routes.
-///
-/// The dashboard is compiled once with npm (`cd Web && npm ci && npm
-/// run build`) into `Web/dist` and served here on the same loopback
-/// origin as the JSON API, so the browser uses relative `fetch` calls
-/// with no runtime Node server and no CORS. API routes above keep
-/// precedence; these handlers only answer paths no API route claimed.
-/// When `Web/dist` is missing the stub reports the Node build steps
-/// instead of failing silently.
-/// - Parameter app: Application receiving the dashboard routes.
 public func registerDashboardRoutes(_ app: Application) {
     let bundle = DashboardBundle.resolve()
     app.get { _ async throws -> Response in

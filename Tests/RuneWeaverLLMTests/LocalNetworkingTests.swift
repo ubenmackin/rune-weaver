@@ -1,7 +1,4 @@
 // Rune Weaver LLM Tests — Local Networking Resolution under App Transport Security.
-//
-// Verifies RFC 1918 / RFC 4193 IP address classification, DNS memoization,
-// and deterministic URL target rewriting with Host header preservation.
 
 import Foundation
 @testable import RuneWeaverLLM

@@ -53,6 +53,15 @@ if [ ! -f "${ROOT_DIR}/Web/dist/index.html" ]; then
 fi
 cp -R "${ROOT_DIR}/Web/dist/." "${RESOURCES_DIR}/web/"
 
+# Copy app icon (generates if missing)
+if [ ! -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
+    echo "==> Generating AppIcon.icns..."
+    python3 "${ROOT_DIR}/scripts/generate_app_icon.py"
+fi
+if [ -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
+    cp "${ROOT_DIR}/Resources/AppIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+fi
+
 # App version (single source: VERSION file, else git tag, else fallback
 # matching the CLI/api version so Info.plist cannot drift silently).
 APP_VERSION=""
@@ -86,6 +95,8 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
     <string>${APP_VERSION}</string>
     <key>CFBundleExecutable</key>
     <string>RuneWeaverApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

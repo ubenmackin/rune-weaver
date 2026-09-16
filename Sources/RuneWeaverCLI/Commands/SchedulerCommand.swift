@@ -1,9 +1,4 @@
 // Rune Weaver CLI — Scheduled job management and foreground runner loop.
-//
-// Bridges configuration to runtime execution: lists configured jobs from
-// `config.toml` and runs the headless scheduler foreground loop. The runner
-// evaluates cron expressions and email-arrival triggers, firing due jobs under
-// stable session identifiers with run logging and notifications.
 
 import ArgumentParser
 import Foundation
@@ -12,14 +7,6 @@ import RuneWeaverLLM
 import RuneWeaverTools
 
 /// Manages scheduled jobs: list config jobs and run the foreground loop.
-///
-/// The scheduler fires cron schedules (`minute hour day month weekday`
-/// plus `@hourly`/`@daily`/`@weekly` shortcuts) and email-arrival poll
-/// rules (`poll_account`/`poll_query`/`poll_mailbox`) from
-/// `[[scheduler.jobs]]`. `scheduler list` prints the configured jobs;
-/// `scheduler run` stays in the foreground, firing due jobs headless
-/// under stable job sessions with run logging and macOS notifications.
-/// Gated writes file pending approvals instead of prompting.
 struct SchedulerCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -76,15 +63,6 @@ struct SchedulerListCommand: AsyncParsableCommand {
 }
 
 /// Runs the foreground scheduler loop with single-flight locking.
-///
-/// Loads `[[scheduler.jobs]]`, then polls for due jobs every
-/// `--interval` seconds. Each fire runs headless through the
-/// orchestrator under the stable job session (`source "scheduler"`) so
-/// episodic memory keeps one session per job; `readOnly` and `trusted`
-/// tools execute directly while `requiresApproval` tools file pending
-/// approvals instead of prompting. Overlapping fires for the same job
-/// skip with a log line. Fires append to the terminal log and post a
-/// macOS notification. `--once` checks once and exits for scripting.
 struct SchedulerRunCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
@@ -180,10 +158,6 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     }
 
     /// Headless collaborators for one foreground-loop invocation.
-    ///
-    /// Bundles the single-flight engine with its headless approval queue and
-    /// trust gate so `run()` stays within style budgets while the wiring
-    /// below stays in one place.
     private struct HeadlessRuntime {
         /// Engine firing due jobs headless.
         let engine: SchedulerEngine
@@ -194,20 +168,6 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     }
 
     /// Wires headless collaborators for the foreground loop.
-    ///
-    /// Shares one embeddings backend across scheduled turns so background
-    /// runs rank and write vectors exactly like chat; nil keeps keyword-only
-    /// behavior when vectors are disabled. The tool bus and orchestrator
-    /// share that backend so memory tools and automatic recall agree on
-    /// vectors, and the engine captures them through its poll and turn
-    /// runners. Conversation history still loads best-effort so a corrupt
-    /// store starts fresh instead of aborting the loop.
-    /// - Parameters:
-    ///   - jobs: Validated jobs to fire.
-    ///   - loaded: Resolved config plus its file URL.
-    ///   - providers: Enabled LLM providers.
-    ///   - selected: Active LLM provider serving turns.
-    /// - Returns: Engine plus its headless approval queue.
     private static func makeHeadlessRuntime(
         jobs: [SchedulerJobConfig],
         loaded: CLIConfigLoader.LoadedConfig,
@@ -242,7 +202,9 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder,
             pluginConfig: loaded.config.plugins,
-            episodesDBPath: loaded.config.memory.episodesDBPath
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm
         )
         let orchestrator = Orchestrator(
             conversations: conversations,
@@ -276,9 +238,6 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     }
 
     /// Reports one check batch: per-job outcomes plus pending approvals.
-    /// - Parameters:
-    ///   - results: Outcomes from the check window.
-    ///   - queue: Headless approval queue holding gated writes.
     private func report(results: [SchedulerRunResult], queue: ApprovalQueue) async {
         if results.isEmpty {
             print(TerminalStyle.dim("No jobs due."))
@@ -299,15 +258,6 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     }
 
     /// Observes current message ids for a poll rule via `email.search`.
-    ///
-    /// Runs the search through the headless tool bus (read-only, no
-    /// approval) and decodes the `EmailSearchEnvelope` ids. Failures and
-    /// undecodable output yield an empty check so one unreadable mailbox
-    /// never stops the loop and never fires.
-    /// - Parameters:
-    ///   - rule: Poll rule to check.
-    ///   - bus: Headless tool bus serving `email.search`.
-    /// - Returns: Currently observed message ids.
     private static func pollCheck(rule: EmailPollRule, bus: ToolBus) async -> SchedulerPollCheck {
         let payload = pollSearchJSON(rule: rule)
         let result = await bus.execute(
@@ -322,14 +272,6 @@ struct SchedulerRunCommand: AsyncParsableCommand {
     }
 
     /// Encodes `email.search` arguments for a poll rule.
-    ///
-    /// The payload holds only strings and ints, so `JSONSerialization`
-    /// cannot fail in practice. On failure no empty-account search is
-    /// emitted (an empty account would widen scope unpredictably);
-    /// instead the failure is asserted in debug and a `{}` sentinel is
-    /// returned so the poll check decodes to empty (no fire).
-    /// - Parameter rule: Poll rule to encode.
-    /// - Returns: JSON arguments document.
     private static func pollSearchJSON(rule: EmailPollRule) -> String {
         var object: [String: Any] = [
             "account": rule.trimmedAccount,

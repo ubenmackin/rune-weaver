@@ -1,9 +1,4 @@
 // Rune Weaver Core — Apple Container Machine Lifecycle Manager.
-//
-// Manages microVM container machine instances via the `apple/container` CLI
-// (`container machine` subcommands). Provides ephemeral detonation chambers for
-// untrusted external payloads (email attachments, archives, unvetted scripts)
-// with zero host filesystem mounts and automatic lifecycle cleanup.
 
 import Dispatch
 import Foundation
@@ -70,24 +65,9 @@ public enum ContainerMachineManager {
     public static let maxProcessErrorBytes = 64 * 1024
 
     /// Local creation-time registry for machines spawned in this process.
-    ///
-    /// The container CLI's tabular listing carries no reliable creation
-    /// timestamp, so ages would otherwise stay unknown and TTL checks could
-    /// never fire. Recording the wall-clock time at successful creation gives
-    /// every locally spawned machine a proven youth; listings that do carry
-    /// timestamps take precedence, and machines with neither source are
-    /// treated as stale so untracked VMs cannot accumulate silently across
-    /// restarts. Entries are dropped on successful delete, keeping the table
-    /// bounded by live machines.
     private static let trackedCreations = OSAllocatedUnfairLock(initialState: [String: Date]())
 
     /// Records a local creation time for a machine.
-    ///
-    /// Called after a successful `createMachine`; exposed so listings without
-    /// timestamps can still be aged and so tests can pin deterministic ages.
-    /// - Parameters:
-    ///   - name: Machine name as passed to the runtime.
-    ///   - date: Creation time. Defaults to now.
     public static func noteMachineCreated(name: String, at date: Date = Date()) {
         trackedCreations.withLock { $0[name] = date }
     }
@@ -100,31 +80,16 @@ public enum ContainerMachineManager {
     }
 
     /// Drops the tracked creation time for a machine.
-    ///
-    /// Called after a successful delete so the registry stays bounded by live
-    /// machines rather than growing with every spawn.
-    /// - Parameter name: Machine name to forget.
     public static func forgetTrackedMachine(name: String) {
         trackedCreations.withLock { _ = $0.removeValue(forKey: name) }
     }
 
     /// Drops all locally tracked creation times.
-    ///
-    /// Housekeeping for process reuse and test isolation: without it a
-    /// long-lived process would retain ages for machines deleted out of band.
     public static func clearTrackedCreations() {
         trackedCreations.withLock { $0.removeAll(keepingCapacity: false) }
     }
 
     /// Resolves the effective creation time, preferring the parsed listing value.
-    ///
-    /// List output wins when present because it reflects the runtime's ground
-    /// truth (including machines spawned by other processes); the local
-    /// registry is only a fallback for timestamp-less listings.
-    /// - Parameters:
-    ///   - name: Machine name for the registry fallback.
-    ///   - parsed: Timestamp parsed from the listing, if any.
-    /// - Returns: Effective creation date, or `nil` when neither source knows it.
     public static func effectiveCreationDate(for name: String, parsed: Date?) -> Date? {
         parsed ?? trackedCreationDate(for: name)
     }
@@ -187,9 +152,6 @@ public enum ContainerMachineManager {
     }
 
     /// Stops a running container machine synchronously.
-    ///
-    /// Throws instead of swallowing failures so prune passes can record the
-    /// outcome per machine rather than reporting success while VMs persist.
     public static func stopMachineSync(
         name: String,
         runtime: String = "container"
@@ -216,10 +178,6 @@ public enum ContainerMachineManager {
     }
 
     /// Deletes a container machine synchronously.
-    ///
-    /// Throws instead of swallowing failures so prune passes can record the
-    /// outcome per machine rather than reporting success while VMs persist.
-    /// Successful deletes also drop the local creation-time entry.
     public static func deleteMachineSync(
         name: String,
         runtime: String = "container"
@@ -247,10 +205,6 @@ public enum ContainerMachineManager {
     }
 
     /// Lists container machines matching the given prefix synchronously.
-    ///
-    /// Throws when the runtime is missing or the listing fails so callers can
-    /// distinguish "no machines" from "could not inspect", instead of silently
-    /// treating an unlisted fleet as already reclaimed.
     public static func listMachinesSync(
         prefix: String = machinePrefix,
         runtime: String = "container"
@@ -281,12 +235,6 @@ public enum ContainerMachineManager {
     // MARK: - Internal Helpers
 
     /// Parses tabular or line-based stdout from `container machine list`.
-    ///
-    /// Expects `NAME STATUS [IMAGE] [CREATED ...]` rows; the trailing columns
-    /// are probed for a creation timestamp (ISO-8601, common date shapes, or
-    /// epoch seconds) because the CLI offers no stable machine-inspect flag.
-    /// Rows without a parsable timestamp fall back to the local creation
-    /// registry so freshly spawned machines still age correctly.
     public static func parseMachineListOutput(_ output: String, prefix: String) -> [ContainerMachineInfo] {
         var machines: [ContainerMachineInfo] = []
         let lines = output.split(separator: "\n", omittingEmptySubsequences: true)
@@ -307,14 +255,6 @@ public enum ContainerMachineManager {
     }
 
     /// Probes trailing listing columns for a creation timestamp.
-    ///
-    /// Tries the joined remainder first so two-column dates (`2026-09-15
-    /// 10:00:00`) parse as one value, then falls back to single tokens for
-    /// ISO-8601 and epoch forms. Fresh `DateFormatter`s are built per call so
-    /// no shared formatter state is touched from concurrent prune paths.
-    /// Timezone-less shapes are read as UTC to keep TTL math deterministic.
-    /// - Parameter tokens: Columns after `NAME STATUS [IMAGE]`.
-    /// - Returns: Parsed date, or `nil` when no token looks like a timestamp.
     private static func parseCreationDate(from tokens: [String]) -> Date? {
         guard !tokens.isEmpty else { return nil }
 
@@ -374,20 +314,9 @@ public enum ContainerMachineManager {
     }
 
     /// Runs a container CLI invocation with a timeout and bounded concurrent output drain.
-    ///
-    /// Untrusted archive detonation streams arbitrary bytes through stdin, so the
-    /// child must never hang a turn: the timeout terminates a stuck runtime, the
-    /// throwing stdin write surfaces broken pipes instead of silently dropping
-    /// bytes, and stdout/stderr drain concurrently in bounded chunks so a large
-    /// stderr cannot fill its pipe and deadlock a stdout wait.
-    /// - Parameters:
-    ///   - executableURL: Container CLI binary.
-    ///   - arguments: CLI arguments.
-    ///   - inputData: Bytes piped to stdin (archive payload), if any.
-    ///   - timeoutSeconds: Seconds before the child is terminated. Defaults to the shared 30s bridge budget.
-    ///   - maxOutputBytes: Maximum stdout bytes retained. Defaults to the shared detonation bound.
-    /// - Returns: Exit status plus bounded stdout/stderr.
-    /// - Throws: `ContainerMachineError/operationFailed` on timeout or output overrun.
+    /// Delegates to the shared `BoundedProcessRunner` so timeout, capped
+    /// drains, and terminate-on-cap stay single-source with every other
+    /// subprocess caller; no local runner lives here.
     public static func runProcessSync(
         executableURL: URL,
         arguments: [String],
@@ -395,121 +324,54 @@ public enum ContainerMachineManager {
         timeoutSeconds: TimeInterval = defaultProcessTimeoutSeconds,
         maxOutputBytes: Int = maxProcessOutputBytes
     ) throws -> ContainerExecutionResult {
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = arguments
-
-        let stdoutPipe = Pipe()
-        let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-
-        let stdinPipe = Pipe()
-        process.standardInput = stdinPipe
-
-        try process.run()
-        if let inputData, !inputData.isEmpty {
-            do {
-                try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
-            } catch {
-                // Child closed stdin early; drain still reports the exit status.
-            }
-        }
-        try? stdinPipe.fileHandleForWriting.close()
-
-        let group = DispatchGroup()
-        let stdoutStore = OSAllocatedUnfairLock(initialState: BoundedRead())
-        let stderrStore = OSAllocatedUnfairLock(initialState: BoundedRead())
-        let outHandle = stdoutPipe.fileHandleForReading
-        let errHandle = stderrPipe.fileHandleForReading
-        let stdoutLimit = maxOutputBytes
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = boundedRead(handle: outHandle, limit: stdoutLimit, process: process)
-            stdoutStore.withLock { $0 = result }
-            group.leave()
-        }
-        group.enter()
-        DispatchQueue.global(qos: .userInitiated).async {
-            let result = boundedRead(handle: errHandle, limit: maxProcessErrorBytes, process: process)
-            stderrStore.withLock { $0 = result }
-            group.leave()
-        }
-
-        let timedOut = OSAllocatedUnfairLock(initialState: false)
-        let timeoutWork = DispatchWorkItem {
-            guard process.isRunning else { return }
-            timedOut.withLock { $0 = true }
-            process.terminate()
-        }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: timeoutWork)
-        process.waitUntilExit()
-        group.wait()
-        timeoutWork.cancel()
-
-        if timedOut.withLock({ $0 }) {
-            throw ContainerMachineError.operationFailed(
-                "Container command timed out after \(Int(timeoutSeconds))s."
+        do {
+            let result = try BoundedProcessRunner.runSync(
+                executableURL: executableURL,
+                arguments: arguments,
+                inputData: inputData,
+                timeoutSeconds: timeoutSeconds,
+                maxOutputBytes: maxOutputBytes,
+                maxErrorBytes: maxProcessErrorBytes
             )
-        }
-        let outResult = stdoutStore.withLock { $0 }
-        let errResult = stderrStore.withLock { $0 }
-        if outResult.didExceed {
-            throw ContainerMachineError.operationFailed(
-                "Container output exceeded the \(stdoutLimit)-byte limit and was terminated."
+            return ContainerExecutionResult(
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr
             )
+        } catch let error as BoundedProcessError {
+            throw ContainerMachineError.operationFailed(error.localizedDescription)
         }
-
-        return ContainerExecutionResult(
-            exitCode: process.terminationStatus,
-            stdout: outResult.data,
-            stderr: errResult.data
-        )
     }
 
-    /// Incremental capped pipe read shared by the concurrent stdout/stderr drains.
-    private struct BoundedRead: Sendable {
-        /// Bytes accumulated so far.
-        var data = Data()
-        /// Whether the cap was passed (caller terminates the child).
-        var didExceed = false
-    }
-
-    /// Reads one pipe in small chunks, terminating the child as soon as the cap passes.
-    private static func boundedRead(handle: FileHandle, limit: Int, process: Process) -> BoundedRead {
-        var result = BoundedRead()
-        while true {
-            let chunk: Data?
-            do {
-                chunk = try handle.read(upToCount: 16384)
-            } catch {
-                break
-            }
-            guard let chunk, !chunk.isEmpty else { break }
-            result.data.append(chunk)
-            if result.data.count > limit {
-                if process.isRunning {
-                    process.terminate()
-                }
-                result.didExceed = true
-                break
-            }
-        }
-        return result
-    }
-
+    /// Runs a container CLI invocation off the cooperative pool.
+    /// Delegates to the shared `BoundedProcessRunner` async entry point.
     private static func runProcess(
         executableURL: URL,
         arguments: [String],
         inputData: Data? = nil,
         timeoutSeconds: TimeInterval = defaultProcessTimeoutSeconds
     ) async throws -> ContainerExecutionResult {
-        try runProcessSync(
-            executableURL: executableURL,
-            arguments: arguments,
-            inputData: inputData,
-            timeoutSeconds: timeoutSeconds
-        )
+        try Task.checkCancellation()
+        do {
+            let result = try await BoundedProcessRunner.runAsync(
+                executableURL: executableURL,
+                arguments: arguments,
+                inputData: inputData,
+                timeoutSeconds: timeoutSeconds,
+                maxOutputBytes: maxProcessOutputBytes,
+                maxErrorBytes: maxProcessErrorBytes
+            )
+            try Task.checkCancellation()
+            return ContainerExecutionResult(
+                exitCode: result.exitCode,
+                stdout: result.stdout,
+                stderr: result.stderr
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as BoundedProcessError {
+            throw ContainerMachineError.operationFailed(error.localizedDescription)
+        }
     }
 }
 

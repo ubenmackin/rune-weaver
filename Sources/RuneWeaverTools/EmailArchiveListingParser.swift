@@ -1,25 +1,11 @@
 // Rune Weaver Tools — Guest archive listing parser for email attachments.
-//
-// Isolates `unzip -l` and `tar -tvf` stdout parsing behind a shared parser so
-// attachment detonation stays focused on orchestration while manifest shaping
-// lives in one place without touching the network or filesystem.
 
 import Foundation
 import RuneWeaverCore
 
 /// Best-effort parser for guest archive listings.
-///
-/// Tries ZIP (`unzip -l`) before TAR (`tar -tvf`) mirroring the guest probe
-/// order; unparseable output yields an empty manifest so the caller fails
-/// closed instead of fabricating entries. Sizes fall back to zero when the
-/// row carries no parseable count, with the extraction byte cap remaining
-/// the authoritative bound.
 public enum EmailArchiveListingParser: Sendable {
     /// Parses guest listing stdout into manifest entries.
-    /// - Parameters:
-    ///   - output: Stdout from the guest list script.
-    ///   - filename: Original archive filename (unused; kept for format hints in future probes).
-    /// - Returns: Parsed entries in listing order, possibly empty when unparseable.
     public static func parseListOutput(_ output: String, filename _: String) -> [EmailArchiveEntry] {
         let zipped = parseUnzipListing(output)
         if !zipped.isEmpty {
@@ -29,13 +15,6 @@ public enum EmailArchiveListingParser: Sendable {
     }
 
     /// Parses `unzip -l` rows into entries.
-    ///
-    /// Skips the archive header, column titles, dash separators, and the
-    /// trailing summary line by requiring a leading integer size; the entry
-    /// name is the remainder after the size/date/time columns so names
-    /// containing spaces survive.
-    /// - Parameter output: Guest stdout.
-    /// - Returns: Parsed entries, possibly empty.
     public static func parseUnzipListing(_ output: String) -> [EmailArchiveEntry] {
         var entries: [EmailArchiveEntry] = []
         for line in output.components(separatedBy: .newlines) {
@@ -58,14 +37,6 @@ public enum EmailArchiveListingParser: Sendable {
     }
 
     /// Parses `tar -tvf` rows into entries.
-    ///
-    /// Finds the size as the first integer token after the permission bits
-    /// and takes the entry name from the tail after the date/time columns;
-    /// `->` symlink suffixes are stripped so the manifest names the archived
-    /// path rather than its target. Rows without a parseable shape are
-    /// skipped rather than guessed.
-    /// - Parameter output: Guest stdout.
-    /// - Returns: Parsed entries, possibly empty.
     public static func parseTarListing(_ output: String) -> [EmailArchiveEntry] {
         var entries: [EmailArchiveEntry] = []
         for line in output.components(separatedBy: .newlines) {

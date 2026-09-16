@@ -1,8 +1,4 @@
 // Rune Weaver Server — Plugin management and marketplace REST endpoints.
-//
-// Exposes routes for inspecting installed/discovered runes, toggling enable/disable state,
-// updating per-tool permission overrides, triggering filesystem rescans, and installing
-// community plugins from the marketplace into the disabled-by-default holding pen.
 
 import Foundation
 import RuneWeaverCore
@@ -90,11 +86,9 @@ private func registerMarketplaceRoutes(_ app: Application) {
     marketplace.post(PathComponent.constant(ServerPaths.install)) { req async throws -> PluginSummary in
         let body = try req.content.decode(InstallMarketplacePluginRequest.self)
         let context = req.application.runeWeaver
-        // Marketplace IDs become directory names and manifest fields, so reject
-        // traversal and injection payloads up front with the same allowlist the
-        // manifest parser enforces; containment below remains as a second layer.
-        // A lone "." would resolve to the pen itself, so it is rejected even
-        // though it matches the character allowlist.
+        // Marketplace IDs become directory names and manifest fields, so reject traversal and
+        // injection payloads up front with the same allowlist the manifest parser enforces;
+        // containment below remains as a second layer.
         let pluginID = body.id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !pluginID.isEmpty,
               pluginID != ".",
@@ -106,10 +100,9 @@ private func registerMarketplaceRoutes(_ app: Application) {
         else {
             throw Abort(.badRequest, reason: "Invalid plugin ID. Only alphanumeric, '.', '-', and '_' are allowed.")
         }
-        // The marketplace URL rides along as display provenance only. The
-        // loopback service never fetches remote URLs server-side, so a crafted
-        // install cannot turn this endpoint into a fetch oracle; only
-        // well-formed https URLs are accepted to keep stored provenance usable.
+        // The marketplace URL rides along as display provenance only. The loopback service never
+        // fetches remote URLs server-side, so a crafted install cannot turn this endpoint into a
+        // fetch oracle; only well-formed https URLs are accepted to keep stored provenance usable.
         if let rawDownloadURL = body.downloadURL?.trimmingCharacters(in: .whitespacesAndNewlines),
            !rawDownloadURL.isEmpty
         {
@@ -180,10 +173,9 @@ private func registerMarketplaceRoutes(_ app: Application) {
         let manifestFile = targetDir.appendingPathComponent("rune.json")
         let scriptFile = targetDir.appendingPathComponent("main.py")
 
-        // Both scaffold files inherit containment from the verified target
-        // directory since their leaf names are fixed server-side constants.
-        // A failed write removes the fresh pen so a half-installed directory
-        // never wedges later installs behind a persistent conflict.
+        // Both scaffold files inherit containment from the verified target directory since their
+        // leaf names are fixed server-side constants. A failed write removes the fresh pen so a
+        // half-installed directory never wedges later installs behind a persistent conflict.
         do {
             try manifestData.write(to: manifestFile, options: .atomic)
             try scriptContent.write(to: scriptFile, atomically: true, encoding: .utf8)

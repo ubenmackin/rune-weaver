@@ -1,34 +1,60 @@
 // Rune Weaver Core — Dynamic system prompt composition from the live tool registry.
-//
-// Snapshots the tool bus at session start to catalog tool names, descriptions,
-// input schemas, and permission levels around fixed identity, tool-use, and
-// memory guidance. Provides the scheduled-run variant guiding background
-// persistence and recall plus the flag-override resolver so chat and scheduler
-// turns share one prompt contract through the orchestrator.
 
 import Foundation
 
 /// Builds the default chat system prompt from the live tool registry.
-///
-/// The composer snapshots the registry via `ToolBus.availableTools()` at
-/// session start so the model sees exactly the tools it can call: every
-/// registered tool contributes its name, description, and input schema.
-/// Identity, tool-use policy, and memory guidance are fixed text around
-/// that live catalog. Callers keep the existing system-message plumbing
-/// (`Orchestrator.systemPrompt`, `Message` role `.system`, and
-/// `[Message].withSystemPrompt(_:)`); this type only produces the prompt
-/// string and never touches message storage.
+public enum VisionSchemaFilter: Sendable {
+    /// Screenshot-related schema keys hidden from text-only models.
+    public static let screenshotKeys = [
+        BrowserScreenshotPolicy.screenshotParamName,
+        "screenshot",
+        "include_screenshot"
+    ]
+
+    /// Removes the screenshot opt-in from a navigate schema.
+    public static func strippedNavigateSchema(_ schema: JSONSchema) -> JSONSchema {
+        guard let data = schema.rawValue.data(using: .utf8),
+              let parsed = try? JSONSerialization.jsonObject(with: data, options: []),
+              var object = parsed as? [String: Any]
+        else { return schema }
+        if var properties = object["properties"] as? [String: Any] {
+            for key in screenshotKeys {
+                properties.removeValue(forKey: key)
+            }
+            object["properties"] = properties
+        }
+        if let required = object["required"] as? [String] {
+            object["required"] = required.filter { !screenshotKeys.contains($0) }
+        }
+        if let anyOf = object["anyOf"] as? [[String: Any]] {
+            object["anyOf"] = anyOf.filter { entry in
+                guard let req = entry["required"] as? [String] else { return true }
+                return !req.allSatisfy { screenshotKeys.contains($0) }
+            }
+        }
+        guard let stripped = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let raw = String(data: stripped, encoding: .utf8)
+        else { return schema }
+        return JSONSchema(rawValue: raw)
+    }
+
+    /// Schema advertised for one tool given the model's vision capability.
+    public static func displaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema {
+        guard !supportsVision, tool.name == BrowserScreenshotPolicy.navigateToolName else {
+            return tool.inputSchema
+        }
+        return strippedNavigateSchema(tool.inputSchema)
+    }
+}
+
 public enum SystemPromptComposer {
     /// Composes the default system prompt for the given tools.
-    ///
-    /// Tools render sorted by name so the prompt is deterministic across
-    /// runs. Each tool contributes one entry with its name, description,
-    /// and raw input schema so the agent can make proper calls. An empty
-    /// registry still yields identity, policy, and memory guidance with
-    /// a note that no tools are registered.
-    /// - Parameter tools: Tools to catalog in the prompt.
-    /// - Returns: Default system prompt text.
     public static func compose(tools: [any Tool]) -> String {
+        compose(tools: tools, supportsVision: true)
+    }
+
+    /// Composes the default system prompt honoring the model's vision capability.
+    public static func compose(tools: [any Tool], supportsVision: Bool) -> String {
         let sorted = tools.sorted { $0.name < $1.name }
         var lines: [String] = []
         lines.append("You are Rune Weaver, a helpful personal assistant.")
@@ -45,7 +71,7 @@ public enum SystemPromptComposer {
         } else {
             for tool in sorted {
                 lines.append("- \(tool.name): \(tool.description)")
-                lines.append("  Input schema: \(tool.inputSchema.rawValue)")
+                lines.append("  Input schema: \(displaySchema(for: tool, supportsVision: supportsVision).rawValue)")
                 lines.append("  Permission: \(tool.permissionLevel.rawValue)")
             }
         }
@@ -61,6 +87,20 @@ public enum SystemPromptComposer {
                 + "run without approval prompts, and every memory write is recorded in the audit log. "
                 + "Never include secrets in prompts."
         )
+        if supportsVision {
+            lines.append(
+                "- browser.navigate screenshot opt-in: includeScreenshot defaults to false; "
+                    + "set it true only when visual layout is needed. Captures are downscaled "
+                    + "to 1280px JPEG under 500KB held in memory for the turn only "
+                    + "(never written to disk), never persist to history, "
+                    + "and audit stores the content hash only."
+            )
+        } else {
+            lines.append(
+                "- Screenshots are unavailable on this text-only model; do not request screenshots "
+                    + "and ignore any screenshot parameter—text snapshots carry the page content."
+            )
+        }
         lines.append("")
         lines.append("Memory guidance:")
         lines.append(
@@ -72,55 +112,49 @@ public enum SystemPromptComposer {
     }
 
     /// Composes the default system prompt from the live tool registry.
-    ///
-    /// Snapshots the bus via `availableTools()` so the prompt always
-    /// matches the session's registered plugins.
-    /// - Parameter toolBus: Live registry owning the session's tools.
-    /// - Returns: Default system prompt text.
     public static func compose(toolBus: ToolBus) async -> String {
         await compose(tools: toolBus.availableTools())
     }
 
+    /// Composes the default system prompt from the live registry with vision awareness.
+    public static func compose(toolBus: ToolBus, supportsVision: Bool) async -> String {
+        await compose(tools: toolBus.availableTools(), supportsVision: supportsVision)
+    }
+
     /// Resolves the effective system prompt, preserving the flag override.
-    ///
-    /// A non-empty `--system-prompt` value wins verbatim; a nil or empty
-    /// flag falls back to the composed default. Empty mirrors
-    /// `[Message].withSystemPrompt(_:)`, which treats empty prompts as
-    /// absent, so the override contract never changes.
-    /// - Parameters:
-    ///   - flag: Explicit `--system-prompt` value, if any.
-    ///   - tools: Tools to catalog when the flag is absent.
-    /// - Returns: The flag when non-empty, else the composed prompt.
     public static func resolve(flag: String?, tools: [any Tool]) -> String {
+        resolve(flag: flag, tools: tools, supportsVision: true)
+    }
+
+    /// Resolves the effective prompt honoring the model's vision capability.
+    public static func resolve(flag: String?, tools: [any Tool], supportsVision: Bool) -> String {
         if let flag, !flag.isEmpty {
             return flag
         }
-        return compose(tools: tools)
+        return compose(tools: tools, supportsVision: supportsVision)
     }
 
     /// Resolves the effective system prompt from the live tool registry.
-    ///
-    /// A non-empty `--system-prompt` value wins verbatim without touching
-    /// the bus; a nil or empty flag composes from `availableTools()`.
-    /// - Parameters:
-    ///   - flag: Explicit `--system-prompt` value, if any.
-    ///   - toolBus: Live registry consulted when the flag is absent.
-    /// - Returns: The flag when non-empty, else the composed prompt.
     public static func resolve(flag: String?, toolBus: ToolBus) async -> String {
+        await resolve(flag: flag, toolBus: toolBus, supportsVision: true)
+    }
+
+    /// Resolves the effective prompt from the live registry with vision awareness.
+    public static func resolve(flag: String?, toolBus: ToolBus, supportsVision: Bool) async -> String {
         if let flag, !flag.isEmpty {
             return flag
         }
-        return await compose(toolBus: toolBus)
+        return await compose(toolBus: toolBus, supportsVision: supportsVision)
     }
 
     /// Composes the system prompt customized for automated scheduled runs.
-    ///
-    /// Extends the catalog with instructions to record state and key outcomes
-    /// via `remember_fact` and recall past run context via `recall_memories`.
-    /// - Parameter tools: Tools to catalog in the prompt.
-    /// - Returns: Scheduled system prompt text.
     public static func composeScheduled(tools: [any Tool]) -> String {
-        var base = compose(tools: tools)
+        composeScheduled(tools: tools, supportsVision: true)
+    }
+
+    /// Composes the scheduled prompt honoring the model's vision capability.
+    public static func composeScheduled(tools: [any Tool], supportsVision: Bool) -> String {
+        var base = compose(tools: tools, supportsVision: supportsVision)
         base += "\n\n"
         base += """
         Scheduled task guidance:
@@ -136,5 +170,20 @@ public enum SystemPromptComposer {
     /// - Returns: Scheduled system prompt text.
     public static func composeScheduled(toolBus: ToolBus) async -> String {
         await composeScheduled(tools: toolBus.availableTools())
+    }
+
+    /// Composes the scheduled prompt from the live registry with vision awareness.
+    public static func composeScheduled(toolBus: ToolBus, supportsVision: Bool) async -> String {
+        await composeScheduled(tools: toolBus.availableTools(), supportsVision: supportsVision)
+    }
+
+    /// Schema advertised for one tool given the model's vision capability.
+    public static func displaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema {
+        VisionSchemaFilter.displaySchema(for: tool, supportsVision: supportsVision)
+    }
+
+    /// Removes the screenshot opt-in from a navigate schema.
+    public static func strippedNavigateSchema(_ schema: JSONSchema) -> JSONSchema {
+        VisionSchemaFilter.strippedNavigateSchema(schema)
     }
 }
