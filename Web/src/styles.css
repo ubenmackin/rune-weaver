@@ -2154,13 +2154,21 @@ button:disabled {
   font-family: monospace;
 }
 
-/* Settings Sub-Tabs */
-.settings-subtabs {
+/* Settings vertical layout: left sidenav beside the content pane keeps every
+ * category visible without horizontal scrolling. */
+.settings-layout {
   display: flex;
-  align-items: center;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.settings-sidenav {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
-  overflow-x: auto;
-  padding: 4px;
+  padding: 6px;
   background: #111118;
   border: 1px solid var(--border-color);
   border-radius: 10px;
@@ -2170,7 +2178,10 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 10px 14px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: 8px;
@@ -2178,7 +2189,6 @@ button:disabled {
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  white-space: nowrap;
   transition: all 0.15s ease;
 }
 
@@ -2194,6 +2204,13 @@ button:disabled {
   font-weight: 600;
 }
 
+/* Keyboard focus stays visible on the stacked nav without relying on the
+ * hover background alone. */
+.settings-tab-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
 .settings-tab-badge {
   font-size: 11px;
   background: rgba(168, 85, 247, 0.2);
@@ -2201,6 +2218,31 @@ button:disabled {
   padding: 1px 6px;
   border-radius: 999px;
   font-weight: 600;
+  margin-left: auto;
+}
+
+.settings-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Narrow viewports stack the sidenav above the content pane so neither
+ * column squeezes below a usable width. */
+@media (max-width: 800px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-sidenav {
+    width: 100%;
+  }
+
+  .settings-content {
+    width: 100%;
+  }
 }
 
 .settings-form {
@@ -2244,6 +2286,33 @@ button:disabled {
   font-size: 13px;
   color: var(--text-muted);
   line-height: 1.4;
+}
+
+/* Subsection header mirrors the section header at a smaller scale so Allowed
+ * Roots Reset/Add sit in the same Reset-then-Add order with identical ghost
+ * hover and alignment as the Files & Access header above it. */
+.settings-subsection-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.settings-subsection-header .row {
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Blocked-paths textarea keeps long guard lists compact: monospace preserves
+ * glob alignment while the min-height shows the default boundary without
+ * scrolling on first paint. */
+.deny-patterns-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  min-height: 160px;
+  resize: vertical;
+  white-space: pre;
 }
 
 .form-row {
@@ -2944,24 +3013,6 @@ button.danger:hover:not(:disabled) {
 .tool-switch-state {
   font-size: 0.85rem;
   min-width: 62px;
-}
-
-.tool-status-pill {
-  font-size: 0.7rem;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  letter-spacing: 0.02em;
-}
-
-.tool-status-pill[data-state="enabled"] {
-  background: rgba(72, 187, 120, 0.2);
-  color: #48bb78;
-}
-
-.tool-status-pill[data-state="disabled"] {
-  background: rgba(160, 174, 192, 0.2);
-  color: #a0aec0;
 }
 
 @media (prefers-reduced-motion: reduce) {

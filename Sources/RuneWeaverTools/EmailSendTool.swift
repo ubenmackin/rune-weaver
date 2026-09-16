@@ -2,7 +2,7 @@
 //
 // Provides the `email.send` plugin tool over the `python3 smtplib`
 // bridge with validation-first header-injection rejection, execution-time
-// credential resolution, sandbox-confined attachments, threaded replies,
+// credential resolution, workspace-guarded attachments, threaded replies,
 // and best-effort Sent archiving. HTML is the standard body with a
 // derived text fallback; the sender always defaults to the account
 // username and dry-run previews never touch the network.
@@ -17,7 +17,7 @@ import RuneWeaverCore
 /// total across all three is capped at twenty. Either `bodyText` or
 /// `bodyHtml` (or both) must be present: HTML-only sends derive a text
 /// fallback by stripping tags. Optional `attachmentPaths` names
-/// sandbox-confined absolute files, and optional `replyToId` plus
+/// workspace-guarded absolute files, and optional `replyToId` plus
 /// `mailbox` threads the send as a reply. The sender is never a schema
 /// field: it always defaults to the account username so spoofed `From`
 /// values cannot enter the bridge.
@@ -53,7 +53,7 @@ public struct EmailSendArgs: Sendable, Equatable, Decodable {
     ///   - subject: Subject header text.
     ///   - bodyText: Optional plain-text body.
     ///   - bodyHtml: Optional HTML body.
-    ///   - attachmentPaths: Optional sandbox-confined attachment paths.
+    ///   - attachmentPaths: Optional workspace-guarded attachment paths.
     ///   - replyToId: Optional replied-to message id.
     ///   - mailbox: Optional mailbox holding the replied-to message.
     public init(
@@ -591,7 +591,7 @@ public enum EmailSendValidation: Sendable {
 /// username with no `From` override, so spoofed `From` values cannot send,
 /// and every send transmits immediately on approval with no scheduled or
 /// delayed send. HTML is standard with a tag-stripped text fallback;
-/// sandbox-confined attachments MIME-encode
+/// workspace-guarded attachments MIME-encode
 /// via `email.message`, and threaded replies fetch the original for
 /// `In-Reply-To`/`References`, a `Re:` subject, and a quoted body. After
 /// SMTP success the tool best-effort appends to Sent without failing the
@@ -607,7 +607,7 @@ public struct EmailSendTool: Tool, Sendable {
             + "Use when the user asks to send or compose mail. "
             + "From always defaults to the account username with no From override; sends immediately on approval with no scheduled or delayed send. "
             + "HTML is standard with a derived text fallback; "
-            + "attachments must be sandbox-confined absolute paths, and replyToId threads a reply. "
+            + "attachments must be workspace-guarded absolute paths, and replyToId threads a reply. "
             + "Returns the sender, recipients, subject, body size, and Sent status."
     /// Function-calling contract for the send envelope plus threading and attachments.
     public let inputSchema =
@@ -620,7 +620,7 @@ public struct EmailSendTool: Tool, Sendable {
                 + #""items":{"type":"string"},"minItems":0,"maxItems":20},"subject":{"type":"string","description":"Subject header "#
                 + #"(1-998 chars, no CR or LF)","maxLength":998},"bodyText":{"type":"string","description":"Plain-text body "#
                 + #"(provide bodyText and/or bodyHtml; HTML-only derives text)"},"bodyHtml":{"type":"string","description":"HTML body "#
-                + #"(standard; provide bodyText and/or bodyHtml)"},"attachmentPaths":{"type":"array","description":"Optional sandbox-confined "#
+                + #"(standard; provide bodyText and/or bodyHtml)"},"attachmentPaths":{"type":"array","description":"Optional workspace-guarded "#
                 + #"absolute attachment paths (10 MB each, 25 MB total)","items":{"type":"string"}},"replyToId":{"type":"string","description":"Optional "#
                 + #"IMAP id of the message being replied to"},"mailbox":{"type":"string","description":"Mailbox holding the replied-to "#
                 + #"message (omitted means INBOX)"}}"#
@@ -635,7 +635,7 @@ public struct EmailSendTool: Tool, Sendable {
     private let smtpGateway: any EmailSMTPGateway
     /// IMAP gateway for threading fetches and Sent appends (subprocess by default, stub in tests).
     private let imapGateway: any EmailIMAPGateway
-    /// Sandbox staging configuration. Attachment paths must resolve under `stagingPath`.
+    /// Detonation policy retained for compatibility. Attachment paths are judged by the workspace guard.
     private let sandboxConfig: SandboxConfig
 
     /// Creates a send tool.
@@ -643,7 +643,7 @@ public struct EmailSendTool: Tool, Sendable {
     ///   - emailConfig: Decoded `[email]` section.
     ///   - smtpGateway: SMTP gateway. Defaults to the `python3` subprocess bridge.
     ///   - gateway: IMAP gateway for threading and Sent appends. Defaults to the `python3` subprocess bridge.
-    ///   - sandboxConfig: Sandbox staging configuration. Defaults to the built-in staging path.
+    ///   - sandboxConfig: Tier-3 detonation policy. Retained for compatibility and ignored for sends.
     public init(
         emailConfig: EmailConfig,
         smtpGateway: (any EmailSMTPGateway)? = nil,
@@ -945,41 +945,27 @@ extension EmailSendTool {
         throw EmailIMAPError.unknownAccount(name: accountName, available: emailConfig.accounts.map(\.name))
     }
 
-    /// Stages sandbox-confined attachments for the bridge.
+    /// Stages workspace-guarded attachments for the bridge.
     ///
-    /// Each path must be absolute and resolve under
-    /// `SandboxConfig.stagingPath` (symlinks resolved on both sides) so a
+    /// Each path must be absolute and satisfy the workspace guard
+    /// (deny plus allow-roots, symlinks resolved on both sides) so a
     /// `..` or symlink escape fails closed with a clear message. Files are
     /// capped at 10 MB each with a 25 MB total; MIME types come from the
     /// file extension without sniffing content.
     /// - Parameter paths: Trimmed absolute paths from validation.
     /// - Returns: Staged bytes with filenames and MIME types.
-    /// - Throws: Failure when a path escapes the sandbox, is missing, or exceeds caps.
+    /// - Throws: Failure when a path is denied by the workspace guard, is missing, or exceeds caps.
     private func stagedAttachments(paths: [String]) throws -> [StagedSendAttachment] {
         guard !paths.isEmpty else { return [] }
-        // Trim, expand tildes, then standardize so `~` and `..` resolve
-        // before sandbox confinement is checked.
-        let trimmedStaging = sandboxConfig.stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        let stagingPrefix: String
-        if !trimmedStaging.isEmpty {
-            let expandedStaging = (trimmedStaging as NSString).expandingTildeInPath
-            let stagingRoot = (expandedStaging as NSString).standardizingPath
-            let stagingURL = URL(fileURLWithPath: stagingRoot, isDirectory: true).standardized
-            let resolvedStaging = stagingURL.resolvingSymlinksInPath()
-            stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
-        } else {
-            stagingPrefix = ""
-        }
         var staged: [StagedSendAttachment] = []
         var totalBytes = 0
         for path in paths {
             let expanded = (path as NSString).expandingTildeInPath
             let candidate = URL(fileURLWithPath: expanded, isDirectory: false).standardized
             let resolved = candidate.resolvingSymlinksInPath()
-            let isUnderStaging = !stagingPrefix.isEmpty && resolved.path.hasPrefix(stagingPrefix)
             let guardDecision = FilesAccessGuard.evaluate(url: resolved)
-            guard isUnderStaging || guardDecision.allowed else {
-                throw EmailIMAPError.bridgeFailed("Invalid attachment '\(path)': path must be under the sandbox staging area or permitted workspace")
+            guard guardDecision.allowed else {
+                throw EmailIMAPError.bridgeFailed(guardDecision.reason ?? "Invalid attachment '\(path)': path is not in the permitted workspace")
             }
             let values: URLResourceValues
             do {

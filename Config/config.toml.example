@@ -49,19 +49,17 @@ whisper_model = "base"
 tts_provider = "system"  # macOS say command
 
 [sandbox]
-staging_path = "~/.runeweaver/sandbox"
-# Days a staged file stays valid before the sweeper may reclaim it.
-retention_days = 14
-# Total byte cap across pending/, approved/, and attachments/; oldest files
-# are evicted first once the cap is exceeded (500 MiB default).
-max_total_bytes = 524288000
-# Seconds between periodic cleanup passes (hourly default).
-cleanup_interval_seconds = 3600
-# Container runtime for archive detonation chambers (Apple container CLI).
-container_runtime = "container"
+# Tier-3 detonation only: there is no host staging. Legacy staging keys
+# (staging_path, retention_days, max_total_bytes, cleanup_interval_seconds)
+# in older files are ignored with no migration; manually clean old dev-only
+# staging directories.
+# Archive detonation always uses the Apple Container CLI ("container");
+# there is no container_runtime key. Older files carrying the key load
+# with the hardcoded default.
 # Default OCI base image for quarantine/detonation chambers.
 container_base_image = "alpine:latest"
-# Idle minutes before a warm archive exploration session is reaped (10 default).
+# Crash-orphan reclamation TTL in minutes for ephemeral detonation machines (10 default).
+# Detonations are reaped immediately; the sweeper reclaims only machines orphaned by crashes.
 archive_session_ttl_minutes = 10
 # Maximum concurrent container machines allowed at once (3 default).
 max_concurrent_machines = 3

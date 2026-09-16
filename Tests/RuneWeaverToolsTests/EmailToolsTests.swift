@@ -681,9 +681,7 @@ struct EmailToolsTests {
             data: bytes
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
-        let sandbox = SandboxConfig(stagingPath: staging.path)
+        let sandbox = SandboxConfig()
         let tool = EmailAttachmentTool(emailConfig: config, gateway: gateway, sandboxConfig: sandbox)
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -697,13 +695,13 @@ struct EmailToolsTests {
             let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
             #expect(staged.skipped == false)
             let path = try #require(staged.path)
-            #expect(path.hasPrefix(staging.path))
+            #expect(path.contains("runeweaver-attachments"))
             #expect(path.contains("attachments"))
             let onDisk = try Data(contentsOf: URL(fileURLWithPath: path))
             #expect(onDisk == bytes)
             #expect(!output.content.contains("test-secret"))
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -716,12 +714,10 @@ struct EmailToolsTests {
             data: bytes
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -732,11 +728,11 @@ struct EmailToolsTests {
             struct Staged: Decodable { let path: String? }
             let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
             let path = try #require(staged.path)
-            #expect(path.hasPrefix(staging.path))
+            #expect(path.contains("runeweaver-attachments"))
             #expect(!path.contains(".."))
             #expect(URL(fileURLWithPath: path).lastPathComponent.contains("evil.txt"))
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -749,12 +745,10 @@ struct EmailToolsTests {
             data: Data(repeating: 0, count: 8)
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -767,9 +761,7 @@ struct EmailToolsTests {
             #expect(decoded.skipped == true)
             #expect(decoded.path == nil)
             #expect((decoded.note ?? "").contains("10 MB"))
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -782,12 +774,10 @@ struct EmailToolsTests {
             data: bytes
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -796,9 +786,7 @@ struct EmailToolsTests {
             )
             #expect(output.isError == false)
             #expect(output.content.contains("Dry run"))
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -849,13 +837,11 @@ struct EmailToolsTests {
             data: bytes
         ))
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let bus = ToolBus(permissionGate: PermissionGate())
         for tool in EmailTools.makeTools(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         ) {
             await bus.register(tool: tool)
         }
@@ -864,9 +850,7 @@ struct EmailToolsTests {
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
             #expect(result.isError == true)
             #expect(result.content.contains("requires approval"))
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1076,12 +1060,10 @@ struct EmailToolsTests {
             mailboxCapture: mailboxCapture
         )
         let config = ToolsTestSupport.testEmailConfig()
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: config,
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1093,9 +1075,11 @@ struct EmailToolsTests {
             struct Staged: Decodable { let mailbox: String; let path: String? }
             let staged = try JSONDecoder().decode(Staged.self, from: Data(output.content.utf8))
             #expect(staged.mailbox == "Archive")
-            #expect((staged.path ?? "").hasPrefix(staging.path))
+            #expect((staged.path ?? "").contains("runeweaver-attachments"))
+            if let path = staged.path {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+            }
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1252,12 +1236,10 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path, retentionDays: 7)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1267,20 +1249,22 @@ struct EmailToolsTests {
             #expect(output.isError == false)
             let envelope = try JSONDecoder().decode(EmailAttachmentEnvelope.self, from: Data(output.content.utf8))
             #expect(envelope.skipped == false)
-            #expect((envelope.path ?? "").hasPrefix(staging.path))
+            #expect((envelope.path ?? "").contains("runeweaver-attachments"))
             #expect(envelope.mimeCategory == "text")
             let expiry = try #require(envelope.expiresAt)
             let parsed = ISO8601DateFormatter().date(from: expiry)
             #expect(parsed != nil)
-            // A week of retention with clock skew tolerance for the download round trip.
+            // Default retention with clock skew tolerance for the download round trip.
             let remaining = (parsed ?? Date()).timeIntervalSince(Date())
-            #expect(remaining > 6 * 86400 && remaining <= 7 * 86400 + 60)
+            #expect(remaining > 13 * 86400 && remaining <= 14 * 86400 + 60)
             #expect((envelope.nextSteps ?? "").contains("files.read"))
             #expect((envelope.nextSteps ?? "").contains(envelope.path ?? ""))
             // No preview was requested, so text stays out of the envelope by default.
             #expect(envelope.preview == nil)
+            if let path = envelope.path {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+            }
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1294,12 +1278,10 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path, retentionDays: 7)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1313,8 +1295,10 @@ struct EmailToolsTests {
             #expect(preview == String(long.prefix(2000)))
             #expect(envelope.previewTruncated == true)
             #expect((envelope.nextSteps ?? "").contains("files.read"))
+            if let path = envelope.path {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+            }
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1328,12 +1312,10 @@ struct EmailToolsTests {
                 sizeBytes: bytes.count,
                 data: bytes
             ))
-            let staging = FileManager.default.temporaryDirectory
-                .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
             let tool = EmailAttachmentTool(
                 emailConfig: ToolsTestSupport.testEmailConfig(),
                 gateway: gateway,
-                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+                sandboxConfig: SandboxConfig()
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
@@ -1345,8 +1327,10 @@ struct EmailToolsTests {
                 #expect(envelope.mimeCategory == "text")
                 #expect((envelope.preview ?? "").contains("hello"))
                 #expect(envelope.previewTruncated == false)
+                if let path = envelope.path {
+                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+                }
             }
-            try? FileManager.default.removeItem(at: staging)
         }
     }
 
@@ -1361,12 +1345,10 @@ struct EmailToolsTests {
                 sizeBytes: bytes.count,
                 data: bytes
             ))
-            let staging = FileManager.default.temporaryDirectory
-                .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
             let tool = EmailAttachmentTool(
                 emailConfig: ToolsTestSupport.testEmailConfig(),
                 gateway: gateway,
-                sandboxConfig: SandboxConfig(stagingPath: staging.path)
+                sandboxConfig: SandboxConfig()
             )
             try await ToolsTestSupport.withTestPassword {
                 let output = try await tool.execute(
@@ -1379,8 +1361,10 @@ struct EmailToolsTests {
                 #expect(envelope.previewTruncated == nil)
                 #expect(envelope.mimeCategory != "text")
                 #expect((envelope.nextSteps ?? "").contains("files.read"))
+                if let path = envelope.path {
+                    try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+                }
             }
-            try? FileManager.default.removeItem(at: staging)
         }
     }
 
@@ -1394,12 +1378,10 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1411,8 +1393,10 @@ struct EmailToolsTests {
             #expect(envelope.preview == nil)
             #expect(envelope.previewTruncated == nil)
             #expect(envelope.mimeCategory == "text")
+            if let path = envelope.path {
+                try? FileManager.default.removeItem(at: URL(fileURLWithPath: path))
+            }
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1425,12 +1409,10 @@ struct EmailToolsTests {
             sizeBytes: oversize,
             data: Data(repeating: 0, count: 8)
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path)
+            sandboxConfig: SandboxConfig()
         )
         try await ToolsTestSupport.withTestPassword {
             let output = try await tool.execute(
@@ -1449,7 +1431,6 @@ struct EmailToolsTests {
             #expect(!output.content.contains("mimeCategory"))
             #expect(!output.content.contains("nextSteps"))
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1469,7 +1450,7 @@ struct EmailToolsTests {
 
     @Test
     func `Archive detonates to manifest only without host staging`() async throws {
-        // Untrusted archive bytes must never land under the sandbox staging area.
+        // Untrusted archive bytes must never land on the host; only the manifest crosses back.
         let bytes = Data("fake-zip-bytes".utf8)
         let gateway = ToolsTestSupport.StubEmailGateway(attachment: EmailAttachmentData(
             filename: "bundle.zip",
@@ -1477,8 +1458,6 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let detonator = StubArchiveDetonator(manifest: [
             EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text"),
             EmailArchiveEntry(path: "photos/pic.png", sizeBytes: 100, category: "image")
@@ -1486,7 +1465,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             archiveDetonator: detonator
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1504,10 +1483,8 @@ struct EmailToolsTests {
             #expect(session.hasPrefix("runeweaver-session-"))
             #expect((envelope.archiveManifest ?? []).count == 2)
             #expect((envelope.nextSteps ?? "").contains(session))
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
             #expect(!output.content.contains("test-secret"))
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1519,8 +1496,6 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let detonator = StubArchiveDetonator(
             manifest: [EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")],
             entryData: Data("inner hello".utf8)
@@ -1528,7 +1503,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             archiveDetonator: detonator
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1541,9 +1516,7 @@ struct EmailToolsTests {
             #expect(envelope.subpath == "hello.txt")
             #expect(envelope.extractedText == "inner hello")
             #expect(envelope.path == nil)
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test
@@ -1559,7 +1532,6 @@ struct EmailToolsTests {
             .appendingPathComponent("runeweaver-home-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let staging = home.appendingPathComponent("staging")
         let destination = home.appendingPathComponent("workspace").appendingPathComponent("hello.txt")
         let detonator = StubArchiveDetonator(
             manifest: [EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")],
@@ -1568,7 +1540,7 @@ struct EmailToolsTests {
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             homeDirectoryURL: home,
             archiveDetonator: detonator
         )
@@ -1600,11 +1572,10 @@ struct EmailToolsTests {
             .appendingPathComponent("runeweaver-home-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
-        let staging = home.appendingPathComponent("staging")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             homeDirectoryURL: home,
             archiveDetonator: StubArchiveDetonator(manifest: [
                 EmailArchiveEntry(path: "hello.txt", sizeBytes: 11, category: "text")
@@ -1629,13 +1600,10 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: staging) }
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             archiveDetonator: StubArchiveDetonator(failure: "detonator must not run for documents")
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1657,12 +1625,10 @@ struct EmailToolsTests {
             sizeBytes: bytes.count,
             data: bytes
         ))
-        let staging = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-attachment-\(UUID().uuidString)")
         let tool = EmailAttachmentTool(
             emailConfig: ToolsTestSupport.testEmailConfig(),
             gateway: gateway,
-            sandboxConfig: SandboxConfig(stagingPath: staging.path),
+            sandboxConfig: SandboxConfig(),
             archiveDetonator: StubArchiveDetonator(failure: "detonator must not run on dry run")
         )
         try await ToolsTestSupport.withTestPassword {
@@ -1672,9 +1638,7 @@ struct EmailToolsTests {
             )
             #expect(output.isError == false)
             #expect(output.content.contains("Dry run"))
-            #expect(FileManager.default.fileExists(atPath: staging.path) == false)
         }
-        try? FileManager.default.removeItem(at: staging)
     }
 
     @Test

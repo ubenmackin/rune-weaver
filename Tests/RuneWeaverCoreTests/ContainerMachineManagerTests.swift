@@ -203,8 +203,9 @@ struct ContainerMachineManagerTests {
 
     @Test
     func `Config initialization reflects container machine settings`() {
+        // Detonation stays pinned to the Apple Container CLI with Tier-3-only
+        // inputs; the runtime accessor always reports the shared default.
         let config = SandboxConfig(
-            containerRuntime: "container",
             containerBaseImage: "alpine:latest",
             archiveSessionTTLMinutes: 15,
             maxConcurrentMachines: 5

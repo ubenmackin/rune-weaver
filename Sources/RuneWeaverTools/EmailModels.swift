@@ -871,6 +871,12 @@ public enum EmailAttachmentLifecycle: Sendable {
     public static let maxArchiveManifestEntries = 500
     /// Maximum characters accepted for an archive subpath.
     public static let maxArchiveSubpathChars = 1024
+    /// Fallback retention window in days when the caller passes a non-positive value.
+    ///
+    /// Keeps expiry math total without coupling to detonation policy;
+    /// matches the historic staged-file default so existing envelopes keep
+    /// a stable horizon.
+    public static let defaultRetentionDays = 14
 
     /// Returns the coarse MIME bucket for a content type.
     ///
@@ -1022,13 +1028,13 @@ public enum EmailAttachmentLifecycle: Sendable {
     /// Adds whole days (86400 s each) to `now` so expiry math stays a
     /// pure function of the configured window, keeping tests deterministic
     /// without touching the clock. Non-positive windows fall back to the
-    /// shared staging default instead of expiring immediately.
+    /// shared default instead of expiring immediately.
     /// - Parameters:
     ///   - now: Reference date (defaults to now).
     ///   - retentionDays: Configured retention window in days.
     /// - Returns: Expiry date.
     public static func expiryDate(from now: Date = Date(), retentionDays: Int) -> Date {
-        let days = retentionDays > 0 ? retentionDays : SandboxConfig.defaultRetentionDays
+        let days = retentionDays > 0 ? retentionDays : Self.defaultRetentionDays
         return now.addingTimeInterval(TimeInterval(days * 86400))
     }
 

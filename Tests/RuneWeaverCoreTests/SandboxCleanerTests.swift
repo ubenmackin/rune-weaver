@@ -1,9 +1,9 @@
-// Rune Weaver Core Tests — Sandbox staging retention and cleanup.
+// Rune Weaver Core Tests — Tier-3 crash-orphan reclamation.
 //
-// Verifies the bounded staging lifecycle: expired files are reclaimed after
-// the retention window, total size pressure evicts oldest-first, symlinks
-// that would escape the staging prefix are refused, and empty staging is a
-// clean no-op. Scoped to the sweeper's filesystem contract, not service wiring.
+// Verifies the Tier-1/Tier-2 Seatbelt plus Tier-3 microVM model with no host
+// sandbox folder: cleanup reclaims only crash-orphaned detonation machines,
+// leaves ordinary files untouched, and reports zero file counts. Scoped to
+// the prune contract, not service wiring.
 
 import Foundation
 @testable import RuneWeaverCore
@@ -15,10 +15,13 @@ struct SandboxCleanerTests {
     func `Swift defaults stay pinned to the web mirror`() {
         // Manual cross-language pin: Web/src/api.ts hardcodes these fallbacks
         // because it cannot import Swift. Update both sides together when the
-        // staging policy changes.
-        #expect(SandboxConfig.defaultRetentionDays == 14)
-        #expect(SandboxConfig.defaultMaxTotalBytes == 500 * 1024 * 1024)
-        #expect(SandboxConfig.defaultCleanupIntervalSeconds == 3600)
+        // detonation policy changes. The sweep cadence lives on the scheduler
+        // so crash-orphan pressure stays bounded without another tuning knob.
+        #expect(SandboxConfig.defaultArchiveSessionTTLMinutes == 10)
+        #expect(SandboxConfig.defaultMaxConcurrentMachines == 3)
+        #expect(SandboxConfig.defaultContainerRuntime == "container")
+        #expect(SandboxConfig.defaultContainerBaseImage == "alpine:latest")
+        #expect(SandboxCleanupScheduler.defaultIntervalSeconds == 3600)
         #expect(FilesConfig.defaultDenyPatterns == [
             ".env*",
             ".netrc",
@@ -35,139 +38,63 @@ struct SandboxCleanerTests {
     }
 
     @Test
-    func `Expired files are removed while fresh files are kept`() throws {
-        let staging = try makeStaging()
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let pending = staging.appendingPathComponent("pending", isDirectory: true)
-        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
+    func `Cleanup leaves ordinary files untouched with zero file counts`() throws {
+        let scratch = try makeScratch()
+        defer { try? FileManager.default.removeItem(at: scratch) }
+        let candidate = scratch.appendingPathComponent("notes.txt")
+        try Data("keep me".utf8).write(to: candidate)
 
-        let now = Date()
-        let oldURL = pending.appendingPathComponent("old.txt")
-        let freshURL = pending.appendingPathComponent("fresh.txt")
-        let oldBytes = Data(repeating: 0x41, count: 64)
-        let freshBytes = Data(repeating: 0x42, count: 64)
-        try oldBytes.write(to: oldURL)
-        try freshBytes.write(to: freshURL)
-        // Age the stale file past the window while keeping the fresh file
-        // current, so the test pins the retention boundary deterministically.
-        try FileManager.default.setAttributes(
-            [.modificationDate: now.addingTimeInterval(-15 * 86400)],
-            ofItemAtPath: oldURL.path
-        )
-        try FileManager.default.setAttributes(
-            [.modificationDate: now],
-            ofItemAtPath: freshURL.path
-        )
+        // The detonation runtime is hardcoded to the Apple Container CLI, so
+        // the prune runs against the shared default; the point under test is
+        // that file state is never swept even when Tier-3 reclamation runs.
+        let config = SandboxConfig()
+        let summary = SandboxCleaner.cleanup(config: config, now: Date())
 
-        var config = SandboxConfig(stagingPath: staging.path)
-        config.retentionDays = 14
-        config.maxTotalBytes = 10 * 1024 * 1024
-        let summary = SandboxCleaner.cleanup(config: config, now: now)
-
-        #expect(summary.filesRemoved == 1)
-        #expect(summary.bytesFreed == oldBytes.count)
-        #expect(FileManager.default.fileExists(atPath: oldURL.path) == false)
-        #expect(FileManager.default.fileExists(atPath: freshURL.path) == true)
-    }
-
-    @Test
-    func `Size cap evicts oldest files first`() throws {
-        let staging = try makeStaging()
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let pending = staging.appendingPathComponent("pending", isDirectory: true)
-        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
-
-        let now = Date()
-        // Three equal payloads with staggered ages; the cap forces exactly
-        // one eviction so the test proves oldest-first ordering, not just count.
-        let oldest = pending.appendingPathComponent("oldest.txt")
-        let middle = pending.appendingPathComponent("middle.txt")
-        let newest = pending.appendingPathComponent("newest.txt")
-        try Data(repeating: 0x41, count: 100).write(to: oldest)
-        try Data(repeating: 0x42, count: 100).write(to: middle)
-        try Data(repeating: 0x43, count: 100).write(to: newest)
-        try FileManager.default.setAttributes(
-            [.modificationDate: now.addingTimeInterval(-300)],
-            ofItemAtPath: oldest.path
-        )
-        try FileManager.default.setAttributes(
-            [.modificationDate: now.addingTimeInterval(-200)],
-            ofItemAtPath: middle.path
-        )
-        try FileManager.default.setAttributes(
-            [.modificationDate: now.addingTimeInterval(-100)],
-            ofItemAtPath: newest.path
-        )
-
-        var config = SandboxConfig(stagingPath: staging.path)
-        // Generous retention disables expiry so only cap pressure drives removal.
-        config.retentionDays = 365
-        config.maxTotalBytes = 200
-        let summary = SandboxCleaner.cleanup(config: config, now: now)
-
-        #expect(summary.filesRemoved == 1)
-        #expect(summary.bytesFreed == 100)
-        #expect(FileManager.default.fileExists(atPath: oldest.path) == false)
-        #expect(FileManager.default.fileExists(atPath: middle.path) == true)
-        #expect(FileManager.default.fileExists(atPath: newest.path) == true)
-    }
-
-    @Test
-    func `Symlink escaping staging is refused`() throws {
-        let staging = try makeStaging()
-        defer { try? FileManager.default.removeItem(at: staging) }
-        let pending = staging.appendingPathComponent("pending", isDirectory: true)
-        try FileManager.default.createDirectory(at: pending, withIntermediateDirectories: true)
-
-        let outside = FileManager.default.temporaryDirectory
-            .appendingPathComponent("runeweaver-outside-\(UUID().uuidString).txt")
-        defer { try? FileManager.default.removeItem(at: outside) }
-        try Data("secret".utf8).write(to: outside)
-
-        // A link inside staging pointing outside must never cause the target
-        // to be unlinked, even when the pass would otherwise reclaim old files.
-        let link = pending.appendingPathComponent("escape.txt")
-        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: outside.path)
-
-        var config = SandboxConfig(stagingPath: staging.path)
-        config.retentionDays = 1
-        config.maxTotalBytes = 10 * 1024 * 1024
-        let summary = SandboxCleaner.cleanup(
-            config: config,
-            now: Date().addingTimeInterval(10 * 86400)
-        )
-
-        #expect(FileManager.default.fileExists(atPath: outside.path) == true)
         #expect(summary.filesRemoved == 0)
-        #expect(summary.errors.isEmpty == false)
+        #expect(summary.bytesFreed == 0)
+        #expect(FileManager.default.fileExists(atPath: candidate.path) == true)
     }
 
     @Test
-    func `Empty staging is a no-op`() throws {
-        let staging = try makeStaging()
-        defer { try? FileManager.default.removeItem(at: staging) }
-        for subdir in ["pending", "approved", "attachments"] {
-            try FileManager.default.createDirectory(
-                at: staging.appendingPathComponent(subdir, isDirectory: true),
-                withIntermediateDirectories: true
-            )
-        }
-
-        let config = SandboxConfig(stagingPath: staging.path)
+    func `Missing runtime is a clean no-op`() {
+        // The runtime stays pinned to the Apple Container CLI with no
+        // per-config override, so a missing CLI must fail closed: probe an
+        // unknown binary to prove the detector reports absent, then verify
+        // the real prune never claims file reclamation. Container counts are
+        // only pinned when the CLI is absent, since a present CLI may report
+        // genuine Tier-3 crash orphans.
+        #expect(ContainerMachineManager.isRuntimeAvailable(runtime: "runeweaver-missing-runtime-\(UUID().uuidString)") == false)
+        let config = SandboxConfig()
+        #expect(config.containerRuntime == SandboxConfig.defaultContainerRuntime)
         let summary = SandboxCleaner.cleanup(config: config)
 
         #expect(summary.filesRemoved == 0)
         #expect(summary.bytesFreed == 0)
-        #expect(summary.errors.isEmpty == true)
+        if ContainerMachineManager.isRuntimeAvailable(runtime: config.containerRuntime) == false {
+            #expect(summary.containersDestroyed == 0)
+            #expect(summary.staleMachinesStopped == 0)
+            #expect(summary.errors.isEmpty == true)
+        }
+    }
+
+    @Test
+    func `Audit event records the Tier-3 scope`() {
+        let summary = SandboxCleanupSummary(containersDestroyed: 1, staleMachinesStopped: 1)
+        let event = SandboxCleanupAuditEvent(summary: summary)
+        #expect(event.stagingPath == SandboxCleanupAuditEvent.tier3Scope)
+        #expect(event.filesRemoved == 0)
+        #expect(event.bytesFreed == 0)
+        #expect(event.containersDestroyed == 1)
+        #expect(event.staleMachinesStopped == 1)
     }
 }
 
-/// Creates an isolated staging root for one test.
+/// Creates an isolated scratch root for one test.
 ///
-/// Each test owns its directory so parallel suites never share sweep state;
+/// Each test owns its directory so parallel suites never share prune state;
 /// callers remove it with `defer` to keep the temporary volume clean.
-/// - Returns: Fresh staging root URL.
-private func makeStaging() throws -> URL {
+/// - Returns: Fresh scratch root URL.
+private func makeScratch() throws -> URL {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("runeweaver-sandbox-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

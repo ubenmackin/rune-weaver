@@ -153,26 +153,6 @@ extension RuneWeaverConfig {
     }
 
     private func validateSandboxSection() throws {
-        if sandbox.retentionDays < 1 || sandbox.retentionDays > 365 {
-            throw ConfigError.validationError(
-                field: "sandbox.retention_days", message: "must be between 1 and 365"
-            )
-        }
-        if sandbox.maxTotalBytes <= 0 {
-            throw ConfigError.validationError(
-                field: "sandbox.max_total_bytes", message: "must be positive"
-            )
-        }
-        if sandbox.cleanupIntervalSeconds <= 0 {
-            throw ConfigError.validationError(
-                field: "sandbox.cleanup_interval_seconds", message: "must be positive"
-            )
-        }
-        if sandbox.containerRuntime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(
-                field: "sandbox.container_runtime", message: "must not be empty"
-            )
-        }
         if sandbox.containerBaseImage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw ConfigError.validationError(
                 field: "sandbox.container_base_image", message: "must not be empty"

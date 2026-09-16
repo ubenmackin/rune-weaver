@@ -9,9 +9,11 @@ import {
   storeFact,
   type FactsResponse,
   type MemoryResult,
+  type UserFact,
 } from "../api";
 import MarkdownText from "./MarkdownText";
-import { PlusIcon, RefreshIcon, SearchIcon, TrashIcon } from "./icons";
+import Modal from "./Modal";
+import { CloseIcon, PlusIcon, RefreshIcon, SearchIcon, TrashIcon } from "./icons";
 
 function hashContent(content: string): string {
   // cyrb53 53-bit hash: substantially fewer collisions than 32-bit djb2
@@ -55,6 +57,12 @@ export default function MemoryBrowser() {
   const [newFact, setNewFact] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Non-blocking delete confirmation: the pending fact renders a true modal
+  // so an accidental trash click never drops persisted memory without review.
+  const [pendingDeleteFact, setPendingDeleteFact] = useState<UserFact | null>(
+    null,
+  );
+  const [deletingFactId, setDeletingFactId] = useState<string | null>(null);
 
   const loadFacts = useCallback(async () => {
     try {
@@ -113,16 +121,26 @@ export default function MemoryBrowser() {
     }
   }
 
-  async function removeFact(id: string) {
+  async function confirmDeleteFact() {
+    if (!pendingDeleteFact) return;
+    const fact = pendingDeleteFact;
+    setDeletingFactId(fact.id);
     setError(null);
     try {
-      await deleteFact(id);
+      await deleteFact(fact.id);
       await loadFacts();
+      setPendingDeleteFact(null);
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Delete fact failed",
       );
+    } finally {
+      setDeletingFactId(null);
     }
+  }
+
+  function cancelDeleteFact() {
+    setPendingDeleteFact(null);
   }
 
   // Stable keys without positional index: duplicates of the same
@@ -138,7 +156,8 @@ export default function MemoryBrowser() {
   }
 
   return (
-    <section className="panel memory-panel" aria-label="Memory browser">
+    <>
+      <section className="panel memory-panel" aria-label="Memory browser">
       <div className="panel-header-row">
         <div>
           <h2>Memory</h2>
@@ -278,7 +297,7 @@ export default function MemoryBrowser() {
                 type="button"
                 className="danger icon-text-btn"
                 aria-label={`Delete fact ${fact.id}`}
-                onClick={() => void removeFact(fact.id)}
+                onClick={() => setPendingDeleteFact(fact)}
               >
                 <TrashIcon size={14} />
                 <span>Delete</span>
@@ -300,6 +319,69 @@ export default function MemoryBrowser() {
           </div>
         ) : null}
       </div>
-    </section>
+      </section>
+
+      {/* Centered Modal for persisted fact delete confirmation */}
+      {pendingDeleteFact ? (
+        <Modal
+          label="Confirm delete fact"
+          onClose={() => {
+            if (deletingFactId === pendingDeleteFact.id) return;
+            cancelDeleteFact();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Delete memory fact?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelDeleteFact}
+              disabled={deletingFactId === pendingDeleteFact.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently delete this stored fact. This cannot be
+              undone.
+            </p>
+            {/* Bounded preview keeps the dialog compact for long facts while
+                still showing enough to confirm the right row is targeted. */}
+            <p
+              className="muted text-sm"
+              style={{ margin: "12px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              &ldquo;
+              {pendingDeleteFact.content.length > 120
+                ? `${pendingDeleteFact.content.slice(0, 120)}…`
+                : pendingDeleteFact.content}
+              &rdquo;
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelDeleteFact}
+              disabled={deletingFactId === pendingDeleteFact.id}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmDeleteFact()}
+              disabled={deletingFactId === pendingDeleteFact.id}
+              aria-label="Confirm delete fact"
+            >
+              {deletingFactId === pendingDeleteFact.id ? "Deleting…" : "Delete"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+    </>
   );
 }

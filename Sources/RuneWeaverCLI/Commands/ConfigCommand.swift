@@ -169,19 +169,14 @@ struct ConfigShowCommand: AsyncParsableCommand {
         }
     }
 
-    /// Prints sandbox retention and file-policy sections together.
+    /// Prints sandbox detonation and file-policy sections together.
     ///
-    /// Both sections describe local trust boundaries for staged writes and
-    /// guarded reads, so grouping them keeps related policy visible in one
-    /// place without lengthening the main show flow.
+    /// Both sections describe local trust boundaries for isolated detonation
+    /// and guarded reads, so grouping them keeps related policy visible in
+    /// one place without lengthening the main show flow.
     /// - Parameter config: Effective configuration to display.
     private func printSandboxAndFilesSections(_ config: RuneWeaverConfig) {
         print("[sandbox]")
-        print("staging_path = \(config.sandbox.stagingPath)")
-        print("retention_days = \(config.sandbox.retentionDays)")
-        print("max_total_bytes = \(config.sandbox.maxTotalBytes)")
-        print("cleanup_interval_seconds = \(config.sandbox.cleanupIntervalSeconds)")
-        print("container_runtime = \(config.sandbox.containerRuntime)")
         print("container_base_image = \(config.sandbox.containerBaseImage)")
         print("archive_session_ttl_minutes = \(config.sandbox.archiveSessionTTLMinutes)")
         print("max_concurrent_machines = \(config.sandbox.maxConcurrentMachines)")
@@ -204,7 +199,7 @@ struct ConfigSetCommand: AsyncParsableCommand {
     )
 
     /// Dotted config key to update.
-    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, sandbox.retention_days).")
+    @Argument(help: "Dotted key (e.g. llm.default_provider, llm.providers.mlx.model, memory.embedding_model, sandbox.container_base_image).")
     var key: String
 
     /// New value for the key.
@@ -340,17 +335,13 @@ private func voiceTOMLAssignment(key lower: String, value: String) -> TOMLAssign
 }
 
 private func sandboxTOMLAssignment(key lower: String, value: String) throws -> TOMLAssignment? {
+    // Legacy staging keys (`sandbox.staging_path`, `sandbox.retention_days`,
+    // `sandbox.max_total_bytes`, `sandbox.cleanup_interval_seconds`) have no
+    // case here on purpose: they fall through to the unknown-key error below
+    // so old keys fail closed with guidance instead of writing dead TOML.
+    // Old dev-only staging directories are left untouched for manual cleanup
+    // with no migration.
     switch lower {
-    case "sandbox.staging_path":
-        TOMLAssignment(section: "sandbox", key: "staging_path", rendered: tomlQuoted(value))
-    case "sandbox.retention_days":
-        try sandboxPositiveIntAssignment(dottedKey: "sandbox.retention_days", key: "retention_days", value: value)
-    case "sandbox.max_total_bytes":
-        try sandboxPositiveIntAssignment(dottedKey: "sandbox.max_total_bytes", key: "max_total_bytes", value: value)
-    case "sandbox.cleanup_interval_seconds":
-        try sandboxPositiveIntAssignment(dottedKey: "sandbox.cleanup_interval_seconds", key: "cleanup_interval_seconds", value: value)
-    case "sandbox.container_runtime":
-        TOMLAssignment(section: "sandbox", key: "container_runtime", rendered: tomlQuoted(value))
     case "sandbox.container_base_image":
         TOMLAssignment(section: "sandbox", key: "container_base_image", rendered: tomlQuoted(value))
     case "sandbox.archive_session_ttl_minutes":
@@ -364,7 +355,7 @@ private func sandboxTOMLAssignment(key lower: String, value: String) throws -> T
 
 /// Builds a validated positive-integer sandbox assignment so mistyped values fail fast with the offending key.
 /// - Parameters:
-///   - dottedKey: Dotted key for error reporting (e.g. `sandbox.retention_days`).
+///   - dottedKey: Dotted key for error reporting (e.g. `sandbox.archive_session_ttl_minutes`).
 ///   - key: TOML key within `[sandbox]`.
 ///   - value: Raw new value.
 /// - Returns: TOML assignment with a canonical integer rendering.
@@ -529,31 +520,10 @@ private func applyVoiceValue(key lower: String, value: String, config: inout Run
 }
 
 private func applySandboxValue(key lower: String, value: String, config: inout RuneWeaverConfig) throws -> Bool {
+    // Legacy staging keys have no case here on purpose so they fall through
+    // to the unknown-key error: old keys fail closed instead of writing dead
+    // state, with no migration for old dev-only staging directories.
     switch lower {
-    case "sandbox.staging_path":
-        config.sandbox.stagingPath = value
-        return true
-    case "sandbox.retention_days":
-        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
-            throw ValidationError("sandbox.retention_days must be a positive integer (got '\(value)')")
-        }
-        config.sandbox.retentionDays = intVal
-        return true
-    case "sandbox.max_total_bytes":
-        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
-            throw ValidationError("sandbox.max_total_bytes must be a positive integer (got '\(value)')")
-        }
-        config.sandbox.maxTotalBytes = intVal
-        return true
-    case "sandbox.cleanup_interval_seconds":
-        guard let intVal = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), intVal > 0 else {
-            throw ValidationError("sandbox.cleanup_interval_seconds must be a positive integer (got '\(value)')")
-        }
-        config.sandbox.cleanupIntervalSeconds = intVal
-        return true
-    case "sandbox.container_runtime":
-        config.sandbox.containerRuntime = value
-        return true
     case "sandbox.container_base_image":
         config.sandbox.containerBaseImage = value
         return true
@@ -734,8 +704,8 @@ private func tomlHeaderBody(_ trimmed: String) -> String {
 /// Scans outside quoted strings so a `#` inside `"..."` or `'...'` never
 /// splits the value; the returned suffix keeps its leading separator spaces
 /// and `#` text so callers can reattach it verbatim after replacing the value.
-/// - Parameter line: Original file line (e.g. `retention_days = 14  # days`).
-/// - Returns: Comment suffix (e.g. `"  # days"`) or `""` when no comment exists.
+/// - Parameter line: Original file line (e.g. `archive_session_ttl_minutes = 10  # minutes`).
+/// - Returns: Comment suffix (e.g. `"  # minutes"`) or `""` when no comment exists.
 private func tomlTrailingComment(_ line: String) -> String {
     var inDouble = false
     var inSingle = false
@@ -784,7 +754,7 @@ private func tomlTrailingComment(_ line: String) -> String {
 /// Renders a full `config.toml` for freshly created files.
 ///
 /// Delegates to the canonical core serializer so fresh `config set` files
-/// keep every section (sandbox retention caps, files/email/home/scheduler/
+/// keep every section (sandbox detonation policy, files/email/home/scheduler/
 /// plugins, provider context lengths) instead of shedding sections the CLI
 /// never edits directly.
 /// - Parameter config: Config to render.

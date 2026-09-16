@@ -188,7 +188,7 @@ describe("SchedulerManager", () => {
     expect(JSON.parse(seen[0].body)).toMatchObject({ enabled: false });
   });
 
-  it("runs a job now and deletes it", async () => {
+  it("runs a job now and deletes it through the shared modal", async () => {
     const user = userEvent.setup();
     const calls: string[] = [];
     vi.stubGlobal(
@@ -228,7 +228,19 @@ describe("SchedulerManager", () => {
       ),
     ).toBe(true);
     await user.click(screen.getByRole("button", { name: "Delete" }));
-    // Non-blocking inline confirm replaces the native prompt.
+    // Shared Modal portals the confirmation with the compact delete styling.
+    const dialog = screen.getByRole("dialog", { name: "Confirm delete schedule" });
+    expect(dialog).toBeInTheDocument();
+    expect(document.querySelector(".session-delete-modal")).not.toBeNull();
+    // Keep dismisses without a request.
+    await user.click(screen.getByRole("button", { name: "Keep" }));
+    expect(
+      screen.queryByRole("dialog", { name: "Confirm delete schedule" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("morning digest")).toBeInTheDocument();
+    expect(calls.some((call) => call.startsWith("DELETE"))).toBe(false);
+    // Delete confirms the persisted removal.
+    await user.click(screen.getByRole("button", { name: "Delete" }));
     await user.click(screen.getByRole("button", { name: "Confirm delete" }));
     await waitFor(() => {
       expect(screen.getByText(/No scheduled jobs yet/)).toBeInTheDocument();

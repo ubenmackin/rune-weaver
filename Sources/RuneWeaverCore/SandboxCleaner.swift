@@ -1,14 +1,15 @@
-// Rune Weaver Core — Sandbox staging retention and reclamation.
+// Rune Weaver Core — Tier-3 crash-orphan reclamation.
 //
-// Owns the lifecycle of staged document/image files under the sandbox staging
-// area. Staged writes in `pending/`, `approved/`, and `attachments/` are
-// bounded by a retention window plus a total size cap so approvals stay
-// reachable for days without unbounded disk growth. Archives never touch
-// staging: they detonate in ephemeral microVMs with manifest-only returns,
-// so this sweeper covers only non-archive files while the TTL prune reclaims
-// crash-orphaned detonation machines. Cleanup runs at service boot and on a
-// periodic cadence; every pass records only aggregate counts to the local
-// audit trail, never file contents.
+// Confinement is Tier-1/Tier-2 Seatbelt plus Tier-3 microVM only; there is no
+// host sandbox folder. Document writes stage in a Seatbelt-confined temp dir
+// with an atomic move into the workspace on approval (never executed from
+// temp, temp removed on deny or failure), and archives detonate in ephemeral
+// microVMs with manifest-only returns. This sweeper therefore reclaims only
+// Tier-3 crash-orphaned detonation machines left behind when a detonation
+// host crashes before its immediate reap; it never sweeps staged files and
+// performs no migration for old staging directories. Cleanup runs at service
+// boot and on a periodic cadence; every pass records only aggregate counts
+// to the local audit trail, never file contents.
 
 import Dispatch
 import Foundation
@@ -16,24 +17,30 @@ import Foundation
 /// Aggregate outcome of one sandbox cleanup pass.
 ///
 /// Counts only, so audit consumers can reason about reclamation pressure
-/// without ever seeing staged file names or bytes.
+/// without ever seeing file names or bytes. There is no host staging to
+/// reclaim: document writes live in Seatbelt-confined temp until an atomic
+/// move on approval, so file counts stay zero and only Tier-3 detonation
+/// reclamation contributes.
 public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
-    /// Number of staged files removed in this pass.
+    /// Legacy file count, always zero now that no host staging is swept.
+    ///
+    /// Retained so existing audit decoders and callers keep compiling while
+    /// the sweeper covers only Tier-3 crash orphans.
     public let filesRemoved: Int
-    /// Total bytes reclaimed in this pass.
+    /// Legacy byte count, always zero now that no host staging is swept.
     public let bytesFreed: Int
     /// Number of ephemeral or stale container machines destroyed.
     public let containersDestroyed: Int
     /// Number of stale running container machines stopped.
     public let staleMachinesStopped: Int
-    /// Non-fatal problems encountered (for example skipped symlinks or
-    /// failed removals). Messages carry no file contents.
+    /// Non-fatal problems encountered (for example listing failures).
+    /// Messages carry no file contents.
     public let errors: [String]
 
     /// Creates a cleanup summary.
     /// - Parameters:
-    ///   - filesRemoved: Files removed.
-    ///   - bytesFreed: Bytes reclaimed.
+    ///   - filesRemoved: Legacy file count. Always zero; kept for compatibility.
+    ///   - bytesFreed: Legacy byte count. Always zero; kept for compatibility.
     ///   - containersDestroyed: Container machines destroyed.
     ///   - staleMachinesStopped: Running container machines stopped.
     ///   - errors: Non-fatal problems. Defaults to empty.
@@ -54,15 +61,18 @@ public struct SandboxCleanupSummary: Sendable, Equatable, Codable {
 
 /// Audit event recorded for every sandbox cleanup pass.
 ///
-/// Local-only and aggregate-only: it carries the staging location plus the
-/// summary counts so later review can reconstruct when reclamation ran and
-/// how much it freed, without ever persisting staged paths or contents.
+/// Local-only and aggregate-only: it carries a scope label plus the summary
+/// counts so later review can reconstruct when Tier-3 reclamation ran and
+/// how much it freed, without ever persisting file paths or contents.
 public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
-    /// Staging directory the pass swept (as configured, unexpanded).
+    /// Scope label for the pass, retained under the historic key for log continuity.
+    ///
+    /// New passes record the Tier-3 scope; older lines may carry a historic
+    /// staging path that is no longer swept and must not be treated as live.
     public let stagingPath: String
-    /// Files removed in this pass.
+    /// Legacy file count, always zero.
     public let filesRemoved: Int
-    /// Bytes reclaimed in this pass.
+    /// Legacy byte count, always zero.
     public let bytesFreed: Int
     /// Container machines destroyed in this pass.
     public let containersDestroyed: Int
@@ -73,12 +83,15 @@ public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
     /// When the pass completed.
     public let timestamp: Date
 
+    /// Scope recorded by current passes covering only Tier-3 orphans.
+    public static let tier3Scope = "tier3-crash-orphans"
+
     /// Creates an audit event from a summary.
     /// - Parameters:
-    ///   - stagingPath: Configured staging path.
+    ///   - stagingPath: Scope label to record. Defaults to the Tier-3 scope.
     ///   - summary: Outcome to record.
     ///   - timestamp: Record time. Defaults to now.
-    public init(stagingPath: String, summary: SandboxCleanupSummary, timestamp: Date = Date()) {
+    public init(stagingPath: String = tier3Scope, summary: SandboxCleanupSummary, timestamp: Date = Date()) {
         self.stagingPath = stagingPath
         self.filesRemoved = summary.filesRemoved
         self.bytesFreed = summary.bytesFreed
@@ -95,7 +108,8 @@ public struct SandboxCleanupAuditEvent: Sendable, Codable, Equatable {
 /// `~/.runeweaver/logs/sandbox-audit.jsonl` (overridable per call).
 /// Writes are best-effort and serialized on a private queue: failures are
 /// swallowed so auditing never fails the cleanup itself, and only aggregate
-/// counts are persisted so staged contents never reach the log.
+/// counts are persisted so file contents never reach the log. Current passes
+/// cover only Tier-3 crash-orphan reclamation under the Tier-3 scope.
 public enum FileSandboxAuditLog {
     /// Serial queue ordering audit appends.
     private static let queue = DispatchQueue(label: "com.runeweaver.sandbox.audit", qos: .utility)
@@ -108,16 +122,18 @@ public enum FileSandboxAuditLog {
     }
 
     /// Appends a cleanup outcome as one JSON line, best-effort.
+    ///
+    /// The Tier-3 scope is recorded instead of any host path because no host
+    /// staging exists to sweep; the historic overload below remains only so
+    /// older callers keep compiling.
     /// - Parameters:
     ///   - summary: Outcome to record (counts only, no file contents).
-    ///   - stagingPath: Configured staging path for context.
     ///   - fileURL: Destination file. Defaults to `defaultLogURL()`.
     public static func append(
         _ summary: SandboxCleanupSummary,
-        stagingPath: String,
         to fileURL: URL? = nil
     ) {
-        let event = SandboxCleanupAuditEvent(stagingPath: stagingPath, summary: summary)
+        let event = SandboxCleanupAuditEvent(summary: summary)
         guard let data = try? JSONEncoder().encode(event) else { return }
         var line = data
         line.append(0x0A)
@@ -143,42 +159,55 @@ public enum FileSandboxAuditLog {
             }
         }
     }
+
+    /// Legacy append retaining the historic staging-path parameter.
+    ///
+    /// Kept only so callers predating the Tier-3-only model keep compiling;
+    /// the supplied path is ignored and the Tier-3 scope is recorded instead
+    /// because no host staging is swept.
+    /// - Parameters:
+    ///   - summary: Outcome to record (counts only, no file contents).
+    ///   - stagingPath: Ignored historic label.
+    ///   - fileURL: Destination file. Defaults to `defaultLogURL()`.
+    @available(*, deprecated, message: "No host staging is swept; use append(_:to:) which records the Tier-3 scope.")
+    public static func append(
+        _ summary: SandboxCleanupSummary,
+        stagingPath _: String,
+        to fileURL: URL? = nil
+    ) {
+        append(summary, to: fileURL)
+    }
 }
 
-/// Reclaims staged files under the sandbox staging area.
+/// Reclaims Tier-3 crash-orphaned detonation machines.
 ///
-/// Pure filesystem sweep with no side effects beyond deletions and the
-/// returned summary. Callers own audit logging (via `FileSandboxAuditLog`)
-/// and scheduling (via `SandboxCleanupScheduler`) so tests can invoke the
-/// sweep deterministically without timers or log files.
+/// Pure prune with no side effects beyond stopping and deleting stale
+/// `runeweaver-` container machines plus the returned summary. There is no
+/// host staging to sweep: Seatbelt temp is removed by its writer on deny or
+/// failure, and approved writes reach the workspace via one atomic move, so
+/// old staging directories are left untouched with no migration. Callers own
+/// audit logging (via `FileSandboxAuditLog`) and scheduling (via
+/// `SandboxCleanupScheduler`) so tests can invoke the prune deterministically
+/// without timers or log files.
 public enum SandboxCleaner {
-    /// Managed subdirectories swept on every pass.
+    /// Prunes Tier-3 crash orphans, ignoring any historic staging fields.
     ///
-    /// Kept in one place so the sweeper, config docs, and tests cannot drift
-    /// on which staging areas are bounded.
-    public static let managedSubdirectories = ["pending", "approved", "attachments"]
-
-    /// Sweeps staged files, enforcing retention then the total size cap.
-    ///
-    /// Retention runs first so clearly expired files never consume cap budget
-    /// that should protect fresh approvals; the cap then evicts oldest-first
-    /// so recent work survives pressure. Symlinks are never followed or
-    /// deleted: any entry whose symlink-resolved location escapes the staging
-    /// prefix is skipped and reported instead of removed.
+    /// Only `containerRuntime` and `archiveSessionTTLMinutes` are read; any
+    /// retained staging or retention values on the config are ignored because
+    /// no host folder exists to bound. File counts in the summary stay zero.
     /// - Parameters:
-    ///   - config: Sandbox retention and cap configuration.
+    ///   - config: Sandbox detonation configuration.
     ///   - now: Reference date for age checks. Defaults to now so tests can pin time.
     /// - Returns: Aggregate counts plus non-fatal problems (no file contents).
     public static func cleanup(config: SandboxConfig, now: Date = Date()) -> SandboxCleanupSummary {
         let containerResult = sweepContainers(config: config, now: now)
-        let fileResult = sweepStagingFiles(config: config, now: now)
 
         return SandboxCleanupSummary(
-            filesRemoved: fileResult.filesRemoved,
-            bytesFreed: fileResult.bytesFreed,
+            filesRemoved: 0,
+            bytesFreed: 0,
             containersDestroyed: containerResult.destroyed,
             staleMachinesStopped: containerResult.stopped,
-            errors: containerResult.errors + fileResult.errors
+            errors: containerResult.errors
         )
     }
 
@@ -193,244 +222,6 @@ public enum SandboxCleaner {
             runtime: config.containerRuntime
         )
     }
-
-    private struct StagingFilesSweepResult {
-        let filesRemoved: Int
-        let bytesFreed: Int
-        let errors: [String]
-    }
-
-    private struct SweepReclamation {
-        var filesRemoved: Int = 0
-        var bytesFreed: Int = 0
-    }
-
-    private static func sweepStagingFiles(config: SandboxConfig, now: Date) -> StagingFilesSweepResult {
-        let trimmed = config.stagingPath.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else {
-            return StagingFilesSweepResult(filesRemoved: 0, bytesFreed: 0, errors: ["Invalid sandbox staging path"])
-        }
-        let expanded = (trimmed as NSString).expandingTildeInPath
-        let stagingURL = URL(fileURLWithPath: expanded, isDirectory: true).standardized
-        let resolvedStaging = stagingURL.resolvingSymlinksInPath().standardized
-        let stagingPrefix = resolvedStaging.path.hasSuffix("/") ? resolvedStaging.path : resolvedStaging.path + "/"
-
-        var isStagingDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: stagingURL.path, isDirectory: &isStagingDir) else {
-            return StagingFilesSweepResult(filesRemoved: 0, bytesFreed: 0, errors: [])
-        }
-
-        var errors: [String] = []
-        let candidates = collectStagingCandidates(
-            stagingURL: stagingURL,
-            stagingPrefix: stagingPrefix,
-            resolvedStaging: resolvedStaging,
-            errors: &errors
-        )
-
-        var reclamation = SweepReclamation()
-        let remaining = sweepExpiredEntries(
-            candidates: candidates,
-            config: config,
-            stagingPrefix: stagingPrefix,
-            now: now,
-            reclamation: &reclamation,
-            errors: &errors
-        )
-
-        sweepOversizedEntries(
-            remaining: remaining,
-            config: config,
-            stagingPrefix: stagingPrefix,
-            reclamation: &reclamation,
-            errors: &errors
-        )
-
-        return StagingFilesSweepResult(
-            filesRemoved: reclamation.filesRemoved,
-            bytesFreed: reclamation.bytesFreed,
-            errors: errors
-        )
-    }
-
-    private static func collectStagingCandidates(
-        stagingURL: URL,
-        stagingPrefix: String,
-        resolvedStaging: URL,
-        errors: inout [String]
-    ) -> [StagedEntry] {
-        var candidates: [StagedEntry] = []
-        for subdir in managedSubdirectories {
-            let subURL = stagingURL.appendingPathComponent(subdir, isDirectory: true)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: subURL.path, isDirectory: &isDir), isDir.boolValue else {
-                continue
-            }
-            let resolvedSub = subURL.resolvingSymlinksInPath().standardized
-            guard resolvedSub.path == resolvedStaging.path || resolvedSub.path.hasPrefix(stagingPrefix) else {
-                errors.append("Skipped \(subdir): escapes the staging area")
-                continue
-            }
-            collectFiles(under: subURL, stagingPrefix: stagingPrefix, candidates: &candidates, errors: &errors)
-        }
-        return candidates
-    }
-
-    private static func sweepExpiredEntries(
-        candidates: [StagedEntry],
-        config: SandboxConfig,
-        stagingPrefix: String,
-        now: Date,
-        reclamation: inout SweepReclamation,
-        errors: inout [String]
-    ) -> [StagedEntry] {
-        var remaining: [StagedEntry] = []
-        remaining.reserveCapacity(candidates.count)
-        let retentionInterval = Double(max(0, config.retentionDays)) * 86400
-        let expiryEnabled = config.retentionDays > 0
-        for entry in candidates {
-            guard expiryEnabled, let modified = entry.modified else {
-                remaining.append(entry)
-                continue
-            }
-            guard now.timeIntervalSince(modified) > retentionInterval else {
-                remaining.append(entry)
-                continue
-            }
-            let resolved = entry.url.resolvingSymlinksInPath().standardized
-            guard resolved.path.hasPrefix(stagingPrefix) else {
-                errors.append("Skipped expired file escaping the staging area")
-                remaining.append(entry)
-                continue
-            }
-            do {
-                try FileManager.default.removeItem(at: entry.url)
-                reclamation.filesRemoved += 1
-                reclamation.bytesFreed += entry.size
-            } catch {
-                errors.append("Could not remove expired file: \(error.localizedDescription)")
-                remaining.append(entry)
-            }
-        }
-        return remaining
-    }
-
-    private static func sweepOversizedEntries(
-        remaining: [StagedEntry],
-        config: SandboxConfig,
-        stagingPrefix: String,
-        reclamation: inout SweepReclamation,
-        errors: inout [String]
-    ) {
-        guard config.maxTotalBytes > 0 else { return }
-        var total = remaining.reduce(0) { $0 + $1.size }
-        guard total > config.maxTotalBytes else { return }
-
-        let ordered = remaining.sorted {
-            let left = $0.modified ?? Date.distantPast
-            let right = $1.modified ?? Date.distantPast
-            if left != right {
-                return left < right
-            }
-            return $0.url.path < $1.url.path
-        }
-        for entry in ordered {
-            if total <= config.maxTotalBytes {
-                break
-            }
-            let resolved = entry.url.resolvingSymlinksInPath().standardized
-            guard resolved.path.hasPrefix(stagingPrefix) else {
-                errors.append("Skipped oversized file escaping the staging area")
-                continue
-            }
-            do {
-                try FileManager.default.removeItem(at: entry.url)
-                reclamation.filesRemoved += 1
-                reclamation.bytesFreed += entry.size
-                total -= entry.size
-            } catch {
-                errors.append("Could not remove oversized file: \(error.localizedDescription)")
-            }
-        }
-    }
-
-    /// One enumerated regular file with its reclamation metadata.
-    private struct StagedEntry {
-        /// Location to unlink when selected for reclamation.
-        let url: URL
-        /// Byte size at enumeration time.
-        let size: Int
-        /// Last modification, when readable; nil keeps the file out of expiry
-        /// but sorts oldest-first under cap pressure so unknown ages evict first.
-        let modified: Date?
-    }
-
-    /// Collects regular files under one managed subdirectory without following symlinks.
-    ///
-    /// Symlinked files and directories are never descended into or deleted;
-    /// outside-pointing links are reported so operators notice staging that
-    /// tries to reach beyond its prefix. Directories themselves are never
-    /// reclaimed, only the files they contain.
-    private static func collectFiles(
-        under root: URL,
-        stagingPrefix: String,
-        candidates: inout [StagedEntry],
-        errors: inout [String]
-    ) {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .contentModificationDateKey, .fileSizeKey],
-            options: []
-        ) else {
-            errors.append("Could not enumerate staging subdirectory")
-            return
-        }
-        for case let fileURL as URL in enumerator {
-            let flags = try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey])
-            let isSymlink = flags?.isSymbolicLink == true
-            let isDirectory = flags?.isDirectory == true
-            if isSymlink {
-                // Never follow or unlink links: an outside target would escape
-                // the prefix, and descending into a linked directory could walk
-                // the rest of the filesystem. Report only outside escapes so
-                // inside links stay silent housekeeping.
-                let resolved = fileURL.resolvingSymlinksInPath().standardized
-                let inside = resolved.path == String(stagingPrefix.dropLast()) || resolved.path.hasPrefix(stagingPrefix)
-                if !inside {
-                    errors.append("Skipped symlink escaping the staging area")
-                }
-                if isDirectory {
-                    enumerator.skipDescendants()
-                }
-                continue
-            }
-            if isDirectory {
-                continue
-            }
-            guard flags?.isRegularFile == true else { continue }
-            let resolved = fileURL.resolvingSymlinksInPath().standardized
-            guard resolved.path.hasPrefix(stagingPrefix) else {
-                errors.append("Skipped file escaping the staging area")
-                continue
-            }
-            let detail = try? fileURL.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
-            var size = detail?.fileSize ?? 0
-            var modified = detail?.contentModificationDate
-            if size == 0 || modified == nil {
-                // Resource values can be absent on some filesystems; fall back
-                // to attributes so size accounting and age checks stay accurate.
-                if let attributes = try? FileManager.default.attributesOfItem(atPath: fileURL.path) {
-                    if size == 0, let number = attributes[.size] as? NSNumber {
-                        size = number.intValue
-                    }
-                    if modified == nil, let date = attributes[.modificationDate] as? Date {
-                        modified = date
-                    }
-                }
-            }
-            candidates.append(StagedEntry(url: fileURL, size: size, modified: modified))
-        }
-    }
 }
 
 /// Periodic scheduler running sandbox reclamation on a cadence.
@@ -440,6 +231,12 @@ public enum SandboxCleaner {
 /// touched from `deinit`. Callers pair every `start` with `stop` on shutdown
 /// so the sleep task never outlives its owner.
 public actor SandboxCleanupScheduler {
+    /// Fixed cadence between Tier-3 reclamation passes.
+    ///
+    /// The cadence stays fixed rather than config-driven so crash-orphan
+    /// pressure is bounded without another tuning knob; the config snapshot
+    /// still supplies the detonation TTL evaluated on every pass.
+    public static let defaultIntervalSeconds: TimeInterval = 3600
     /// In-flight sleep loop, if started.
     private var task: Task<Void, Never>?
     /// Whether the loop is running.
@@ -450,14 +247,14 @@ public actor SandboxCleanupScheduler {
 
     /// Starts the periodic cleanup loop.
     ///
-    /// Safe to call repeatedly; the second call is a no-op. The interval comes
-    /// from the config snapshot so later config edits take effect on the next
-    /// `start` after a `stop`, keeping one source for the cadence.
-    /// - Parameter config: Sandbox config supplying `cleanupIntervalSeconds`.
+    /// Safe to call repeatedly; the second call is a no-op. Each pass reuses
+    /// the config snapshot so later config edits take effect on the next
+    /// `start` after a `stop`.
+    /// - Parameter config: Sandbox config supplying the detonation TTL.
     public func start(config: SandboxConfig) {
         guard !isStarted else { return }
         isStarted = true
-        let interval = max(1.0, Double(config.cleanupIntervalSeconds))
+        let interval = Self.defaultIntervalSeconds
         let snapshot = config
         task = Task { [weak self] in
             while !Task.isCancelled {
@@ -486,19 +283,19 @@ public actor SandboxCleanupScheduler {
         isStarted
     }
 
-    /// Runs one cleanup pass and records it to the audit trail.
+    /// Runs one Tier-3 prune pass and records it to the audit trail.
     ///
-    /// Only aggregate counts reach the audit log; staged file names and bytes
-    /// never leave the filesystem. Audit writes are best-effort so a log
-    /// failure never fails the sweep.
+    /// Only aggregate counts reach the audit log; file names and bytes never
+    /// leave the filesystem. Audit writes are best-effort so a log failure
+    /// never fails the prune.
     /// - Parameters:
-    ///   - config: Sandbox config to sweep.
+    ///   - config: Sandbox config supplying the detonation TTL.
     ///   - now: Reference date for age checks. Defaults to now.
     /// - Returns: Aggregate outcome of the pass.
     @discardableResult
     public func runOnce(config: SandboxConfig, now: Date = Date()) async -> SandboxCleanupSummary {
         let summary = SandboxCleaner.cleanup(config: config, now: now)
-        FileSandboxAuditLog.append(summary, stagingPath: config.stagingPath)
+        FileSandboxAuditLog.append(summary)
         return summary
     }
 }

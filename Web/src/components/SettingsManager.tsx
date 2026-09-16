@@ -1,18 +1,17 @@
 // Rune Weaver Dashboard — Settings manager for config.toml configuration.
 // Allows managing LLM providers, engine identity, sandbox policy, memory, voice, and email accounts.
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   DEFAULT_FILES_ALLOW_ROOTS,
   DEFAULT_FILES_DENY_PATTERNS,
+  DEFAULT_FILES_DENY_PATTERNS_TEXT,
+  formatDenyPatternsText,
+  parseDenyPatternsText,
   DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
-  DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS,
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
-  DEFAULT_SANDBOX_CONTAINER_RUNTIME,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
-  DEFAULT_SANDBOX_MAX_TOTAL_BYTES,
-  DEFAULT_SANDBOX_RETENTION_DAYS,
   getSettings,
   updateSettings,
   getPlugins,
@@ -32,6 +31,7 @@ import {
   ApprovalsIcon,
   ChatIcon,
   CheckIcon,
+  CloseIcon,
   MailIcon,
   MemoryIcon,
   PlusIcon,
@@ -40,9 +40,13 @@ import {
   TrashIcon,
   WrenchIcon,
 } from "./icons";
+import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 
-type SettingsTab = "providers" | "engine" | "tools" | "sandbox" | "files" | "memory" | "voice" | "email";
+// Seven-item vertical navigation keeps every category visible without
+// horizontal scrolling; sandbox and file policy share one Security pane so
+// the sidebar stays within the width budget as settings grow.
+type SettingsTab = "providers" | "engine" | "tools" | "security" | "memory" | "voice" | "email";
 
 interface ProviderEntry {
   id: string;
@@ -76,22 +80,9 @@ export default function SettingsManager() {
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
-  const [sandboxStagingPath, setSandboxStagingPath] = useState("");
-  // Sandbox retention caps single-sourced via api.ts defaults mirroring
-  // SandboxConfig so a fresh dashboard without stored values still shows
-  // the bounded-staging policy before the first fetch resolves.
-  const [sandboxRetentionDays, setSandboxRetentionDays] = useState(
-    DEFAULT_SANDBOX_RETENTION_DAYS
-  );
-  const [sandboxMaxTotalBytes, setSandboxMaxTotalBytes] = useState(
-    DEFAULT_SANDBOX_MAX_TOTAL_BYTES
-  );
-  const [sandboxCleanupIntervalSeconds, setSandboxCleanupIntervalSeconds] = useState(
-    DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
-  );
-  const [sandboxContainerRuntime, setSandboxContainerRuntime] = useState(
-    DEFAULT_SANDBOX_CONTAINER_RUNTIME
-  );
+  // Tier-3 detonation policy: ephemeral microVMs with immediate reap. The
+  // TTL bounds only crash-orphan reclamation and the cap gates concurrent
+  // detonations; the runtime stays pinned server-side with no editor.
   const [sandboxContainerBaseImage, setSandboxContainerBaseImage] = useState(
     DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
   );
@@ -101,15 +92,26 @@ export default function SettingsManager() {
   const [sandboxMaxConcurrentMachines, setSandboxMaxConcurrentMachines] = useState(
     DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
   );
-  // File access policy mirrors FilesConfig defaults so the deny list stays
-  // visible even when an older engine omits the [files] section.
-  const [filesDenyPatterns, setFilesDenyPatterns] = useState<string[]>([
-    ...DEFAULT_FILES_DENY_PATTERNS,
-  ]);
+  // Blocked-paths editor holds raw textarea text (one glob per line) so
+  // blank lines survive editing and only collapse on save; the parsed count
+  // drives the live badge while an emptied editor intentionally means
+  // allow-all in scope rather than falling back to defaults.
+  const [filesDenyText, setFilesDenyText] = useState<string>(
+    DEFAULT_FILES_DENY_PATTERNS_TEXT
+  );
   const [filesAllowRoots, setFilesAllowRoots] = useState<string[]>([
     ...DEFAULT_FILES_ALLOW_ROOTS,
   ]);
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
+  // Direct handle to the blocked-paths editor so Add Pattern can return
+  // keyboard focus without a document-wide lookup that breaks with
+  // multiple instances or strict-mode remounts.
+  const denyTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Form-local reset confirmations: resetting only rewrites the in-progress
+  // form and never persists until Save, so the modal must state counts and
+  // the until-Save nature explicitly.
+  const [pendingResetDeny, setPendingResetDeny] = useState(false);
+  const [pendingResetRoots, setPendingResetRoots] = useState(false);
   const [memoryVectorDBPath, setMemoryVectorDBPath] = useState("");
   const [memoryEpisodesDBPath, setMemoryEpisodesDBPath] = useState("");
   const [memoryEmbeddingModel, setMemoryEmbeddingModel] = useState("");
@@ -130,6 +132,12 @@ export default function SettingsManager() {
   const [rescanLoading, setRescanLoading] = useState(false);
   const [marketplaceOpen, setMarketplaceOpen] = useState(false);
   const [updatingPluginId, setUpdatingPluginId] = useState<string | null>(null);
+  // Non-blocking uninstall confirmation: the pending rune renders a true
+  // modal so an installed plugin is never removed by an accidental click.
+  const [pendingUninstallPlugin, setPendingUninstallPlugin] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
@@ -219,10 +227,9 @@ export default function SettingsManager() {
     }
   };
 
-  const handleUninstall = async (pluginId: string, name: string) => {
-    if (!window.confirm(`Are you sure you want to uninstall and remove '${name}'?`)) {
-      return;
-    }
+  async function confirmUninstallPlugin() {
+    if (!pendingUninstallPlugin) return;
+    const { id: pluginId, name } = pendingUninstallPlugin;
     setUpdatingPluginId(pluginId);
     setPluginActionError(null);
     setPluginActionSuccess(null);
@@ -232,12 +239,17 @@ export default function SettingsManager() {
       const toolsRes = await getTools();
       setAllTools(toolsRes.tools);
       setPluginActionSuccess(`Uninstalled '${name}'.`);
+      setPendingUninstallPlugin(null);
     } catch (err) {
       setPluginActionError(err instanceof Error ? err.message : "Failed to uninstall plugin.");
     } finally {
       setUpdatingPluginId(null);
     }
-  };
+  }
+
+  function cancelUninstallPlugin() {
+    setPendingUninstallPlugin(null);
+  }
 
   // Flips one builtin engine tool without a protected list: every builtin
   // toggles independently so closely related tools (email.read vs
@@ -293,15 +305,6 @@ export default function SettingsManager() {
     );
     setProvidersList(pList);
 
-    setSandboxStagingPath(data.sandboxStagingPath);
-    setSandboxRetentionDays(data.sandboxRetentionDays ?? DEFAULT_SANDBOX_RETENTION_DAYS);
-    setSandboxMaxTotalBytes(data.sandboxMaxTotalBytes ?? DEFAULT_SANDBOX_MAX_TOTAL_BYTES);
-    setSandboxCleanupIntervalSeconds(
-      data.sandboxCleanupIntervalSeconds ?? DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS
-    );
-    setSandboxContainerRuntime(
-      data.sandboxContainerRuntime ?? DEFAULT_SANDBOX_CONTAINER_RUNTIME
-    );
     setSandboxContainerBaseImage(
       data.sandboxContainerBaseImage ?? DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE
     );
@@ -311,11 +314,7 @@ export default function SettingsManager() {
     setSandboxMaxConcurrentMachines(
       data.sandboxMaxConcurrentMachines ?? DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
     );
-    setFilesDenyPatterns(
-      Array.isArray(data.filesDenyPatterns)
-        ? [...data.filesDenyPatterns]
-        : [...DEFAULT_FILES_DENY_PATTERNS]
-    );
+    setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
     setFilesAllowRoots(
       Array.isArray(data.filesAllowRoots)
         ? [...data.filesAllowRoots]
@@ -438,31 +437,36 @@ export default function SettingsManager() {
       };
     }
 
-    // Deny patterns fail closed on blanks and `..` escapes so a bad row
-    // never persists a traversal into the policy file; the server enforces
-    // the same rule, but surfacing it here avoids a round-trip.
-    for (const pattern of filesDenyPatterns) {
-      const trimmed = pattern.trim();
-      if (!trimmed) {
-        setError("Deny patterns cannot be empty.");
-        setSaving(false);
-        return;
-      }
+    // Blocked-paths textarea validates per line with original numbers so a
+    // bad glob points at its editor row; blank lines collapse on save and an
+    // emptied editor stays a valid allow-all, while `..` fails closed here
+    // and authoritatively on the server guard.
+    const denyLines = filesDenyText.split("\n");
+    for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
+      const trimmed = denyLines[lineIndex].trim();
+      // Blank lines filter on save (empty editor means allow all in scope),
+      // so only traversal escapes fail the form with their line number.
+      if (!trimmed) continue;
       if (trimmed.includes("..")) {
-        setError(`Deny pattern must not contain '..': "${trimmed}".`);
+        setError(
+          `Line ${lineIndex + 1}: Deny pattern must not contain '..': "${trimmed}".`
+        );
         setSaving(false);
         return;
       }
     }
-    for (const root of filesAllowRoots) {
-      const trimmed = root.trim();
+    const parsedDenyPatterns = parseDenyPatternsText(filesDenyText);
+    for (let rootIndex = 0; rootIndex < filesAllowRoots.length; rootIndex += 1) {
+      const trimmed = filesAllowRoots[rootIndex].trim();
+      // An empty root would dissolve the home containment boundary, so it
+      // fails closed with its row number instead of being filtered.
       if (!trimmed) {
-        setError("Allowed roots cannot be empty.");
+        setError(`Line ${rootIndex + 1}: Allowed roots cannot be empty.`);
         setSaving(false);
         return;
       }
       if (trimmed.includes("..")) {
-        setError(`Allowed root must not contain '..': "${trimmed}".`);
+        setError(`Line ${rootIndex + 1}: Allowed root must not contain '..': "${trimmed}".`);
         setSaving(false);
         return;
       }
@@ -563,15 +567,10 @@ export default function SettingsManager() {
         // would preserve the previous value instead.
         fallbackProvider: fallbackProvider,
         providers: providersMap,
-        sandboxStagingPath,
-        sandboxRetentionDays: Number(sandboxRetentionDays),
-        sandboxMaxTotalBytes: Number(sandboxMaxTotalBytes),
-        sandboxCleanupIntervalSeconds: Number(sandboxCleanupIntervalSeconds),
-        sandboxContainerRuntime,
         sandboxContainerBaseImage,
         sandboxArchiveSessionTTLMinutes: Number(sandboxArchiveSessionTTLMinutes),
         sandboxMaxConcurrentMachines: Number(sandboxMaxConcurrentMachines),
-        filesDenyPatterns: filesDenyPatterns.map((p) => p.trim()).filter(Boolean),
+        filesDenyPatterns: parsedDenyPatterns,
         filesAllowRoots: filesAllowRoots.map((r) => r.trim()).filter(Boolean),
         filesRequireApprovalOnDeny,
         memoryVectorDBPath,
@@ -762,23 +761,27 @@ export default function SettingsManager() {
     );
   };
 
-  // Files deny-list CRUD helpers: rows are plain strings so add/remove stays
-  // index-based; reset restores the guard-mirroring defaults instead of
-  // clearing to an unprotected empty list.
+  // Blocked-paths editing is a single textarea (small-screen friendly for
+  // long guard lists); reset only rewrites the form text after an explicit
+  // modal confirm and never persists until Save.
   const handleAddDenyPattern = () => {
-    setFilesDenyPatterns((prev) => [...prev, ""]);
+    // No row model exists for the textarea, so Add focuses the editor for
+    // keyboard flow; ensure a trailing newline exists so typed globs start
+    // on a fresh line without altering the parsed count by itself.
+    setFilesDenyText((prev) => {
+      if (!prev) return prev;
+      return prev.endsWith("\n") ? prev : `${prev}\n`;
+    });
+    denyTextareaRef.current?.focus();
   };
 
-  const handleRemoveDenyPattern = (index: number) => {
-    setFilesDenyPatterns((prev) => prev.filter((_, i) => i !== index));
+  const handleConfirmResetDenyPatterns = () => {
+    setFilesDenyText(DEFAULT_FILES_DENY_PATTERNS_TEXT);
+    setPendingResetDeny(false);
   };
 
-  const handleDenyPatternChange = (index: number, value: string) => {
-    setFilesDenyPatterns((prev) => prev.map((p, i) => (i === index ? value : p)));
-  };
-
-  const handleResetDenyPatterns = () => {
-    setFilesDenyPatterns([...DEFAULT_FILES_DENY_PATTERNS]);
+  const handleCancelResetDenyPatterns = () => {
+    setPendingResetDeny(false);
   };
 
   const handleAddAllowRoot = () => {
@@ -793,9 +796,18 @@ export default function SettingsManager() {
     setFilesAllowRoots((prev) => prev.map((r, i) => (i === index ? value : r)));
   };
 
-  const handleResetAllowRoots = () => {
+  const handleConfirmResetAllowRoots = () => {
     setFilesAllowRoots([...DEFAULT_FILES_ALLOW_ROOTS]);
+    setPendingResetRoots(false);
   };
+
+  const handleCancelResetAllowRoots = () => {
+    setPendingResetRoots(false);
+  };
+
+  // Live parsed count keeps the badge and the textarea hint in sync without
+  // storing a second source of truth beside the raw editor text.
+  const denyPatternCount = parseDenyPatternsText(filesDenyText).length;
 
   if (loading && !settings) {
     return (
@@ -845,99 +857,118 @@ export default function SettingsManager() {
       {error && <div className="error-banner">{error}</div>}
       {success && <div className="success-banner">{success}</div>}
 
-      {/* Sub-Tabs Navigation */}
-      <nav className="settings-subtabs" aria-label="Settings categories">
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "providers" ? "active" : ""}`}
-          onClick={() => setActiveTab("providers")}
-        >
-          <ChatIcon size={16} />
-          <span>LLM Providers</span>
-          <span className="settings-tab-badge">{providersList.length}</span>
-        </button>
+      {/* Vertical sidenav: stacked categories beside the content pane so every
+          section stays visible without horizontal scrolling. */}
+      <div className="settings-layout">
+        <nav className="settings-sidenav" aria-label="Settings categories" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "providers"}
+            className={`settings-tab-btn ${activeTab === "providers" ? "active" : ""}`}
+            onClick={() => setActiveTab("providers")}
+          >
+            <ChatIcon size={16} />
+            <span>LLM Providers</span>
+            <span className="settings-tab-badge">{providersList.length}</span>
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
-          onClick={() => setActiveTab("engine")}
-        >
-          <SettingsIcon size={16} />
-          <span>Engine & Logs</span>
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "engine"}
+            className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
+            onClick={() => setActiveTab("engine")}
+          >
+            <SettingsIcon size={16} />
+            <span>Engine and Logs</span>
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
-          onClick={() => setActiveTab("tools")}
-        >
-          <WrenchIcon size={16} />
-          <span>Tools & Runes</span>
-          {pendingCount > 0 ? (
-            <span
-              className="settings-tab-badge"
-              style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
-              title={`${pendingCount} runes pending human review`}
-            >
-              {pendingCount}
-            </span>
-          ) : (
-            <span className="settings-tab-badge">{pluginsList.length}</span>
-          )}
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "tools"}
+            className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
+            onClick={() => setActiveTab("tools")}
+          >
+            <WrenchIcon size={16} />
+            <span>Tools and Runes</span>
+            {/* Pending and tampered counts stay on the nav item so review and
+                quarantine signals remain visible without opening the pane. */}
+            {pendingCount > 0 ? (
+              <span
+                className="settings-tab-badge"
+                style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                title={`${pendingCount} runes pending human review`}
+              >
+                {pendingCount}
+              </span>
+            ) : (
+              <span className="settings-tab-badge">{pluginsList.length}</span>
+            )}
+            {tamperedCount > 0 && (
+              <span
+                className="settings-tab-badge"
+                style={{ backgroundColor: "#f56565", color: "#ffffff" }}
+                title={`${tamperedCount} runes modified since approval`}
+              >
+                {tamperedCount}
+              </span>
+            )}
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "sandbox" ? "active" : ""}`}
-          onClick={() => setActiveTab("sandbox")}
-        >
-          <ApprovalsIcon size={16} />
-          <span>Sandbox & Trust</span>
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "security"}
+            className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
+            onClick={() => setActiveTab("security")}
+          >
+            <ApprovalsIcon size={16} />
+            <span>Security</span>
+            {denyPatternCount > 0 && (
+              <span className="settings-tab-badge">{denyPatternCount}</span>
+            )}
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "files" ? "active" : ""}`}
-          onClick={() => setActiveTab("files")}
-        >
-          <ApprovalsIcon size={16} />
-          <span>Files & Access</span>
-          {filesDenyPatterns.length > 0 && (
-            <span className="settings-tab-badge">{filesDenyPatterns.length}</span>
-          )}
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "memory"}
+            className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
+            onClick={() => setActiveTab("memory")}
+          >
+            <MemoryIcon size={16} />
+            <span>Memory and Storage</span>
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
-          onClick={() => setActiveTab("memory")}
-        >
-          <MemoryIcon size={16} />
-          <span>Memory & Storage</span>
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "voice"}
+            className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
+            onClick={() => setActiveTab("voice")}
+          >
+            <span>Voice</span>
+          </button>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
-          onClick={() => setActiveTab("voice")}
-        >
-          <span>Voice</span>
-        </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "email"}
+            className={`settings-tab-btn ${activeTab === "email" ? "active" : ""}`}
+            onClick={() => setActiveTab("email")}
+          >
+            <MailIcon size={16} />
+            <span>Email Accounts</span>
+            {emailAccountsList.length > 0 && (
+              <span className="settings-tab-badge">{emailAccountsList.length}</span>
+            )}
+          </button>
+        </nav>
 
-        <button
-          type="button"
-          className={`settings-tab-btn ${activeTab === "email" ? "active" : ""}`}
-          onClick={() => setActiveTab("email")}
-        >
-          <MailIcon size={16} />
-          <span>Email Accounts</span>
-          {emailAccountsList.length > 0 && (
-            <span className="settings-tab-badge">{emailAccountsList.length}</span>
-          )}
-        </button>
-      </nav>
-
-      <form onSubmit={handleSave} className="settings-form">
+        <div className="settings-content">
+          <form onSubmit={handleSave} className="settings-form">
         {/* TAB 1: LLM Providers */}
         {activeTab === "providers" && (
           <div className="settings-section card">
@@ -1449,7 +1480,12 @@ export default function SettingsManager() {
                           <button
                             type="button"
                             className="icon-button danger"
-                            onClick={() => handleUninstall(plugin.id, plugin.name)}
+                            onClick={() =>
+                              setPendingUninstallPlugin({
+                                id: plugin.id,
+                                name: plugin.name,
+                              })
+                            }
                             disabled={updatingPluginId === plugin.id}
                             title={`Uninstall ${plugin.name}`}
                             aria-label={`Uninstall ${plugin.name}`}
@@ -1604,26 +1640,6 @@ export default function SettingsManager() {
                       <span className="tool-switch-state">
                         {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
                       </span>
-                      {/* Redundant status pill mirrors the switch for at-a-glance
-                          scanning; colors reuse the rune status tokens (green for
-                          on, muted for off). */}
-                      <span
-                        className="tool-status-pill"
-                        data-state={tool.isEnabled ? "enabled" : "disabled"}
-                        style={
-                          tool.isEnabled
-                            ? {
-                                backgroundColor: "rgba(72, 187, 120, 0.2)",
-                                color: "#48bb78",
-                              }
-                            : {
-                                backgroundColor: "rgba(160, 174, 192, 0.2)",
-                                color: "#a0aec0",
-                              }
-                        }
-                      >
-                        {tool.isEnabled ? "Enabled" : "Disabled"}
-                      </span>
                     </label>
                   </div>
                 );
@@ -1685,38 +1701,39 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* TAB: Sandbox & Trust (staging path plus retention caps) */}
-        {activeTab === "sandbox" && (
-          <div className="settings-section card">
+        {/* Security merge shell: sandbox isolation plus file guard share one
+            pane so the sidenav stays at seven items without losing either
+            surface. Both sections save together through the same form. */}
+        {activeTab === "security" && (
+          <>
+            <div className="settings-section card">
             <div className="settings-section-title-group">
               <h3>Sandbox & Security Policy</h3>
               <p className="settings-section-hint">
-                Controls process and payload isolation, microVM container machines, and cleanup retention.
+                Controls ephemeral Tier-3 detonation isolation and crash-orphan reclamation. Document writes use Seatbelt-confined temp with an atomic move on approval.
                 Changes need a restart to take effect.
               </p>
             </div>
 
             {/* Container Machine (Apple Container microVM for Tier 3 detonation) */}
             <div className="settings-section-title-group" style={{ marginTop: "10px" }}>
-              <h4>Apple Container Machine (Virtualization)</h4>
+              <h4>Apple Container Machine</h4>
               <p className="settings-section-hint">
                 MicroVM settings for untrusted external payloads (email attachments, archives). Zero host directory mounts.
               </p>
             </div>
             <div className="form-row">
+              {/* Detonation runtime is pinned server-side so every caller shares
+                  one spelling; the pane shows the fixed value as text with no
+                  editor rather than an input that suggests a choice. */}
               <div className="form-group flex-1">
-                <label htmlFor="sandbox-container-runtime">Container Runtime</label>
-                <input
-                  id="sandbox-container-runtime"
-                  type="text"
-                  className="input-field"
-                  value={sandboxContainerRuntime}
-                  onChange={(e) => setSandboxContainerRuntime(e.target.value)}
-                  placeholder="container"
-                  required
-                />
+                <span className="form-group-label">Container Runtime</span>
+                <p data-testid="sandbox-container-runtime">
+                  <code>container</code>{" "}
+                  <span className="muted text-sm">Apple Container CLI (fixed)</span>
+                </p>
                 <span className="form-group-hint">
-                  Apple container CLI command or binary path (default "container").
+                  Tier 3 detonation always uses the Apple Container CLI; no runtime selection.
                 </span>
               </div>
               <div className="form-group flex-1">
@@ -1750,7 +1767,7 @@ export default function SettingsManager() {
                   required
                 />
                 <span className="form-group-hint">
-                  Idle timeout for warm archive exploration microVMs before automatic termination.
+                  Crash-orphan reclamation TTL for ephemeral detonation machines; live detonations reap immediately.
                 </span>
               </div>
               <div className="form-group flex-1">
@@ -1771,84 +1788,10 @@ export default function SettingsManager() {
                 </span>
               </div>
             </div>
-
-            {/* Retention & Sweeper */}
-            <div className="settings-section-title-group" style={{ marginTop: "20px" }}>
-              <h4>Retention & Storage Caps</h4>
-              <p className="settings-section-hint">
-                Retention limits and sweeper interval for reclaimed container machines and legacy staging debris.
-              </p>
             </div>
-            <div className="form-group">
-              <label htmlFor="staging-path">Sandbox Staging Path (Legacy / Deprecated)</label>
-              <input
-                id="staging-path"
-                type="text"
-                className="input-field"
-                value={sandboxStagingPath}
-                onChange={(e) => setSandboxStagingPath(e.target.value)}
-              />
-              <span className="form-group-hint">
-                Legacy host directory for staged files. Runtime isolation is now enforced via macOS Seatbelt and Apple Container Machine.
-              </span>
-            </div>
-            <div className="form-row">
-              <div className="form-group flex-1">
-                <label htmlFor="sandbox-retention-days">Retention (days)</label>
-                <input
-                  id="sandbox-retention-days"
-                  type="number"
-                  min={1}
-                  max={365}
-                  step={1}
-                  className="input-field"
-                  value={sandboxRetentionDays}
-                  onChange={(e) => setSandboxRetentionDays(Number(e.target.value))}
-                  required
-                />
-                <span className="form-group-hint">
-                  Days a staged file stays valid before reclamation (1–365).
-                </span>
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="sandbox-max-bytes">Max Total Size (bytes)</label>
-                <input
-                  id="sandbox-max-bytes"
-                  type="number"
-                  min={0}
-                  step={1024}
-                  className="input-field"
-                  value={sandboxMaxTotalBytes}
-                  onChange={(e) => setSandboxMaxTotalBytes(Number(e.target.value))}
-                  required
-                />
-                <span className="form-group-hint">
-                  Total byte cap across staging; oldest files evict first.
-                </span>
-              </div>
-              <div className="form-group flex-1">
-                <label htmlFor="sandbox-cleanup-interval">Cleanup Interval (seconds)</label>
-                <input
-                  id="sandbox-cleanup-interval"
-                  type="number"
-                  min={0}
-                  step={60}
-                  className="input-field"
-                  value={sandboxCleanupIntervalSeconds}
-                  onChange={(e) => setSandboxCleanupIntervalSeconds(Number(e.target.value))}
-                  required
-                />
-                <span className="form-group-hint">
-                  Seconds between periodic cleanup passes (hourly default).
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* TAB: Files & Access (deny list plus allowed roots) */}
-        {activeTab === "files" && (
-          <div className="settings-section card">
+            {/* File guard stays in the same Security pane below sandbox policy
+                so deny-list edits and detonation-policy edits save together. */}
+            <div className="settings-section card">
             <div className="settings-section-header">
               <div className="settings-section-title-group">
                 <h3>Files & Access</h3>
@@ -1860,15 +1803,15 @@ export default function SettingsManager() {
               <div className="row">
                 <button
                   type="button"
-                  className="secondary-button"
-                  onClick={handleResetDenyPatterns}
+                  className="ghost icon-text-btn"
+                  onClick={() => setPendingResetDeny(true)}
                 >
                   <RefreshIcon size={14} />
                   <span>Reset to Defaults</span>
                 </button>
                 <button
                   type="button"
-                  className="secondary-button"
+                  className="ghost icon-text-btn"
                   onClick={handleAddDenyPattern}
                 >
                   <PlusIcon size={14} />
@@ -1877,64 +1820,74 @@ export default function SettingsManager() {
               </div>
             </div>
 
-            {filesDenyPatterns.length === 0 ? (
-              <div className="empty-state-box">
-                <p>No deny patterns configured. File tools will allow all in-scope paths.</p>
+            {/* Blocked-paths deny list: multiline editor keeps long guard
+                lists compact; blank lines collapse on save and an emptied
+                editor means allow-all in scope, with the server guard as the
+                authoritative enforcer. */}
+            <div className="settings-section-title-group" style={{ marginTop: "4px" }}>
+              <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
+              <p className="settings-section-hint">
+                One glob per line. Denied paths escalate or fail per the toggle below.
+              </p>
+            </div>
+            <div className="form-group" style={{ marginTop: "8px" }}>
+              <label htmlFor="deny-patterns-textarea">
+                Deny patterns{" "}
+                <span className="muted text-sm">
+                  ({denyPatternCount} {denyPatternCount === 1 ? "pattern" : "patterns"})
+                </span>
+              </label>
+              <textarea
+                id="deny-patterns-textarea"
+                ref={denyTextareaRef}
+                className="input-field deny-patterns-textarea"
+                aria-label="Deny patterns, one per line"
+                value={filesDenyText}
+                onChange={(e) => setFilesDenyText(e.target.value)}
+                placeholder="e.g. .env*, *.pem, .ssh/*"
+                rows={8}
+              />
+              <span className="form-group-hint">
+                Glob-like patterns: `*` matches within a name, directory prefixes like
+                `.ssh/*` guard a whole subtree. `..` escapes are rejected with line
+                numbers; blank lines are ignored.
+              </span>
+              {denyPatternCount === 0 && (
+                <span className="form-group-hint">
+                  No deny patterns configured. File tools will allow all in-scope paths.
+                </span>
+              )}
+            </div>
+
+            {/* Allowed roots stay row-based (small N) with Reset-then-Add in
+                the subsection header to mirror Files & Access; both use the
+                ghost icon treatment so hover and alignment match. */}
+            <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+              <div className="settings-section-title-group">
+                <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
+                <p className="settings-section-hint">
+                  Home containment boundary (`~` expands to the home directory). Paths outside
+                  these roots escalate to approval.
+                </p>
+              </div>
+              <div className="row">
                 <button
                   type="button"
-                  className="secondary-button"
-                  onClick={handleResetDenyPatterns}
+                  className="ghost icon-text-btn"
+                  onClick={() => setPendingResetRoots(true)}
                 >
                   <RefreshIcon size={14} />
-                  <span>Reset to Defaults</span>
+                  <span>Reset Roots</span>
+                </button>
+                <button
+                  type="button"
+                  className="ghost icon-text-btn"
+                  onClick={handleAddAllowRoot}
+                >
+                  <PlusIcon size={14} />
+                  <span>Add Root</span>
                 </button>
               </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                {filesDenyPatterns.map((pattern, index) => (
-                  <div
-                    key={`deny-${index}`}
-                    style={{ display: "flex", gap: "8px", alignItems: "center" }}
-                  >
-                    <div className="form-group" style={{ flex: 1, margin: 0 }}>
-                      <label htmlFor={`deny-pattern-${index}`} className="sr-only">
-                        Deny pattern {index + 1}
-                      </label>
-                      <input
-                        id={`deny-pattern-${index}`}
-                        type="text"
-                        className="input-field"
-                        aria-label={`Deny pattern ${index + 1}`}
-                        value={pattern}
-                        onChange={(e) => handleDenyPatternChange(index, e.target.value)}
-                        placeholder='e.g. .env*, *.pem, .ssh/*'
-                        required
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      className="icon-button danger"
-                      onClick={() => handleRemoveDenyPattern(index)}
-                      title={`Remove deny pattern ${index + 1}`}
-                      aria-label={`Remove deny pattern ${index + 1}`}
-                    >
-                      <TrashIcon size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            <span className="form-group-hint" style={{ marginTop: "8px", display: "block" }}>
-              Glob-like patterns: `*` matches within a name, directory prefixes like
-              `.ssh/*` guard a whole subtree. Blank rows and `..` escapes are rejected.
-            </span>
-
-            <div className="settings-section-title-group" style={{ marginTop: "20px" }}>
-              <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
-              <p className="settings-section-hint">
-                Home containment boundary (`~` expands to the home directory). Paths outside
-                these roots escalate to approval.
-              </p>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {filesAllowRoots.map((root, index) => (
@@ -1969,25 +1922,6 @@ export default function SettingsManager() {
                 </div>
               ))}
             </div>
-            <div className="row" style={{ marginTop: "8px", gap: "8px" }}>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={handleAddAllowRoot}
-              >
-                <PlusIcon size={14} />
-                <span>Add Root</span>
-              </button>
-              <button
-                type="button"
-                className="ghost icon-text-btn"
-                onClick={handleResetAllowRoots}
-              >
-                <RefreshIcon size={14} />
-                <span>Reset Roots</span>
-              </button>
-            </div>
-
             <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
               <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
                 <input
@@ -2002,7 +1936,101 @@ export default function SettingsManager() {
                 When on, denied paths escalate to the approvals inbox instead of failing silently.
               </span>
             </div>
-          </div>
+            </div>
+            {/* Form-local reset confirmations share the modal so destructive
+                rewrites stay explicit: counts show what is lost and the copy
+                stresses nothing persists until Save. */}
+            {pendingResetDeny ? (
+              <Modal
+                label="Confirm reset deny patterns"
+                onClose={handleCancelResetDenyPatterns}
+                containerClassName="modal-container session-delete-modal"
+              >
+                <div className="modal-header">
+                  <h3>Reset deny patterns?</h3>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={handleCancelResetDenyPatterns}
+                    aria-label="Close"
+                  >
+                    <CloseIcon size={16} />
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <p className="muted" style={{ margin: 0 }}>
+                    This will replace {denyPatternCount}{" "}
+                    {denyPatternCount === 1 ? "custom pattern" : "custom patterns"} with{" "}
+                    {DEFAULT_FILES_DENY_PATTERNS.length} defaults. This only updates the
+                    form — nothing is saved until you choose Save Settings.
+                  </p>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={handleCancelResetDenyPatterns}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={handleConfirmResetDenyPatterns}
+                    aria-label="Confirm reset deny patterns"
+                  >
+                    Reset to Defaults
+                  </button>
+                </div>
+              </Modal>
+            ) : null}
+            {pendingResetRoots ? (
+              <Modal
+                label="Confirm reset allowed roots"
+                onClose={handleCancelResetAllowRoots}
+                containerClassName="modal-container session-delete-modal"
+              >
+                <div className="modal-header">
+                  <h3>Reset allowed roots?</h3>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={handleCancelResetAllowRoots}
+                    aria-label="Close"
+                  >
+                    <CloseIcon size={16} />
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <p className="muted" style={{ margin: 0 }}>
+                    This will replace {filesAllowRoots.length}{" "}
+                    {filesAllowRoots.length === 1 ? "custom root" : "custom roots"} with{" "}
+                    {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}
+                    {DEFAULT_FILES_ALLOW_ROOTS.length === 1 ? "default" : "defaults"} (
+                    {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form —
+                    nothing is saved until you choose Save Settings.
+                  </p>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={handleCancelResetAllowRoots}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={handleConfirmResetAllowRoots}
+                    aria-label="Confirm reset allowed roots"
+                  >
+                    Reset Roots
+                  </button>
+                </div>
+              </Modal>
+            ) : null}
+          </>
         )}
 
         {/* TAB 4: Memory & Persistence */}
@@ -2315,7 +2343,9 @@ export default function SettingsManager() {
             {saving ? "Saving Changes..." : "Save Settings to config.toml"}
           </button>
         </div>
-      </form>
+          </form>
+        </div>
+      </div>
 
       <RuneMarketplaceModal
         isOpen={marketplaceOpen}
@@ -2324,6 +2354,58 @@ export default function SettingsManager() {
           void loadPluginsData();
         }}
       />
+
+      {/* Persisted plugin uninstall confirmation via the shared modal. */}
+      {pendingUninstallPlugin ? (
+        <Modal
+          label="Confirm uninstall plugin"
+          onClose={() => {
+            if (updatingPluginId === pendingUninstallPlugin.id) return;
+            cancelUninstallPlugin();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Uninstall rune?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelUninstallPlugin}
+              disabled={updatingPluginId === pendingUninstallPlugin.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This will permanently uninstall and remove &lsquo;
+              {pendingUninstallPlugin.name}&rsquo;. This cannot be undone.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelUninstallPlugin}
+              disabled={updatingPluginId === pendingUninstallPlugin.id}
+            >
+              Keep
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmUninstallPlugin()}
+              disabled={updatingPluginId === pendingUninstallPlugin.id}
+              aria-label="Confirm uninstall plugin"
+            >
+              {updatingPluginId === pendingUninstallPlugin.id
+                ? "Uninstalling…"
+                : "Uninstall"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }

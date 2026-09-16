@@ -611,14 +611,10 @@ export interface SettingsResponse {
   voiceSTTProvider: string;
   voiceWhisperModel: string;
   voiceTTSProvider: string;
-  sandboxStagingPath: string;
-  // Sandbox retention caps persisted under [sandbox]; optional for
-  // back-compat with older engines that only send the staging path.
-  sandboxRetentionDays?: number;
-  sandboxMaxTotalBytes?: number;
-  sandboxCleanupIntervalSeconds?: number;
-  // Container virtualization sandbox settings
-  sandboxContainerRuntime?: string;
+  // Tier-3 detonation policy persisted under [sandbox]: ephemeral microVMs
+  // with immediate reap; the TTL reclaims only crash orphans and the cap
+  // gates concurrent detonations. The runtime stays pinned to the Apple
+  // Container CLI server-side with no dashboard knob.
   sandboxContainerBaseImage?: string;
   sandboxArchiveSessionTTLMinutes?: number;
   sandboxMaxConcurrentMachines?: number;
@@ -647,11 +643,6 @@ export interface UpdateSettingsInput {
   voiceSTTProvider?: string;
   voiceWhisperModel?: string;
   voiceTTSProvider?: string;
-  sandboxStagingPath?: string;
-  sandboxRetentionDays?: number;
-  sandboxMaxTotalBytes?: number;
-  sandboxCleanupIntervalSeconds?: number;
-  sandboxContainerRuntime?: string;
   sandboxContainerBaseImage?: string;
   sandboxArchiveSessionTTLMinutes?: number;
   sandboxMaxConcurrentMachines?: number;
@@ -686,15 +677,44 @@ export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
 // hand alongside the Swift default.
 export const DEFAULT_FILES_ALLOW_ROOTS: string[] = ["~"];
 
-// Manual mirrors of SandboxConfig defaults in
+// Textarea mirror of the deny defaults so the blocked-paths editor starts
+// from the same guard boundary without joining inline in every caller. An
+// empty textarea (zero parsed lines) intentionally means allow-all in scope,
+// so this default text is only for initial display and reset, never a
+// fallback that would silently re-protect a cleared list.
+export const DEFAULT_FILES_DENY_PATTERNS_TEXT: string =
+  DEFAULT_FILES_DENY_PATTERNS.join("\n");
+
+// Parses the blocked-paths textarea into the wire shape: one glob per line,
+// trimmed, with blank lines dropped. Blank filtering keeps an emptied editor
+// as an explicit allow-all instead of persisting whitespace-only rows, and
+// the server-side guard remains the authoritative enforcer.
+export function parseDenyPatternsText(text: string | undefined | null): string[] {
+  if (text == null) return [...DEFAULT_FILES_DENY_PATTERNS];
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// Formats a deny array for the multiline editor, falling back to the guard
+// defaults when an older engine omits the [files] section entirely. Callers
+// use this for initial display and reset so textarea and array states never
+// diverge on the default boundary.
+export function formatDenyPatternsText(
+  patterns: string[] | undefined | null
+): string {
+  if (!Array.isArray(patterns)) return DEFAULT_FILES_DENY_PATTERNS_TEXT;
+  return patterns.join("\n");
+}
+
+// Manual mirrors of SandboxConfig Tier-3 defaults in
 // Sources/RuneWeaverCore/Config.swift. The dashboard cannot import Swift, so
 // these are updated by hand alongside the Swift defaults and provide the single
 // web source for sandbox fallbacks; component state must import these instead of
-// hardcoding magic numbers.
-export const DEFAULT_SANDBOX_RETENTION_DAYS = 14;
-export const DEFAULT_SANDBOX_MAX_TOTAL_BYTES = 524288000;
-export const DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS = 3600;
-export const DEFAULT_SANDBOX_CONTAINER_RUNTIME = "container";
+// hardcoding magic numbers. Reclamation cadence stays fixed server-side via the
+// cleanup scheduler (hourly) with no dashboard knob, and detonation stays
+// pinned to the Apple Container CLI with no runtime setting.
 export const DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE = "alpine:latest";
 export const DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES = 10;
 export const DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES = 3;

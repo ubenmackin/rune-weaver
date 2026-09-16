@@ -875,7 +875,9 @@ public struct CancelChatResponse: Content, Equatable {
 /// Carries no secret values: providers expose only `apiKeyEnv` variable
 /// names and email accounts expose identity fields only, with passwords
 /// and keys resolved at runtime via `SecretsManager` so TOML and JSON
-/// never carry credentials.
+/// never carry credentials. The sandbox surface is Tier-3 detonation only;
+/// legacy staging keys in older dashboard payloads decode as unknown keys
+/// and are ignored instead of failing the request.
 public struct SettingsResponse: Content, Equatable {
     public let engineName: String
     public let logLevel: String
@@ -889,11 +891,6 @@ public struct SettingsResponse: Content, Equatable {
     public let voiceSTTProvider: String
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
-    public let sandboxStagingPath: String
-    public let sandboxRetentionDays: Int
-    public let sandboxMaxTotalBytes: Int
-    public let sandboxCleanupIntervalSeconds: Int
-    public let sandboxContainerRuntime: String
     public let sandboxContainerBaseImage: String
     public let sandboxArchiveSessionTTLMinutes: Int
     public let sandboxMaxConcurrentMachines: Int
@@ -919,11 +916,6 @@ public struct SettingsResponse: Content, Equatable {
         self.voiceSTTProvider = config.voice.sttProvider
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
-        self.sandboxStagingPath = config.sandbox.stagingPath
-        self.sandboxRetentionDays = config.sandbox.retentionDays
-        self.sandboxMaxTotalBytes = config.sandbox.maxTotalBytes
-        self.sandboxCleanupIntervalSeconds = config.sandbox.cleanupIntervalSeconds
-        self.sandboxContainerRuntime = config.sandbox.containerRuntime
         self.sandboxContainerBaseImage = config.sandbox.containerBaseImage
         self.sandboxArchiveSessionTTLMinutes = config.sandbox.archiveSessionTTLMinutes
         self.sandboxMaxConcurrentMachines = config.sandbox.maxConcurrentMachines
@@ -957,11 +949,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let voiceSTTProvider: String?
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
-    public let sandboxStagingPath: String?
-    public let sandboxRetentionDays: Int?
-    public let sandboxMaxTotalBytes: Int?
-    public let sandboxCleanupIntervalSeconds: Int?
-    public let sandboxContainerRuntime: String?
     public let sandboxContainerBaseImage: String?
     public let sandboxArchiveSessionTTLMinutes: Int?
     public let sandboxMaxConcurrentMachines: Int?
@@ -986,11 +973,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         voiceSTTProvider: String? = nil,
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
-        sandboxStagingPath: String? = nil,
-        sandboxRetentionDays: Int? = nil,
-        sandboxMaxTotalBytes: Int? = nil,
-        sandboxCleanupIntervalSeconds: Int? = nil,
-        sandboxContainerRuntime: String? = nil,
         sandboxContainerBaseImage: String? = nil,
         sandboxArchiveSessionTTLMinutes: Int? = nil,
         sandboxMaxConcurrentMachines: Int? = nil,
@@ -1014,11 +996,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.voiceSTTProvider = voiceSTTProvider
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
-        self.sandboxStagingPath = sandboxStagingPath
-        self.sandboxRetentionDays = sandboxRetentionDays
-        self.sandboxMaxTotalBytes = sandboxMaxTotalBytes
-        self.sandboxCleanupIntervalSeconds = sandboxCleanupIntervalSeconds
-        self.sandboxContainerRuntime = sandboxContainerRuntime
         self.sandboxContainerBaseImage = sandboxContainerBaseImage
         self.sandboxArchiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
         self.sandboxMaxConcurrentMachines = sandboxMaxConcurrentMachines
@@ -1115,21 +1092,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
     }
 
     private func applySandbox(to sandbox: inout SandboxConfig) {
-        if let sandboxStagingPath {
-            sandbox.stagingPath = sandboxStagingPath
-        }
-        if let sandboxRetentionDays {
-            sandbox.retentionDays = sandboxRetentionDays
-        }
-        if let sandboxMaxTotalBytes {
-            sandbox.maxTotalBytes = sandboxMaxTotalBytes
-        }
-        if let sandboxCleanupIntervalSeconds {
-            sandbox.cleanupIntervalSeconds = sandboxCleanupIntervalSeconds
-        }
-        if let sandboxContainerRuntime {
-            sandbox.containerRuntime = sandboxContainerRuntime
-        }
         if let sandboxContainerBaseImage {
             sandbox.containerBaseImage = sandboxContainerBaseImage
         }

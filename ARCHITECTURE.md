@@ -236,8 +236,8 @@ When approving an action, the user can choose:
 Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic.com" = trusted for 1 day).
 
 **Sandbox (tiered)**:
-- Tier 1/2 — Seatbelt-confinement for plugin subprocesses and staged file writes: document/image downloads stage under `~/.runeweaver/sandbox/` (`pending/`, `approved/`, `attachments/`) and writes to the real filesystem require explicit approval via `FilesAccessGuard`
-- Tier 3 — Ephemeral microVM detonation for untrusted archives: ZIP/TAR families run in zero-host-mounts container machines with manifest-only returns (no host staging); single-entry inspection truncates text to the preview cap and caps vision payloads, exports are approval-gated through the workspace guard
+- Tier 1/2 — Seatbelt-confinement for plugin subprocesses and document writes: downloads and edits use Seatbelt-confined temp with an atomic move into the workspace only on approval; writes to the real filesystem require explicit approval via `FilesAccessGuard` with no host staging directory
+- Tier 3 — Ephemeral microVM detonation for untrusted archives: ZIP/TAR families run in zero-host-mounts Apple Container machines with manifest-only returns (no host staging); single-entry inspection truncates text to the preview cap and caps vision payloads, exports are approval-gated through the workspace guard
 - Each detonation is ephemeral and reaped immediately; `archive_session_ttl_minutes` reclaims only crash orphans and `max_concurrent_machines` caps concurrent detonations before spawn
 - Browser automation runs in an isolated Playwright context
 - Python plugins run in subprocess sandboxes with timeouts and bounded output drains
@@ -363,10 +363,6 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
 ```
 ~/.runeweaver/
 ├── config.toml          # Non-sensitive configuration
-├── sandbox/             # Staging area for document/image writes only (Tier 1/2 Seatbelt)
-│   ├── pending/         # Awaiting approval
-│   ├── approved/        # Approved for real filesystem
-│   └── attachments/     # `email.attachment` document/image downloads only (10 MB cap, requiresApproval)
 ├── memory/
 │   ├── episodes.db      # SQLite: conversation history (sessions, messages, episodes), scheduler jobs, run logs
 │   └── vectors/         # LanceDB: semantic memory
@@ -380,17 +376,21 @@ Trust is stored per-action-type per-target (e.g., "send email to dr.smith@clinic
     ├── whisper/         # Local Whisper model
     └── tts/             # TTS models/voice data
 
-Tier 3 (outside the host filesystem): ephemeral microVM detonation chamber
+Tier 1/2 (no host staging): document writes use Seatbelt-confined temp with an
+atomic move on approval; denied or failed writes never reach the workspace.
+Tier 3 (outside the host filesystem): ephemeral Apple Container detonation chamber
 for archives — zero host mounts, manifest-only returns, immediate reap.
 ```
 
-Document/image staging is bounded by `[sandbox]` retention policy (`retention_days = 14`,
-`max_total_bytes = 524288000`, `cleanup_interval_seconds = 3600`): the
-sweeper reclaims expired files and evicts oldest-first past the cap. Archives
-never touch staging: they detonate in ephemeral Tier 3 microVMs (`container_runtime`,
-`container_base_image`) with manifest-only returns, immediate post-call reap,
-crash-orphan reclamation after `archive_session_ttl_minutes = 10`, and a
-`max_concurrent_machines = 3` spawn gate. File-tool
+Document writes use Seatbelt-confined temp with an atomic move on approval;
+there is no host staging directory to bound and no retention sweep. Archives
+detonate in ephemeral Tier-3 Apple Container microVMs (`container_base_image`)
+with manifest-only returns, immediate post-call reap, crash-orphan reclamation
+after `archive_session_ttl_minutes = 10`, and a `max_concurrent_machines = 3`
+spawn gate. Reclamation runs on a fixed hourly cadence
+(`SandboxCleanupScheduler.defaultIntervalSeconds = 3600`) with no dashboard
+knob, and the detonation runtime stays pinned to the Apple Container CLI with
+no runtime setting. File-tool
 access is further bounded by `[files]` policy (`deny_patterns`,
 `allow_roots`, `require_approval_on_deny`).
 
@@ -481,11 +481,10 @@ whisper_model = "base"
 tts_provider = "system"  # macOS say command
 
 [sandbox]
-staging_path = "~/.runeweaver/sandbox"  # document/image staging only; archives detonate in ephemeral Tier 3 microVMs with no host mounts
-retention_days = 14  # staged-file retention window (1-365 days)
-max_total_bytes = 524288000  # total staging cap across pending/approved/attachments (500 MiB)
-cleanup_interval_seconds = 3600  # seconds between periodic cleanup passes (hourly)
-container_runtime = "container"  # Apple container CLI for Tier 3 detonation
+# Tier-3 detonation only: ephemeral Apple Container microVMs with no host
+# mounts. Document writes use Seatbelt-confined temp with an atomic move on
+# approval; reclamation runs hourly server-side with no interval knob and the
+# runtime stays pinned to the Apple Container CLI with no setting.
 container_base_image = "alpine:latest"  # OCI image for detonation guests
 archive_session_ttl_minutes = 10  # crash-orphan reclamation TTL for ephemeral detonation machines (1-1440)
 max_concurrent_machines = 3  # concurrent detonation cap, enforced before spawn

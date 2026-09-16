@@ -576,21 +576,15 @@ extension RuneWeaverConfig {
 
     private static func decodeSandbox(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let sandbox = root.tables["sandbox"] else { return }
-        if let path = try sandbox.strictString("staging_path", field: "sandbox.staging_path") {
-            config.sandbox.stagingPath = path
-        }
-        if let days = try sandbox.strictInt("retention_days", field: "sandbox.retention_days") {
-            config.sandbox.retentionDays = days
-        }
-        if let cap = try sandbox.strictInt("max_total_bytes", field: "sandbox.max_total_bytes") {
-            config.sandbox.maxTotalBytes = cap
-        }
-        if let interval = try sandbox.strictInt("cleanup_interval_seconds", field: "sandbox.cleanup_interval_seconds") {
-            config.sandbox.cleanupIntervalSeconds = interval
-        }
-        if let runtime = try sandbox.strictString("container_runtime", field: "sandbox.container_runtime") {
-            config.sandbox.containerRuntime = runtime
-        }
+        // Legacy staging keys (`staging_path`, `retention_days`,
+        // `max_total_bytes`, `cleanup_interval_seconds`) are intentionally
+        // ignored: Tier-3-only detonation has no host staging to bound, so old
+        // files carrying the keys keep loading with Tier-3 defaults instead of
+        // failing. Old dev-only staging directories are left untouched for
+        // manual cleanup with no migration.
+        // Legacy `container_runtime` is intentionally ignored: Tier 3 detonation
+        // only supports the Apple Container CLI, so old files carrying the key
+        // keep loading with the hardcoded default instead of failing.
         if let image = try sandbox.strictString("container_base_image", field: "sandbox.container_base_image") {
             config.sandbox.containerBaseImage = image
         }

@@ -93,9 +93,17 @@ Semantic memory selects its vector backend via `embedding_backend` (default `"ap
 
 ### `[sandbox]`
 
+Tier-3 detonation only: there is no host staging. Document writes use Seatbelt-confined temp with an atomic move on approval, and archives detonate in ephemeral microVMs with manifest-only returns.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `staging_path` | string | `"~/.runeweaver/sandbox"` | Staging directory for file writes awaiting approval (`pending/` vs `approved/`). Must not be empty. |
+| `container_base_image` | string | `"alpine:latest"` | OCI base image for detonation microVMs. Must not be empty. |
+| `archive_session_ttl_minutes` | integer | `10` | Crash-orphan reclamation TTL for ephemeral detonation machines. Must be 1–1440. |
+| `max_concurrent_machines` | integer | `3` | Maximum simultaneous detonation machines, enforced before spawn. Must be positive. |
+
+Archive detonation always uses the Apple Container CLI (`container`); there is no `container_runtime` key. Older files carrying the key load with the hardcoded default.
+
+Legacy staging keys (`staging_path`, `retention_days`, `max_total_bytes`, `cleanup_interval_seconds`) in older files are ignored with no crash and no migration; manually clean old dev-only staging directories.
 
 ### `[email]` — `[[email.accounts]]`
 
@@ -288,5 +296,5 @@ vector_db_path = "~/.runeweaver/memory/vectors"
 episodes_db_path = "~/.runeweaver/memory/episodes.db"
 
 [sandbox]
-staging_path = "~/.runeweaver/sandbox"
+container_base_image = "alpine:latest"
 ```

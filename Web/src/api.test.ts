@@ -8,9 +8,9 @@ import {
   decideApproval,
   DEFAULT_FILES_ALLOW_ROOTS,
   DEFAULT_FILES_DENY_PATTERNS,
-  DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS,
-  DEFAULT_SANDBOX_MAX_TOTAL_BYTES,
-  DEFAULT_SANDBOX_RETENTION_DAYS,
+  DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
+  DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
+  DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteFact,
   deleteJob,
   getFacts,
@@ -266,11 +266,14 @@ describe("dashboard api client", () => {
 
   it("keeps web default mirrors pinned to the Swift single source", () => {
     // Manual cross-language pin: the dashboard cannot import Swift, so these
-    // literals must match FilesConfig/SandboxConfig defaults in
+    // literals must match FilesConfig/SandboxConfig Tier-3 defaults in
     // Sources/RuneWeaverCore/Config.swift. Update both sides together.
-    expect(DEFAULT_SANDBOX_RETENTION_DAYS).toBe(14);
-    expect(DEFAULT_SANDBOX_MAX_TOTAL_BYTES).toBe(524288000);
-    expect(DEFAULT_SANDBOX_CLEANUP_INTERVAL_SECONDS).toBe(3600);
+    // Reclamation cadence stays fixed server-side via the cleanup scheduler
+    // (hourly, 3600 seconds) with no dashboard knob, and detonation stays
+    // pinned to the Apple Container CLI with no runtime setting.
+    expect(DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES).toBe(10);
+    expect(DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES).toBe(3);
+    expect(DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE).toBe("alpine:latest");
     expect(DEFAULT_FILES_ALLOW_ROOTS).toEqual(["~"]);
     expect(DEFAULT_FILES_DENY_PATTERNS).toEqual([
       ".env*",
