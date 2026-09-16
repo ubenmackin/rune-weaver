@@ -1280,4 +1280,104 @@ struct TrustGrantsRouteTests {
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/kept.md")) == true)
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "stub.write", target: "/tmp/once.md")) == false)
     }
+
+    @Test
+    func `GET exposes zero usage for fresh grants`() async {
+        let gate = PermissionGate()
+        let fresh = ActionDescriptor(toolName: "email.send", target: "fresh@example.com")
+        await gate.grantTrust(for: fresh, duration: .oneHour)
+
+        // Fresh rows must encode the untouched baseline so dashboards can
+        // distinguish never-fired trust from exercised trust.
+        let response = await grantsResponse(for: gate)
+        #expect(response.count == 1)
+        guard let row = response.grants.first(where: { $0.target == "fresh@example.com" }) else {
+            Issue.record("Expected fresh grant in list")
+            return
+        }
+        #expect(row.useCount == 0)
+        #expect(row.lastUsedAt == nil)
+        #expect(row.toolName == "email.send")
+        #expect(row.duration == .oneHour)
+    }
+
+    @Test
+    func `GET exposes incremented usage after recordUse`() async {
+        let gate = PermissionGate()
+        let fresh = ActionDescriptor(toolName: "email.send", target: "fresh@example.com")
+        let used = ActionDescriptor(toolName: "email.send", target: "used@example.com")
+        await gate.grantTrust(for: fresh, duration: .oneHour)
+        await gate.grantTrust(for: used, duration: .forever)
+        await gate.recordUse(for: used)
+        await gate.recordUse(for: used)
+        await gate.recordUse(for: used)
+
+        // The list must carry the durable counters so the inbox proves
+        // liveness without re-deriving it from run history.
+        let response = await grantsResponse(for: gate)
+        #expect(response.count == 2)
+        guard let freshRow = response.grants.first(where: { $0.target == "fresh@example.com" }) else {
+            Issue.record("Expected fresh grant in list")
+            return
+        }
+        #expect(freshRow.useCount == 0)
+        #expect(freshRow.lastUsedAt == nil)
+        guard let usedRow = response.grants.first(where: { $0.target == "used@example.com" }) else {
+            Issue.record("Expected used grant in list")
+            return
+        }
+        #expect(usedRow.useCount == 3)
+        #expect(usedRow.lastUsedAt != nil)
+        #expect(usedRow.duration == .forever)
+        #expect(usedRow.expiresAt == nil)
+    }
+
+    @Test
+    func `DELETE persists removal and second delete stays notFound`() async throws {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "gone@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected granted row before delete")
+            return
+        }
+        // First DELETE removes the row with an empty 204 body.
+        #expect(try await deleteGrantStatus(id: id, gate: gate).code == 204)
+        #expect(await gate.isTrusted(descriptor) == false)
+        // A repeat DELETE for the same identifier must stay 404 so dashboards
+        // explain the row is already gone instead of retrying.
+        do {
+            _ = try await deleteGrantStatus(id: id, gate: gate)
+            Issue.record("Expected notFound for already-revoked grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        }
+        #expect(await gate.revokeGrant(id: UUID()) == false)
+    }
+
+    @Test
+    func `Revoke already-expired grant stays notFound`() async {
+        let now = Date()
+        let expired = TrustGrant(
+            id: UUID(),
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "lapsed@example.com"),
+            grantedAt: now.addingTimeInterval(-7200),
+            expiresAt: now.addingTimeInterval(-60),
+            duration: .fiveMinutes
+        )
+        // Bootstrap prunes the lapsed row, so the stranded identifier never
+        // matches; the DELETE contract stays 404 for clock-skewed retries.
+        let store = InMemoryTrustStore(grants: [expired])
+        let gate = await PermissionGate.load(store: store)
+        #expect(await gate.activeGrants().isEmpty == true)
+        #expect(await gate.revokeGrant(id: expired.id) == false)
+        do {
+            _ = try await deleteGrantStatus(id: expired.id, gate: gate)
+            Issue.record("Expected notFound for already-expired grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        } catch {
+            Issue.record("Unexpected error: \(error)")
+        }
+    }
 }

@@ -237,6 +237,28 @@ public struct TrustGrant: Sendable, Codable, Equatable {
     public let expiresAt: Date?
     /// The duration tier this grant was created with.
     public let duration: TrustDuration
+    /// How many covered calls have run against this grant.
+    public var useCount: Int
+    /// When the grant last covered a call, or nil when never used.
+    public var lastUsedAt: Date?
+
+    /// Coding keys for durable grant rows.
+    private enum CodingKeys: String, CodingKey {
+        /// Stable grant identifier.
+        case id
+        /// The trusted action.
+        case actionDescriptor
+        /// When the grant was created.
+        case grantedAt
+        /// When the grant expires.
+        case expiresAt
+        /// The duration tier.
+        case duration
+        /// Covered-call counter.
+        case useCount
+        /// Last covered-call time.
+        case lastUsedAt
+    }
 
     /// Creates a trust grant.
     public init(
@@ -244,13 +266,50 @@ public struct TrustGrant: Sendable, Codable, Equatable {
         actionDescriptor: ActionDescriptor,
         grantedAt: Date = Date(),
         expiresAt: Date?,
-        duration: TrustDuration
+        duration: TrustDuration,
+        useCount: Int = 0,
+        lastUsedAt: Date? = nil
     ) {
         self.id = id
         self.actionDescriptor = actionDescriptor
         self.grantedAt = grantedAt
         self.expiresAt = expiresAt
         self.duration = duration
+        // Counters never go negative in memory; clamp direct construction
+        // so a corrupt caller cannot seed a negative baseline.
+        self.useCount = max(0, useCount)
+        self.lastUsedAt = lastUsedAt
+    }
+
+    /// Decodes a grant, tolerating rows written before usage counters existed.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.actionDescriptor = try container.decode(ActionDescriptor.self, forKey: .actionDescriptor)
+        self.grantedAt = try container.decode(Date.self, forKey: .grantedAt)
+        self.expiresAt = try container.decodeIfPresent(Date.self, forKey: .expiresAt)
+        self.duration = try container.decode(TrustDuration.self, forKey: .duration)
+        // Older persisted rows predate usage tracking, so a missing counter
+        // means the grant was never observed in use rather than a corrupt row.
+        // Clamp negatives so legacy or hand-edited JSON cannot seed a
+        // negative in-memory baseline.
+        let decodedCount = try container.decodeIfPresent(Int.self, forKey: .useCount) ?? 0
+        self.useCount = max(0, decodedCount)
+        self.lastUsedAt = try container.decodeIfPresent(Date.self, forKey: .lastUsedAt)
+    }
+
+    /// Encodes a grant including its usage counters.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(actionDescriptor, forKey: .actionDescriptor)
+        try container.encode(grantedAt, forKey: .grantedAt)
+        try container.encodeIfPresent(expiresAt, forKey: .expiresAt)
+        try container.encode(duration, forKey: .duration)
+        try container.encode(useCount, forKey: .useCount)
+        try container.encodeIfPresent(lastUsedAt, forKey: .lastUsedAt)
     }
 
     /// Whether the grant is expired at the given date.
@@ -455,25 +514,95 @@ public struct FileTrustStore: TrustStore, Sendable {
                     target TEXT NOT NULL,
                     granted_at REAL NOT NULL,
                     expires_at REAL,
-                    duration TEXT NOT NULL
+                    duration TEXT NOT NULL,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at REAL
                 );
                 CREATE INDEX IF NOT EXISTS idx_trust_grants_tool_target ON trust_grants(tool_name, target);
                 CREATE INDEX IF NOT EXISTS idx_trust_grants_expires_at ON trust_grants(expires_at);
                 """,
                 failure: { TrustStorageError(message: $0) }
             )
+            // Databases created before usage counters gain the new columns
+            // once; the probe keeps later opens a no-op instead of erroring
+            // on duplicate `ALTER` statements.
+            let existing = SQLiteHelpers.columnNames(handle: handle, table: .trustGrants)
+            let pendingMigrations: [(column: String, sql: String)] = [
+                ("use_count", "ALTER TABLE trust_grants ADD COLUMN use_count INTEGER NOT NULL DEFAULT 0;"),
+                ("last_used_at", "ALTER TABLE trust_grants ADD COLUMN last_used_at REAL;")
+            ]
+            for migration in pendingMigrations where !existing.contains(migration.column) {
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: migration.sql,
+                        failure: { TrustStorageError(message: $0) }
+                    )
+                } catch {
+                    // Concurrent opens can race the probe onto the same
+                    // `ALTER`; only that duplicate-column case is safe to
+                    // ignore. Any other failure (readonly, disk-full, syntax)
+                    // must surface instead of masquerading as migrated.
+                    var engineDetail = ""
+                    if let message = sqlite3_errmsg(handle) {
+                        engineDetail = String(cString: message)
+                    }
+                    let combined = (engineDetail + " " + String(describing: error)).lowercased()
+                    if combined.contains("duplicate column") {
+                        continue
+                    }
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.warning(
+                        "SQLiteTrustStorage: migration failed for column '\(migration.column)' (code \(code)): \(error)"
+                    )
+                    throw error
+                }
+            }
             return handle
         }
 
         static func load(dbPath: String) -> [TrustGrant] {
-            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): \(error)")
+                return []
+            }
+            guard let handle else {
+                // `open` should either throw or return a handle; a nil handle
+                // without an error would otherwise read as empty trust.
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): unexpected nil handle")
+                return []
+            }
             defer { sqlite3_close(handle) }
             let now = Date().timeIntervalSince1970
-            let sql = "SELECT id, tool_name, target, granted_at, expires_at, duration FROM trust_grants WHERE expires_at IS NULL OR expires_at > ?;"
+            // Counter columns can arrive independently when one `ALTER`
+            // succeeds and the other fails, so project each surviving
+            // column instead of discarding both on a partial migration.
+            let columns = SQLiteHelpers.columnNames(handle: handle, table: .trustGrants)
+            let hasUseCount = columns.contains("use_count")
+            let hasLastUsedAt = columns.contains("last_used_at")
+            var selectColumns = "id, tool_name, target, granted_at, expires_at, duration"
+            if hasUseCount {
+                selectColumns += ", use_count"
+            }
+            if hasLastUsedAt {
+                selectColumns += ", last_used_at"
+            }
+            let sql = "SELECT \(selectColumns) FROM trust_grants WHERE expires_at IS NULL OR expires_at > ?;"
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed preparing trust load (code \(code)).")
+                return []
+            }
             defer { sqlite3_finalize(statement) }
             SQLiteHelpers.bindDouble(statement, index: 1, value: now)
+            // Counter positions shift when only one column survived, so
+            // resolve them from the same probe that built the projection.
+            let useCountIndex: Int32? = hasUseCount ? 6 : nil
+            let lastUsedIndex: Int32? = hasLastUsedAt ? (hasUseCount ? 7 : 6) : nil
             var results: [TrustGrant] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 guard let idString = SQLiteHelpers.columnText(statement, index: 0),
@@ -489,59 +618,155 @@ public struct FileTrustStore: TrustStore, Sendable {
                 if sqlite3_column_type(statement, 4) != SQLITE_NULL {
                     expiresAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 4))
                 }
+                // Legacy rows predate counters, so missing or NULL values
+                // mean the grant has never been observed in use.
+                var useCount = 0
+                var lastUsedAt: Date?
+                if let useCountIndex {
+                    if let rawCount = SQLiteHelpers.columnInt64(statement, index: useCountIndex) {
+                        useCount = max(0, Int(rawCount))
+                    }
+                }
+                if let lastUsedIndex {
+                    if sqlite3_column_type(statement, lastUsedIndex) != SQLITE_NULL {
+                        let stamp = SQLiteHelpers.columnDouble(statement, index: lastUsedIndex)
+                        lastUsedAt = Date(timeIntervalSince1970: stamp)
+                    }
+                }
                 results.append(TrustGrant(
                     id: id,
                     actionDescriptor: ActionDescriptor(toolName: toolName, target: target),
                     grantedAt: grantedAt,
                     expiresAt: expiresAt,
-                    duration: duration
+                    duration: duration,
+                    useCount: useCount,
+                    lastUsedAt: lastUsedAt
                 ))
             }
             return results
         }
 
         static func pruneExpired(at date: Date, dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else { return }
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): \(error)")
+                return
+            }
+            guard let handle else {
+                // A nil handle without an error would otherwise skip the
+                // prune silently, leaving expired trust visible.
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): unexpected nil handle")
+                return
+            }
             defer { sqlite3_close(handle) }
             let sql = "DELETE FROM trust_grants WHERE expires_at IS NOT NULL AND expires_at <= ?;"
             var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return }
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed preparing trust prune (code \(code)).")
+                return
+            }
             defer { sqlite3_finalize(statement) }
             SQLiteHelpers.bindDouble(statement, index: 1, value: date.timeIntervalSince1970)
-            _ = sqlite3_step(statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed pruning expired trust grants (code \(code)).")
+                return
+            }
         }
 
         static func save(grants: [TrustGrant], dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else { return }
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): \(error)")
+                return
+            }
+            guard let handle else {
+                // A nil handle without an error would otherwise drop the
+                // save silently, discarding live trust updates.
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed opening store at \(dbPath): unexpected nil handle")
+                return
+            }
             defer { sqlite3_close(handle) }
             // Replace the table atomically: any prepare/step failure rolls
             // back to the pre-save contents instead of committing an
             // empty or partial grant set that would wipe live trust.
-            guard sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else { return }
+            guard sqlite3_exec(handle, "BEGIN IMMEDIATE TRANSACTION;", nil, nil, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed beginning trust save (code \(code)).")
+                return
+            }
             guard sqlite3_exec(handle, "DELETE FROM trust_grants;", nil, nil, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed clearing trust grants (code \(code)).")
                 _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
                 return
             }
-            let insertSQL = "INSERT INTO trust_grants (id, tool_name, target, granted_at, expires_at, duration) VALUES (?, ?, ?, ?, ?, ?);"
+            // Probe after migration so a table missing one counter still
+            // persists the surviving columns instead of failing an
+            // eight-column write and rolling back the whole save.
+            let columns = SQLiteHelpers.columnNames(handle: handle, table: .trustGrants)
+            let hasUseCount = columns.contains("use_count")
+            let hasLastUsedAt = columns.contains("last_used_at")
+            var insertColumns = "id, tool_name, target, granted_at, expires_at, duration"
+            var placeholders = "?, ?, ?, ?, ?, ?"
+            if hasUseCount {
+                insertColumns += ", use_count"
+                placeholders += ", ?"
+            }
+            if hasLastUsedAt {
+                insertColumns += ", last_used_at"
+                placeholders += ", ?"
+            }
+            let insertSQL = "INSERT INTO trust_grants (\(insertColumns)) VALUES (\(placeholders));"
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(handle, insertSQL, -1, &stmt, nil) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteTrustStorage: failed preparing trust save (code \(code)).")
                 _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
                 return
             }
             var succeeded = true
             for grant in grants {
                 sqlite3_reset(stmt)
-                SQLiteHelpers.bindText(stmt, index: 1, value: grant.id.uuidString)
-                SQLiteHelpers.bindText(stmt, index: 2, value: grant.actionDescriptor.toolName)
-                SQLiteHelpers.bindText(stmt, index: 3, value: grant.actionDescriptor.target)
-                SQLiteHelpers.bindDouble(stmt, index: 4, value: grant.grantedAt.timeIntervalSince1970)
+                // Bind positions shift with the surviving counter columns,
+                // so advance one slot at a time instead of fixed indices.
+                var nextIndex: Int32 = 1
+                SQLiteHelpers.bindText(stmt, index: nextIndex, value: grant.id.uuidString)
+                nextIndex += 1
+                SQLiteHelpers.bindText(stmt, index: nextIndex, value: grant.actionDescriptor.toolName)
+                nextIndex += 1
+                SQLiteHelpers.bindText(stmt, index: nextIndex, value: grant.actionDescriptor.target)
+                nextIndex += 1
+                SQLiteHelpers.bindDouble(stmt, index: nextIndex, value: grant.grantedAt.timeIntervalSince1970)
+                nextIndex += 1
                 if let exp = grant.expiresAt {
-                    SQLiteHelpers.bindDouble(stmt, index: 5, value: exp.timeIntervalSince1970)
+                    SQLiteHelpers.bindDouble(stmt, index: nextIndex, value: exp.timeIntervalSince1970)
                 } else {
-                    sqlite3_bind_null(stmt, 5)
+                    sqlite3_bind_null(stmt, nextIndex)
                 }
-                SQLiteHelpers.bindText(stmt, index: 6, value: grant.duration.rawValue)
+                nextIndex += 1
+                SQLiteHelpers.bindText(stmt, index: nextIndex, value: grant.duration.rawValue)
+                nextIndex += 1
+                if hasUseCount {
+                    SQLiteHelpers.bindInt64(stmt, index: nextIndex, value: Int64(max(0, grant.useCount)))
+                    nextIndex += 1
+                }
+                if hasLastUsedAt {
+                    if let lastUsed = grant.lastUsedAt {
+                        SQLiteHelpers.bindDouble(stmt, index: nextIndex, value: lastUsed.timeIntervalSince1970)
+                    } else {
+                        sqlite3_bind_null(stmt, nextIndex)
+                    }
+                    nextIndex += 1
+                }
                 guard sqlite3_step(stmt) == SQLITE_DONE else {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.error("SQLiteTrustStorage: failed writing trust grant (code \(code)).")
                     succeeded = false
                     break
                 }
@@ -549,6 +774,8 @@ public struct FileTrustStore: TrustStore, Sendable {
             sqlite3_finalize(stmt)
             if succeeded {
                 if sqlite3_exec(handle, "COMMIT;", nil, nil, nil) != SQLITE_OK {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.error("SQLiteTrustStorage: failed committing trust save (code \(code)).")
                     _ = sqlite3_exec(handle, "ROLLBACK;", nil, nil, nil)
                 }
             } else {
@@ -734,14 +961,34 @@ public actor PermissionGate {
         pruneExpired()
         grants.removeAll { $0.actionDescriptor == descriptor }
         let now = Date()
+        // A replacement grant starts its usage history fresh so prior
+        // counters cannot leak into the new lifetime.
         let grant = TrustGrant(
             actionDescriptor: descriptor,
             grantedAt: now,
             expiresAt: duration.timeInterval.map { now.addingTimeInterval($0) },
-            duration: duration
+            duration: duration,
+            useCount: 0,
+            lastUsedAt: nil
         )
         grants.append(grant)
         denials.removeValue(forKey: descriptor)
+        await persist()
+    }
+
+    /// Records one covered use of a live grant without notifying clients.
+    /// - Parameter descriptor: The executed action to attribute.
+    public func recordUse(for descriptor: ActionDescriptor) async {
+        pruneExpired()
+        let now = Date()
+        // Attribute usage exactly where an allow decision came from.
+        // Staying silent keeps accounting out of the approval broadcast path.
+        guard let index = coveringGrantIndex(for: descriptor, at: now) else { return }
+        // Saturate at the limit instead of trapping on overflow.
+        if grants[index].useCount < Int.max {
+            grants[index].useCount += 1
+        }
+        grants[index].lastUsedAt = now
         await persist()
     }
 
@@ -796,14 +1043,30 @@ public actor PermissionGate {
 
     // MARK: - Private
 
+    /// Index of the live grant covering the descriptor, if any. An exact
+    /// tool-plus-target grant wins, with a tool-wide empty-target grant as
+    /// the fallback. Shared by allow checks and usage accounting so both
+    /// attribute to the same grant.
+    private func coveringGrantIndex(for descriptor: ActionDescriptor, at date: Date) -> Int? {
+        if let exact = grants.firstIndex(where: {
+            $0.isValid(at: date)
+                && $0.actionDescriptor.toolName == descriptor.toolName
+                && $0.actionDescriptor.target == descriptor.target
+        }) {
+            return exact
+        }
+        guard !descriptor.target.isEmpty else { return nil }
+        return grants.firstIndex(where: {
+            $0.isValid(at: date)
+                && $0.actionDescriptor.toolName == descriptor.toolName
+                && $0.actionDescriptor.target.isEmpty
+        })
+    }
+
     /// Whether any live grant covers the descriptor, either by exact
     /// target match or by a tool-wide grant with an empty target.
     private func covers(_ descriptor: ActionDescriptor) -> Bool {
-        grants.contains {
-            $0.isValid()
-                && $0.actionDescriptor.toolName == descriptor.toolName
-                && ($0.actionDescriptor.target.isEmpty || $0.actionDescriptor.target == descriptor.target)
-        }
+        coveringGrantIndex(for: descriptor, at: Date()) != nil
     }
 
     /// Drops expired grants from memory only, without touching storage.

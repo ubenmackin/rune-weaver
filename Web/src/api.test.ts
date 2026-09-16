@@ -269,6 +269,8 @@ describe("dashboard api client", () => {
             grantedAt: now,
             expiresAt: future,
             duration: "oneHour",
+            useCount: 3,
+            lastUsedAt: now,
           },
           {
             id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
@@ -277,6 +279,8 @@ describe("dashboard api client", () => {
             grantedAt: now,
             expiresAt: null,
             duration: "forever",
+            useCount: 0,
+            lastUsedAt: null,
           },
         ],
         count: 2,
@@ -289,9 +293,45 @@ describe("dashboard api client", () => {
     // Forever grants keep a null expiry through the client so the inbox can
     // branch on never-expires without sentinel-date comparisons.
     expect(listed.grants[1].expiresAt).toBeNull();
+    // Usage counters ride the same payload so the inbox proves liveness
+    // without re-deriving it from run history.
+    expect(listed.grants[0].useCount).toBe(3);
+    expect(listed.grants[0].lastUsedAt).toBe(now);
+    // Untouched grants encode the zero baseline explicitly rather than
+    // omitting the fields.
+    expect(listed.grants[1].useCount).toBe(0);
+    expect(listed.grants[1].lastUsedAt).toBeNull();
     const [path] = fetchMock.mock.calls[0] as unknown as [string];
     expect(path).toBe("/approvals/grants");
     expect(path.startsWith("http")).toBe(false);
+  });
+
+  it("tolerates legacy trust grants without usage fields", async () => {
+    const now = new Date().toISOString();
+    const future = new Date(Date.now() + 3600_000).toISOString();
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        grants: [
+          {
+            id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            toolName: "email.send",
+            target: "legacy@example.com",
+            grantedAt: now,
+            expiresAt: future,
+            duration: "oneHour",
+          },
+        ],
+        count: 1,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const listed = await listTrustGrants();
+    expect(listed.count).toBe(1);
+    // Rows minted before tracking carry no counter keys; the client must pass
+    // them through as missing so the inbox degrades to untouched.
+    expect(listed.grants[0].useCount).toBeUndefined();
+    expect(listed.grants[0].lastUsedAt).toBeUndefined();
+    expect(listed.grants[0].toolName).toBe("email.send");
   });
 
   it("revokes a trust grant with an encoded DELETE", async () => {
@@ -337,6 +377,64 @@ describe("dashboard api client", () => {
     const offline = await listTrustGrants().catch((error: unknown) => error);
     expect(offline).toBeInstanceOf(ApiError);
     expect((offline as ApiError).status).toBe(0);
+  });
+
+  it("carries numeric wire shapes for usage timestamps", async () => {
+    // SQLite persistence encodes times as Unix seconds while older payloads
+    // carry ISO strings; the client must pass both through without coercing
+    // null last-use into the epoch.
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({
+        grants: [
+          {
+            id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            toolName: "email.send",
+            target: "numeric@example.com",
+            grantedAt: nowSeconds,
+            expiresAt: nowSeconds + 3600,
+            duration: "oneHour",
+            useCount: 1,
+            lastUsedAt: nowSeconds,
+          },
+          {
+            id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            toolName: "email.send",
+            target: "untouched@example.com",
+            grantedAt: nowSeconds,
+            expiresAt: null,
+            duration: "forever",
+            useCount: 0,
+            lastUsedAt: null,
+          },
+        ],
+        count: 2,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const listed = await listTrustGrants();
+    expect(listed.grants[0].useCount).toBe(1);
+    expect(listed.grants[0].lastUsedAt).toBe(nowSeconds);
+    expect(listed.grants[1].useCount).toBe(0);
+    expect(listed.grants[1].lastUsedAt).toBeNull();
+  });
+
+  it("reports already-expired revokes as notFound without retry", async () => {
+    // An already-lapsed grant stays 404 with the engine reason so the inbox
+    // explains the row expired instead of treating it as a transport error.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ reason: "Unknown grant lapsed-id" }), {
+          status: 404,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    const lapsed = await revokeTrustGrant("lapsed-id").catch((error: unknown) => error);
+    expect(lapsed).toBeInstanceOf(ApiError);
+    expect((lapsed as ApiError).status).toBe(404);
+    expect((lapsed as ApiError).message).toContain("Unknown grant lapsed-id");
   });
 
   it("throws ApiError with status on failure", async () => {

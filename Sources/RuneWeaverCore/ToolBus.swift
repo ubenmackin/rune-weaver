@@ -176,7 +176,15 @@ public actor ToolBus {
             if let gate = permissionGate {
                 switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
                 case .allowed:
-                    break
+                    // Attribute this run to the covering grant so later review
+                    // can see which trust is actually exercised. Persistence
+                    // stays best-effort inside the gate, so a store failure
+                    // never blocks the already-authorized tool call. Dry-run
+                    // previews never execute, so they leave counters alone.
+                    if !context.dryRun {
+                        let descriptor = ActionDescriptor.descriptor(for: toolCall, tool: tool)
+                        await gate.recordUse(for: descriptor)
+                    }
                 case let .denied(reason):
                     return .failure(
                         toolCallID: toolCall.callID,
