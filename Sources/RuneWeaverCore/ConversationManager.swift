@@ -708,7 +708,7 @@ enum SessionStoreIO {
             if needsMigration {
                 // Best-effort migration for existing databases created without title, source, or
                 // error-flag columns.
-                let existingSessions = columnNames(in: .sessions, handle: handle)
+                let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
                 let sessionColumnsToAdd: [(name: String, sql: String)] = [
                     ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
                     ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;")
@@ -725,7 +725,7 @@ enum SessionStoreIO {
                         RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column '\(col)' (code \(code)): \(error)")
                     }
                 }
-                if !columnNames(in: .messages, handle: handle).contains("is_error") {
+                if !SQLiteHelpers.columnNames(handle: handle, table: .messages).contains("is_error") {
                     do {
                         try SQLiteHelpers.exec(
                             handle: handle,
@@ -749,35 +749,6 @@ enum SessionStoreIO {
         /// Executes a multi-statement SQL string.
         private static func exec(handle: OpaquePointer?, sql: String) throws {
             try SQLiteHelpers.exec(handle: handle, sql: sql, failure: ConversationManagerError.persistenceFailed)
-        }
-
-        private enum KnownTable {
-            case sessions
-            case messages
-
-            var pragmaSQL: String {
-                switch self {
-                case .sessions: "PRAGMA table_info(sessions);"
-                case .messages: "PRAGMA table_info(messages);"
-                }
-            }
-        }
-
-        /// Lists the declared column names of a table, lowercased.
-        private static func columnNames(in table: KnownTable, handle: OpaquePointer?) -> Set<String> {
-            let pragmaSQL = table.pragmaSQL
-            var names: Set<String> = []
-            var statement: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, pragmaSQL, -1, &statement, nil) == SQLITE_OK else {
-                return names
-            }
-            defer { sqlite3_finalize(statement) }
-            while sqlite3_step(statement) == SQLITE_ROW {
-                if let name = sqlite3_column_text(statement, 1).map({ String(cString: $0) }) {
-                    names.insert(name.lowercased())
-                }
-            }
-            return names
         }
 
         /// Binds optional text, mapping nil to NULL.

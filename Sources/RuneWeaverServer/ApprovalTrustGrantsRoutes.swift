@@ -1,9 +1,9 @@
 // Rune Weaver Server — Durable trust grants routes and change broadcast.
 //
-// Owns the trust-grants HTTP surface plus the lightweight change signal so dashboards
-// stay in sync without polling: listing pruned active grants newest-first and revoking
-// by identifier, with a hub broadcast notifying every connected client after durable
-// changes that alter the grants list.
+// Owns the trust-grants HTTP surface plus the lightweight change signal for
+// grant/revoke broadcast (usage via poll/manual refresh): listing pruned active
+// grants newest-first and revoking by identifier, with a hub broadcast notifying
+// every connected client after durable changes that alter the grants list.
 
 import Foundation
 import RuneWeaverCore
@@ -53,6 +53,9 @@ func registerTrustGrantsRoutes(_ app: Application) {
         guard removed else {
             throw Abort(.notFound, reason: "Unknown grant \(raw)")
         }
+        // Revocation only stops future matches; past allowed calls already
+        // happened and stay in history, so dashboards must treat the delete
+        // as future-only and not imply prior uses are undone.
         // Notify dashboards so a revoked grant disappears without a manual refresh.
         await context.hub.broadcastTrustGrantsChanged()
         return .noContent

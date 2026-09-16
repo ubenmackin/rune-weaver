@@ -6,6 +6,7 @@ import {
   decideApproval,
   listApprovals,
   listTrustGrants,
+  parseRunTimestamp,
   parseTrustGrantExpiry,
   revokeTrustGrant,
   trustDurationOptions,
@@ -15,14 +16,17 @@ import {
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { mergeApprovalFrame } from "../approvalsSession";
-import { RefreshIcon } from "./icons";
+import Modal from "./Modal";
+import { CloseIcon, RefreshIcon } from "./icons";
 
 function isTrustDuration(value: string): value is TrustDuration {
   return trustDurationOptions.some((option) => option.value === value);
 }
 
-// Lightweight clock tick so relative countdowns roll without a server
-// round-trip; expiry eviction derives from the same timestamp.
+// Clock tick plus grants poll cadence: relative countdowns roll on the same
+// interval that refetches usage counters (record-use emits no WS broadcast,
+// so the poll proves a grant is live); expiry eviction derives from the same
+// timestamp.
 const GRANT_CLOCK_POLL_MS = 30_000;
 
 function durationLabelFor(duration: TrustDuration): string {
@@ -57,25 +61,68 @@ function grantExpiryDate(grant: TrustGrant): Date | null {
   return parseTrustGrantExpiry(grant.expiresAt);
 }
 
+// Shared threshold ladder for grant recency so expiry countdowns and last-use
+// recency read with identical granularity. Future renders "in Nx", past renders
+// "Nx ago"; callers handle their own empty/expired/just-now sentinels.
+// Sub-second deltas collapse so fresh uses never render "0s ago" and imminent
+// expiries never render "in 0s".
+function formatDuration(diffMs: number, future: boolean): string {
+  const diffSec = Math.floor(diffMs / 1000);
+  if (diffSec < 60) {
+    if (diffSec < 1) return future ? "in 1s" : "just now";
+    return future ? `in ${diffSec}s` : `${diffSec}s ago`;
+  }
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return future ? `in ${diffMin}m` : `${diffMin}m ago`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return future ? `in ${diffHour}h` : `${diffHour}h ago`;
+  const diffDays = Math.floor(diffHour / 24);
+  return future ? `in ${diffDays}d` : `${diffDays}d ago`;
+}
+
 // Relative countdown for a timed grant ("in 5m"); forever grants have no
 // expiry date and render "Never expires" instead of a countdown.
 function grantRelativeLabel(expiry: Date | null, nowMs: number): string {
   if (!expiry) return "Never expires";
   const diffMs = expiry.getTime() - nowMs;
   if (diffMs <= 0) return "Expired";
-  const diffSec = Math.floor(diffMs / 1000);
-  if (diffSec < 60) return `in ${diffSec}s`;
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return `in ${diffMin}m`;
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return `in ${diffHour}h`;
-  return `in ${Math.floor(diffHour / 24)}d`;
+  return formatDuration(diffMs, true);
 }
 
 function isGrantExpired(grant: TrustGrant, nowMs: number): boolean {
   const expiry = grantExpiryDate(grant);
   if (!expiry) return false;
   return expiry.getTime() <= nowMs;
+}
+
+// Normalizes the last-use timestamp through the same dual-shape parser as expiry, so ISO
+// strings and Unix seconds converge without the card branching on the wire encoding. A null
+// or epoch result means the grant never fired and renders as untouched.
+function grantLastUsedDate(grant: TrustGrant): Date | null {
+  const raw = grant.lastUsedAt;
+  if (raw == null) return null;
+  const parsed = parseRunTimestamp(raw);
+  if (parsed.getTime() === 0) return null;
+  return parsed;
+}
+
+// Relative "ago" label sharing the expiry countdown ladder, so elapsed time reads with
+// the same granularity as remaining time. Future-skewed stamps and sub-second
+// uses collapse to "just now" rather than rendering a negative countdown or
+// "0s ago".
+function grantLastUsedRelativeLabel(lastUsed: Date | null, nowMs: number): string {
+  if (!lastUsed) return "Never";
+  const diffMs = nowMs - lastUsed.getTime();
+  if (diffMs < 1000) return "just now";
+  return formatDuration(diffMs, false);
+}
+
+// Hit count tolerating payloads minted before usage tracking, so older grants degrade to
+// "not used" instead of rendering NaN or crashing the card.
+function grantUseCount(grant: TrustGrant): number {
+  const raw = grant.useCount;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return 0;
+  return Math.floor(raw);
 }
 
 export default function ApprovalsInbox() {
@@ -89,6 +136,12 @@ export default function ApprovalsInbox() {
   } | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
   const [revokingId, setRevokingId] = useState<string | null>(null);
+  // Staged revoke target renders the shared confirmation modal; the destructive request only
+  // fires from the modal so list-row clicks stay non-destructive by default.
+  const [pendingRevoke, setPendingRevoke] = useState<TrustGrant | null>(null);
+  // Revoke failure stays inside the confirmation dialog because the page-level error renders
+  // behind the modal portal backdrop and would be invisible while staged.
+  const [revokeError, setRevokeError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
   // Grants fetch stays best-effort so a grants outage never clears the
@@ -196,16 +249,19 @@ export default function ApprovalsInbox() {
     };
   }, []);
 
-  // Roll relative countdowns and evict expiries client-side on a light
-  // cadence; expired rows hide without a server round-trip.
+  // Tick the clock for relative countdowns and poll grants for usage
+  // counters on the same cadence. Record-use emits no WS broadcast by
+  // contract, so the 30s poll is what proves a grant is live; expiry
+  // eviction still derives from the same timestamp.
   useEffect(() => {
     const timer = setInterval(() => {
       setNowMs(Date.now());
+      void refreshGrants();
     }, GRANT_CLOCK_POLL_MS);
     return () => {
       clearInterval(timer);
     };
-  }, []);
+  }, [refreshGrants]);
 
   function durationFor(id: string): TrustDuration {
     return durations[id] ?? "thisTime";
@@ -230,21 +286,33 @@ export default function ApprovalsInbox() {
     }
   }
 
-  async function revoke(id: string) {
+  // Confirms the staged revoke: the server already removed the row on 204, so filtering
+  // locally avoids a flash of stale state. Failures keep the modal open with the error
+  // surfaced inside the dialog so the user can retry or cancel instead of losing scope.
+  async function confirmRevoke() {
+    if (!pendingRevoke) return;
+    const id = pendingRevoke.id;
     setRevokingId(id);
-    setError(null);
+    setRevokeError(null);
     try {
       await revokeTrustGrant(id);
       // Drop the row without a refetch: the server already removed it, so
       // filtering locally avoids a flash of stale state.
       setGrants((previous) => previous.filter((grant) => grant.id !== id));
+      setPendingRevoke(null);
+      setRevokeError(null);
     } catch (failure) {
-      setError(
+      setRevokeError(
         failure instanceof ApiError ? failure.message : "Revoke failed",
       );
     } finally {
       setRevokingId(null);
     }
+  }
+
+  function cancelRevoke() {
+    setPendingRevoke(null);
+    setRevokeError(null);
   }
 
   // Expired-by-clock rows hide locally so a lapsed grant never lingers
@@ -386,6 +454,12 @@ export default function ApprovalsInbox() {
           {visibleGrants.map((grant) => {
             const expiry = grantExpiryDate(grant);
             const relative = grantRelativeLabel(expiry, nowMs);
+            // Usage degrades to untouched only when both signals agree the grant never
+            // fired, so a partial-migration row with a count but no stamp (or a stamp
+            // but no count) still proves exercised trust instead of hiding as unused.
+            const useCount = grantUseCount(grant);
+            const lastUsed = grantLastUsedDate(grant);
+            const isUnused = useCount === 0 && !lastUsed;
             return (
               <div className="card approval-card" key={grant.id}>
                 <div className="approval-card-header">
@@ -410,6 +484,27 @@ export default function ApprovalsInbox() {
                   )}
                 </div>
 
+                <div className="approval-grant-usage text-sm muted">
+                  {isUnused ? (
+                    <span>Not used yet</span>
+                  ) : useCount > 0 && lastUsed ? (
+                    <span>
+                      Used {useCount}x · Last used{" "}
+                      {grantLastUsedRelativeLabel(lastUsed, nowMs)} (
+                      {lastUsed.toLocaleString()})
+                    </span>
+                  ) : useCount > 0 ? (
+                    <span>Used {useCount}x</span>
+                  ) : lastUsed ? (
+                    <span>
+                      Last used {grantLastUsedRelativeLabel(lastUsed, nowMs)} (
+                      {lastUsed.toLocaleString()})
+                    </span>
+                  ) : (
+                    <span>Not used yet</span>
+                  )}
+                </div>
+
                 <div className="approval-actions-bar">
                   <div className="approval-decision-buttons">
                     {revokingId === grant.id ? (
@@ -426,14 +521,23 @@ export default function ApprovalsInbox() {
                       </button>
                     ) : (
                       <>
-                        {/* Per-row locking mirrors the pending inbox: only
-                            the revoking row locks so independent grants stay
-                            revocable while one revoke is in flight. */}
+                        {/* Staging lock for confirm-every-revoke: while a revoke is staged
+                            (modal open, not yet confirming) every row disables so a
+                            second Revoke cannot overwrite pendingRevoke and silently
+                            drop the first context. Once confirming, only the
+                            revoking row locks so siblings stay actionable. */}
                         <button
                           type="button"
                           className="danger"
-                          disabled={revokingId === grant.id}
-                          onClick={() => void revoke(grant.id)}
+                          disabled={
+                            revokingId !== null
+                              ? revokingId === grant.id
+                              : pendingRevoke !== null
+                          }
+                          onClick={() => {
+                            setRevokeError(null);
+                            setPendingRevoke(grant);
+                          }}
                         >
                           Revoke
                         </button>
@@ -446,6 +550,75 @@ export default function ApprovalsInbox() {
           })}
         </div>
       </div>
+
+      {/* Revoke confirmation via the shared modal so the dialog portals above page
+          stacking contexts with Escape support. Staging keeps row clicks
+          non-destructive; only the modal confirm issues the DELETE. */}
+      {pendingRevoke ? (
+        <Modal
+          label="Confirm revoke grant"
+          onClose={() => {
+            if (revokingId === pendingRevoke.id) return;
+            cancelRevoke();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Revoke approval?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={cancelRevoke}
+              disabled={revokingId === pendingRevoke.id}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              {grantScopeLine(pendingRevoke)}
+            </p>
+            <p
+              className="muted text-sm"
+              style={{ margin: "8px 0 0 0", overflowWrap: "anywhere" }}
+            >
+              {pendingRevoke.toolName} ·{" "}
+              {durationLabelFor(pendingRevoke.duration)}
+              {grantExpiryDate(pendingRevoke)
+                ? ` · Expires ${grantExpiryDate(pendingRevoke)?.toLocaleString()} (${grantRelativeLabel(grantExpiryDate(pendingRevoke), nowMs)})`
+                : " · Never expires"}
+            </p>
+            <p className="muted" style={{ margin: "8px 0 0 0" }}>
+              Future calls will require approval again.
+            </p>
+            {revokeError ? (
+              <p className="error" role="alert" style={{ margin: "8px 0 0 0" }}>
+                {revokeError}
+              </p>
+            ) : null}
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={cancelRevoke}
+              disabled={revokingId === pendingRevoke.id}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void confirmRevoke()}
+              disabled={revokingId === pendingRevoke.id}
+              aria-label="Confirm revoke grant"
+            >
+              {revokingId === pendingRevoke.id ? "Revoking…" : "Revoke"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }

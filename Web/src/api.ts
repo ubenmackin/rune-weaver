@@ -112,6 +112,15 @@ export interface TrustGrant {
   // survive as "forever" through every UI path rather than collapsing to the epoch.
   expiresAt: string | number | null;
   duration: TrustDuration;
+  // Auto-approved hit count so the inbox can distinguish untouched grants from exercised
+  // trust without re-deriving it from run history. Zero means the grant never fired. Optional
+  // because rows minted before usage tracking omit the key; absent degrades to untouched.
+  useCount?: number;
+  // Last auto-approved use in either wire shape, or null when the grant never fired. Kept as
+  // the same ISO-or-Unix-seconds union as grantedAt/expiresAt so callers normalize through
+  // parseRunTimestamp instead of branching on the encoding. Optional because legacy payloads
+  // omit the key entirely; absent degrades to untouched like an explicit null.
+  lastUsedAt?: string | number | null;
 }
 
 export interface TrustGrantsResponse {

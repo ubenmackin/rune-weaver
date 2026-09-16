@@ -109,6 +109,29 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
 #if canImport(SQLite3)
     import SQLite3
 
+    /// Allowlisted tables eligible for schema probing.
+    ///
+    /// The probe builds its `PRAGMA` from fixed constants so callers can
+    /// never inject an arbitrary identifier; adding a case here is the
+    /// only way to make another table queryable.
+    package enum SQLiteKnownTable: Sendable {
+        /// Conversation sessions.
+        case sessions
+        /// Messages belonging to a session.
+        case messages
+        /// Graduated-trust grants.
+        case trustGrants
+
+        /// Fixed `PRAGMA` statement for the table.
+        package var pragmaSQL: String {
+            switch self {
+            case .sessions: "PRAGMA table_info(sessions);"
+            case .messages: "PRAGMA table_info(messages);"
+            case .trustGrants: "PRAGMA table_info(trust_grants);"
+            }
+        }
+    }
+
     /// Shared SQLite primitives for the episode, session, scheduler, and run-log stores.
     package enum SQLiteHelpers {
         /// Opens a database handle, creating parent directories.
@@ -189,6 +212,26 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         /// Column-double helper.
         package static func columnDouble(_ statement: OpaquePointer?, index: Int32) -> Double {
             sqlite3_column_double(statement, index)
+        }
+
+        /// Lists declared columns for a table, lowercased for case-tolerant migration checks.
+        /// - Parameters:
+        ///   - handle: Open database handle being migrated or projected.
+        ///   - table: Allowlisted table; its fixed `PRAGMA` is the only SQL issued.
+        /// - Returns: Lowercased column names, or empty when the probe cannot prepare so callers attempt migration.
+        package static func columnNames(handle: OpaquePointer?, table: SQLiteKnownTable) -> Set<String> {
+            var names: Set<String> = []
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, table.pragmaSQL, -1, &statement, nil) == SQLITE_OK else {
+                return names
+            }
+            defer { sqlite3_finalize(statement) }
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let name = columnText(statement, index: 1) {
+                    names.insert(name.lowercased())
+                }
+            }
+            return names
         }
     }
 #endif
