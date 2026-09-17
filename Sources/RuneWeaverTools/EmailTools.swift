@@ -1,4 +1,4 @@
-// Rune Weaver Tools — Email search, read, attachment, and send tools.
+// Rune Weaver Tools — Email search, read, attachment, send, mailbox listing, and move tools.
 
 import Foundation
 import RuneWeaverCore
@@ -921,7 +921,7 @@ extension EmailAttachmentTool {
 /// Factory registering the email tools on a `ToolBus`.
 public enum EmailTools {
     /// Tool names in registration order.
-    public static let toolNames = ["email.search", "email.read", "email.attachment", "email.send"]
+    public static let toolNames = ["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"]
 
     /// Builds the email tools for an email config.
     public static func makeTools(
@@ -951,7 +951,9 @@ public enum EmailTools {
             gateway: shared,
             sandboxConfig: sandboxConfig
         )
-        return [search, read, attachment, send]
+        let listMailboxes: any Tool = EmailListMailboxesTool(emailConfig: emailConfig, gateway: shared)
+        let move: any Tool = EmailMoveTool(emailConfig: emailConfig, gateway: shared)
+        return [search, read, attachment, send, listMailboxes, move]
     }
 
     /// Registers the email tools, replacing same-named entries.

@@ -148,10 +148,30 @@ private struct StubSendIMAPGateway: EmailIMAPGateway, Sendable {
         throw EmailIMAPError.bridgeFailed("No attachments in send stub")
     }
 
-    /// Returns canned mailboxes.
-    func listMailboxes(credentials _: ResolvedEmailCredentials) async throws -> [String] {
+    /// Returns canned mailboxes with hierarchy separators for list coverage.
+    func mailboxListing(credentials _: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
         box?.recordList()
-        return mailboxes
+        return EmailMailboxListing(mailboxes: mailboxes, delimiter: "/")
+    }
+
+    /// Canned move supporting list/move registration without touching the network.
+    func move(
+        credentials _: ResolvedEmailCredentials,
+        mailbox sourceMailbox: String,
+        messageID _: String,
+        destination: String,
+        markAsRead: Bool
+    ) async throws -> EmailMoveResult {
+        // Same-folder moves are no-ops by contract, so report them without pretending to copy.
+        if sourceMailbox.lowercased() == destination.lowercased() {
+            return EmailMoveResult(mailbox: sourceMailbox, destination: destination, moved: false, markedAsRead: markAsRead)
+        }
+        return EmailMoveResult(mailbox: sourceMailbox, destination: destination, moved: true, markedAsRead: markAsRead)
+    }
+
+    /// Shim for old callers delegating to the richer listing.
+    func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+        try await mailboxListing(credentials: credentials).mailboxes
     }
 
     /// Returns the canned message for one mailbox.
@@ -418,14 +438,16 @@ struct EmailSendTests {
     }
 
     @Test
-    func `Email tools expose gated send as fourth tool`() {
+    func `Email tools expose gated send as sixth tool in six-tool set`() {
         let config = ToolsTestSupport.testEmailConfig()
         let tools = EmailTools.makeTools(emailConfig: config, smtpGateway: StubSMTPGateway())
-        #expect(tools.count == 4)
-        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send"]))
-        #expect(EmailTools.toolNames == ["email.search", "email.read", "email.attachment", "email.send"])
+        #expect(tools.count == 6)
+        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"]))
+        #expect(EmailTools.toolNames == ["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"])
         let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
         #expect(levels["email.send"] == .requiresApproval)
+        #expect(levels["email.listMailboxes"] == .readOnly)
+        #expect(levels["email.move"] == .requiresApproval)
     }
 
     @Test

@@ -19,6 +19,28 @@ public enum EmailMailboxNormalization: Sendable {
         guard let trimmed = trimmed(value), !trimmed.isEmpty else { return "INBOX" }
         return trimmed
     }
+
+    /// Returns the first alias that is present and non-blank after trimming.
+    /// Blank strings behave as omitted so a valid later alias still wins.
+    /// - Parameter candidates: Aliases in priority order.
+    /// - Returns: First non-blank alias, or nil when all are omitted or blank.
+    public static func firstNonBlank(_ candidates: [String?]) -> String? {
+        for candidate in candidates {
+            guard let candidate else { continue }
+            if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                continue
+            }
+            return candidate
+        }
+        return nil
+    }
+
+    /// Variadic convenience over the array form.
+    /// - Parameter candidates: Aliases in priority order.
+    /// - Returns: First non-blank alias, or nil when all are omitted or blank.
+    public static func firstNonBlank(_ candidates: String?...) -> String? {
+        firstNonBlank(candidates)
+    }
 }
 
 /// Search arguments for the `email.search` tool.
@@ -108,19 +130,17 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes arguments, accepting every documented id alias.
+    /// Blank aliases behave as omitted so a valid later alias still wins.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
-        if let direct = try container.decodeIfPresent(String.self, forKey: .id), !direct.isEmpty {
-            messageID = direct
-        } else if let alias = try container.decodeIfPresent(String.self, forKey: .messageId), !alias.isEmpty {
-            messageID = alias
-        } else if let snake = try container.decodeIfPresent(String.self, forKey: .messageID), !snake.isEmpty {
-            messageID = snake
-        } else if let uid = try container.decodeIfPresent(String.self, forKey: .uid), !uid.isEmpty {
-            messageID = uid
-        } else {
+        let idAlias = try container.decodeIfPresent(String.self, forKey: .id)
+        let messageIdAlias = try container.decodeIfPresent(String.self, forKey: .messageId)
+        let messageIDSnakeAlias = try container.decodeIfPresent(String.self, forKey: .messageID)
+        let uidAlias = try container.decodeIfPresent(String.self, forKey: .uid)
+        let idCandidates = [idAlias, messageIdAlias, messageIDSnakeAlias, uidAlias]
+        guard let resolvedID = EmailMailboxNormalization.firstNonBlank(idCandidates) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.id,
                 DecodingError.Context(
@@ -129,8 +149,10 @@ public struct EmailReadArgs: Sendable, Equatable, Decodable {
                 )
             )
         }
-        mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
-            ?? container.decodeIfPresent(String.self, forKey: .folder)
+        messageID = resolvedID
+        let mailboxAlias = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        let folderAlias = try container.decodeIfPresent(String.self, forKey: .folder)
+        mailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias])
     }
 
     /// Trimmed account nickname.
@@ -449,19 +471,17 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
     }
 
     /// Decodes arguments, accepting every documented id and index alias.
+    /// Blank id and mailbox aliases behave as omitted so valid later aliases still win.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         account = try container.decode(String.self, forKey: .account)
-        if let direct = try container.decodeIfPresent(String.self, forKey: .id), !direct.isEmpty {
-            messageID = direct
-        } else if let alias = try container.decodeIfPresent(String.self, forKey: .messageId), !alias.isEmpty {
-            messageID = alias
-        } else if let snake = try container.decodeIfPresent(String.self, forKey: .messageID), !snake.isEmpty {
-            messageID = snake
-        } else if let uid = try container.decodeIfPresent(String.self, forKey: .uid), !uid.isEmpty {
-            messageID = uid
-        } else {
+        let idAlias = try container.decodeIfPresent(String.self, forKey: .id)
+        let messageIdAlias = try container.decodeIfPresent(String.self, forKey: .messageId)
+        let messageIDSnakeAlias = try container.decodeIfPresent(String.self, forKey: .messageID)
+        let uidAlias = try container.decodeIfPresent(String.self, forKey: .uid)
+        let idCandidates = [idAlias, messageIdAlias, messageIDSnakeAlias, uidAlias]
+        guard let resolvedID = EmailMailboxNormalization.firstNonBlank(idCandidates) else {
             throw DecodingError.keyNotFound(
                 CodingKeys.id,
                 DecodingError.Context(
@@ -470,6 +490,7 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
                 )
             )
         }
+        messageID = resolvedID
         if let direct = try container.decodeIfPresent(Int.self, forKey: .index) {
             attachmentIndex = direct
         } else if let camel = try container.decodeIfPresent(Int.self, forKey: .attachmentIndex) {
@@ -485,8 +506,9 @@ public struct EmailAttachmentArgs: Sendable, Equatable, Decodable {
                 )
             )
         }
-        mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
-            ?? container.decodeIfPresent(String.self, forKey: .folder)
+        let mailboxAlias = try container.decodeIfPresent(String.self, forKey: .mailbox)
+        let folderAlias = try container.decodeIfPresent(String.self, forKey: .folder)
+        mailbox = EmailMailboxNormalization.firstNonBlank([mailboxAlias, folderAlias])
         // Optional preview flag defaults to false.
         preview = try container.decodeIfPresent(Bool.self, forKey: .preview) ?? false
         // Archive follow-ups stay optional;
@@ -931,16 +953,6 @@ public enum EmailBridgeParsing {
         let attachment: BridgeAttachmentPayload?
     }
 
-    /// Bridge `list` response shape.
-    struct ListResponse: Decodable {
-        /// Whether the operation succeeded.
-        let ok: Bool
-        /// Error detail when `ok` is false.
-        let error: String?
-        /// Selectable mailboxes when `ok` is true.
-        let mailboxes: [String]?
-    }
-
     /// Decodes a bridge `search` stdout payload.
     public static func parseSearchPayload(_ data: Data) throws -> [EmailSearchHit] {
         let response = try JSONDecoder().decode(SearchResponse.self, from: data)
@@ -1033,15 +1045,6 @@ public enum EmailBridgeParsing {
         return String(bytes: data, encoding: .utf8) ?? ""
     }
 
-    /// Decodes a bridge `list` stdout payload.
-    public static func parseListPayload(_ data: Data) throws -> [String] {
-        let response = try JSONDecoder().decode(ListResponse.self, from: data)
-        if !response.ok {
-            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP list failed")
-        }
-        return response.mailboxes ?? []
-    }
-
     /// Bridge `append` response shape.
     struct AppendResponse: Decodable {
         /// Whether the operation succeeded.
@@ -1056,46 +1059,6 @@ public enum EmailBridgeParsing {
         if !response.ok {
             throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP append failed")
         }
-    }
-
-    /// Filters a raw `LIST` mailbox list to selectable folders.
-    public static func selectableMailboxes(from entries: [(flags: String, mailbox: String)]) -> [String] {
-        entries.compactMap { entry in
-            let lowered = entry.flags.lowercased()
-            if lowered.contains("noselect") || lowered.contains("nonexistent") {
-                return nil
-            }
-            let trimmed = entry.mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }
-    }
-
-    /// Resolves a requested mailbox against the selectable list.
-    public static func resolveMailbox(_ requested: String, among available: [String]) -> String? {
-        if available.contains(requested) {
-            return requested
-        }
-        let lowered = requested.lowercased()
-        return available.first { $0.lowercased() == lowered }
-    }
-
-    /// Resolves a requested mailbox against an already-listed selectable list.
-    public static func resolveMailboxAgainstList(requested: String, available: [String]) throws -> String {
-        guard !available.isEmpty else {
-            throw unknownMailboxError(requested: requested, available: available)
-        }
-        guard let canonical = resolveMailbox(requested, among: available) else {
-            throw unknownMailboxError(requested: requested, available: available)
-        }
-        return canonical
-    }
-
-    /// Builds the unknown-mailbox failure without secrets.
-    public static func unknownMailboxError(requested: String, available: [String]) -> EmailIMAPError {
-        if available.isEmpty {
-            return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (no selectable mailboxes found)")
-        }
-        return EmailIMAPError.bridgeFailed("Unknown mailbox '\(requested)' (available: \(available.sorted().joined(separator: ", ")))")
     }
 }
 

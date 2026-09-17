@@ -139,7 +139,12 @@ public enum EmailIMAPValidation: Sendable {
 
 /// IMAP gateway used by the email tools.
 public protocol EmailIMAPGateway: Sendable {
-    /// Lists selectable mailboxes via `IMAP LIST`, excluding non-selectable flags.
+    /// Lists selectable mailboxes with the shared hierarchy delimiter.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: Selectable mailbox names in server order plus the common delimiter.
+    func mailboxListing(credentials: ResolvedEmailCredentials) async throws -> EmailMailboxListing
+
+    /// Compatibility shim over `mailboxListing` for existing callers.
     /// - Parameter credentials: Resolved connection fields plus password.
     /// - Returns: Selectable mailbox names in server order.
     func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String]
@@ -160,6 +165,42 @@ public protocol EmailIMAPGateway: Sendable {
 
     /// Appends one RFC822 message to a mailbox with `\Seen`.
     func append(credentials: ResolvedEmailCredentials, mailbox: String, rawMessage: Data) async throws
+
+    /// Moves one message to another mailbox, optionally marking it read.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Source mailbox holding the message.
+    ///   - messageID: UID of the message to move.
+    ///   - destination: Destination mailbox.
+    ///   - markAsRead: Whether to set `\Seen` on the moved message.
+    /// - Returns: Source, destination, and whether the move and flag update applied.
+    func move(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        destination: String,
+        markAsRead: Bool
+    ) async throws -> EmailMoveResult
+}
+
+public extension EmailIMAPGateway {
+    /// Default compatibility shim over the single required `mailboxListing`.
+    /// `mailboxListing` is the only required listing method so conformers cannot
+    /// satisfy the protocol with neither method and recurse between defaults.
+    func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+        try await mailboxListing(credentials: credentials).mailboxes
+    }
+
+    /// Default move that fails closed for gateways without move support.
+    func move(
+        credentials _: ResolvedEmailCredentials,
+        mailbox _: String,
+        messageID _: String,
+        destination _: String,
+        markAsRead _: Bool
+    ) async throws -> EmailMoveResult {
+        throw EmailIMAPError.bridgeFailed("IMAP move not supported")
+    }
 }
 
 /// Resolves the best-effort Sent mailbox from a `LIST` result.
@@ -183,9 +224,79 @@ public enum EmailSentMailbox: Sendable {
     }
 }
 
+/// Result of moving one message between mailboxes.
+public struct EmailMoveResult: Sendable, Equatable, Codable {
+    /// Source mailbox the message was moved from.
+    public let mailbox: String
+    /// Destination mailbox the message was moved to.
+    public let destination: String
+    /// Whether the message was relocated (false for same-folder flag-only updates).
+    public let moved: Bool
+    /// Whether `\Seen` is set on the resulting message.
+    public let markedAsRead: Bool
+
+    /// Creates a move result.
+    public init(mailbox: String, destination: String, moved: Bool, markedAsRead: Bool) {
+        self.mailbox = mailbox
+        self.destination = destination
+        self.moved = moved
+        self.markedAsRead = markedAsRead
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mailbox
+        case destination
+        case moved
+        case markedAsRead
+        case markedAsReadSnake = "marked_as_read"
+        case markAsRead
+    }
+
+    /// Decodes a move result, accepting `markedAsRead` and snake-case aliases.
+    /// All fields are required so malformed bridge payloads fail closed instead
+    /// of reporting a silent no-op success.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        guard let decodedMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox),
+              !decodedMailbox.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no mailbox")
+        }
+        mailbox = decodedMailbox
+        guard let decodedDestination = try container.decodeIfPresent(String.self, forKey: .destination),
+              !decodedDestination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no destination")
+        }
+        destination = decodedDestination
+        guard let decodedMoved = try container.decodeIfPresent(Bool.self, forKey: .moved) else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no moved flag")
+        }
+        moved = decodedMoved
+        if let marked = try container.decodeIfPresent(Bool.self, forKey: .markedAsRead) {
+            markedAsRead = marked
+        } else if let snake = try container.decodeIfPresent(Bool.self, forKey: .markedAsReadSnake) {
+            markedAsRead = snake
+        } else if let echoed = try container.decodeIfPresent(Bool.self, forKey: .markAsRead) {
+            markedAsRead = echoed
+        } else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no markedAsRead flag")
+        }
+    }
+
+    /// Encodes the move result with the canonical `markedAsRead` key.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(mailbox, forKey: .mailbox)
+        try container.encode(destination, forKey: .destination)
+        try container.encode(moved, forKey: .moved)
+        try container.encode(markedAsRead, forKey: .markedAsRead)
+    }
+}
+
 /// Bridge request document sent to the Python helper over stdin.
 struct EmailIMAPBridgeRequest: Encodable {
-    /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, or `"append"`.
+    /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, `"append"`, or `"move"`.
     let op: String
     /// IMAP hostname.
     let host: String
@@ -201,12 +312,16 @@ struct EmailIMAPBridgeRequest: Encodable {
     let query: String?
     /// Maximum hits (search only).
     let limit: Int?
-    /// Message UID (fetch and attachment only).
+    /// Message UID (fetch, attachment, and move only).
     let messageID: String?
     /// Zero-based attachment position (attachment only).
     let attachmentIndex: Int?
     /// Base64 RFC822 bytes for `append` only.
     let rawMessageBase64: String?
+    /// Destination mailbox for `move` only.
+    let destination: String?
+    /// Whether `move` should set `\Seen` on the resulting message.
+    let markAsRead: Bool?
 
     /// Creates a search request.
     static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX") -> Self {
@@ -221,7 +336,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             limit: limit,
             messageID: nil,
             attachmentIndex: nil,
-            rawMessageBase64: nil
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil
         )
     }
 
@@ -238,7 +355,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             limit: nil,
             messageID: messageID,
             attachmentIndex: nil,
-            rawMessageBase64: nil
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil
         )
     }
 
@@ -260,14 +379,16 @@ struct EmailIMAPBridgeRequest: Encodable {
             limit: nil,
             messageID: messageID,
             attachmentIndex: attachmentIndex,
-            rawMessageBase64: nil
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil
         )
     }
 
     /// Creates a mailbox-listing request.
     /// - Parameter credentials: Resolved connection fields plus password.
-    /// - Returns: `list` request reporting selectable mailboxes.
-    static func list(credentials: ResolvedEmailCredentials) -> Self {
+    /// - Returns: `list` request reporting selectable mailboxes plus the common delimiter.
+    static func listing(credentials: ResolvedEmailCredentials) -> Self {
         Self(
             op: "list",
             host: credentials.host,
@@ -279,7 +400,41 @@ struct EmailIMAPBridgeRequest: Encodable {
             limit: nil,
             messageID: nil,
             attachmentIndex: nil,
-            rawMessageBase64: nil
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil
+        )
+    }
+
+    /// Compatibility shim over `listing` for existing callers.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: `list` request reporting selectable mailboxes plus the common delimiter.
+    static func list(credentials: ResolvedEmailCredentials) -> Self {
+        listing(credentials: credentials)
+    }
+
+    /// Creates a move request relocating one message between mailboxes.
+    static func move(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        destination: String,
+        markAsRead: Bool
+    ) -> Self {
+        Self(
+            op: "move",
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password,
+            mailbox: mailbox,
+            query: nil,
+            limit: nil,
+            messageID: messageID,
+            attachmentIndex: nil,
+            rawMessageBase64: nil,
+            destination: destination,
+            markAsRead: markAsRead
         )
     }
 
@@ -296,7 +451,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             limit: nil,
             messageID: nil,
             attachmentIndex: nil,
-            rawMessageBase64: rawMessage.base64EncodedString()
+            rawMessageBase64: rawMessage.base64EncodedString(),
+            destination: nil,
+            markAsRead: nil
         )
     }
 }
@@ -351,19 +508,26 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Lists selectable mailboxes via the Python helper.
+    /// Lists selectable mailboxes plus the common hierarchy delimiter.
     /// - Parameter credentials: Resolved connection fields plus password.
-    /// - Returns: Selectable mailbox names in server order.
-    public func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
-        let request = EmailIMAPBridgeRequest.list(credentials: credentials)
+    /// - Returns: Selectable mailbox names in server order with the shared delimiter.
+    public func mailboxListing(credentials: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
+        let request = EmailIMAPBridgeRequest.listing(credentials: credentials)
         let data = try await run(request: request)
         do {
-            return try EmailBridgeParsing.parseListPayload(data)
+            return try EmailBridgeParsing.parseMailboxListingPayload(data)
         } catch let error as EmailIMAPError {
             throw error
         } catch {
             throw EmailIMAPError.decodeFailed(error.localizedDescription)
         }
+    }
+
+    /// Compatibility shim over `mailboxListing` for existing callers.
+    /// - Parameter credentials: Resolved connection fields plus password.
+    /// - Returns: Selectable mailbox names in server order.
+    public func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+        try await mailboxListing(credentials: credentials).mailboxes
     }
 
     /// Fetches one message from one mailbox via the Python helper.
@@ -427,6 +591,43 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
+    /// Moves one message between mailboxes, optionally marking it read.
+    public func move(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        messageID: String,
+        destination: String,
+        markAsRead: Bool
+    ) async throws -> EmailMoveResult {
+        try EmailIMAPValidation.validateMessageID(messageID)
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        try EmailIMAPValidation.validateMailbox(destination)
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedMessageID = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedDestination = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        try EmailIMAPValidation.validateMessageID(trimmedMessageID)
+        try EmailIMAPValidation.validateMailbox(trimmedMailbox)
+        try EmailIMAPValidation.validateMailbox(trimmedDestination)
+        guard !trimmedDestination.isEmpty else {
+            throw EmailIMAPError.bridgeFailed("Invalid destination: destination must not be empty")
+        }
+        let request = EmailIMAPBridgeRequest.move(
+            credentials: credentials,
+            mailbox: trimmedMailbox,
+            messageID: trimmedMessageID,
+            destination: trimmedDestination,
+            markAsRead: markAsRead
+        )
+        let data = try await run(request: request)
+        do {
+            return try EmailBridgeParsing.parseMoveResultPayload(data)
+        } catch let error as EmailIMAPError {
+            throw error
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+    }
+
     /// Runs the helper once with the given request.
     func run(request: EmailIMAPBridgeRequest) async throws -> Data {
         let payload: Data
@@ -440,6 +641,76 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             payload: payload,
             pythonExecutable: pythonExecutable,
             serviceName: "IMAP"
+        )
+    }
+}
+
+/// Bridge `move` response shape for the gateway minimal result.
+private struct MoveResultResponse: Decodable {
+    /// Whether the operation succeeded.
+    let ok: Bool
+    /// Error detail when `ok` is false.
+    let error: String?
+    /// Source mailbox.
+    let mailbox: String?
+    /// Destination mailbox.
+    let destination: String?
+    /// Whether the message was relocated.
+    let moved: Bool?
+    /// Whether `\Seen` is set on the resulting message.
+    let markedAsRead: Bool?
+    /// Snake-case alias for `markedAsRead`.
+    let markedAsReadSnake: Bool?
+    /// Request-echo alias for `markedAsRead`.
+    let markAsRead: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case error
+        case mailbox
+        case destination
+        case moved
+        case markedAsRead
+        case markedAsReadSnake = "marked_as_read"
+        case markAsRead
+    }
+}
+
+public extension EmailBridgeParsing {
+    /// Decodes a bridge `move` stdout payload into the gateway minimal result.
+    /// Requires `mailbox`, `destination`, `moved`, and a read flag so partial
+    /// payloads fail closed instead of reporting a silent no-op success.
+    static func parseMoveResultPayload(_ data: Data) throws -> EmailMoveResult {
+        let response: MoveResultResponse
+        do {
+            response = try JSONDecoder().decode(MoveResultResponse.self, from: data)
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+        if !response.ok {
+            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP move failed")
+        }
+        guard let mailbox = response.mailbox,
+              !mailbox.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no mailbox")
+        }
+        guard let destination = response.destination,
+              !destination.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no destination")
+        }
+        guard let moved = response.moved else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no moved flag")
+        }
+        guard let marked = response.markedAsRead ?? response.markedAsReadSnake ?? response.markAsRead else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no markedAsRead flag")
+        }
+        return EmailMoveResult(
+            mailbox: mailbox,
+            destination: destination,
+            moved: moved,
+            markedAsRead: marked
         )
     }
 }
