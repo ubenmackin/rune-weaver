@@ -40,6 +40,10 @@ public enum ServerPaths {
     public static let searchEnsure = "ensure"
     /// Search stop subpath under `/search`.
     public static let searchStop = "stop"
+    /// Search remove subpath under `/search`.
+    /// Deletes the managed container entry while leaving the image cache so the
+    /// next Start recreates it; a running entry stops first rather than half-deleting.
+    public static let searchRemove = "remove"
     /// Run log group.
     public static let runs = "runs"
     /// Sessions group.

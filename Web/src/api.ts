@@ -825,6 +825,10 @@ export interface SearchHealthResponse {
   containerName?: string | null;
   started?: boolean | null;
   stopped?: boolean | null;
+  // Whether the managed entry is gone after a remove. Optional because health,
+  // ensure, and stop payloads predate removal; absent degrades to the honest
+  // reachable probe instead of assuming deleted.
+  removed?: boolean | null;
   message?: string | null;
   diagnostics?: string | null;
   // Live Start stage plus Start time while an ensure flight runs (resolving, daemon, pulling,
@@ -982,6 +986,18 @@ export function ensureSearch(): Promise<SearchHealthResponse> {
 // when already stopped.
 export function stopSearch(): Promise<SearchHealthResponse> {
   return fetchJson<SearchHealthResponse>("/search/stop", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Deletes the SearXNG container entry and reports the resulting health. The
+// server stops a running entry first rather than half-deleting, and the image
+// cache survives so the next Start recreates the entry from cache. Idempotent
+// when already absent: an unknown-never-started host reports unreachable with
+// removed true, while a still-reachable engine refuses with guidance.
+export function removeSearch(): Promise<SearchHealthResponse> {
+  return fetchJson<SearchHealthResponse>("/search/remove", {
     method: "POST",
     body: JSON.stringify({}),
   });

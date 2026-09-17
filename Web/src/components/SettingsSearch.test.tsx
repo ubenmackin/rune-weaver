@@ -145,7 +145,7 @@ describe("SettingsManager search", () => {
     expect(sentPayload?.["searchMaxResults"]).toBe(10);
   });
 
-  it("starts and stops search through the ensure and stop paths", async () => {
+  it("toggles search through a single button reading stopped then running", async () => {
     const user = userEvent.setup();
     const seen: string[] = [];
     vi.stubGlobal(
@@ -186,32 +186,218 @@ describe("SettingsManager search", () => {
     });
     const searchTab = screen.getByRole("tab", { name: /Search/i });
     await user.click(searchTab);
-    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
-    const stopBtn = screen.getByRole("button", { name: "Stop SearXNG" });
-    // Header placement matches the providers and security panes: lifecycle
-    // actions sit in the right-aligned title group instead of a pane-level row.
-    for (const btn of [startBtn, stopBtn]) {
-      expect(btn.className).toContain("ghost");
-      expect(btn.className).toContain("icon-text-btn");
-      expect(btn.closest(".settings-section-header")).not.toBeNull();
-      expect(btn.querySelector("svg")).not.toBeNull();
-    }
-    // Full labels stay visible with matching accessible names so the header
+    // Stopped reads as a single Start toggle with no Stop beside it.
+    const startToggle = screen.getByRole("button", { name: "Start SearXNG" });
+    expect(screen.queryByRole("button", { name: "Stop SearXNG" })).toBeNull();
+    // Header placement matches the providers and security panes: the lifecycle
+    // toggle sits in the right-aligned title group instead of a pane-level row.
+    expect(startToggle.className).toContain("ghost");
+    expect(startToggle.className).toContain("icon-text-btn");
+    expect(startToggle.closest(".settings-section-header")).not.toBeNull();
+    expect(startToggle.querySelector("svg")).not.toBeNull();
+    // Full label stays visible with a matching accessible name so the header
     // reads without relying on icon-only affordances.
-    expect(startBtn.textContent).toContain("Start SearXNG");
-    expect(stopBtn.textContent).toContain("Stop SearXNG");
-    expect(startBtn.getAttribute("aria-label")).toBe("Start SearXNG");
-    expect(stopBtn.getAttribute("aria-label")).toBe("Stop SearXNG");
-    await user.click(startBtn);
+    expect(startToggle.textContent).toContain("Start SearXNG");
+    expect(startToggle.getAttribute("aria-label")).toBe("Start SearXNG");
+    await user.click(startToggle);
     await waitFor(() => {
       expect(seen.some((u) => u.includes("/search/ensure"))).toBe(true);
       expect(
         screen.getByTestId("search-health-text").textContent?.toLowerCase()
       ).toContain("reachable");
     });
-    await user.click(stopBtn);
+    // Running flips the same toggle to Stop with no Start beside it.
+    const stopToggle = screen.getByRole("button", { name: "Stop SearXNG" });
+    expect(screen.queryByRole("button", { name: "Start SearXNG" })).toBeNull();
+    expect(stopToggle.className).toContain("ghost");
+    expect(stopToggle.className).toContain("icon-text-btn");
+    expect(stopToggle.closest(".settings-section-header")).not.toBeNull();
+    expect(stopToggle.querySelector("svg")).not.toBeNull();
+    expect(stopToggle.textContent).toContain("Stop SearXNG");
+    expect(stopToggle.getAttribute("aria-label")).toBe("Stop SearXNG");
+    await user.click(stopToggle);
     await waitFor(() => {
       expect(seen.some((u) => u.includes("/search/stop"))).toBe(true);
+    });
+  });
+
+  it("reads running as a single Stop toggle", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: true,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("search-health-text").textContent?.toLowerCase()
+      ).toContain("reachable");
+    });
+    // One toggle only: running offers Stop while Start stays absent.
+    const stopToggle = screen.getByRole("button", { name: "Stop SearXNG" });
+    expect(screen.queryByRole("button", { name: "Start SearXNG" })).toBeNull();
+    expect(stopToggle.textContent).toContain("Stop SearXNG");
+    expect(stopToggle.getAttribute("aria-label")).toBe("Stop SearXNG");
+    expect(stopToggle.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("reads unknown as an enabled Start toggle", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({});
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId("search-health-text").textContent?.toLowerCase()
+      ).toContain("unknown");
+    });
+    // Unknown stays honest gray yet still offers Start so a first probe
+    // failure never strands the pane without a recovery action.
+    const startToggle = screen.getByRole("button", { name: "Start SearXNG" });
+    expect(screen.queryByRole("button", { name: "Stop SearXNG" })).toBeNull();
+    expect(startToggle.textContent).toContain("Start SearXNG");
+    expect(startToggle.getAttribute("aria-label")).toBe("Start SearXNG");
+    expect(startToggle.hasAttribute("disabled")).toBe(false);
+  });
+
+  it("locks the single toggle with Starting while a start is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveEnsure!: (value: Response) => void;
+    const ensureGate = new Promise<Response>((resolve) => {
+      resolveEnsure = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (url.includes("/search/ensure")) {
+          return ensureGate;
+        }
+        if (url.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (url.includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const startToggle = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startToggle);
+    // The in-flight start keeps one disabled toggle naming the action so a
+    // second click cannot race the minutes-budget pull.
+    await waitFor(() => {
+      const busy = screen.getByTestId("search-toggle");
+      expect(busy.hasAttribute("disabled")).toBe(true);
+      expect(busy.textContent).toContain("Starting");
+    });
+    expect(screen.queryByRole("button", { name: "Stop SearXNG" })).toBeNull();
+    resolveEnsure(jsonResponse({ reachable: true, url: ENGINE_SEARCH_URL }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Stop SearXNG" })).toBeDefined();
+    });
+  });
+
+  it("locks the single toggle with Stopping while a stop is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveStop!: (value: Response) => void;
+    const stopGate = new Promise<Response>((resolve) => {
+      resolveStop = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes("/search/health")) {
+          return jsonResponse({
+            reachable: true,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (url.includes("/search/stop")) {
+          return stopGate;
+        }
+        if (url.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (url.includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const stopToggle = await screen.findByRole("button", {
+      name: "Stop SearXNG",
+    });
+    await user.click(stopToggle);
+    // The in-flight stop keeps one disabled toggle naming the action so Start
+    // cannot interleave before the container reports stopped.
+    await waitFor(() => {
+      const busy = screen.getByTestId("search-toggle");
+      expect(busy.hasAttribute("disabled")).toBe(true);
+      expect(busy.textContent).toContain("Stopping");
+    });
+    expect(screen.queryByRole("button", { name: "Start SearXNG" })).toBeNull();
+    resolveStop(jsonResponse({ reachable: false, url: ENGINE_SEARCH_URL }));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Start SearXNG" })
+      ).toBeDefined();
     });
   });
 

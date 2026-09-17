@@ -250,3 +250,81 @@ public struct SearchStopResponse: Content, Equatable {
         try container.encodeIfPresent(message, forKey: .message)
     }
 }
+
+/// Search container remove response for `POST /search/remove`.
+/// Reports whether the managed entry is gone plus an honest reachability
+/// re-probe, so the dashboard can keep the pill honest without a second fetch.
+/// The image cache survives removal by design, so the next Start recreates the
+/// entry from the cached image instead of paying another pull. A running entry
+/// stops first on the server rather than half-deleting; when the engine still
+/// answers afterwards the response refuses with guidance instead of claiming
+/// the entry is gone.
+public struct SearchRemoveResponse: Content, Equatable {
+    /// Whether the container entry is gone (false when still reachable or still listed).
+    public let removed: Bool
+    /// Container name that was removed.
+    public let containerName: String
+    /// Whether the engine answers after the remove (honest re-probe; true when the halt or delete did not take).
+    public let reachable: Bool
+    /// Configured SearXNG base URL for dashboard fallback display.
+    public let baseURL: String
+    /// Alias of `baseURL` for dashboard clients expecting `url`.
+    public let url: String
+    /// Collapsed status (honest re-probe: `"running"` when still reachable, else `"stopped"`).
+    public let status: String
+    /// Guidance when the entry is not gone (still reachable, or stopped but still listed).
+    public let message: String?
+
+    /// Creates a remove response.
+    public init(removed: Bool, containerName: String, reachable: Bool = false, baseURL: String = "", url: String? = nil, status: String? = nil, message: String? = nil) {
+        self.removed = removed
+        self.containerName = containerName
+        self.reachable = reachable
+        self.baseURL = baseURL
+        self.url = url ?? baseURL
+        self.status = status ?? (reachable ? "running" : "stopped")
+        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.message = trimmed.isEmpty ? nil : trimmed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case removed
+        case containerName
+        case reachable
+        case baseURL
+        case url
+        case status
+        case message
+    }
+
+    /// Decodes tolerantly so dashboard `SearchHealthResponse` shapes still parse.
+    /// An absent `removed` derives from the honest `reachable` probe instead
+    /// of optimistically assuming removed on shape drift.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        reachable = try container.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
+        removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? !reachable
+        containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
+        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
+        let alias = try container.decodeIfPresent(String.self, forKey: .url)
+        let resolved = base ?? alias ?? ""
+        baseURL = resolved
+        url = alias ?? resolved
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
+        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
+        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        message = trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Encodes the full shape so health-style readers keep working.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(removed, forKey: .removed)
+        try container.encode(containerName, forKey: .containerName)
+        try container.encode(reachable, forKey: .reachable)
+        try container.encode(baseURL, forKey: .baseURL)
+        try container.encode(url, forKey: .url)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(message, forKey: .message)
+    }
+}

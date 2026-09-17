@@ -17,6 +17,7 @@ import {
   DEFAULT_SEARCH_TIMEOUT_SECONDS,
   ensureSearch,
   getSearchHealth,
+  removeSearch,
   resolveSearchDiagnostics,
   resolveSearchMessage,
   searchStageCopy,
@@ -156,12 +157,24 @@ export default function SettingsManager() {
   // without a page reload or an extra probe round-trip.
   const [searchReachable, setSearchReachable] = useState<boolean | null>(null);
   const [searchHealthLoading, setSearchHealthLoading] = useState(false);
-  // Tracks which lifecycle action is in flight so Start shows Starting… and
-  // Stop shows Stopping… instead of sharing one misleading Starting… label.
-  const [searchAction, setSearchAction] = useState<"start" | "stop" | null>(
-    null
-  );
+  // Tracks which lifecycle action is in flight so Starting… names the start,
+  // Stopping… names the stop, and Removing… names the remove instead of sharing
+  // one misleading label.
+  const [searchAction, setSearchAction] = useState<
+    "start" | "stop" | "remove" | null
+  >(null);
   const searchActionBusy = searchAction !== null;
+  // Single source for the toggle direction: running offers Stop while stopped
+  // and unknown both offer Start, so the header never shows two buttons.
+  const searchRunning = searchReachable === true;
+  // Guarded remove enablement: only a known stopped entry or an
+  // unknown-never-started host may delete, never a running entry and never
+  // while any lifecycle action is busy. A running entry must stop first so the
+  // server never half-deletes a live container.
+  const searchRemoveEnabled = !searchActionBusy && !searchRunning;
+  // Non-blocking remove confirmation: the pending flag renders the shared modal
+  // so the container entry is never deleted by an accidental click.
+  const [pendingRemoveSearch, setPendingRemoveSearch] = useState(false);
   // Shared staged Start progress (1s poll, minutes-budget cap, elapsed, cleanup) feeding the
   // amber Starting line; busy ownership stays here so the cap path keeps the toggle locked.
   const {
@@ -250,39 +263,59 @@ export default function SettingsManager() {
     }
   }, []);
 
-  const handleEnsureSearch = async () => {
-    setSearchAction("start");
+  // Single lifecycle toggle mirroring the TopNav shape: unknown and stopped
+  // both start, running stops. The direction is captured up front so the busy
+  // label and the error slot can tell a failed start apart from a failed stop.
+  const handleToggleSearch = async () => {
+    if (searchAction !== null) return;
+    const wasStarting = !searchRunning;
+    setSearchAction(wasStarting ? "start" : "stop");
     setSearchHealthError(null);
     setSearchDiagnostics(null);
     // A Start fans out to a minutes-budget cascade (notably the first-run image pull), so poll
     // health about 1s for the live step while it runs. Polls feed the Starting line only; the pill
-    // moves solely on the terminal ensure result below, so mid-flight flaps never flip it early.
+    // moves solely on the terminal result below, so mid-flight flaps never flip it early.
     // The cap clears only the stage line plus a dot re-probe; busy stays locked until the
-    // terminal result below lands so Start/Stop cannot race the hung pull.
-    beginSearchStartProgress(() => {
-      void refreshSearchHealth();
-    });
+    // terminal result below lands so the toggle cannot race the hung pull.
+    if (wasStarting) {
+      beginSearchStartProgress(() => {
+        void refreshSearchHealth();
+      });
+    }
     try {
-      const response = await ensureSearch();
-      // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
+      const response = wasStarting ? await ensureSearch() : await stopSearch();
+      // Honest tri-state: only a boolean reachable flag may move the pill; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of optimistically flipping.
       // A failed start (reachable false) renders the trimmed banner in the existing error slot
       // with chained detail in the collapsed diagnostics below, instead of flipping silently to red.
+      // A failed stop (still reachable) surfaces its message; a clean stop clears the slot.
+      // Stop carries no chained diagnostics today, but the slot clears symmetrically with ensure.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchDiagnostics(resolveSearchDiagnostics(response));
-        if (!response.reachable) {
+        if (wasStarting && !response.reachable) {
           const detail = resolveSearchMessage(response);
           setSearchHealthError(detail ?? "Search start failed; status unchanged.");
+        } else if (!wasStarting && response.reachable) {
+          const detail = resolveSearchMessage(response);
+          setSearchHealthError(detail ?? "Search stop failed; still reachable.");
         }
-      } else {
+      } else if (wasStarting) {
         setSearchHealthError(
           "Search start returned an unexpected response; status unchanged."
+        );
+      } else {
+        setSearchHealthError(
+          "Search stop returned an unexpected response; status unchanged."
         );
       }
     } catch (err) {
       setSearchHealthError(
-        err instanceof Error ? err.message : "Failed to start search."
+        err instanceof Error
+          ? err.message
+          : wasStarting
+            ? "Failed to start search."
+            : "Failed to stop search."
       );
     } finally {
       // Terminal result stops the Starting line on every path (success, failure, cancellation),
@@ -292,31 +325,48 @@ export default function SettingsManager() {
     }
   };
 
-  const handleStopSearch = async () => {
-    setSearchAction("stop");
+  // Guarded remove through the dedicated remove path: the server stops a
+  // running entry first rather than half-deleting, the image cache survives so
+  // the next Start recreates the entry, and the pill moves solely on the
+  // honest reachable re-probe below. The button stays disabled while running
+  // or busy, so this path normally runs from stopped or unknown only; a
+  // still-reachable result refuses with guidance instead of claiming deleted.
+  const handleConfirmRemoveSearch = async () => {
+    if (searchAction !== null) return;
+    setPendingRemoveSearch(false);
+    setSearchAction("remove");
     setSearchHealthError(null);
     setSearchDiagnostics(null);
     try {
-      const response = await stopSearch();
-      // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
-      // preserve the previous state and surface an inline error instead of claiming stopped.
-      // A failed stop (still reachable) surfaces its message; a clean stop clears the slot.
-      // Stop carries no chained diagnostics today, but the slot clears symmetrically with ensure.
+      const response = await removeSearch();
+      // Honest tri-state like the toggle: only a boolean reachable flag may
+      // move the pill; shape-drifted payloads preserve state with an error.
+      // A refused remove (still reachable, or stopped-but-still-listed via
+      // removed false) surfaces its guidance; a clean delete clears to
+      // Stopped so the next Start recreates the entry.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchDiagnostics(resolveSearchDiagnostics(response));
         if (response.reachable) {
           const detail = resolveSearchMessage(response);
-          setSearchHealthError(detail ?? "Search stop failed; still reachable.");
+          setSearchHealthError(
+            detail ??
+              "Search remove failed; still reachable. Stop the container first, then retry remove."
+          );
+        } else if (response.removed === false) {
+          const detail = resolveSearchMessage(response);
+          setSearchHealthError(
+            detail ?? "Search remove failed; status unchanged."
+          );
         }
       } else {
         setSearchHealthError(
-          "Search stop returned an unexpected response; status unchanged."
+          "Search remove returned an unexpected response; status unchanged."
         );
       }
     } catch (err) {
       setSearchHealthError(
-        err instanceof Error ? err.message : "Failed to stop search."
+        err instanceof Error ? err.message : "Failed to remove search container."
       );
     } finally {
       setSearchAction(null);
@@ -2384,30 +2434,70 @@ export default function SettingsManager() {
                   image (about 150 MB), later starts reuse it.
                 </p>
               </div>
+              {/* Lifecycle actions in the header: stopped and unknown offer Start, running
+                  offers Stop, and a guarded Remove sits beside the toggle for a stopped or
+                  unknown entry only — never while running and never while any action runs.
+                  Starting…/Stopping…/Removing… lock both controls while the action runs. */}
               <div className="row">
                 <button
                   type="button"
                   className="ghost icon-text-btn"
-                  onClick={() => void handleEnsureSearch()}
+                  data-testid="search-toggle"
+                  onClick={() => void handleToggleSearch()}
                   disabled={searchActionBusy}
-                  aria-label="Start SearXNG"
+                  aria-label={searchRunning ? "Stop SearXNG" : "Start SearXNG"}
+                  title={searchRunning ? "Stop SearXNG" : "Start SearXNG"}
                 >
-                  <SearchIcon size={14} />
-                  <span>
-                    {searchAction === "start" ? "Starting…" : "Start SearXNG"}
-                  </span>
+                  {searchAction === "start" ? (
+                    <>
+                      <SearchIcon size={14} />
+                      <span>Starting…</span>
+                    </>
+                  ) : searchAction === "stop" ? (
+                    <>
+                      <StopIcon size={14} />
+                      <span>Stopping…</span>
+                    </>
+                  ) : searchRunning ? (
+                    <>
+                      <StopIcon size={14} />
+                      <span>Stop SearXNG</span>
+                    </>
+                  ) : (
+                    <>
+                      <SearchIcon size={14} />
+                      <span>Start SearXNG</span>
+                    </>
+                  )}
                 </button>
+                {/* Guarded delete beside the toggle: danger styling marks the
+                    destructive step, and the enablement matrix (stopped or
+                    unknown only, never running, never busy) keeps a live entry
+                    from half-deleting — a running entry must stop first. */}
                 <button
                   type="button"
-                  className="ghost icon-text-btn"
-                  onClick={() => void handleStopSearch()}
-                  disabled={searchActionBusy}
-                  aria-label="Stop SearXNG"
+                  className="danger icon-text-btn"
+                  data-testid="search-remove"
+                  onClick={() => setPendingRemoveSearch(true)}
+                  disabled={!searchRemoveEnabled}
+                  aria-label="Remove SearXNG container"
+                  title={
+                    searchRunning
+                      ? "Stop SearXNG before removing"
+                      : "Remove SearXNG container"
+                  }
                 >
-                  <StopIcon size={14} />
-                  <span>
-                    {searchAction === "stop" ? "Stopping…" : "Stop SearXNG"}
-                  </span>
+                  {searchAction === "remove" ? (
+                    <>
+                      <TrashIcon size={14} />
+                      <span>Removing…</span>
+                    </>
+                  ) : (
+                    <>
+                      <TrashIcon size={14} />
+                      <span>Remove container</span>
+                    </>
+                  )}
                 </button>
               </div>
             </div>
@@ -2521,6 +2611,68 @@ export default function SettingsManager() {
                   {searchDiagnostics}
                 </pre>
               </details>
+            ) : null}
+            {/* Single lifecycle hint keeps the three-way contract explicit: stop
+                preserves the entry for a fast restart, remove deletes it fully
+                while the image stays cached, and quit intentionally leaves the
+                container running. */}
+            <p
+              className="muted text-sm"
+              data-testid="search-lifecycle-hint"
+              style={{ margin: "8px 0 0 0" }}
+            >
+              Stop keeps the container for fast restart, Remove deletes it
+              fully, and quit leaves it running by design.
+            </p>
+            {/* Guarded remove confirmation via the shared modal so the entry is
+                never deleted by an accidental click. */}
+            {pendingRemoveSearch ? (
+              <Modal
+                label="Confirm remove search container"
+                onClose={() => {
+                  if (searchAction !== null) return;
+                  setPendingRemoveSearch(false);
+                }}
+                containerClassName="modal-container session-delete-modal"
+              >
+                <div className="modal-header">
+                  <h3>Remove search container?</h3>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    onClick={() => setPendingRemoveSearch(false)}
+                    disabled={searchAction !== null}
+                    aria-label="Close"
+                  >
+                    <CloseIcon size={16} />
+                  </button>
+                </div>
+                <div className="modal-body">
+                  <p className="muted" style={{ margin: 0 }}>
+                    This will stop (if running) and delete the
+                    runeweaver-searxng container. The image cache stays and
+                    next Start recreates the container.
+                  </p>
+                </div>
+                <div className="modal-footer">
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => setPendingRemoveSearch(false)}
+                    disabled={searchAction !== null}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    className="danger"
+                    onClick={() => void handleConfirmRemoveSearch()}
+                    disabled={searchAction !== null}
+                  >
+                    Remove container
+                  </button>
+                </div>
+              </Modal>
             ) : null}
           </div>
         )}
