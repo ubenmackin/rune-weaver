@@ -20,6 +20,10 @@ export interface WSToolStartFrame {
   callID: string;
   argumentsJSON: string;
   sessionID?: string;
+  // Zero-based LLM round that produced this call, oldest first. Mirrors the
+  // engine frame so live timelines interleave like history reloads; absent on
+  // older engines where live ordering falls back to arrival order.
+  roundIndex?: number;
 }
 
 export interface WSToolEndFrame {
@@ -28,6 +32,9 @@ export interface WSToolEndFrame {
   callID: string;
   result: ToolResult;
   sessionID?: string;
+  // Chronological round mirroring the start frame so resumed batches rejoin
+  // the same timeline instead of collapsing; absent on older engines.
+  roundIndex?: number;
 }
 
 export interface WSStreamDone {
@@ -38,6 +45,10 @@ export interface WSStreamDone {
   text?: string;
   sessionID: string;
   toolActions?: ToolAction[];
+  // Highest round index in this turn, when any tool ran. Mirrors the engine
+  // terminal frame so clients learn the round count without scanning actions;
+  // absent on older engines or text-only turns.
+  roundIndex?: number;
   totalTokens?: number;
   modelName?: string;
   contextLength?: number;
@@ -69,6 +80,17 @@ export interface WSWarningFrame {
   sessionID?: string;
 }
 
+// Session-tagged liveness heartbeat proving the engine is still processing a
+// turn while prompt evaluation emits no deltas to render. Views re-arm their
+// inactivity timer on it without touching message state; older dashboards that
+// do not know this type drop it as an unknown frame. TypeScript mirror of
+// RuneWeaverCore.WSTurnAliveFrame (Sources/RuneWeaverCore/WSWire.swift);
+// update both sides together so the wire shape never drifts.
+export interface WSTurnAliveFrame {
+  type: "turn_alive";
+  sessionID?: string;
+}
+
 export interface WSErrorFrame {
   type: "error";
   message: string;
@@ -97,7 +119,8 @@ export type WSIncomingFrame =
   | WSCancelledFrame
   | WSErrorFrame
   | WSWarningFrame
-  | WSApprovalFrame;
+  | WSApprovalFrame
+  | WSTurnAliveFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
@@ -147,6 +170,12 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // Degraded-tool notices are informational: a preformatted line plus an
       // optional owner, so the guard only requires the line like error frames.
       return typeof value.message === "string";
+    case "turn_alive":
+      // Liveness heartbeats are session-tagged with no payload to render; the
+      // guard only checks the owner so malformed tags drop before re-arming.
+      return (
+        value.sessionID === undefined || typeof value.sessionID === "string"
+      );
     case "approval":
       return isApprovalFrame(value);
     default:

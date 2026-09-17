@@ -5,13 +5,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   cancelChat,
+  compareToolActionsByRound,
   decideApproval,
   getSession,
   getSessionToolActions,
+  groupToolActionsByRound,
   listApprovals,
   newSessionId,
+  normalizeRoundIndex,
   postChat,
+  sortToolActionsByRound,
   updateSessionTitle,
+  type ChatSegment,
   type HealthResponse,
   type PermissionRequest,
   type SessionMessageToolActions,
@@ -25,7 +30,11 @@ import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
 import { WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
-import type { WSIncomingFrame } from "../hooks/useSharedWebSocket";
+import type {
+  WSIncomingFrame,
+  WSToolEndFrame,
+  WSToolStartFrame,
+} from "../hooks/useSharedWebSocket";
 import {
   approvalSessionID,
   isRecord,
@@ -40,11 +49,245 @@ interface MessageItem {
   role: "user" | "assistant" | "system" | "tool";
   text: string;
   toolActions?: ToolAction[];
+  // Chronological timeline for this turn: text and tool batches alternate in the
+  // order the engine produced them so multi-round turns never collapse into one
+  // lumped bucket. Flat `text`/`toolActions` stay as back-compat summaries while
+  // rendering walks this list in order; absent on turns built before segmentation.
+  segments?: ChatSegment[];
 }
 
 interface InFlightTurn {
   toolActions: ToolAction[];
   text: string;
+  // Live chronological timeline built incrementally: the current text segment
+  // closes when a tool starts and a fresh text segment opens on the next delta
+  // after tools, mirroring the persisted per-round note boundaries for reloads.
+  segments: ChatSegment[];
+}
+
+// Folds flat summaries from an ordered timeline so legacy readers that only know
+// `text`/`toolActions` still see the same content that segmented rendering shows.
+function flatTextFromSegments(segments: ChatSegment[]): string {
+  return segments
+    .filter((segment) => segment.kind === "text")
+    .map((segment) => segment.text)
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+// Flattens tool batches oldest-first so the legacy bucket matches segment order.
+function flatActionsFromSegments(segments: ChatSegment[]): ToolAction[] {
+  const flat: ToolAction[] = [];
+  for (const segment of segments) {
+    if (segment.kind === "tools") flat.push(...segment.actions);
+  }
+  return flat;
+}
+
+// Appends one started call to the live timeline, closing the open text segment
+// by opening a fresh tools batch instead of concatenating onto prior prose.
+function appendToolStartToSegments(
+  segments: ChatSegment[],
+  action: ToolAction,
+): ChatSegment[] {
+  const next = segments.map((segment) =>
+    segment.kind === "tools"
+      ? { kind: "tools" as const, actions: [...segment.actions] }
+      : { ...segment },
+  );
+  const last = next[next.length - 1];
+  if (last && last.kind === "tools") {
+    last.actions.push(action);
+    return next;
+  }
+  return [...next, { kind: "tools" as const, actions: [action] }];
+}
+
+// Merges one completed result into the matching live batch by call identity so
+// resumed batches rejoin the same timeline instead of forking a duplicate row.
+// Falls back to pending same-tool rows only when no call identity matches, so
+// batches with multiple same-tool calls never misattribute one result to all rows.
+function updateToolEndInSegments(
+  segments: ChatSegment[],
+  callID: string,
+  toolName: string,
+  result: ToolResult | null,
+  roundIndex?: number,
+): ChatSegment[] {
+  const hasCallIDMatch = segments.some(
+    (segment) =>
+      segment.kind === "tools" &&
+      segment.actions.some((action) => action.callID === callID),
+  );
+  return segments.map((segment) => {
+    if (segment.kind !== "tools") return segment;
+    return {
+      kind: "tools" as const,
+      actions: segment.actions.map((action) => {
+        const isMatch = hasCallIDMatch
+          ? action.callID === callID
+          : !action.result && action.toolName === toolName;
+        return isMatch
+          ? {
+              ...action,
+              result,
+              ...(roundIndex !== undefined ? { roundIndex } : {}),
+            }
+          : action;
+      }),
+    };
+  });
+}
+
+// Appends streamed prose to the live timeline, opening a fresh text segment when
+// the previous piece is a tool batch so text never merges across round bounds.
+function appendDeltaToSegments(
+  segments: ChatSegment[],
+  deltaText: string,
+): ChatSegment[] {
+  if (!deltaText) return segments;
+  const next = segments.map((segment) =>
+    segment.kind === "tools"
+      ? { kind: "tools" as const, actions: [...segment.actions] }
+      : { ...segment },
+  );
+  const last = next[next.length - 1];
+  if (last && last.kind === "text") {
+    return [
+      ...next.slice(0, -1),
+      { kind: "text" as const, text: last.text + deltaText },
+    ];
+  }
+  return [...next, { kind: "text" as const, text: deltaText }];
+}
+
+// Keeps only prose lines not already covered by structured actions, identified
+// by the authoritative call identifier, so narration fallback lines never
+// double-count with structured actions while unrelated prose stays visible.
+function filterUncoveredText(text: string, coveredCallIDs: Set<string>): string {
+  return text
+    .split("\n")
+    .filter((line) => {
+      if (!line.trim()) return false;
+      for (const callID of coveredCallIDs) {
+        if (callID && line.includes(`[${callID}]`)) return false;
+      }
+      return true;
+    })
+    .join("\n")
+    .trim();
+}
+
+// Builds a terminal timeline from the streamed skeleton plus authoritative done
+// actions: tool results merge by call identity while the streamed text order
+// stays, so live and reload render the same interleaving without double-counting.
+function buildDoneSegments(
+  snapshotSegments: ChatSegment[],
+  doneToolActions: ToolAction[],
+  doneText: string | undefined,
+  snapshotText: string,
+): ChatSegment[] {
+  const byCallID = new Map<string, ToolAction>();
+  for (const action of doneToolActions) {
+    if (action.callID) byCallID.set(action.callID, action);
+  }
+  if (snapshotSegments.length > 0) {
+    const merged = snapshotSegments.map((segment) => {
+      if (segment.kind !== "tools") return segment;
+      return {
+        kind: "tools" as const,
+        actions: segment.actions.map((action) => {
+          const authoritative = action.callID
+            ? byCallID.get(action.callID)
+            : undefined;
+          return authoritative ? { ...authoritative } : { ...action };
+        }),
+      };
+    });
+    // Done actions for calls never streamed (parked resumes) append as their own
+    // round groups so the same turn timeline grows instead of dropping them.
+    const streamedCallIDs = new Set(
+      merged.flatMap((segment) =>
+        segment.kind === "tools"
+          ? segment.actions.map((action) => action.callID)
+          : [],
+      ),
+    );
+    const missing = doneToolActions.filter(
+      (action) => action.callID && !streamedCallIDs.has(action.callID),
+    );
+    if (missing.length > 0) {
+      const groups = groupToolActionsByRound(
+        [...missing].sort(compareToolActionsByRound),
+      );
+      for (const group of groups) {
+        merged.push({ kind: "tools" as const, actions: group });
+      }
+    }
+    // The streamed skeleton already carries every round's prose in order; the
+    // terminal text repeats only the final round, so preferring it would discard
+    // intermediate narration. Keep streamed prose unless nothing streamed.
+    const hasStreamedText = merged.some(
+      (segment) => segment.kind === "text" && segment.text.trim().length > 0,
+    );
+    if (!hasStreamedText && doneText && doneText.trim().length > 0) {
+      merged.push({ kind: "text" as const, text: doneText });
+    } else if (
+      !hasStreamedText &&
+      snapshotText.trim().length > 0 &&
+      (!doneText || doneText.trim().length === 0)
+    ) {
+      merged.push({ kind: "text" as const, text: snapshotText });
+    }
+    return merged;
+  }
+  // No live skeleton (cold done): group authoritative actions by round oldest-first
+  // then trail the terminal text, matching the history reconstruction order.
+  const ordered = [...doneToolActions].sort(compareToolActionsByRound);
+  const built: ChatSegment[] = [];
+  for (const group of groupToolActionsByRound(ordered)) {
+    built.push({ kind: "tools" as const, actions: group });
+  }
+  const trailing = (doneText ?? snapshotText ?? "").trim();
+  // Avoid duplicating narration fallback lines already covered by structured
+  // actions: only uncovered prose becomes a text segment.
+  if (trailing.length > 0) {
+    const covered = new Set(
+      ordered.map((action) => action.callID).filter(Boolean),
+    );
+    const uncovered = filterUncoveredText(trailing, covered);
+    if (uncovered.length > 0) {
+      built.push({ kind: "text" as const, text: uncovered });
+    } else if (built.length === 0) {
+      built.push({ kind: "text" as const, text: trailing });
+    }
+  }
+  return built;
+}
+
+// Builds REST fallback timelines without a live skeleton: round groups in order
+// then the terminal text, so polling clients agree with streaming ones.
+function buildRestSegments(actions: ToolAction[], text: string): ChatSegment[] {
+  const ordered = [...actions].sort(compareToolActionsByRound);
+  const built: ChatSegment[] = [];
+  for (const group of groupToolActionsByRound(ordered)) {
+    built.push({ kind: "tools" as const, actions: group });
+  }
+  if (text.trim().length > 0) {
+    const covered = new Set(ordered.map((a) => a.callID).filter(Boolean));
+    const uncovered = filterUncoveredText(text, covered);
+    // Without a structured record every line stays visible as prose instead of
+    // guessing its shape, so fall back to the full text when all lines filter.
+    if (uncovered.length > 0) {
+      built.push({ kind: "text" as const, text: uncovered });
+    } else if (built.length === 0) {
+      built.push({ kind: "text" as const, text: text.trim() });
+    } else if (ordered.length === 0) {
+      built.push({ kind: "text" as const, text: text.trim() });
+    }
+  }
+  return built;
 }
 
 const MAX_MESSAGES = 200;
@@ -109,24 +352,57 @@ export function approvalsForSession(
   });
 }
 
-// Bounds inactivity during a WebSocket-started turn: a socket that drops with no subsequent
-// activity must not strand the input disabled forever. Reset on each tool execution, streaming
-// delta, or approval prompt so multi-turn tool chains never time out while active.
-const TURN_TIMEOUT_MS = 300_000;
+// Liveness-aware inactivity budget for a WebSocket-started turn. A socket that
+// drops with no subsequent activity must not strand the input disabled forever,
+// but healthy local inference can spend minutes in prompt evaluation with zero
+// deltas to render — the server covers those stretches with session-tagged
+// turn_alive heartbeats that re-arm this timer without rendering. Reset on each
+// tool execution, streaming delta, approval prompt, warning, or heartbeat so
+// multi-turn tool chains never time out while active; only a truly silent
+// socket (no frames at all) trips the timeout, while a dropped socket takes
+// the immediate close path instead.
+const TURN_TIMEOUT_BASE_MS = 600_000;
+const TURN_TIMEOUT_PER_CONTEXT_TOKEN_MS = 30;
+const TURN_TIMEOUT_MAX_MS = 900_000;
+
+// Scales the inactivity budget with the model's context window so large prompts
+// on slow local models get room to finish prompt evaluation: a small window
+// stays at the 10-minute minimum while a large window stretches toward the
+// 15-minute cap instead of the old fixed 5 minutes that cancelled healthy evals.
+function turnTimeoutMs(contextTokens: number): number {
+  const normalized =
+    Number.isFinite(contextTokens) && contextTokens > 0
+      ? Math.floor(contextTokens)
+      : 8192;
+  const scaled = normalized * TURN_TIMEOUT_PER_CONTEXT_TOKEN_MS;
+  return Math.min(Math.max(TURN_TIMEOUT_BASE_MS, scaled), TURN_TIMEOUT_MAX_MS);
+}
 
 interface ChatViewProps {
   health?: HealthResponse | null;
 }
 
-// Indexes server-derived per-message groups by parent message ID.
+// Indexes server-derived per-message groups by parent message ID, oldest message
+// first. Each group's actions sort chronologically by round so reloads interleave
+// identically to live turns; untracked rounds keep stored order at their stored slot.
 export function toolActionMap(
   groups: SessionMessageToolActions[] | undefined,
 ): Map<string, ToolAction[]> {
   const map = new Map<string, ToolAction[]>();
   for (const group of groups ?? []) {
-    map.set(group.messageID, [...(group.actions ?? [])]);
+    map.set(group.messageID, sortToolActionsByRound([...(group.actions ?? [])]));
   }
   return map;
+}
+
+// Groups one message's authoritative actions into chronological tools segments,
+// oldest round first, so a multi-call note never collapses rounds into one bucket.
+function toolsSegmentsForMessage(actions: ToolAction[]): ChatSegment[] {
+  const ordered = [...actions].sort(compareToolActionsByRound);
+  return groupToolActionsByRound(ordered).map((group) => ({
+    kind: "tools" as const,
+    actions: group,
+  }));
 }
 
 export function reconstructMessages(
@@ -149,22 +425,28 @@ export function reconstructMessages(
     }
     return (structuredByMessageID as Record<string, ToolAction[]>)[messageID];
   };
+  // Flushes one turn's ordered timeline while keeping flat summaries for legacy
+  // readers: text joins text segments and actions flatten tool batches in order.
+  const flushTurn = (segments: ChatSegment[], id: string): MessageItem => {
+    const text = flatTextFromSegments(segments);
+    const flat = flatActionsFromSegments(segments);
+    return {
+      id,
+      role: "assistant",
+      text,
+      toolActions: flat.length > 0 ? flat : undefined,
+      segments: [...segments],
+    };
+  };
   const result: MessageItem[] = [];
-  let pendingToolActions: ToolAction[] = [];
-  let pendingProse: string[] = [];
+  let pendingSegments: ChatSegment[] = [];
 
   for (let i = 0; i < rawMessages.length; i++) {
     const m = rawMessages[i];
     if (m.role === "user") {
-      if (pendingToolActions.length > 0 || pendingProse.length > 0) {
-        result.push({
-          id: `interim_${i}`,
-          role: "assistant",
-          text: pendingProse.join("\n").trim(),
-          toolActions: pendingToolActions.length > 0 ? pendingToolActions : undefined,
-        });
-        pendingToolActions = [];
-        pendingProse = [];
+      if (pendingSegments.length > 0) {
+        result.push(flushTurn(pendingSegments, `interim_${i}`));
+        pendingSegments = [];
       }
       result.push({
         id: m.id || `${m.createdAt || i}`,
@@ -204,7 +486,8 @@ export function reconstructMessages(
         for (const rawLine of m.content.split("\n")) {
           if (!rawLine.trim()) continue;
           // Hide only lines the server record covers, identified by the
-          // authoritative call identifier, so unrelated prose stays visible.
+          // authoritative call identifier, so unrelated prose stays visible and
+          // narration fallback lines never double-count with structured actions.
           let isCovered = false;
           for (const callID of coveredCallIDs) {
             if (rawLine.includes(`[${callID}]`)) {
@@ -215,10 +498,15 @@ export function reconstructMessages(
           if (isCovered) continue;
           leftoverLines.push(rawLine);
         }
-        pendingToolActions.push(...structured);
+        // Preserve live order per round: this note's prose precedes its tools, and
+        // successive notes append as successive segments instead of one bucket.
         if (leftoverLines.length > 0) {
-          pendingProse.push(leftoverLines.join("\n").trim());
+          pendingSegments.push({
+            kind: "text",
+            text: leftoverLines.join("\n").trim(),
+          });
         }
+        pendingSegments.push(...toolsSegmentsForMessage(structured));
         continue;
       }
       const leftoverLines: string[] = [];
@@ -229,17 +517,16 @@ export function reconstructMessages(
         leftoverLines.push(rawLine);
       }
       if (leftoverLines.length > 0) {
-        const fullProse = [...pendingProse, leftoverLines.join("\n")].filter(Boolean).join("\n\n").trim();
-        const actions = pendingToolActions.length > 0 ? pendingToolActions : undefined;
-        result.push({
-          id: m.id || `${m.createdAt || i}`,
-          role: "assistant",
-          text: fullProse,
-          toolActions: actions,
+        pendingSegments.push({
+          kind: "text",
+          text: leftoverLines.join("\n").trim(),
         });
-        pendingToolActions = [];
-        pendingProse = [];
-      } else if (pendingToolActions.length > 0) {
+        // A prose message with no structured record closes the current turn's
+        // timeline like before, so consecutive bare messages keep their prior
+        // split instead of merging every turn into one.
+        result.push(flushTurn(pendingSegments, m.id || `${m.createdAt || i}`));
+        pendingSegments = [];
+      } else if (pendingSegments.length > 0) {
         // Empty message with no server record: keep pending tool context
         // for the next prose turn instead of synthesizing.
         continue;
@@ -249,13 +536,8 @@ export function reconstructMessages(
     }
   }
 
-  if (pendingToolActions.length > 0 || pendingProse.length > 0) {
-    result.push({
-      id: `trailing_${rawMessages.length}`,
-      role: "assistant",
-      text: pendingProse.join("\n").trim(),
-      toolActions: pendingToolActions.length > 0 ? pendingToolActions : undefined,
-    });
+  if (pendingSegments.length > 0) {
+    result.push(flushTurn(pendingSegments, `trailing_${rawMessages.length}`));
   }
 
   return result.filter(
@@ -360,6 +642,12 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     inFlightTurnRef.current = inFlightTurn;
   }, [inFlightTurn]);
+  // Live copy of the context window so the inactivity budget scales without
+  // re-creating the arming callback on every health poll.
+  const contextLimitRef = useRef(contextLimit);
+  useEffect(() => {
+    contextLimitRef.current = contextLimit;
+  }, [contextLimit]);
 
   const clearTurnTimeout = useCallback(() => {
     if (turnTimeoutRef.current != null) {
@@ -372,9 +660,11 @@ export default function ChatView({ health }: ChatViewProps) {
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
     }
-    // Capture the owning session at turn start; reading the live ref inside
-    // the timeout would cancel a session switched to mid-turn instead.
-    const turnSID = sessionIDRef.current;
+    // Prefer the owning session captured at turn start so a re-arm after a
+    // mid-turn session switch still cancels the orphaned turn, falling back
+    // to the live session only before the first turn marker lands.
+    const turnSID = turnSessionIDRef.current ?? sessionIDRef.current;
+    const budgetMs = turnTimeoutMs(contextLimitRef.current);
     turnTimeoutRef.current = setTimeout(() => {
       turnTimeoutRef.current = null;
       // Best-effort cancel the orphaned server turn so a retry does not
@@ -385,10 +675,15 @@ export default function ChatView({ health }: ChatViewProps) {
       turnSessionIDRef.current = null;
       setInFlightTurn(null);
       setPending(false);
+      // Honest liveness copy: with heartbeats re-arming healthy evals, reaching
+      // here means no frames at all for the whole budget while the socket stayed
+      // open — a large prompt stalled on slow local inference, not a routine
+      // pause. Name the cause instead of a bare timed-out line.
+      const budgetMinutes = Math.max(1, Math.round(budgetMs / 60000));
       setError(
-        "Turn timed out waiting for a response. The connection may have dropped — retry your message.",
+        `Still thinking took longer than expected — no progress for ${budgetMinutes} minutes with a large prompt on local inference. The interrupted turn was cancelled; retry your message.`,
       );
-    }, TURN_TIMEOUT_MS);
+    }, budgetMs);
   }, []);
 
   // Release a stranded turn when the socket drops mid-turn.
@@ -483,15 +778,41 @@ export default function ChatView({ health }: ChatViewProps) {
     // Untagged session frames carry no owner, so they must never touch the
     // current view; only global broadcasts (approval/run_*) bypass tagging.
     // Warnings stay session-scoped with the turn frames so one session's
-    // skipped tools never alarm another session's banner.
+    // skipped tools never alarm another session's banner. Heartbeats stay
+    // session-scoped for the same reason so one turn's proof of life never
+    // re-arms another session's timer.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
         frameType === "tool_start" ||
         frameType === "tool_end" ||
         frameType === "done" ||
-        frameType === "warning")
+        frameType === "warning" ||
+        frameType === "turn_alive")
     ) {
+      return;
+    }
+
+    if (frameType === "turn_alive") {
+      // Liveness heartbeat: the engine is still in prompt evaluation with no
+      // deltas to render. Re-arm the inactivity timer without touching message
+      // state so healthy long evals never look like a dropped socket, and
+      // render nothing so older dashboards that drop unknown types agree.
+      // Only re-arm while a turn is actually in flight so a parked approval
+      // arriving with no active turn never starts a spurious timer.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        // Heartbeats are session-tagged liveness for one turn, so a frame for
+        // another session must never re-arm this turn's timer after a mid-turn
+        // session switch leaves an orphaned turn behind.
+        if (
+          !frameSessionID ||
+          normalizeSessionID(frameSessionID) !==
+            normalizeSessionID(turnSessionIDRef.current)
+        ) {
+          return;
+        }
+        armTurnTimeout();
+      }
       return;
     }
 
@@ -513,6 +834,11 @@ export default function ChatView({ health }: ChatViewProps) {
       const toolName = rawToolName;
       const callID = rawCallID;
       const argumentsJSON = rawArgumentsJSON;
+      // Round hints stay ordering-only: drifted shapes degrade to unordered rather
+      // than dropping the execution, so malformed rounds never hide tools.
+      const startRound = normalizeRoundIndex(
+        (data as WSToolStartFrame).roundIndex,
+      );
       setPending(true);
       pendingRef.current = true;
       // Evict only this batch's waiting placeholder (same callID) or uncorrelated waiting with no
@@ -531,15 +857,22 @@ export default function ChatView({ health }: ChatViewProps) {
       );
       setInFlightTurn((prev) => {
         const currentActions = prev ? [...prev.toolActions] : [];
-        currentActions.push({
+        const started: ToolAction = {
           toolName,
           callID,
           argumentsJSON,
           result: null,
-        });
+          ...(startRound !== undefined ? { roundIndex: startRound } : {}),
+        };
+        currentActions.push(started);
+        const previousSegments = prev ? prev.segments : [];
+        // Closing the open text segment here keeps live interleaving identical to
+        // the persisted per-round note boundaries used on reload.
+        const segments = appendToolStartToSegments(previousSegments, started);
         return {
           toolActions: currentActions,
           text: prev ? prev.text : "",
+          segments,
         };
       });
     } else if (frameType === "tool_end") {
@@ -559,33 +892,74 @@ export default function ChatView({ health }: ChatViewProps) {
       const endCallID = rawEndCallID;
       const endToolName = rawEndToolName;
       const endResult = isToolResult(rawEndResult) ? rawEndResult : null;
+      // Live end frames mirror the start round so resumed batches rejoin the
+      // same timeline; absent rounds keep the start value instead of clearing it.
+      const endRound = normalizeRoundIndex(
+        (data as WSToolEndFrame).roundIndex,
+      );
       setMessages((prev) =>
         prev.map((msg) => {
           if (!msg.toolActions || msg.toolActions.length === 0) return msg;
-          const hasMatch = msg.toolActions.some(
-            (a) => a.callID === endCallID || (!a.result && a.toolName === endToolName)
+          // Match by call identity first so batches with multiple same-tool
+          // calls never stamp one result onto every pending sibling; the
+          // pending same-tool fallback only applies when no call identity
+          // matches in this message.
+          const hasCallIDMatch = msg.toolActions.some(
+            (a) => a.callID === endCallID,
           );
+          const hasMatch = hasCallIDMatch
+            ? true
+            : msg.toolActions.some(
+                (a) => !a.result && a.toolName === endToolName,
+              );
           if (!hasMatch) return msg;
+          const nextActions = msg.toolActions.map((a) => {
+            const isMatch = hasCallIDMatch
+              ? a.callID === endCallID
+              : !a.result && a.toolName === endToolName;
+            return isMatch
+              ? {
+                  ...a,
+                  result: endResult,
+                  ...(endRound !== undefined ? { roundIndex: endRound } : {}),
+                }
+              : a;
+          });
+          // Keep segmented timelines in sync with the flat bucket so history
+          // reloads and live updates agree on the same chronological rows.
+          const nextSegments = msg.segments
+            ? updateToolEndInSegments(
+                msg.segments,
+                endCallID,
+                endToolName,
+                endResult,
+                endRound,
+              )
+            : undefined;
           return {
             ...msg,
-            toolActions: msg.toolActions.map((a) =>
-              a.callID === endCallID || (!a.result && a.toolName === endToolName)
-                ? { ...a, result: endResult }
-                : a
-            ),
+            toolActions: nextActions,
+            ...(nextSegments ? { segments: nextSegments } : {}),
           };
         })
       );
       setInFlightTurn((prev) => {
         if (!prev) return prev;
+        // Same call-identity-first rule as the message bucket above: one end
+        // frame updates only its own call, with the pending same-tool fallback
+        // reserved for frames that match nothing by identity.
+        const hasTurnCallIDMatch = prev.toolActions.some(
+          (action) => action.callID === endCallID,
+        );
         const updated = prev.toolActions.map((action) => {
-          if (
-            action.callID === endCallID ||
-            (!action.result && action.toolName === endToolName)
-          ) {
+          const isMatch = hasTurnCallIDMatch
+            ? action.callID === endCallID
+            : !action.result && action.toolName === endToolName;
+          if (isMatch) {
             return {
               ...action,
               result: endResult,
+              ...(endRound !== undefined ? { roundIndex: endRound } : {}),
             };
           }
           return action;
@@ -593,6 +967,13 @@ export default function ChatView({ health }: ChatViewProps) {
         return {
           ...prev,
           toolActions: updated,
+          segments: updateToolEndInSegments(
+            prev.segments,
+            endCallID,
+            endToolName,
+            endResult,
+            endRound,
+          ),
         };
       });
     } else if (frameType === "delta") {
@@ -616,6 +997,9 @@ export default function ChatView({ health }: ChatViewProps) {
       setInFlightTurn((prev) => ({
         toolActions: prev ? prev.toolActions : [],
         text: (prev ? prev.text : "") + deltaText,
+        // Opening a fresh text segment after tools preserves round bounds so the
+        // live timeline interleaves exactly like the persisted note boundaries.
+        segments: appendDeltaToSegments(prev ? prev.segments : [], deltaText),
       }));
     } else if (frameType === "approval") {
       // Live approval prompts join the inbox immediately so the session
@@ -740,15 +1124,33 @@ export default function ChatView({ health }: ChatViewProps) {
       // stays pure; nesting a message append inside a turn updater would
       // run twice under double-invoke and duplicate the assistant message.
       const snapshot = inFlightTurnRef.current;
+      const orderedDoneActions = [...(doneToolActions ?? [])].sort(
+        compareToolActionsByRound,
+      );
       const finalActions =
-        doneToolActions && doneToolActions.length > 0
-          ? doneToolActions
-          : snapshot?.toolActions ?? [];
+        orderedDoneActions.length > 0
+          ? orderedDoneActions
+          : [...(snapshot?.toolActions ?? [])].sort(compareToolActionsByRound);
+      // Chronological terminal timeline: merge authoritative results into the
+      // streamed skeleton so multi-round turns keep text/tools interleaved and
+      // parked resumes append to the same turn instead of a lumped bucket.
+      const doneSegments = buildDoneSegments(
+        snapshot?.segments ?? [],
+        finalActions,
+        doneText,
+        snapshot?.text ?? "",
+      );
+      const legacyText =
+        doneSegments.length > 0
+          ? flatTextFromSegments(doneSegments)
+          : (doneText ?? snapshot?.text ?? "");
+      const legacyActions = flatActionsFromSegments(doneSegments);
       const finalMsg: MessageItem = {
         id: newSessionId(),
         role: "assistant",
-        text: doneText ?? snapshot?.text ?? "",
-        toolActions: finalActions.length > 0 ? finalActions : undefined,
+        text: legacyText,
+        toolActions: legacyActions.length > 0 ? legacyActions : undefined,
+        segments: doneSegments.length > 0 ? doneSegments : undefined,
       };
       setMessages((prev) => {
         // Terminal dedup stays batch-scoped: evict only placeholders whose batch overlaps this
@@ -971,6 +1373,9 @@ export default function ChatView({ health }: ChatViewProps) {
     }
   };
 
+  // Manual cancel stays immediate even with the longer liveness budget: the
+  // user action clears the timer and aborts the server turn without waiting
+  // for the inactivity window to expire.
   async function handleCancel() {
     if (!pending) return;
     cancelledRef.current = true;
@@ -1019,7 +1424,7 @@ export default function ChatView({ health }: ChatViewProps) {
       textareaRef.current.style.height = "auto";
     }
 
-    setInFlightTurn({ toolActions: [], text: "" });
+    setInFlightTurn({ toolActions: [], text: "", segments: [] });
     // Remember the owning session so timeout/close cancels this turn even
     // when the user switches sessions before the terminal frame arrives.
     turnSessionIDRef.current = sessionID;
@@ -1088,12 +1493,24 @@ export default function ChatView({ health }: ChatViewProps) {
         isFirstMessageRef.current = false;
       }
 
+      const orderedRestActions = [...response.toolActions].sort(
+        compareToolActionsByRound,
+      );
+      const restSegments = buildRestSegments(
+        orderedRestActions,
+        response.text,
+      );
+      const restFlatText =
+        restSegments.length > 0
+          ? flatTextFromSegments(restSegments)
+          : response.text;
+      const restFlat = flatActionsFromSegments(restSegments);
       const assistantMessage: MessageItem = {
         id: newSessionId(),
         role: "assistant",
-        text: response.text,
-        toolActions:
-          response.toolActions.length > 0 ? response.toolActions : undefined,
+        text: restFlatText,
+        toolActions: restFlat.length > 0 ? restFlat : undefined,
+        segments: restSegments.length > 0 ? restSegments : undefined,
       };
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
@@ -1116,6 +1533,9 @@ export default function ChatView({ health }: ChatViewProps) {
         failure instanceof ApiError ? failure.message : "Chat failed";
       setError(message);
     } finally {
+      // Mirror every streaming terminal path: a heartbeat-armed timer must not
+      // outlive the REST turn and fire a spurious cancel after completion.
+      clearTurnTimeout();
       turnSessionIDRef.current = null;
       setInFlightTurn(null);
       setPending(false);
@@ -1161,6 +1581,13 @@ export default function ChatView({ health }: ChatViewProps) {
   // leak into this header.
   const sessionApprovals = approvalsForSession(pendingApprovals, sessionID);
   const sessionPendingCount = sessionApprovals.length;
+  // Liveness helpers for the persistent footer below: a tool with no result is
+  // still running on the engine, while completed tools plus partial text mean
+  // the next prompt round is processing silently with no frames to render.
+  const hasRunningTools =
+    inFlightTurn?.toolActions.some((action) => !action.result) ?? false;
+  const hasPartialText =
+    (inFlightTurn?.text.trim().length ?? 0) > 0;
 
   return (
     <div className="chat-layout">
@@ -1231,38 +1658,85 @@ export default function ChatView({ health }: ChatViewProps) {
             const hasTools = actions.length > 0;
             const hasText = Boolean(message.text && message.text.trim().length > 0);
             if (!hasText && !hasTools) return null;
+            // Segmented turns render text and tool batches in chronological order
+            // so multi-round timelines never collapse into one lumped bucket.
+            // Turns built before segmentation fall back to the legacy bucket below.
+            const segments =
+              message.role === "assistant" && message.segments
+                ? message.segments
+                : undefined;
 
             return (
               <div key={message.id} className={`message ${message.role}`}>
-                {/* Distinct Tool Activity if assistant called tools */}
-                {hasTools ? (
-                  <div className="chat-tool-container">
-                    <div className="chat-tool-heading">
-                      <WrenchIcon size={12} />
-                      <span>Tool Activity ({actions.length})</span>
-                    </div>
-                    <div className="chat-tool-list">
-                      {actions.map((action, i) => (
-                        <ToolActionRow
-                          key={action.callID || i}
-                          action={action}
-                          isLive={false}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {/* Message Content */}
-                {hasText ? (
-                  <div className="message-text">
-                    {message.role === "assistant" ? (
-                      <MarkdownText text={message.text} />
-                    ) : (
-                      message.text
+                {segments && segments.length > 0 ? (
+                  <>
+                    {segments.map((segment, segmentIndex) =>
+                      segment.kind === "tools" ? (
+                        <div
+                          key={`tools-${segmentIndex}`}
+                          className="chat-tool-container"
+                        >
+                          <div className="chat-tool-heading">
+                            <WrenchIcon size={12} />
+                            <span>Tool Activity ({segment.actions.length})</span>
+                          </div>
+                          <div className="chat-tool-list">
+                            {segment.actions.map((action, i) => (
+                              <ToolActionRow
+                                key={action.callID || `${segmentIndex}-${i}`}
+                                action={action}
+                                isLive={false}
+                              />
+                            ))}
+                          </div>
+                        </div>
+                      ) : segment.text.trim().length > 0 ? (
+                        <div
+                          key={`text-${segmentIndex}`}
+                          className="message-text"
+                        >
+                          {message.role === "assistant" ? (
+                            <MarkdownText text={segment.text} />
+                          ) : (
+                            segment.text
+                          )}
+                        </div>
+                      ) : null,
                     )}
-                  </div>
-                ) : null}
+                  </>
+                ) : (
+                  <>
+                    {/* Distinct Tool Activity if assistant called tools */}
+                    {hasTools ? (
+                      <div className="chat-tool-container">
+                        <div className="chat-tool-heading">
+                          <WrenchIcon size={12} />
+                          <span>Tool Activity ({actions.length})</span>
+                        </div>
+                        <div className="chat-tool-list">
+                          {actions.map((action, i) => (
+                            <ToolActionRow
+                              key={action.callID || i}
+                              action={action}
+                              isLive={false}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Message Content */}
+                    {hasText ? (
+                      <div className="message-text">
+                        {message.role === "assistant" ? (
+                          <MarkdownText text={message.text} />
+                        ) : (
+                          message.text
+                        )}
+                      </div>
+                    ) : null}
+                  </>
+                )}
               </div>
             );
           })}
@@ -1270,34 +1744,75 @@ export default function ChatView({ health }: ChatViewProps) {
           {/* Active in-flight assistant response with live tools and streaming text */}
           {pending && inFlightTurn && (inFlightTurn.toolActions.length > 0 || inFlightTurn.text.trim().length > 0) ? (
             <div className="message assistant streaming-bubble">
-              {inFlightTurn.toolActions.length > 0 ? (
-                <div className="chat-tool-container">
-                  <div className="chat-tool-heading">
-                    <WrenchIcon size={12} />
-                    <span>Tool Activity ({inFlightTurn.toolActions.length})</span>
-                  </div>
-                  <div className="chat-tool-list">
-                    {inFlightTurn.toolActions.map((action, i) => (
-                      <ToolActionRow
-                        key={action.callID || i}
-                        action={action}
-                        isLive
-                      />
-                    ))}
-                  </div>
-                </div>
-              ) : null}
+              {inFlightTurn.segments && inFlightTurn.segments.length > 0 ? (
+                <>
+                  {inFlightTurn.segments.map((segment, segmentIndex) =>
+                    segment.kind === "tools" ? (
+                      <div
+                        key={`live-tools-${segmentIndex}`}
+                        className="chat-tool-container"
+                      >
+                        <div className="chat-tool-heading">
+                          <WrenchIcon size={12} />
+                          <span>Tool Activity ({segment.actions.length})</span>
+                        </div>
+                        <div className="chat-tool-list">
+                          {segment.actions.map((action, i) => (
+                            <ToolActionRow
+                              key={action.callID || `live-${segmentIndex}-${i}`}
+                              action={action}
+                              isLive
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ) : segment.text.trim().length > 0 ? (
+                      <div
+                        key={`live-text-${segmentIndex}`}
+                        className="message-text"
+                      >
+                        <MarkdownText text={segment.text} />
+                      </div>
+                    ) : null,
+                  )}
+                </>
+              ) : (
+                <>
+                  {inFlightTurn.toolActions.length > 0 ? (
+                    <div className="chat-tool-container">
+                      <div className="chat-tool-heading">
+                        <WrenchIcon size={12} />
+                        <span>Tool Activity ({inFlightTurn.toolActions.length})</span>
+                      </div>
+                      <div className="chat-tool-list">
+                        {inFlightTurn.toolActions.map((action, i) => (
+                          <ToolActionRow
+                            key={action.callID || i}
+                            action={action}
+                            isLive
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
 
-              {inFlightTurn.text.trim().length > 0 ? (
-                <div className="message-text">
-                  <MarkdownText text={inFlightTurn.text} />
-                </div>
-              ) : null}
+                  {inFlightTurn.text.trim().length > 0 ? (
+                    <div className="message-text">
+                      <MarkdownText text={inFlightTurn.text} />
+                    </div>
+                  ) : null}
+                </>
+              )}
             </div>
           ) : null}
 
-          {/* Animated Loading Bubble when pending and assistant has not yet produced text */}
-          {pending && (!inFlightTurn || inFlightTurn.text.trim().length === 0) ? (
+          {/* Persistent liveness footer: the engine emits zero renderable frames
+              while the next prompt round processes (heartbeats re-arm silently),
+              so visibility keys on pending alone rather than partial text.
+              Parked, cancelled, and error turns clear pending and therefore hide
+              this without extra guards. The idle copy stays honest about large
+              prompts on slow local models instead of implying a stall. */}
+          {pending ? (
             <div className="message assistant pending-bubble">
               <div className="typing-indicator" aria-label="Rune Weaver is thinking">
                 <span className="typing-dot" />
@@ -1305,9 +1820,11 @@ export default function ChatView({ health }: ChatViewProps) {
                 <span className="typing-dot" />
               </div>
               <span className="typing-text">
-                {inFlightTurn && inFlightTurn.toolActions.length > 0
+                {hasRunningTools
                   ? "Executing tools…"
-                  : "Rune Weaver is working…"}
+                  : hasPartialText
+                    ? "Thinking…"
+                    : "Still thinking — large prompts take a while…"}
               </span>
             </div>
           ) : null}

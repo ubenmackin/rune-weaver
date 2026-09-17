@@ -382,13 +382,13 @@ struct NarrationFallbackTests {
         let events = await collector.events
         #expect(response.text == "Your latest email is from Google.")
         #expect(events.contains(where: {
-            if case let .toolStarted(name, id, _) = $0 {
+            if case let .toolStarted(name, id, _, _) = $0 {
                 return name == "email.search" && id == "call_abc"
             }
             return false
         }))
         #expect(events.contains(where: {
-            if case let .toolCompleted(name, id, res) = $0 {
+            if case let .toolCompleted(name, id, res, _) = $0 {
                 return name == "email.search" && id == "call_abc" && res.content.contains("Google")
             }
             return false

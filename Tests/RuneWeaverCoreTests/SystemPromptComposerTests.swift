@@ -47,13 +47,23 @@ struct SystemPromptComposerTests {
         let prompt = await SystemPromptComposer.compose(toolBus: bus)
         for tool in await bus.availableTools() {
             #expect(prompt.contains(tool.name))
-            #expect(prompt.contains(tool.description))
-            #expect(prompt.contains(tool.inputSchema.rawValue))
+            // Prompts carry the one-line summary so multi-sentence sources stay within budget.
+            #expect(prompt.contains(ToolPromptDisplay.oneLine(tool.description)))
+            // Prompts carry minified sorted-keys schemas so strict backends see the same object without whitespace.
+            let display = SystemPromptComposer.validatedDisplaySchema(for: tool, supportsVision: true, logSkips: false)
+            #expect(display != nil)
+            if let display {
+                #expect(prompt.contains(SystemPromptComposer.compactSchemaJSON(display)))
+            }
         }
         #expect(prompt.contains("stub.read"))
         #expect(prompt.contains("stub.write"))
         #expect(prompt.contains("Reads stub records for the composer test."))
         #expect(prompt.contains("Writes stub records for the composer test."))
+        // The default tier needs no label; only gated levels are marked inline.
+        #expect(!prompt.contains("Permission: readOnly"))
+        #expect(!prompt.contains("[readOnly]"))
+        #expect(prompt.contains("[requiresApproval]"))
     }
 
     @Test
@@ -106,5 +116,38 @@ struct SystemPromptComposerTests {
         let history = [Message(role: .user, content: "hello")].withSystemPrompt(prompt)
         #expect(history.first?.role == .system)
         #expect(history.first?.content == prompt)
+    }
+
+    @Test
+    func `Prompt byte audit measures total plus per-tool schema contribution`() {
+        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
+        let audit = SystemPromptComposer.byteAudit(tools: tools)
+        #expect(audit.totalBytes == SystemPromptComposer.compose(tools: tools).utf8.count)
+        #expect(audit.perTool.count == 2)
+        for entry in audit.perTool {
+            #expect(entry.schemaBytes > 0)
+            #expect(entry.entryBytes >= entry.schemaBytes)
+        }
+        // Sorted-by-name determinism keeps the audit stable across runs.
+        #expect(audit.perTool.map(\.name) == ["stub.read", "stub.write"])
+    }
+
+    @Test
+    func `Vision and text-only prompts stay distinct`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let vision = SystemPromptComposer.compose(tools: tools, supportsVision: true)
+        let textOnly = SystemPromptComposer.compose(tools: tools, supportsVision: false)
+        #expect(vision != textOnly)
+        #expect(vision.lowercased().contains("screenshot"))
+        #expect(textOnly.lowercased().contains("text-only"))
+    }
+
+    @Test
+    func `One-line summary keeps abbreviation guidance intact`() {
+        // Abbreviations must not truncate mid-sentence, or prompt guidance is lost.
+        let description = "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act. Auth walls escalate to human login; downloads are manifest-only."
+        let oneLine = ToolPromptDisplay.oneLine(description)
+        #expect(oneLine == "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act.")
+        #expect(oneLine.contains("e12) for browser.act"))
     }
 }

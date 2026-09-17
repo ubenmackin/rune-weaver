@@ -26,8 +26,28 @@ private struct PromptToolEntry: Sendable {
     let description: String
     /// Advertised input schema.
     let schema: JSONSchema
-    /// Permission level raw value.
-    let permission: String
+    /// Trust level driving the compact permission marker.
+    let permission: PermissionLevel
+}
+
+/// Per-tool byte contribution for prompt budget audits.
+/// Tests alone consume this so production turns never pay logging overhead.
+public struct PromptToolBytes: Sendable {
+    /// Stable tool name in prompt order.
+    public let name: String
+    /// Compacted schema size in UTF-8 bytes.
+    public let schemaBytes: Int
+    /// Full two-line prompt entry size in UTF-8 bytes.
+    public let entryBytes: Int
+}
+
+/// Total prompt size plus per-tool breakdown for budget decisions.
+/// Tests alone consume this so production turns never pay logging overhead.
+public struct PromptByteAudit: Sendable {
+    /// Total prompt size in UTF-8 bytes.
+    public let totalBytes: Int
+    /// Per-tool entry sizes in prompt order.
+    public let perTool: [PromptToolBytes]
 }
 
 /// Builds the default chat system prompt from the live tool registry.
@@ -156,13 +176,14 @@ public enum VisionSchemaFilter: Sendable {
 
     /// Validated schema advertised for one tool, or nil when the schema must be omitted.
     /// Returning nil keeps unparseable schemas out of the prompt while naming the skip.
-    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema? {
+    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool, logSkips: Bool = true) -> JSONSchema? {
         // Single-source validation through the shared partition so prompt and wire withhold
         // the same schemas with one wording; the partition logs the skip.
         let initial = partitionValidSchemas(
             entries: [tool],
             name: { $0.name },
-            rawSchema: { $0.inputSchema.rawValue }
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: logSkips
         )
         guard initial.valid.first != nil else {
             return nil
@@ -176,7 +197,8 @@ public enum VisionSchemaFilter: Sendable {
         let rechecked = partitionValidSchemas(
             entries: [stripped.rawValue],
             name: { _ in tool.name },
-            rawSchema: { $0 }
+            rawSchema: { $0 },
+            logSkips: logSkips
         )
         guard !rechecked.valid.isEmpty else {
             return nil
@@ -191,9 +213,46 @@ public enum SystemPromptComposer {
         compose(tools: tools, supportsVision: true)
     }
 
-    /// Composes the default system prompt honoring the model's vision capability.
-    public static func compose(tools: [any Tool], supportsVision: Bool) -> String {
+    /// Sorted prompt-safe entries shared by composition and auditing.
+    /// Single-sourcing the sort plus schema filter keeps the live prompt and the
+    /// budget audit identical when the entry format changes; callers choose the
+    /// vision branch and whether skips log so audits stay silent.
+    /// - Parameters:
+    ///   - tools: Candidate tools in any order; sorting mirrors compose.
+    ///   - supportsVision: Vision branch to filter.
+    ///   - logSkips: Whether invalid schemas log; audits pass false.
+    /// - Returns: Valid entries in prompt order.
+    private static func sortedValidEntries(tools: [any Tool], supportsVision: Bool, logSkips: Bool) -> [PromptToolEntry] {
+        // Omit invalid schemas so one bad plugin degrades to fewer prompt entries, not a corrupt prompt.
         let sorted = tools.sorted { $0.name < $1.name }
+        var validEntries: [PromptToolEntry] = []
+        validEntries.reserveCapacity(sorted.count)
+        for tool in sorted {
+            guard let schema = VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision, logSkips: logSkips) else {
+                continue
+            }
+            validEntries.append(PromptToolEntry(name: tool.name, description: tool.description, schema: schema, permission: tool.permissionLevel))
+        }
+        return validEntries
+    }
+
+    /// Composes the default system prompt honoring the model's vision capability.
+    /// Disabled tools never reach the prompt because the ToolBus overloads snapshot
+    /// availableTools, which already omits anything the operator turned off via ToolStateStore.
+    public static func compose(tools: [any Tool], supportsVision: Bool) -> String {
+        // Logging path: invalid schemas warn once here so operators see the skip.
+        let validEntries = sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: true)
+        return renderPrompt(from: validEntries, supportsVision: supportsVision)
+    }
+
+    /// Renders the full prompt text from already-validated entries.
+    /// Shared by composition and auditing so the measured bytes always match the
+    /// live prompt; validation happens once in the caller, never inside the render.
+    /// - Parameters:
+    ///   - validEntries: Prompt-safe entries in prompt order.
+    ///   - supportsVision: Vision branch to render.
+    /// - Returns: Complete system prompt text.
+    private static func renderPrompt(from validEntries: [PromptToolEntry], supportsVision: Bool) -> String {
         var lines: [String] = []
         lines.append("You are Rune Weaver, a helpful personal assistant.")
         lines.append("")
@@ -204,58 +263,100 @@ public enum SystemPromptComposer {
         )
         lines.append("")
         lines.append("Available tools:")
-        // Omit invalid schemas so one bad plugin degrades to fewer prompt entries, not a corrupt prompt.
-        var validEntries: [PromptToolEntry] = []
-        validEntries.reserveCapacity(sorted.count)
-        for tool in sorted {
-            guard let schema = VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision) else {
-                continue
-            }
-            validEntries.append(PromptToolEntry(name: tool.name, description: tool.description, schema: schema, permission: tool.permissionLevel.rawValue))
-        }
         if validEntries.isEmpty {
             lines.append("No tools are currently registered.")
         } else {
             for entry in validEntries {
-                lines.append("- \(entry.name): \(entry.description)")
-                lines.append("  Input schema: \(entry.schema.rawValue)")
-                lines.append("  Permission: \(entry.permission)")
+                lines.append(promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission))
             }
         }
         lines.append("")
         lines.append("Tool-use policy:")
-        lines.append("- Read freely with read-only tools; searching and reading never need approval.")
         lines.append(
-            "- Approval-gated writes go through the gate: requiresApproval tools run "
-                + "only after the approval gate allows them; report denials plainly."
+            "- Read freely with read-only tools; approval-gated writes go through the gate — "
+                + "requiresApproval runs only after approval, trusted runs without prompts; report denials plainly."
+        )
+        // Prompt-level browser guardrail: tool descriptions compact to one line, so the
+        // navigate auth/manifest sentence would otherwise never reach the model.
+        lines.append(
+            "- Auth walls escalate to human login; downloads are manifest-only; never invent credentials "
+                + "or re-fetch with credentials."
         )
         lines.append(
-            "- Memory writes auto-allowed and auditable: remember_fact and recall_memories are trusted, "
-                + "run without approval prompts, and every memory write is recorded in the audit log. "
-                + "Never include secrets in prompts."
+            "- Memory writes auto-allowed and auditable: remember_fact and recall_memories are trusted "
+                + "without prompts and every write is logged; never include secrets. "
+                + "Call recall_memories before answering from history without inventing; "
+                + "call remember_fact unprompted for durable facts."
         )
         if supportsVision {
             lines.append(
-                "- browser.navigate screenshot opt-in: includeScreenshot defaults to false; "
-                    + "set it true only when visual layout is needed. Captures are downscaled "
-                    + "to 1280px JPEG under 500KB held in memory for the turn only "
-                    + "(never written to disk), never persist to history, "
-                    + "and audit stores the content hash only."
+                "- browser.navigate screenshot opt-in: includeScreenshot defaults false; "
+                    + "set true only when visual layout is needed "
+                    + "(1280px JPEG under 500KB, turn-only, hash-only audit)."
             )
         } else {
             lines.append(
-                "- Screenshots are unavailable on this text-only model; do not request screenshots "
-                    + "and ignore any screenshot parameter—text snapshots carry the page content."
+                "- Screenshots unavailable on this text-only model; do not request screenshots — "
+                    + "text snapshots carry the page content."
             )
         }
-        lines.append("")
-        lines.append("Memory guidance:")
-        lines.append(
-            "- Call recall_memories before answering from history or when the user asks what you remember; "
-                + "use the ranked memories as context and do not invent what recall does not support."
-        )
-        lines.append("- Call remember_fact unprompted for durable facts when the user states a lasting preference or fact, or asks you to remember something.")
         return lines.joined(separator: "\n")
+    }
+
+    /// Minifies a prompt schema to sorted-keys JSON without pretty whitespace.
+    /// Strict backends still see a valid object because only whitespace and key order change.
+    public static func compactSchemaJSON(_ schema: JSONSchema) -> String {
+        guard let data = schema.rawValue.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data, options: []),
+              JSONSerialization.isValidJSONObject(object),
+              let minified = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let raw = String(data: minified, encoding: .utf8)
+        else { return schema.rawValue }
+        return raw
+    }
+
+    /// Builds one two-line prompt entry shared by composition and auditing.
+    /// Centralizing the headline plus compacted-schema shape keeps live prompts
+    /// and budget measurements identical when the format changes.
+    /// - Parameters:
+    ///   - name: Stable tool name.
+    ///   - description: Full description, compacted to one line inside.
+    ///   - schema: Advertised input schema, minified inside.
+    ///   - permission: Trust level driving the compact marker.
+    /// - Returns: Two-line entry (headline plus indented input line).
+    private static func promptEntry(name: String, description: String, schema: JSONSchema, permission: PermissionLevel) -> String {
+        // Two lines per tool keep strict backends honest while dropping the
+        // redundant readOnly marker: the default needs no label, only gated levels do.
+        var headline = "- \(name): \(ToolPromptDisplay.oneLine(description))"
+        if permission != .readOnly {
+            headline += " [\(permission.rawValue)]"
+        }
+        return headline + "\n  Input: \(compactSchemaJSON(schema))"
+    }
+
+    /// Measures prompt budget without logging so tests alone decide what to print.
+    /// Validates once silently then renders through the shared prompt builder,
+    /// so the audit total and the live prompt cannot drift into separate shapes.
+    /// - Parameters:
+    ///   - tools: Candidate tools in any order; sorting mirrors compose.
+    ///   - supportsVision: Vision branch to measure.
+    /// - Returns: Total UTF-8 bytes plus per-tool schema and entry sizes in prompt order.
+    public static func byteAudit(tools: [any Tool], supportsVision: Bool = true) -> PromptByteAudit {
+        // Silent path: skips never log here, so audits stay quiet while compose above stays the single logging site.
+        let validEntries = sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: false)
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision)
+        var perTool: [PromptToolBytes] = []
+        perTool.reserveCapacity(validEntries.count)
+        for entry in validEntries {
+            let compacted = compactSchemaJSON(entry.schema)
+            let rendered = promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission)
+            perTool.append(PromptToolBytes(
+                name: entry.name,
+                schemaBytes: compacted.utf8.count,
+                entryBytes: rendered.utf8.count
+            ))
+        }
+        return PromptByteAudit(totalBytes: prompt.utf8.count, perTool: perTool)
     }
 
     /// Composes the default system prompt from the live tool registry.
@@ -325,8 +426,8 @@ public enum SystemPromptComposer {
     }
 
     /// Validated schema for one tool, or nil when the schema must be omitted from the prompt.
-    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema? {
-        VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision)
+    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool, logSkips: Bool = true) -> JSONSchema? {
+        VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision, logSkips: logSkips)
     }
 
     /// Partitions tools into prompt-safe entries plus skipped names.

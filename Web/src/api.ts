@@ -53,6 +53,94 @@ export interface ToolAction {
   callID: string;
   argumentsJSON: string;
   result?: ToolResult | null;
+  // Zero-based LLM round that produced this call, oldest first. Optional because
+  // older engines predate round tracking; absent means unordered and callers fall
+  // back to stored order, which remains chronological.
+  roundIndex?: number | null;
+}
+
+// Ordered timeline pieces for one assistant turn. Text and tool batches alternate
+// chronologically (text, tools, text, tools, text) so multi-round turns never
+// collapse into a single lumped bucket. The flat `text`/`toolActions` on message
+// state stay as back-compat summaries while rendering walks this list in order.
+export type ChatTextSegment = { kind: "text"; text: string };
+export type ChatToolsSegment = { kind: "tools"; actions: ToolAction[] };
+export type ChatSegment = ChatTextSegment | ChatToolsSegment;
+
+// Normalizes a round hint to a comparable index: finite numbers floor to an
+// integer round, while absent or drifted shapes degrade to undefined so ordering
+// falls back to stored order instead of dropping the action.
+export function normalizeRoundIndex(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    return undefined;
+  return Math.floor(value);
+}
+
+// Compares two actions chronologically: numbered rounds ascend oldest-first with
+// untracked rounds partitioning after tracked so mixed legacy+tracked history
+// holds a total order. Untracked pairs keep stored order through sort stability,
+// while tracked rounds always meet numerically even across an untracked gap.
+export function compareToolActionsByRound(a: ToolAction, b: ToolAction): number {
+  const left = normalizeRoundIndex(a.roundIndex);
+  const right = normalizeRoundIndex(b.roundIndex);
+  if (left === undefined && right === undefined) return 0;
+  if (left === undefined) return 1;
+  if (right === undefined) return -1;
+  return left - right;
+}
+
+// Orders one batch of actions oldest-first without mutating the input, keeping
+// tracked rounds numeric and untracked rounds after tracked in stored order so
+// reloads match live.
+export function sortToolActionsByRound(actions: ToolAction[]): ToolAction[] {
+  return [...actions].sort(compareToolActionsByRound);
+}
+
+// Groups actions into one tools segment per round, oldest round first. The untracked
+// bucket shares one group re-entering at its stored slot, so mixed legacy+tracked
+// turns keep a deterministic position instead of drifting with input order. Pure
+// numbered inputs still sort oldest-first; callers sort before grouping so the
+// stored slot already reflects the total order on the normal path.
+export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
+  if (actions.length === 0) return [];
+  const byRound = new Map<number, ToolAction[]>();
+  const untracked: ToolAction[] = [];
+  // Stored index of the first untracked action pins the single untracked bucket;
+  // without it a stored-first legacy action would render last after sorting.
+  let firstUntrackedIndex: number | null = null;
+  for (let index = 0; index < actions.length; index++) {
+    const action = actions[index] as ToolAction;
+    const round = normalizeRoundIndex(action.roundIndex);
+    if (round === undefined) {
+      untracked.push(action);
+      if (firstUntrackedIndex === null) firstUntrackedIndex = index;
+      continue;
+    }
+    const list = byRound.get(round);
+    if (list) list.push(action);
+    else {
+      byRound.set(round, [action]);
+    }
+  }
+  // Numbered rounds sort independently of where the untracked bucket sat, so a
+  // late R0 never renders after R1 just because legacy actions interleaved it.
+  const orderedRounds = [...byRound.keys()].sort((a, b) => a - b);
+  if (untracked.length === 0) {
+    return orderedRounds.map((round) => byRound.get(round) as ToolAction[]);
+  }
+  if (byRound.size === 0) {
+    return [[...untracked]];
+  }
+  const groups = orderedRounds.map(
+    (round) => byRound.get(round) as ToolAction[],
+  );
+  const slot = Math.min(
+    firstUntrackedIndex ?? groups.length,
+    groups.length,
+  );
+  groups.splice(slot, 0, [...untracked]);
+  return groups;
 }
 
 export interface OrchestratorResponse {
