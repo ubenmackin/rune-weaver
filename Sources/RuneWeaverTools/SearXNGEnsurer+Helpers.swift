@@ -554,18 +554,62 @@ public extension SearXNGEnsurer {
     }
 
     /// Non-throwing ensure outcome for HTTP lifecycle routes.
-    /// Small struct replacing the 3-tuple so the large-tuple gate stays
-    /// green while callers keep the same reachable plus started plus
-    /// message shape.
+    /// `message` carries the trimmed banner (terminal cause plus one
+    /// `scripts/searxng-up.sh` remediation) for inline error slots, while
+    /// `diagnostics` carries the full per-stage detail (stage, exit, capped
+    /// tail, timeout) for server warn logs plus the collapsed Settings
+    /// diagnostics element. Both normalize blanks to nil so callers never
+    /// render whitespace as detail.
     struct EnsureReport: Sendable {
         public let reachable: Bool
         public let started: Bool
         public let message: String?
-        public init(reachable: Bool, started: Bool, message: String? = nil) {
+        public let diagnostics: String?
+        public init(reachable: Bool, started: Bool, message: String? = nil, diagnostics: String? = nil) {
             self.reachable = reachable
             self.started = started
-            self.message = message
+            let trimmedMessage = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            self.message = trimmedMessage.isEmpty ? nil : trimmedMessage
+            let trimmedDiagnostics = (diagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            self.diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
         }
+    }
+
+    /// User-info key carrying the full per-stage detail alongside the trimmed banner.
+    /// The banner (`NSLocalizedDescriptionKey`) stays to terminal cause plus one
+    /// remediation so it renders once; this key holds the chained stage fragments
+    /// for warn logs plus collapsed diagnostics without nesting a second guidance
+    /// message inside the banner.
+    static let diagnosticsUserInfoKey = "RuneWeaverSearXNGDiagnostics"
+
+    /// Extracts the per-stage diagnostics chained for an ensure failure.
+    /// - Parameter error: Failure from `unreachableError`.
+    /// - Returns: Full cascade detail when present, nil for install-only or cancelled paths.
+    static func diagnostics(from error: Error) -> String? {
+        let raw = (error as NSError).userInfo[diagnosticsUserInfoKey] as? String
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Trimmed banner for a daemon heal that stayed down.
+    /// Single cause plus one hatch command; raw stage tail lives in diagnostics only.
+    static func daemonBanner() -> String {
+        "Container system service failed to start. Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Trimmed banner for a container start-or-run heal that failed.
+    /// Generic pull guidance covers image-pull and run failures alike so the banner
+    /// renders once without leaking raw registry output; the capped tail stays in
+    /// diagnostics plus warn logs.
+    static func pullBanner() -> String {
+        "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Trimmed banner for a poll timeout with no heal failure to name.
+    /// - Parameter baseURL: Configured `searxng_url`.
+    /// - Returns: Not-reachable cause plus the single hatch command.
+    static func timeoutBanner(baseURL: String) -> String {
+        "SearXNG is not reachable at \(baseURL). Start it with `scripts/searxng-up.sh`, then retry."
     }
 
     /// Raw daemon probe outcome.
@@ -1029,24 +1073,32 @@ public extension SearXNGEnsurer {
         }
     }
 
-    /// Fail-closed guidance naming the manual escape hatch.
-    /// Appends the last cascade detail (stage, exit, capped tail, timeout) so
-    /// callers and the dashboard surface why the heal stopped, not just that
-    /// the probe stayed dark.
+    /// Fail-closed banner naming the terminal cause plus one hatch command.
+    /// The banner holds only the generic terminal cause (daemon, pull/run, or
+    /// not-reachable) plus a single `scripts/searxng-up.sh` remediation so each
+    /// of install, daemon, pull, and timeout renders once without nesting the
+    /// unreachable text around install text or chaining every stage into the
+    /// banner. The full per-stage detail (stage, exit, capped tail, timeout)
+    /// travels in `diagnosticsUserInfoKey` for server warn logs plus the
+    /// collapsed Settings diagnostics element.
     /// - Parameters:
     ///   - baseURL: Configured `searxng_url`.
-    ///   - detail: Last failure fragment from the cascade, if any.
-    /// - Returns: Error carrying remediation steps plus failure detail.
+    ///   - detail: Chained per-stage fragments from the cascade, if any.
+    /// - Returns: Error carrying the trimmed banner plus chained diagnostics.
     static func unreachableError(baseURL: String, detail: String?) -> Error {
-        var message =
-            "SearXNG is not reachable at \(baseURL). Start it with `scripts/searxng-up.sh` "
-                + "or `container start \(containerName)`, then retry the search. "
-                + "The container is left running after quit by design."
         let trimmed = (detail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            message += " (\(trimmed))"
+        let banner: String = if trimmed.contains("stage: run") || trimmed.contains("stage: start") {
+            pullBanner()
+        } else if trimmed.contains("stage: daemon") {
+            daemonBanner()
+        } else {
+            timeoutBanner(baseURL: baseURL)
         }
-        return NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        var userInfo: [String: Any] = [NSLocalizedDescriptionKey: banner]
+        if !trimmed.isEmpty {
+            userInfo[diagnosticsUserInfoKey] = trimmed
+        }
+        return NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: userInfo)
     }
 
     /// Fail-closed guidance naming the manual escape hatch.

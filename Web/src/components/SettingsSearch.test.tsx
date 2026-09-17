@@ -88,9 +88,9 @@ describe("SettingsManager search", () => {
     expect(screen.getByText(/150 MB/i)).toBeDefined();
     // Health text reflects the probed container state.
     await waitFor(() => {
-      expect(screen.getByTestId("search-health-text").textContent).toContain(
-        "reachable"
-      );
+      expect(
+        screen.getByTestId("search-health-text").textContent?.toLowerCase()
+      ).toContain("reachable");
     });
   });
 
@@ -205,9 +205,9 @@ describe("SettingsManager search", () => {
     await user.click(startBtn);
     await waitFor(() => {
       expect(seen.some((u) => u.includes("/search/ensure"))).toBe(true);
-      expect(screen.getByTestId("search-health-text").textContent).toContain(
-        "reachable"
-      );
+      expect(
+        screen.getByTestId("search-health-text").textContent?.toLowerCase()
+      ).toContain("reachable");
     });
     await user.click(stopBtn);
     await waitFor(() => {
@@ -243,9 +243,9 @@ describe("SettingsManager search", () => {
     await user.click(searchTab);
     // Health still probes automatically on pane open without a manual control.
     await waitFor(() => {
-      expect(screen.getByTestId("search-health-text").textContent).toContain(
-        "reachable"
-      );
+      expect(
+        screen.getByTestId("search-health-text").textContent?.toLowerCase()
+      ).toContain("reachable");
     });
     // Pane-level refresh is gone; the global Settings header Refresh remains
     // the single manual refresh so probes stay automatic otherwise.
@@ -255,5 +255,102 @@ describe("SettingsManager search", () => {
     const refreshButtons = screen.getAllByRole("button", { name: /Refresh/i });
     expect(refreshButtons).toHaveLength(1);
     expect(refreshButtons[0].textContent).toMatch(/Refresh/);
+  });
+
+  it("renders a trimmed banner once with collapsed diagnostics on failed start", async () => {
+    const user = userEvent.setup();
+    const banner =
+      "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry.";
+    const chained = "stage: run, exit: 1, detail: pull access denied; stage: poll, (timed out after 10s)";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/search/ensure")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: chained,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Banner holds the terminal cause plus one remediation only, rendering once
+    // without chained stage fragments.
+    await waitFor(() => {
+      const error = screen.getByTestId("search-health-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      // One remediation command in the banner.
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    // Chained detail lives in the optional collapsed element, not the banner.
+    const diagnostics = screen.getByTestId("search-health-diagnostics");
+    expect(diagnostics.tagName.toLowerCase()).toBe("details");
+    expect(diagnostics.textContent).toContain("stage: run");
+    expect(diagnostics.textContent).toContain("stage: poll");
+  });
+
+  it("hides the diagnostics element when the banner carries no chain", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/search/ensure")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: "SearXNG is not reachable. Start it with `scripts/searxng-up.sh`, then retry.",
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    await waitFor(() => {
+      expect(screen.getByTestId("search-health-error")).toBeDefined();
+    });
+    // No chain means no collapsed element, so the banner still renders once alone.
+    expect(screen.queryByTestId("search-health-diagnostics")).toBeNull();
   });
 });

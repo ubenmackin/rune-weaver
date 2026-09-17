@@ -807,9 +807,11 @@ export function updateSettings(
 // Web search (SearXNG) lifecycle surfaced by the engine service. The service
 // runs SearXNG in an Apple Container machine with no Docker dependency, so
 // these routes start and stop that machine rather than proxying queries.
-// The ensure path carries the last cascade failure detail (stage, exit,
-// capped tail, timeout) in `message` when unreachable so callers render why
-// the heal stopped instead of flipping silently.
+// The ensure path carries a trimmed banner (terminal cause plus one
+// `scripts/searxng-up.sh` remediation) in `message` and the chained per-stage
+// detail (stage, exit, capped tail, timeout) in `diagnostics` when unreachable.
+// Inline slots render `message` once; the Settings pane optionally exposes
+// `diagnostics` in a collapsed element while warn logs keep the full chain.
 export interface SearchHealthResponse {
   reachable: boolean;
   url?: string;
@@ -819,6 +821,7 @@ export interface SearchHealthResponse {
   started?: boolean | null;
   stopped?: boolean | null;
   message?: string | null;
+  diagnostics?: string | null;
 }
 
 // Resolves the display URL across the dual `url`/`baseURL` contract so custom
@@ -835,14 +838,29 @@ export function resolveSearchURL(
   return candidate || fallback;
 }
 
-// Single-sourced cascade-detail extraction for the search lifecycle: trims the
-// engine `message` (stage, exit, capped tail, timeout) and normalizes blank or
-// non-string payloads to null so callers never render whitespace as detail.
+// Single-sourced banner extraction for the search lifecycle: trims the engine
+// `message` (terminal cause plus one remediation) and normalizes blank or
+// non-string payloads to null so callers never render whitespace as a banner.
+// Per-stage detail lives in `diagnostics`, never in this slot, so install,
+// daemon, pull, and timeout banners each render once without nesting.
 export function resolveSearchMessage(
   response: SearchHealthResponse | null | undefined,
 ): string | null {
   const message = response?.message;
   return typeof message === "string" && message.trim() ? message.trim() : null;
+}
+
+// Single-sourced diagnostics extraction for the search lifecycle: trims the
+// engine `diagnostics` (chained stage, exit, capped tail, timeout) and
+// normalizes blank or non-string payloads to null so the collapsed Settings
+// element only renders when real per-stage detail exists.
+export function resolveSearchDiagnostics(
+  response: SearchHealthResponse | null | undefined,
+): string | null {
+  const diagnostics = response?.diagnostics;
+  return typeof diagnostics === "string" && diagnostics.trim()
+    ? diagnostics.trim()
+    : null;
 }
 
 // Reads live SearXNG reachability without touching settings: the profile

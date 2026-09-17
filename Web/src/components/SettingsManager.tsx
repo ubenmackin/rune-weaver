@@ -18,6 +18,7 @@ import {
   ensureSearch,
   getSearchHealth,
   getSettings,
+  resolveSearchDiagnostics,
   resolveSearchMessage,
   resolveSearchURL,
   updateSettings,
@@ -164,6 +165,12 @@ export default function SettingsManager() {
   const [searchHealthError, setSearchHealthError] = useState<string | null>(
     null
   );
+  // Chained per-stage detail for the optional collapsed diagnostics element.
+  // The inline banner stays trimmed to terminal cause plus one remediation;
+  // this holds the full stage chain for operators without nesting it in the banner.
+  const [searchDiagnostics, setSearchDiagnostics] = useState<string | null>(
+    null
+  );
   const [emailAccountsList, setEmailAccountsList] = useState<EmailEntry[]>([]);
   const [pluginsDir, setPluginsDir] = useState("~/.runeweaver/plugins");
   const [pluginsMarketplaceIndexURL, setPluginsMarketplaceIndexURL] = useState(
@@ -210,11 +217,15 @@ export default function SettingsManager() {
   const refreshSearchHealth = useCallback(async () => {
     setSearchHealthLoading(true);
     setSearchHealthError(null);
+    setSearchDiagnostics(null);
     try {
       const response = await getSearchHealth();
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchHealthURL(resolveSearchURL(response, "") || null);
+        // Health carries no diagnostics today; clear the collapsed slot so a
+        // prior ensure failure never lingers beside fresh health.
+        setSearchDiagnostics(resolveSearchDiagnostics(response));
       } else {
         setSearchReachable(null);
         setSearchHealthURL(null);
@@ -225,6 +236,7 @@ export default function SettingsManager() {
     } catch (err) {
       setSearchReachable(null);
       setSearchHealthURL(null);
+      setSearchDiagnostics(null);
       setSearchHealthError(
         err instanceof Error ? err.message : "Search health check failed."
       );
@@ -236,15 +248,17 @@ export default function SettingsManager() {
   const handleEnsureSearch = async () => {
     setSearchAction("start");
     setSearchHealthError(null);
+    setSearchDiagnostics(null);
     try {
       const response = await ensureSearch();
       // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of optimistically flipping.
-      // A failed start (reachable false) renders the cascade message in the existing error slot
-      // instead of flipping silently to red.
+      // A failed start (reachable false) renders the trimmed banner in the existing error slot
+      // with chained detail in the collapsed diagnostics below, instead of flipping silently to red.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+        setSearchDiagnostics(resolveSearchDiagnostics(response));
         if (!response.reachable) {
           const detail = resolveSearchMessage(response);
           setSearchHealthError(detail ?? "Search start failed; status unchanged.");
@@ -266,14 +280,17 @@ export default function SettingsManager() {
   const handleStopSearch = async () => {
     setSearchAction("stop");
     setSearchHealthError(null);
+    setSearchDiagnostics(null);
     try {
       const response = await stopSearch();
       // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
       // preserve the previous state and surface an inline error instead of claiming stopped.
       // A failed stop (still reachable) surfaces its message; a clean stop clears the slot.
+      // Stop carries no chained diagnostics today, but the slot clears symmetrically with ensure.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
         setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
+        setSearchDiagnostics(resolveSearchDiagnostics(response));
         if (response.reachable) {
           const detail = resolveSearchMessage(response);
           setSearchHealthError(detail ?? "Search stop failed; still reachable.");
@@ -2440,23 +2457,56 @@ export default function SettingsManager() {
                 on open and Start/Stop update directly from their action
                 response while the global header Refresh stays the single
                 manual refresh. */}
+            {/* Pill carries the tri-state for at-a-glance scanning while the URL stays muted
+                beside it so the probed endpoint remains visible without repeating the sentence. */}
             <span
               data-testid="search-health-text"
-              className="muted text-sm"
+              className="search-health-line"
               title={searchHealthURL || searchSearxngURL}
             >
-              {searchHealthLoading
-                ? "Checking search health…"
-                : searchReachable === null
-                  ? "Search health unknown."
-                  : searchReachable
-                    ? `Search reachable at ${searchHealthURL || searchSearxngURL}.`
-                    : `Search stopped (${searchHealthURL || searchSearxngURL} unreachable).`}
+              {searchHealthLoading ? (
+                <span className="muted text-sm">Checking search health…</span>
+              ) : searchReachable === null ? (
+                <>
+                  <span className="status-pill skipped">Unknown</span>
+                  <span className="muted text-sm search-health-url">
+                    {searchHealthURL || searchSearxngURL}
+                  </span>
+                </>
+              ) : searchReachable ? (
+                <>
+                  <span className="status-pill ok">Reachable</span>
+                  <span className="muted text-sm search-health-url">
+                    {searchHealthURL || searchSearxngURL}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="status-pill error">Stopped</span>
+                  <span className="muted text-sm search-health-url">
+                    {searchHealthURL || searchSearxngURL}
+                  </span>
+                </>
+              )}
             </span>
             {searchHealthError ? (
               <div className="error-banner" data-testid="search-health-error">
                 {searchHealthError}
               </div>
+            ) : null}
+            {/* Collapsed per-stage diagnostics stay out of the banner so install, daemon, pull,
+                and timeout each render once inline; operators expand this only when the banner
+                plus warn logs are not enough. */}
+            {searchDiagnostics ? (
+              <details
+                className="muted text-sm"
+                data-testid="search-health-diagnostics"
+              >
+                <summary>Diagnostics</summary>
+                <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0 0" }}>
+                  {searchDiagnostics}
+                </pre>
+              </details>
             ) : null}
           </div>
         )}

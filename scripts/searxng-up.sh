@@ -22,9 +22,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_NAME="runeweaver-searxng"
-# Pinned image (never `:latest`) so supply-chain updates stay explicit; bump
-# alongside `SearXNGEnsurer.containerImage` after verifying the digest.
-IMAGE="${SEARXNG_IMAGE:-searxng/searxng:2025.9.1}"
+# Tracked image (`:latest` by design) so fresh runs follow upstream without a
+# version bump; pin via `SEARXNG_IMAGE=searxng/searxng:<tag>` when
+# reproducibility matters. Keep in sync with `SearXNGEnsurer.containerImage`.
+IMAGE="${SEARXNG_IMAGE:-searxng/searxng:latest}"
 # Port sync: the engine derives the publish port from [browser] searxng_url via
 # SearXNGEnsurer.hostPort(from:) (explicit port wins, else 80 for http / 443 for
 # https). This hatch mirrors it exactly: SEARXNG_URL (when set) wins with its

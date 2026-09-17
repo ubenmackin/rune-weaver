@@ -400,4 +400,68 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(crowded.filter { $0 == "/opt/homebrew/bin" }.count == 1)
         #expect(crowded.first == "/opt/homebrew/bin")
     }
+
+    @Test
+    func `Fresh runs track the latest image`() {
+        // Deliberate tracking keeps fresh installs on upstream without a version
+        // bump; reproducibility pins via SEARXNG_IMAGE instead of a baked tag.
+        #expect(SearXNGEnsurer.containerImage == "searxng/searxng:latest")
+    }
+
+    @Test
+    func `Unreachable banner holds terminal cause plus one remediation`() {
+        // Full cascade chains stay in diagnostics for warn logs plus collapsed
+        // UI; the banner holds one generic cause plus one hatch command so each
+        // failure renders once without nesting stage fragments.
+        let chained = "stage: daemon, exit: 1, detail: xpc down; stage: run, exit: 1, detail: pull failed; stage: poll, (timed out after 10s)"
+        let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: chained)
+        let banner = error.localizedDescription
+        #expect(!banner.contains("stage:"))
+        #expect(banner.components(separatedBy: "scripts/searxng-up.sh").count - 1 == 1)
+        #expect(!banner.contains("container start"))
+        let chainedDiagnostics = SearXNGEnsurer.diagnostics(from: error) ?? ""
+        #expect(chainedDiagnostics.contains("stage:"))
+        #expect(chainedDiagnostics == chained)
+    }
+
+    @Test
+    func `Pull failures carry generic guidance with raw tail in diagnostics`() {
+        // Image pull or run output never leaks raw registry text into the banner;
+        // the banner names the generic pull cause once while diagnostics keeps
+        // the capped tail for logs plus collapsed UI.
+        let runDetail = SearXNGEnsurer.failureMessage(stage: "run", exitCode: 1, output: "pull access denied for searxng", timedOut: false)
+        let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: runDetail)
+        let banner = error.localizedDescription.lowercased()
+        #expect(banner.contains("pull"))
+        #expect(banner.contains("scripts/searxng-up.sh"))
+        #expect(!error.localizedDescription.contains("stage:"))
+        let raw = SearXNGEnsurer.diagnostics(from: error) ?? ""
+        #expect(raw.contains("stage: run"))
+    }
+
+    @Test
+    func `Timeout banner names reachability with one hatch command`() {
+        // Poll-only timeouts (external bases, flap retries) render as not
+        // reachable plus the single hatch, with the timed-out fragment kept in
+        // diagnostics rather than nested as a second guidance wrapper.
+        let pollDetail = SearXNGEnsurer.failureMessage(stage: "poll", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: 10)
+        let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: pollDetail)
+        let banner = error.localizedDescription
+        #expect(banner.lowercased().contains("not reachable"))
+        #expect(banner.components(separatedBy: "scripts/searxng-up.sh").count - 1 == 1)
+        #expect(!banner.contains("stage:"))
+        #expect((SearXNGEnsurer.diagnostics(from: error) ?? "").contains("stage: poll"))
+    }
+
+    @Test
+    func `Ensure report threads banner plus diagnostics separately`() {
+        // The non-throwing report keeps the trimmed banner apart from the chained
+        // diagnostics so routes can warn with both while inline slots show one.
+        let report = SearXNGEnsurer.EnsureReport(reachable: false, started: false, message: "banner", diagnostics: "stage: poll, (timed out after 10s)")
+        #expect(report.message == "banner")
+        #expect(report.diagnostics?.contains("stage: poll") == true)
+        let blanked = SearXNGEnsurer.EnsureReport(reachable: false, started: false, message: "  ", diagnostics: "  ")
+        #expect(blanked.message == nil)
+        #expect(blanked.diagnostics == nil)
+    }
 }

@@ -174,8 +174,10 @@ export default function TopNav({
   // Toggles the SearXNG container through the engine service. The result becomes the local override
   // only on an honest boolean reachable flag; shape-drifted payloads keep the previous dot and
   // surface an inline error instead of optimistically flipping. A failed start (reachable false
-  // after ensure) renders the cascade message in the existing error slot instead of flipping
-  // silently to red; a failed stop (still reachable) does the same. Failures keep the menu open.
+  // after ensure) renders the trimmed banner (terminal cause plus one remediation) in the existing
+  // error slot instead of flipping silently to red; chained per-stage detail stays in server warn
+  // logs plus the Settings collapsed diagnostics, so this slot renders once. A failed stop (still
+  // reachable) does the same. Failures keep the menu open.
   const handleToggleSearch = useCallback(async () => {
     if (searchBusyAction !== null) return;
     // Capture whether this action is a start so the error slot can tell a

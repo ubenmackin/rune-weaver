@@ -15,11 +15,15 @@
 // processes serialize on the shared container name. A missing runtime fails with install
 // guidance (Apple Container link, Docker unsupported); a down system service
 // heals via a fast probe plus bounded `system start` before any container
-// start. A missing engine then starts an existing container or runs the pinned
-// image (never `:latest`) with a loopback-only publish plus a per-install
-// secret (`0600` file, `0700` directory; the bundled placeholder is never
-// mounted), then fails closed with the last cascade detail (stage, exit,
-// capped tail, timeout). The container stays running after quit by design.
+// start. A missing engine then starts an existing container or runs the tracked
+// `:latest` image with a loopback-only publish plus a per-install secret
+// (`0600` file, `0700` directory; the bundled placeholder is never mounted).
+// Fresh runs track `:latest` by design so new installs follow upstream without
+// a version bump; pin via `SEARXNG_IMAGE` when reproducibility matters. Failures
+// report a trimmed banner (terminal cause plus one `scripts/searxng-up.sh`
+// remediation) while per-stage detail (stage, exit, capped tail, timeout) moves
+// to server warn logs plus collapsed diagnostics. The container stays running
+// after quit by design.
 
 import Foundation
 import RuneWeaverCore
@@ -39,10 +43,11 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
 
     /// Container name shared by boot, search, and the escape-hatch script.
     public static let containerName = "runeweaver-searxng"
-    /// Pinned OCI image for fresh runs when no container exists yet.
-    /// Version-pinned (never `:latest`) so supply-chain updates stay explicit;
-    /// bump alongside `scripts/searxng-up.sh` after verifying the digest.
-    public static let containerImage = "searxng/searxng:2025.9.1"
+    /// Tracked OCI image for fresh runs when no container exists yet.
+    /// Deliberately tracks `:latest` so fresh installs follow upstream without a
+    /// version bump; pin via `SEARXNG_IMAGE` (script) or this constant when
+    /// reproducibility matters. Keep in sync with `scripts/searxng-up.sh`.
+    public static let containerImage = "searxng/searxng:latest"
     /// Budget for the final reachability poll only, not the whole cascade.
     /// Heals above it (daemon probe, system start, container start/run) carry
     /// their own timeouts, so one attempt runs about 41s worst case.
@@ -179,11 +184,13 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Fresh callers own one `ensureImpl` flight and report its real start
     /// outcome; joiners collapsing onto an existing flight never claim a
     /// start. A cancelled turn reports unreachable without claiming, so the
-    /// route never marks a cancelled turn reachable. Failures carry the last
-    /// cascade detail (stage, exit, capped tail, timeout) so the dashboard can
-    /// surface why the start stopped instead of flipping silently to red.
+    /// route never marks a cancelled turn reachable. Failures carry a trimmed
+    /// banner in `message` (terminal cause plus one hatch command) with the
+    /// full per-stage detail (stage, exit, capped tail, timeout) in
+    /// `diagnostics` for warn logs plus collapsed UI, so the banner renders
+    /// once instead of chaining every stage.
     /// - Parameter browser: `[browser]` policy carrying the base URL.
-    /// - Returns: Reachability plus whether this caller actually started a container plus failure detail.
+    /// - Returns: Reachability plus whether this caller actually started a container plus banner and diagnostics.
     public func ensureReport(browser: BrowserConfig) async -> EnsureReport {
         if Task.isCancelled {
             return EnsureReport(reachable: false, started: false, message: nil)
@@ -203,6 +210,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         if inFlight[key] != nil {
             // Joiner: collapse onto the owner's flight without claiming.
             var joinMessage: String?
+            var joinDiagnostics: String?
             do {
                 try await ensure(browser: browser)
             } catch is CancellationError {
@@ -212,6 +220,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
                     return EnsureReport(reachable: false, started: false, message: nil)
                 }
                 joinMessage = error.localizedDescription
+                joinDiagnostics = Self.diagnostics(from: error)
                 // Fall through to the honest probe below.
             }
             if Task.isCancelled {
@@ -224,7 +233,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             if reachable {
                 return EnsureReport(reachable: true, started: false, message: nil)
             }
-            return EnsureReport(reachable: false, started: false, message: joinMessage)
+            return EnsureReport(reachable: false, started: false, message: joinMessage, diagnostics: joinDiagnostics)
         }
         // Owner: run one flight and return its actual start outcome, not a
         // precomputed guess, so an engine already started by another process
@@ -244,8 +253,10 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             }
             // Failed flight: probe honestly without claiming a start the
             // flight could not prove, so cross-process races never double-claim.
-            // The caught detail threads through so the route can render it.
+            // The trimmed banner threads through for the inline slot while the
+            // chained diagnostics thread through for warn logs plus collapsed UI.
             let detail = error.localizedDescription
+            let diagnostics = Self.diagnostics(from: error)
             let reachable = await Self.isReachable(baseURL: browser.searxngURL)
             if Task.isCancelled {
                 return EnsureReport(reachable: false, started: false, message: nil)
@@ -253,15 +264,16 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             if reachable {
                 return EnsureReport(reachable: true, started: false, message: nil)
             }
-            return EnsureReport(reachable: false, started: false, message: detail)
+            return EnsureReport(reachable: false, started: false, message: detail, diagnostics: diagnostics)
         }
     }
 
     /// Runs one self-healing attempt through the ordered cascade.
     /// Follows runtime, daemon, start, run, poll (worst case about 41s: the
     /// 10s budget covers the final poll only): each stage records its own
-    /// failure detail, so the final error names the stage that stopped
-    /// progress plus exit, capped tail, and timeout.
+    /// fragment for diagnostics, while the thrown banner holds only the generic
+    /// terminal cause plus one hatch command so install, daemon, pull, and
+    /// timeout each render once.
     /// - Returns: Whether this attempt actually started a local container or the system service.
     private static func ensureImpl(browser: BrowserConfig) async throws -> Bool {
         try Task.checkCancellation()
