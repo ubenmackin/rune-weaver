@@ -4,6 +4,7 @@
 import { useEffect, useRef } from "react";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
+import { sanitizeWarnings } from "../warnings";
 
 // Typed inbound frames mirroring the engine wire shapes so dashboard views narrow a parsed payload
 // with a typed union.
@@ -45,6 +46,10 @@ export interface WSStreamDone {
   // turn filed gated approvals and waits on the inbox, absent on older
   // engines where it defaults to not parked.
   isParked?: boolean;
+  // Degraded-tool notices repeated from the terminal response so polling
+  // clients agree with streaming ones. Absent on older engines where the
+  // turn renders without a banner.
+  warnings?: string[];
 }
 
 export interface WSCancelledFrame {
@@ -53,6 +58,15 @@ export interface WSCancelledFrame {
   // True when a running turn was aborted; false for idle cancels that
   // left no pending mark. Optional for back-compat with older engines.
   cancelled?: boolean;
+}
+
+// Mid-turn degraded-tool notice: the engine streams one frame per skipped
+// tool so chat can surface the skip live, then repeats the lines on the
+// terminal done frame for polling clients. Informational only, never fatal.
+export interface WSWarningFrame {
+  type: "warning";
+  message: string;
+  sessionID?: string;
 }
 
 export interface WSErrorFrame {
@@ -82,6 +96,7 @@ export type WSIncomingFrame =
   | WSStreamDone
   | WSCancelledFrame
   | WSErrorFrame
+  | WSWarningFrame
   | WSApprovalFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
@@ -110,16 +125,27 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // Text and the parked flag are both optional for back-compat: older engines omit them when
       // streamed deltas already carry the reply or when the turn was never parked, and the view
       // finalizes from its accumulated snapshot while treating a missing flag as not parked.
-      return (
-        (value.text === undefined || typeof value.text === "string") &&
-        typeof value.sessionID === "string" &&
-        (value.isParked === undefined || typeof value.isParked === "boolean")
-      );
+      // Terminal warnings degrade to absent via the shared sanitizer so a drifted shape never
+      // drops an otherwise complete turn.
+      if (
+        !(value.text === undefined || typeof value.text === "string") ||
+        typeof value.sessionID !== "string" ||
+        !(value.isParked === undefined || typeof value.isParked === "boolean")
+      ) {
+        return false;
+      }
+      // Probe the shared sanitizer so done-frame validation never drifts from the banner path.
+      sanitizeWarnings(value.warnings);
+      return true;
     case "cancelled":
       return (
         value.sessionID === undefined || typeof value.sessionID === "string"
       );
     case "error":
+      return typeof value.message === "string";
+    case "warning":
+      // Degraded-tool notices are informational: a preformatted line plus an
+      // optional owner, so the guard only requires the line like error frames.
       return typeof value.message === "string";
     case "approval":
       return isApprovalFrame(value);

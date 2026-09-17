@@ -454,15 +454,15 @@ public struct BrowserNavigateTool: Tool, Sendable {
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"url":{"type":"string","description":"http(s) page URL "#
                 + #"to open"},"page":{"type":"string","description":"Alias for url"}, "#
-                + #"pageUrl":{"type":"string","description":"Alias for url"}, "#
-                + #"page_url":{"type":"string","description":"Alias for url"}, "#
-                + #"includeScreenshot":{"type":"boolean","description":"Capture "#
+                + #""pageUrl":{"type":"string","description":"Alias for url"}, "#
+                + #""page_url":{"type":"string","description":"Alias for url"}, "#
+                + #""includeScreenshot":{"type":"boolean","description":"Capture "#
                 + #"a downscaled JPEG screenshot for vision models "#
                 + #"(default false; vision models only)","default":false}, "#
-                + #"screenshot":{"type":"boolean","description":"Alias for includeScreenshot", "#
+                + #""screenshot":{"type":"boolean","description":"Alias for includeScreenshot", "#
                 + #""default":false},"include_screenshot":{"type":"boolean", "#
-                + #""description":"Alias for includeScreenshot"}, "#
-                + #"anyOf":[{"required":["url"]}, {"required":["page"]}, "#
+                + #""description":"Alias for includeScreenshot"}}, "#
+                + #""anyOf":[{"required":["url"]}, {"required":["page"]}, "#
                 + #"{"required":["pageUrl"]}, {"required":["page_url"]}],"#
                 + #""additionalProperties":false}"#
         )
@@ -592,25 +592,25 @@ public struct BrowserActTool: Tool, Sendable {
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"action":{"type":"string", "#
                 + #""description":"Single action: click, fill, select, press, or scroll"}, "#
-                + #"type":{"type":"string","description":"Alias for action"}, "#
-                + #"kind":{"type":"string","description":"Alias for action"}, "#
-                + #"ref":{"type":["string","integer"],"description":"Snapshot element ref "#
+                + #""type":{"type":"string","description":"Alias for action"}, "#
+                + #""kind":{"type":"string","description":"Alias for action"}, "#
+                + #""ref":{"type":["string","integer"],"description":"Snapshot element ref "#
                 + #"from browser.navigate (e.g. e12 or 12)"}, "#
-                + #"target":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #"selector":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #"element":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #"elementRef":{"type":["string","integer"],"description":"Alias for ref"}, "#
-                + #"text":{"type":"string","description":"Value for fill/select "#
+                + #""target":{"type":["string","integer"],"description":"Alias for ref"}, "#
+                + #""selector":{"type":["string","integer"],"description":"Alias for ref"}, "#
+                + #""element":{"type":["string","integer"],"description":"Alias for ref"}, "#
+                + #""elementRef":{"type":["string","integer"],"description":"Alias for ref"}, "#
+                + #""text":{"type":"string","description":"Value for fill/select "#
                 + #"or key for press (e.g. Enter)"}, "#
-                + #"value":{"type":"string","description":"Alias for text"}, "#
-                + #"input":{"type":"string","description":"Alias for text"}, "#
-                + #"key":{"type":"string","description":"Alias for text (press key)"}, "#
-                + #"url":{"type":"string","description":"Snapshot page URL the ref "#
+                + #""value":{"type":"string","description":"Alias for text"}, "#
+                + #""input":{"type":"string","description":"Alias for text"}, "#
+                + #""key":{"type":"string","description":"Alias for text (press key)"}, "#
+                + #""url":{"type":"string","description":"Snapshot page URL the ref "#
                 + #"came from"}, "#
-                + #"page":{"type":"string","description":"Alias for url"}, "#
-                + #"pageUrl":{"type":"string","description":"Alias for url"}, "#
-                + #"page_url":{"type":"string","description":"Alias for url"}}, "#
-                + #"allOf":[{"anyOf":[{"required":["action"]}, "#
+                + #""page":{"type":"string","description":"Alias for url"}, "#
+                + #""pageUrl":{"type":"string","description":"Alias for url"}, "#
+                + #""page_url":{"type":"string","description":"Alias for url"}}, "#
+                + #""allOf":[{"anyOf":[{"required":["action"]}, "#
                 + #"{"required":["type"]}, {"required":["kind"]}]}, "#
                 + #"{"anyOf":[{"required":["ref"]}, {"required":["target"]}, "#
                 + #"{"required":["selector"]}, {"required":["element"]}, "#

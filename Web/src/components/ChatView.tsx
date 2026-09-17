@@ -33,6 +33,7 @@ import {
   mergeApprovalFrame,
   normalizeSessionID,
 } from "../approvalsSession";
+import { sanitizeWarnings } from "../warnings";
 
 interface MessageItem {
   id: string;
@@ -271,6 +272,22 @@ export function autoTitleFromPrompt(text: string): string {
   return firstLine.slice(0, 40) + "…";
 }
 
+// Merges terminal warnings over live ones without duplicating the lines the
+// engine repeats on done: the terminal frame restates every mid-turn notice,
+// so union-by-value keeps one row per skipped tool.
+function mergeWarningLists(previous: string[], next: string[]): string[] {
+  if (next.length === 0) return previous;
+  const seen = new Set(previous);
+  const merged = [...previous];
+  for (const entry of next) {
+    if (!seen.has(entry)) {
+      seen.add(entry);
+      merged.push(entry);
+    }
+  }
+  return merged;
+}
+
 export default function ChatView({ health }: ChatViewProps) {
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [input, setInput] = useState("");
@@ -280,6 +297,9 @@ export default function ChatView({ health }: ChatViewProps) {
   const [pending, setPending] = useState(false);
   const [inFlightTurn, setInFlightTurn] = useState<InFlightTurn | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Degraded-tool notices for the active turn: live warning frames plus the
+  // terminal done list. Informational only, so they never gate the input.
+  const [turnWarnings, setTurnWarnings] = useState<string[]>([]);
   // Unresolved approvals for the inbox badge: filtered by session below so
   // only this conversation's blocked tools raise the amber indicator.
   const [pendingApprovals, setPendingApprovals] = useState<PermissionRequest[]>([]);
@@ -462,12 +482,15 @@ export default function ChatView({ health }: ChatViewProps) {
     }
     // Untagged session frames carry no owner, so they must never touch the
     // current view; only global broadcasts (approval/run_*) bypass tagging.
+    // Warnings stay session-scoped with the turn frames so one session's
+    // skipped tools never alarm another session's banner.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
         frameType === "tool_start" ||
         frameType === "tool_end" ||
-        frameType === "done")
+        frameType === "done" ||
+        frameType === "warning")
     ) {
       return;
     }
@@ -613,9 +636,36 @@ export default function ChatView({ health }: ChatViewProps) {
           ? previous
           : [...previous, request],
       );
+    } else if (frameType === "warning") {
+      // Degraded-tool notices surface live without failing the turn: the
+      // banner accumulates one row per skipped tool and never locks input.
+      // Blank or malformed lines drop instead of rendering empty rows.
+      const rawWarning: unknown = data.message;
+      if (typeof rawWarning !== "string" || rawWarning.trim().length === 0) {
+        return;
+      }
+      // Only extend the turn timeout while a turn is in flight, mirroring
+      // approvals, so a broadcast arriving with no active turn never arms a
+      // spurious timeout cancel.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        armTurnTimeout();
+      }
+      const line = rawWarning;
+      setTurnWarnings((previous) =>
+        previous.includes(line) ? previous : [...previous, line],
+      );
     } else if (frameType === "done") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
+      // Terminal warnings repeat every mid-turn notice for polling clients,
+      // so merge them even on a cancelled turn: the banner is informational
+      // and must not depend on the reply surviving cancellation.
+      const earlyWarnings = sanitizeWarnings(
+        (data as Record<string, unknown>).warnings,
+      );
+      if (earlyWarnings.length > 0) {
+        setTurnWarnings((previous) => mergeWarningLists(previous, earlyWarnings));
+      }
       if (cancelledRef.current) {
         setInFlightTurn(null);
         setPending(false);
@@ -949,6 +999,9 @@ export default function ChatView({ health }: ChatViewProps) {
     knownDraftIDRef.current = null;
     setPending(true);
     setError(null);
+    // Each turn owns its banner: stale degraded-tool lines clear on send so
+    // the next live or terminal notice starts from an honest empty state.
+    setTurnWarnings([]);
 
     const isFirst = messages.length === 0;
     isFirstMessageRef.current = isFirst;
@@ -1044,6 +1097,12 @@ export default function ChatView({ health }: ChatViewProps) {
       };
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
+      // REST turns carry no stream, so terminal warnings are the only banner
+      // source here; malformed lists degrade to no banner like the WS path.
+      const restWarnings = sanitizeWarnings(response.warnings);
+      if (restWarnings.length > 0) {
+        setTurnWarnings((previous) => mergeWarningLists(previous, restWarnings));
+      }
       if (isParked) {
         // Parked REST turns (WS closed) wait on inbox approval: refresh immediately so the header
         // shows the amber waiting state instead of appearing completed, while the waiting text
@@ -1073,6 +1132,9 @@ export default function ChatView({ health }: ChatViewProps) {
     setMessages([]);
     setInFlightTurn(null);
     setError(null);
+    // Banners belong to their session, so switching drafts never carries
+    // another conversation's skipped-tool lines into the fresh view.
+    setTurnWarnings([]);
     setLastTurnTokens(null);
     setSessionTokens(loadSessionTokens(nextID));
   }
@@ -1086,6 +1148,7 @@ export default function ChatView({ health }: ChatViewProps) {
     setSessionID(id);
     setInFlightTurn(null);
     setError(null);
+    setTurnWarnings([]);
     setLastTurnTokens(null);
     setSessionTokens(loadSessionTokens(id));
   }
@@ -1253,6 +1316,39 @@ export default function ChatView({ health }: ChatViewProps) {
         </div>
 
         {error ? <p className="error chat-error">{error}</p> : null}
+
+        {/* Degraded-tool banner sits above the input like the fatal error, but
+            stays amber and dismissible: skipped tools never fail the turn, so
+            the notice must never lock Send the way a red error interrupts. */}
+        {turnWarnings.length > 0 ? (
+          <div
+            data-testid="turn-warnings-banner"
+            role="status"
+            aria-label="Degraded tool warnings"
+            className="turn-warnings-banner"
+          >
+            <div className="turn-warnings-header">
+              <strong>
+                {turnWarnings.length === 1
+                  ? "A tool was skipped for this turn"
+                  : `${turnWarnings.length} tools were skipped for this turn`}
+              </strong>
+              <button
+                type="button"
+                className="ghost turn-warnings-dismiss"
+                aria-label="Dismiss warnings"
+                onClick={() => setTurnWarnings([])}
+              >
+                Dismiss
+              </button>
+            </div>
+            <ul className="turn-warnings-list">
+              {turnWarnings.map((warning) => (
+                <li key={warning}>{warning}</li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
 
         {/* Inline session approvals sit between the parked waiting text and
             the input as a non-modal list, so deciding never blocks typing. */}

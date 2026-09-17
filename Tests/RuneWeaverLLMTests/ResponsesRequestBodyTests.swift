@@ -208,6 +208,46 @@ struct ResponsesRequestBodyTests {
         assertNoInputTextOnAssistantOrToolItems(input)
     }
 
+    @Test
+    func `Degraded definitions skip broken schemas on both wires`() throws {
+        // One corrupt plugin must not fail the turn: bulk builders omit it
+        // while direct encoding stays loud for isolated callers.
+        let valid = ToolDefinition(
+            name: "email.search",
+            description: "Search email",
+            parameters: JSONSchema(rawValue: #"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}"#)
+        )
+        let broken = ToolDefinition(
+            name: "broken.tool",
+            description: "Corrupt schema",
+            parameters: JSONSchema(rawValue: "not-json")
+        )
+        do {
+            _ = try encodeToolParameters(broken)
+            Issue.record("encodeToolParameters should throw for corrupt schemas")
+        } catch {
+            #expect(error is LLMProviderError)
+        }
+        let filtered = validatedDefinitions([valid, broken])
+        #expect(filtered.valid.count == 1)
+        #expect(filtered.skipped == ["broken.tool"])
+        let messages = [Message(role: .user, content: "Degraded wire check")]
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: [valid, broken], stream: true)
+        let chatJSON = try #require(try JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatTools = try #require(chatJSON["tools"] as? [[String: Any]])
+        #expect(chatTools.count == 1)
+        let chatName = try #require((chatTools[0]["function"] as? [String: Any])?["name"] as? String)
+        #expect(chatName == "email.search")
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: [valid, broken], stream: true)
+        let responsesJSON = try #require(try JSONSerialization.jsonObject(with: responsesBody) as? [String: Any])
+        let responsesTools = try #require(responsesJSON["tools"] as? [[String: Any]])
+        #expect(responsesTools.count == 1)
+        #expect((responsesTools[0]["name"] as? String) == "email.search")
+        let parameters = try #require(responsesTools[0]["parameters"] as? [String: Any])
+        #expect(parameters["type"] as? String == "object")
+        #expect(parameters["additionalProperties"] as? Bool == false)
+    }
+
     private func responsesInputItems(from body: Data) throws -> [[String: Any]] {
         let object = try JSONSerialization.jsonObject(with: body)
         let json = try #require(object as? [String: Any])

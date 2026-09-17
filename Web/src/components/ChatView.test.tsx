@@ -1019,3 +1019,117 @@ describe("Inline session approval banner", () => {
   });
 });
 
+describe("Degraded tool warnings and fatal errors", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    localStorage.clear();
+  });
+
+  it("renders degraded warnings as an amber banner without locking input", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "check mail");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+
+    // Live degraded notice surfaces immediately without failing the turn.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "warning",
+      message: "Tool broken.tool was disabled for this turn: invalid input schema",
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("turn-warnings-banner")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(
+        "Tool broken.tool was disabled for this turn: invalid input schema",
+      ),
+    ).toBeInTheDocument();
+
+    // Terminal frame repeats the notice and completes normally.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "Checked what I could.",
+      sessionID: turnSID,
+      toolActions: [],
+      totalTokens: 10,
+      warnings: [
+        "Tool broken.tool was disabled for this turn: invalid input schema",
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    // Amber banner stays informational: one row, amber class distinct from fatal error, input usable.
+    const banner = screen.getByTestId("turn-warnings-banner");
+    expect(banner).toHaveTextContent("A tool was skipped for this turn");
+    expect(banner.className).toContain("turn-warnings-banner");
+    expect(banner.className).not.toContain("chat-error");
+    expect(screen.getByText("Checked what I could.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+    expect(screen.queryByText("Chat turn failed")).not.toBeInTheDocument();
+  });
+
+  it("renders fatal turn errors in red without the amber banner", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "check mail");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "error",
+      message: "Chat turn failed",
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("Chat turn failed")).toBeInTheDocument();
+    });
+
+    // Fatal errors use the red error class, never the amber warnings banner.
+    const errorEl = screen.getByText("Chat turn failed");
+    expect(errorEl.className).toContain("error");
+    expect(errorEl.className).toContain("chat-error");
+    expect(
+      screen.queryByTestId("turn-warnings-banner"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+});
+

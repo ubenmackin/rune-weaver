@@ -41,12 +41,17 @@ public actor LLMRouter {
 
     /// Tool definitions safe for one provider's capability.
     public static func visionFilteredDefinitions(_ tools: [ToolDefinition], supportsVision: Bool) -> [ToolDefinition] {
-        guard !supportsVision else { return tools }
-        return tools.map { definition in
+        // Silent prefilter and re-validation keep one wire log site per turn: the request body
+        // builders log each skip, so router filtering stays quiet to avoid 2x per invalid tool.
+        let prefiltered = validatedDefinitions(tools, logSkips: false)
+        guard !supportsVision else { return prefiltered.valid }
+        let stripped = prefiltered.valid.map { definition in
             guard definition.name == BrowserScreenshotPolicy.navigateToolName else { return definition }
-            let stripped = VisionSchemaFilter.strippedNavigateSchema(definition.parameters)
-            return ToolDefinition(name: definition.name, description: definition.description, parameters: stripped)
+            let strippedSchema = VisionSchemaFilter.strippedNavigateSchema(definition.parameters)
+            return ToolDefinition(name: definition.name, description: definition.description, parameters: strippedSchema)
         }
+        // Re-validate after the vision transform in case stripping produced an invalid shape.
+        return validatedDefinitions(stripped, logSkips: false).valid
     }
 
     /// Streams a chat completion via the first healthy provider.
@@ -185,10 +190,24 @@ public actor LLMRouter {
 
     /// Tools safe for one provider's capability on the text-streaming path.
     public static func visionGatedTools(_ tools: [any Tool], supportsVision: Bool) -> [any Tool] {
-        guard !supportsVision else { return tools }
-        return tools.map { tool -> any Tool in
+        // Silent prefilter and re-validation keep one wire log site per turn: the request body
+        // builders log each skip, so router filtering stays quiet to avoid 2x per invalid tool.
+        let prefiltered = VisionSchemaFilter.validatedTools(tools, logSkips: false)
+        guard !supportsVision else { return prefiltered.valid }
+        return prefiltered.valid.compactMap { tool -> (any Tool)? in
             guard tool.name == BrowserScreenshotPolicy.navigateToolName else { return tool }
             let stripped = VisionSchemaFilter.strippedNavigateSchema(tool.inputSchema)
+            // Stripping only removes optional keys, but omit defensively if it broke validity.
+            // Silent check keeps the single wire log site; the builder logs if this ever withholds.
+            let rechecked = VisionSchemaFilter.partitionValidSchemas(
+                entries: [stripped.rawValue],
+                name: { _ in tool.name },
+                rawSchema: { $0 },
+                logSkips: false
+            )
+            guard !rechecked.valid.isEmpty else {
+                return nil
+            }
             return VisionGatedTool(wrapping: tool, inputSchema: stripped)
         }
     }

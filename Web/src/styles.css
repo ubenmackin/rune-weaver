@@ -1921,6 +1921,36 @@ a {
   white-space: nowrap;
 }
 
+/* Degraded-tool banner for skipped schemas: amber and informational, never the red fatal
+ * error. Single class replaces the previous inline amber style so theme and fatal styles
+ * stay distinct without per-render style objects. */
+.turn-warnings-banner {
+  margin: 0 16px 12px;
+  padding: 10px 14px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.turn-warnings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.turn-warnings-dismiss {
+  padding: 2px 10px;
+  font-size: 12px;
+}
+
+.turn-warnings-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
 .run-kind-tag {
   font-size: 12px;
   font-weight: 600;

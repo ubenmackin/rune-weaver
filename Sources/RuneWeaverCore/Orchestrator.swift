@@ -69,6 +69,9 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     public let sessionTokens: Int?
     /// Whether this turn parked waiting on approval.
     public let isParked: Bool
+    /// Degraded-tool notices for tools omitted this turn. Carries only tool names
+    /// plus a static reason so no secrets or schema payloads reach the wire.
+    public let warnings: [String]
 
     /// Coding keys matching the JSON wire shape.
     private enum CodingKeys: String, CodingKey {
@@ -88,6 +91,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         case sessionTokens
         /// Whether the turn parked waiting on approval.
         case isParked
+        /// Degraded-tool notices.
+        case warnings
     }
 
     /// Creates a response.
@@ -99,7 +104,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         modelName: String? = nil,
         contextLength: Int? = nil,
         sessionTokens: Int? = nil,
-        isParked: Bool = false
+        isParked: Bool = false,
+        warnings: [String] = []
     ) {
         self.text = text
         self.sessionID = sessionID
@@ -109,9 +115,10 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
         self.isParked = isParked
+        self.warnings = warnings
     }
 
-    /// Decodes a response, defaulting missing parked flags to not parked.
+    /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to empty.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -123,6 +130,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
         self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
+        self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
     }
 
     /// Encodes a response.
@@ -137,6 +145,11 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         try container.encodeIfPresent(contextLength, forKey: .contextLength)
         try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
         try container.encode(isParked, forKey: .isParked)
+        // Omit empty warnings so older decoders see an absent key and degrade to no banner,
+        // mirroring WSStreamDone which nils empty lists for back-compat.
+        if !warnings.isEmpty {
+            try container.encode(warnings, forKey: .warnings)
+        }
     }
 }
 
@@ -176,111 +189,9 @@ public enum OrchestratorEvent: Sendable, Codable, Equatable {
     case textDelta(String)
     /// Filed narrated approval awaiting an inbox decision.
     case approval(PermissionRequest)
-}
-
-/// Resolves model-requested tool calls for the current context.
-public typealias OrchestratorToolResolver = @Sendable ([Message], [any Tool]) async throws -> [ToolInput]
-
-/// Single shared tool-loop policy for the orchestrator and the CLI chat loop.
-public enum OrchestratorToolLoop {
-    /// Returns the assistant content to persist for a tool round.
-    public static func assistantNoteContent(text: String, calls: [ToolInput]) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return ToolInput.placeholderContent(for: calls)
-        }
-        if calls.isEmpty {
-            return text
-        }
-        return text + "\n" + ToolInput.placeholderContent(for: calls)
-    }
-
-    /// Whether final assistant text is worth storing and returning.
-    /// - Parameter text: Final assistant text.
-    /// - Returns: True when the text is non-blank.
-    public static func shouldStoreAssistantText(_ text: String) -> Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// Whether the tool-round budget is exceeded.
-    public static func isLimitExceeded(rounds: Int, max: Int) -> Bool {
-        rounds > max
-    }
-
-    /// Builds the compact episodic record for one tool execution.
-    public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
-        MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
-    }
-
-    /// Normalizes an input source label, defaulting blanks to `"chat"`.
-    public static func resolvedSource(_ source: String) -> String {
-        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "chat" : trimmed
-    }
-
-    /// Converts narrated placeholder lines into read-only tool calls.
-    public static func narratedToolCalls(from text: String, tools: [any Tool]) -> [ToolInput] {
-        narratedCalls(from: text, tools: tools, where: { $0.permissionLevel == .readOnly })
-    }
-
-    /// Converts narrated placeholder lines into approval-gated tool calls.
-    public static func narratedGatedCalls(from text: String, tools: [any Tool]) -> [ToolInput] {
-        narratedCalls(from: text, tools: tools, where: { $0.permissionLevel == .requiresApproval })
-    }
-
-    /// Converts narrated placeholder lines into tool calls matching a permission filter.
-    private static func narratedCalls(
-        from text: String,
-        tools: [any Tool],
-        where predicate: (any Tool) -> Bool
-    ) -> [ToolInput] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-        let byName = Dictionary(tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        var calls: [ToolInput] = []
-        for rawLine in normalized.components(separatedBy: "\n") {
-            guard let parsed = ToolInput.parsePlaceholderLine(rawLine) else { continue }
-            guard let tool = byName[parsed.toolName] else { continue }
-            guard predicate(tool) else { continue }
-            guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
-            calls.append(ToolInput(
-                toolName: parsed.toolName,
-                argumentsJSON: parsed.argumentsJSON,
-                callID: UUID().uuidString
-            ))
-        }
-        return calls
-    }
-
-    /// Builds the parked-turn message ending a narration that needs approval.
-    public static func waitingOnApprovalMessage(for calls: [ToolInput]) -> String {
-        let names = Array(Set(calls.map(\.toolName))).sorted()
-        let joined = names.isEmpty ? "the requested tool" : names.joined(separator: ", ")
-        return "Waiting for approval to run \(joined). Approve in the approvals inbox to continue."
-    }
-
-    /// Builds the session notice recording a denied narrated approval.
-    public static func deniedApprovalMessage(for toolName: String) -> String {
-        let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.isEmpty ? "the requested tool" : trimmed
-        return "Approval denied for \(name); not running it."
-    }
-
-    /// Whether raw narration arguments are a JSON object.
-    private static func isNarrationArgumentsJSON(_ argumentsJSON: String) -> Bool {
-        let trimmed = argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        guard let data = trimmed.data(using: .utf8) else { return false }
-        do {
-            let value = try JSONSerialization.jsonObject(with: data, options: [])
-            return value is [String: Any]
-        } catch {
-            return false
-        }
-    }
+    /// Degraded-tool notice for a tool omitted this turn. Carries only the
+    /// preformatted warning line so no schema payloads reach subscribers.
+    case warning(String)
 }
 
 /// Parked narrated approval awaiting a later decision.
@@ -450,6 +361,13 @@ public actor Orchestrator {
                 recall: recall
             )
             let tools = await toolBus.availableTools()
+            // Degraded tools stay out of the model request but must not fail the turn:
+            // surface one static warning per skipped tool name mid-turn and again
+            // on the terminal response so streaming and polling clients agree.
+            let turnWarnings = OrchestratorToolLoop.degradedToolWarnings(for: tools)
+            for warning in turnWarnings {
+                await onEvent?(.warning(warning))
+            }
             let request = TurnLoopRequest(
                 workingMessages: workingMessages,
                 tools: tools,
@@ -474,7 +392,8 @@ public actor Orchestrator {
                     totalTokens: loopBilled,
                     modelName: llm.modelInfo.name,
                     contextLength: llm.modelInfo.contextLength,
-                    sessionTokens: cumulativeTokens
+                    sessionTokens: cumulativeTokens,
+                    warnings: turnWarnings
                 )
             }
         } catch let error as CancellationError {
@@ -591,6 +510,14 @@ extension Orchestrator {
         if let newAction {
             appendBufferedParkedAction(newAction, forBatch: batchID)
         }
+        // Resumed turns advertise the current registry, so recompute degraded notices
+        // here rather than reusing the parked turn's snapshot.
+        let resumeWarnings = await OrchestratorToolLoop.degradedToolWarnings(for: toolBus.availableTools())
+        // Mirror the fresh-turn path so streaming and polling clients agree:
+        // surface each skip live before the terminal response repeats it.
+        for warning in resumeWarnings {
+            await onEvent?(.warning(warning))
+        }
         let remaining = remainingPendingActions(inBatch: batchID)
         if !remaining.isEmpty {
             let buffered = bufferedParkedActions(forBatch: batchID)
@@ -616,7 +543,8 @@ extension Orchestrator {
                 modelName: llm.modelInfo.name,
                 contextLength: llm.modelInfo.contextLength,
                 sessionTokens: sessionTokensBySession[sessionID],
-                isParked: true
+                isParked: true,
+                warnings: resumeWarnings
             )
         }
         let buffered = takeBufferedParkedActions(forBatch: batchID)
@@ -628,7 +556,8 @@ extension Orchestrator {
                 modelName: llm.modelInfo.name,
                 contextLength: llm.modelInfo.contextLength,
                 sessionTokens: sessionTokensBySession[sessionID],
-                isParked: false
+                isParked: false,
+                warnings: resumeWarnings
             )
         }
         let prompt = await resolveParkedSynthesisPrompt(parked)
@@ -642,7 +571,8 @@ extension Orchestrator {
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulative,
-            isParked: false
+            isParked: false,
+            warnings: resumeWarnings
         )
     }
 
@@ -803,6 +733,9 @@ extension Orchestrator {
     ) async throws -> (text: String, billedTokens: Int?) {
         try Task.checkCancellation()
         let tools = await toolBus.availableTools()
+        // Live degraded notices already streamed once by the resume caller, so synthesis stays
+        // quiet to keep one warning frame per skipped tool instead of doubling the bell badge.
+        // Invalid schemas still stay out of the model request via the provider filter.
         let workingMessages = await conversations.workingHistory(for: sessionID, systemPrompt: prompt)
         let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
             await onEvent?(.textDelta(delta))
@@ -829,6 +762,14 @@ extension Orchestrator {
         var finalText = ""
         var toolRounds = 0
         var billedTokens: Int?
+        // Fail-closed names for structured calls: hallucinated names for omitted schemas never execute.
+        // Silent partition keeps the prompt and wire filters as the single logging sites per turn.
+        let validToolNames = Set(VisionSchemaFilter.partitionValidSchemas(
+            entries: tools,
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: false
+        ).valid.map(\.name))
         while true {
             try Task.checkCancellation()
             let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
@@ -838,9 +779,13 @@ extension Orchestrator {
                 billedTokens = (billedTokens ?? 0) + billed
             }
             finalText = collected.text
-            var calls = collected.toolCalls
+            // Withheld schemas leave no executable call: fall through to the fail-closed narrated
+            // fallback rather than running hallucinated names.
+            var calls = collected.toolCalls.filter { validToolNames.contains($0.toolName) }
             if calls.isEmpty {
                 calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
+                // Custom resolvers see the full registry, so withhold invalid schemas here as well.
+                calls = calls.filter { validToolNames.contains($0.toolName) }
             }
             // Narrated gated calls are always collected so mixed turns that
             // pair structured calls with gated narration file approvals
@@ -967,7 +912,15 @@ extension Orchestrator {
         _ context: ParkGatedCallsContext,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async -> OrchestratorResponse {
-        let byName = Dictionary(context.tools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
+        // Withhold invalid schemas fail-closed: gated narrations for omitted tools never file.
+        // Silent partition keeps the prompt and wire filters as the single logging sites.
+        let validParkTools = VisionSchemaFilter.partitionValidSchemas(
+            entries: context.tools,
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: false
+        ).valid
+        let byName = Dictionary(validParkTools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
         let batchID = UUID()
         if let queue = approvalQueue {
             for call in context.gated {
@@ -995,6 +948,9 @@ extension Orchestrator {
         let pendingGatedActions = context.gated.map {
             ToolAction(toolName: $0.toolName, callID: $0.callID, argumentsJSON: $0.argumentsJSON, result: nil)
         }
+        // Degraded tools share the turn's registry snapshot so parked and finished
+        // responses agree even when the model never saw the omitted entries.
+        let parkedWarnings = OrchestratorToolLoop.degradedToolWarnings(for: context.tools)
         return OrchestratorResponse(
             text: waiting,
             sessionID: context.sessionID,
@@ -1003,7 +959,8 @@ extension Orchestrator {
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulativeTokens,
-            isParked: true
+            isParked: true,
+            warnings: parkedWarnings
         )
     }
 }
@@ -1051,11 +1008,18 @@ extension Orchestrator {
         await conversations.append(Message(role: .assistant, content: acknowledgement), to: sessionID)
         pendingEpisodic.append((acknowledgement, .assistant))
         await onEvent?(.textDelta(acknowledgement))
+        // Remember turns bypass the model but must stay honest: surface the same degraded-tool
+        // notices live and on the terminal response so skips never go silent.
+        let rememberWarnings = await OrchestratorToolLoop.degradedToolWarnings(for: toolBus.availableTools())
+        for warning in rememberWarnings {
+            await onEvent?(.warning(warning))
+        }
         return OrchestratorResponse(
             text: acknowledgement,
             sessionID: sessionID,
             toolActions: [],
-            sessionTokens: sessionTokensBySession[sessionID]
+            sessionTokens: sessionTokensBySession[sessionID],
+            warnings: rememberWarnings
         )
     }
 

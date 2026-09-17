@@ -63,6 +63,10 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
         )
     case let .textDelta(delta):
         try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
+    case let .warning(message):
+        // Degraded-tool notices stream as warning frames so clients surface skips
+        // mid-turn without failing; the terminal done frame repeats them.
+        try? String(data: JSONEncoder().encode(WSWarningFrame(message: message, sessionID: sessionID)), encoding: .utf8)
     case .approval:
         nil
     }
@@ -157,6 +161,8 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
             if parked {
                 await context.hub.broadcastRun(entry)
             }
+            // Live warning frames already streamed mid-turn; the terminal done frame repeats them
+            // for polling clients, so no per-warning resend here that would double-count the bell.
             let done = WSStreamDone(from: response)
             if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
                 await context.hub.send(id: connectionID, text: frame)

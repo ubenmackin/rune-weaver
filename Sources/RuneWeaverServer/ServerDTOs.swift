@@ -813,6 +813,8 @@ public typealias WSToolEndFrame = RuneWeaverCore.WSToolEndFrame
 public typealias WSCancelMessage = RuneWeaverCore.WSCancelMessage
 /// Cancelled confirmation frame, single-sourced from core.
 public typealias WSCancelledFrame = RuneWeaverCore.WSCancelledFrame
+/// Mid-turn degraded-tool notice, single-sourced from core.
+public typealias WSWarningFrame = RuneWeaverCore.WSWarningFrame
 
 /// Classifies one inbound WebSocket text frame.
 public enum WSInboundKind: Sendable, Equatable {
