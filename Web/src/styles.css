@@ -1907,6 +1907,24 @@ a {
   animation: pulseTool 2s infinite ease-in-out;
 }
 
+/* Search health line pairs the tri-state pill with the probed URL so state stays
+ * scannable while the endpoint remains visible; wrapping plus anywhere-break keeps
+ * pill and long URLs readable in narrow panes without horizontal scrolling. */
+.search-health-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.search-health-line .search-health-url {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 /* Shared amber badge for runs or sessions parked awaiting an approval
  * decision. Single class replaces duplicated inline badge styles so every
  * pending indicator stays visually consistent. */

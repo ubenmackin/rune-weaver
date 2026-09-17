@@ -655,8 +655,10 @@ public struct SearchHealthResponse: Content, Equatable {
 }
 
 /// Search engine ensure response for `POST /search/ensure`.
-/// Carries the last cascade failure detail in `message` when unreachable, so
-/// the dashboard can render why the heal stopped instead of flipping silently.
+/// `message` carries the trimmed banner (terminal cause plus one hatch command)
+/// for inline error slots, while `diagnostics` carries the full per-stage detail
+/// (stage, exit, capped tail, timeout) for warn logs plus the collapsed Settings
+/// diagnostics element. Older engines omit `diagnostics`, which decodes to nil.
 public struct SearchEnsureResponse: Content, Equatable {
     /// Whether the engine answers after the ensure attempt.
     public let reachable: Bool
@@ -668,11 +670,13 @@ public struct SearchEnsureResponse: Content, Equatable {
     public let url: String
     /// Collapsed status (`"running"` when reachable, else `"stopped"`).
     public let status: String
-    /// Last cascade failure detail (stage, exit, capped tail, timeout) when unreachable.
+    /// Trimmed banner (terminal cause plus one remediation) when unreachable.
     public let message: String?
+    /// Full per-stage detail for logs plus collapsed diagnostics, when unreachable.
+    public let diagnostics: String?
 
     /// Creates an ensure response.
-    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil, message: String? = nil) {
+    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil, message: String? = nil, diagnostics: String? = nil) {
         self.reachable = reachable
         self.baseURL = baseURL
         self.started = started
@@ -680,6 +684,8 @@ public struct SearchEnsureResponse: Content, Equatable {
         self.status = status ?? (reachable ? "running" : "stopped")
         let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         self.message = trimmed.isEmpty ? nil : trimmed
+        let trimmedDiagnostics = (diagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -689,9 +695,10 @@ public struct SearchEnsureResponse: Content, Equatable {
         case url
         case status
         case message
+        case diagnostics
     }
 
-    /// Decodes tolerantly across `baseURL`/`url` shapes plus optional message.
+    /// Decodes tolerantly across `baseURL`/`url` shapes plus optional message and diagnostics.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         reachable = try container.decode(Bool.self, forKey: .reachable)
@@ -705,6 +712,9 @@ public struct SearchEnsureResponse: Content, Equatable {
         let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
         let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         message = trimmed.isEmpty ? nil : trimmed
+        let rawDiagnostics = try container.decodeIfPresent(String.self, forKey: .diagnostics)
+        let trimmedDiagnostics = (rawDiagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
     }
 
     /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
@@ -716,6 +726,7 @@ public struct SearchEnsureResponse: Content, Equatable {
         try container.encode(started, forKey: .started)
         try container.encode(status, forKey: .status)
         try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(diagnostics, forKey: .diagnostics)
     }
 }
 

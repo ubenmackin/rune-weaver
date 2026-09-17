@@ -2,17 +2,20 @@
 //
 // Thin HTTP adapters over the shared `SearXNGEnsurer`: health probes the
 // configured base URL, ensure collapses onto the self-healing cascade
-// (runtime, daemon, start, run, poll) with failure detail, and stop halts the
-// managed container. Lifecycle policy (loopback-only bind, per-install secret
-// mount, pinned image, final poll 10s with 500 ms polls inside an about-41s
-// worst-case cascade, bounded 8s system start) lives single-source in the
-// ensurer so boot, `web.search`, and these routes cannot drift; the routes
-// only translate outcomes to HTTP shapes.
+// (runtime, daemon, start, run, poll) with a trimmed banner plus chained
+// diagnostics, and stop halts the managed container. Lifecycle policy
+// (loopback-only bind, per-install secret mount, tracked `:latest` image,
+// final poll 10s with 500 ms polls inside an about-41s worst-case cascade,
+// bounded 8s system start) lives single-source in the ensurer so boot,
+// `web.search`, and these routes cannot drift; the routes only translate
+// outcomes to HTTP shapes. Fresh runs track `:latest` by design so new
+// installs follow upstream; pin via `SEARXNG_IMAGE` when reproducibility
+// matters.
 //
 // Health reporting stays honest: ensure reports whether a local start was
-// actually attempted plus the last failure detail, warning with the container
-// plus outcome, and stop re-probes after halting so the dashboard never
-// shows Stopped while the engine still answers.
+// actually attempted plus the trimmed banner, warning with the container plus
+// outcome plus chained per-stage diagnostics, and stop re-probes after halting
+// so the dashboard never shows Stopped while the engine still answers.
 
 import Foundation
 import RuneWeaverCore
@@ -41,17 +44,20 @@ func registerSearchRoutes(_ app: Application) {
         // Single-sourced through the shared ensurer so boot, search, and this
         // route collapse onto one in-flight attempt keyed by base URL instead
         // of duplicating the cascade budgets (final poll 10s with 500 ms
-        // polls inside the worst-case cascade). The failure detail threads
-        // through so the dashboard renders why the heal stopped.
+        // polls inside the worst-case cascade). The trimmed banner threads
+        // through for the inline slot while chained diagnostics thread through
+        // for logs plus collapsed UI, so each failure renders once.
         let report = await SearXNGEnsurer.shared.ensureReport(browser: context.browserConfig)
-        // Warn with the container plus outcome so operator logs keep the
-        // failing stage without re-running the cascade.
+        // Warn with the container plus outcome plus chained per-stage detail so
+        // operator logs keep every failing stage without re-running the cascade;
+        // the banner stays trimmed to terminal cause plus one command.
         if !report.reachable {
             let container = SearXNGEnsurer.containerName
-            let detail = report.message ?? "none"
+            let banner = report.message ?? "none"
+            let chained = report.diagnostics ?? "none"
             let warningMessage =
                 "SearXNG ensure container=\(container) reachable=\(report.reachable) "
-                    + "started=\(report.started) message=\(detail)"
+                    + "started=\(report.started) message=\(banner) diagnostics=\(chained)"
             req.logger.warning("\(warningMessage)")
             RuneWeaverLog.server.warning("\(warningMessage)")
         }
@@ -59,7 +65,8 @@ func registerSearchRoutes(_ app: Application) {
             reachable: report.reachable,
             baseURL: context.browserConfig.searxngURL,
             started: report.started,
-            message: report.message
+            message: report.message,
+            diagnostics: report.diagnostics
         )
     }
 

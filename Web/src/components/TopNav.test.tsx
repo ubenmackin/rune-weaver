@@ -207,4 +207,82 @@ describe("TopNav SearXNG row", () => {
       );
     });
   });
+
+  it("renders a single trimmed banner on failed start without nesting stages", async () => {
+    const user = userEvent.setup();
+    const banner =
+      "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (String(input) === "/search/ensure" && init?.method === "POST") {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: "stage: run, exit: 1, detail: pull denied; stage: poll, (timed out after 10s)",
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    renderNav({
+      status: "ok",
+      engine: "Rune Weaver",
+      version: "0.1.0",
+      searchReachable: false,
+      searchURL: ENGINE_SEARCH_URL,
+    });
+    await openProfile(user);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Banner renders once with the generic pull cause plus one remediation;
+    // chained stage detail stays out of this slot (Settings diagnostics only).
+    await waitFor(() => {
+      const error = screen.getByTestId("searxng-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    // Tri-state dot stays honest: failed start keeps the red Stopped dot.
+    expect(screen.getByTestId("searxng-status-text").textContent).toBe(
+      "Stopped"
+    );
+  });
+
+  it("keeps timeout banners to one remediation command", async () => {
+    const user = userEvent.setup();
+    const banner =
+      "SearXNG is not reachable at http://127.0.0.1:8888. Start it with `scripts/searxng-up.sh`, then retry.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (String(input) === "/search/ensure" && init?.method === "POST") {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    renderNav({
+      status: "ok",
+      engine: "Rune Weaver",
+      version: "0.1.0",
+      searchReachable: false,
+      searchURL: ENGINE_SEARCH_URL,
+    });
+    await openProfile(user);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    await waitFor(() => {
+      const error = screen.getByTestId("searxng-error");
+      expect(error.textContent).toBe(banner);
+      // One hatch command, never the legacy `container start` second command.
+      expect(error.textContent).toContain("scripts/searxng-up.sh");
+      expect(error.textContent).not.toContain("container start");
+    });
+  });
 });
