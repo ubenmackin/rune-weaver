@@ -99,20 +99,101 @@ public enum ContainerMachineManager {
         resolveRuntimeURL(runtime: runtime) != nil
     }
 
-    /// Resolves the absolute path for the container CLI.
-    public static func resolveRuntimeURL(runtime: String = "container") -> URL? {
-        if runtime.starts(with: "/") {
-            let url = URL(fileURLWithPath: runtime)
-            return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+    /// Known install locations always probed after PATH entries.
+    /// Mirrors the SearXNG resolver so detonation and search share one lookup:
+    /// a minimal PATH must never hide a standard Homebrew install.
+    public static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+    /// Ordered directories probed for the container runtime.
+    /// PATH order wins so an operator override shadows the fallback, while the
+    /// appended fallbacks keep a Homebrew install visible when PATH is minimal.
+    /// Duplicates collapse so a PATH that already carries a fallback probes it
+    /// once; blanks are skipped so empty segments never become relative probes.
+    /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    public static func runtimeSearchDirectories(pathValue: String?) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        func append(_ dir: String) {
+            let trimmed = dir.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { return }
+            ordered.append(trimmed)
         }
-        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
-        for dir in envPath.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent(runtime)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+        if let pathValue {
+            for part in pathValue.split(separator: ":") {
+                append(String(part))
+            }
+        }
+        for fallback in fallbackRuntimeDirectories {
+            append(fallback)
+        }
+        return ordered
+    }
+
+    /// Ordered directories probed for the container runtime in this process.
+    /// Reads the live `PATH` so production and diagnostics share one ordering.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    public static func runtimeSearchDirectories() -> [String] {
+        runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
+    }
+
+    /// Resolves the absolute path for the container CLI.
+    /// Absolute runtime values probe directly without PATH expansion; bare
+    /// names probe the shared search ordering with no Docker fallback.
+    /// - Parameters:
+    ///   - runtime: Binary name or absolute path.
+    ///   - searchDirectories: Ordered directories to probe for bare names.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when missing.
+    public static func resolveRuntimeURL(
+        runtime: String = "container",
+        searchDirectories: [String],
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        if runtime.hasPrefix("/") {
+            let url = URL(fileURLWithPath: runtime)
+            return isExecutable(url.path) ? url : nil
+        }
+        for dir in searchDirectories {
+            let candidate = URL(fileURLWithPath: dir).appendingPathComponent(runtime)
+            if isExecutable(candidate.path) {
                 return candidate
             }
         }
         return nil
+    }
+
+    /// Resolves the runtime against an explicit PATH value for testing.
+    /// Routes the same fallback ordering through a stubbed filesystem probe so
+    /// minimal-PATH coverage stays verifiable without touching the real PATH.
+    /// - Parameters:
+    ///   - runtime: Binary name or absolute path.
+    ///   - pathValue: Raw `PATH` value driving the search ordering.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when missing everywhere searched.
+    public static func resolveRuntimeURL(
+        runtime: String = "container",
+        pathValue: String?,
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        resolveRuntimeURL(
+            runtime: runtime,
+            searchDirectories: runtimeSearchDirectories(pathValue: pathValue),
+            isExecutable: isExecutable
+        )
+    }
+
+    /// Resolves the absolute path for the container CLI.
+    public static func resolveRuntimeURL(runtime: String = "container") -> URL? {
+        if runtime.hasPrefix("/") {
+            let url = URL(fileURLWithPath: runtime)
+            return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
+        }
+        return resolveRuntimeURL(
+            runtime: runtime,
+            searchDirectories: runtimeSearchDirectories(),
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
     }
 
     /// Creates a new container machine with an internal virtual disk.
@@ -383,9 +464,13 @@ public enum ContainerMachineError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case let .runtimeNotFound(runtime):
-            "Apple container CLI ('\(runtime)') was not found in PATH. Install via https://github.com/apple/container."
+            // Name the searched directories so the failure alone explains the
+            // miss; the ordering mirrors the resolver (PATH first, then the
+            // Homebrew fallbacks) instead of a bare "not in PATH".
+            let searched = ContainerMachineManager.runtimeSearchDirectories().joined(separator: ", ")
+            return "Apple container CLI ('\(runtime)') was not found in PATH. Install via https://github.com/apple/container. Searched: \(searched)."
         case let .operationFailed(reason):
-            reason
+            return reason
         }
     }
 }

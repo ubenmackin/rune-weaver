@@ -272,8 +272,12 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         // Stage order matters: a missing runtime short-circuits before any
         // daemon probe, and a down daemon heals before container start/run so
         // later stages never misreport a service outage as a container miss.
+        // A missing runtime fails with the install guidance alone: wrapping
+        // the unreachable-engine text around it would bury the one actionable
+        // cause under a second message, so the single error propagates as-is
+        // through the web.search failure path.
         guard let runtime = resolveRuntimeURL() else {
-            throw unreachableError(baseURL: browser.searxngURL, detail: installGuidanceMessage())
+            throw runtimeNotFoundError()
         }
         try Task.checkCancellation()
         // External bases need no local heal: poll only, so a remote SearXNG
@@ -593,6 +597,10 @@ public struct WebSearchTool: Tool, Sendable {
         do {
             try await ensurer.ensure(browser: browserConfig)
         } catch {
+            // Single guidance: the ensurer error already carries the one
+            // actionable cause (install guidance for a missing runtime, or the
+            // last cascade detail otherwise), so surface it verbatim instead
+            // of nesting it inside a second unreachable message.
             return .failure(error.localizedDescription, callID: input.callID)
         }
         do {
