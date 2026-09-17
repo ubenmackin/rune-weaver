@@ -4,10 +4,13 @@
 // the local SearXNG engine: inspect-first existence probing with a list
 // cross-check, stale-entry removal before fresh runs, explicit image
 // pull-before-run, reachability probing, and the ticking watch where HTTP
-// wins, terminal states fail fast with the logs tail, and unparseable states
-// keep waiting until the backstop. This keeps the configuration and
-// daemon-healing helpers in `SearXNGEnsurer+Helpers.swift` focused while the
-// lifecycle entry points keep calling the same `SearXNGEnsurer` namespace.
+// success wins, terminal states fail fast with the logs tail, persistent 5xx
+// with a readable body fails fast with the capped body tail, definitive non-5xx
+// resets the streak, and gaps plus empty or unparseable states keep waiting
+// until the backstop. This keeps the
+// configuration and daemon-healing helpers in
+// `SearXNGEnsurer+Helpers.swift` focused while the lifecycle entry points keep
+// calling the same `SearXNGEnsurer` namespace.
 
 import Foundation
 import RuneWeaverCore
@@ -295,7 +298,9 @@ public extension SearXNGEnsurer {
     /// Arguments running a fresh container with the per-install settings mount.
     /// Split from the pull step so each carries its own timeout: pull pays
     /// minutes once, run stays short. The publish stays loopback-only because
-    /// the engine has no auth.
+    /// the engine has no auth. Capped at one CPU and 512M because single-user
+    /// search never needs more; verify live usage with
+    /// `container stats --no-stream runeweaver-searxng` before raising the ceiling.
     /// - Parameters:
     ///   - settingsPath: Per-install settings file mounted read-only.
     ///   - hostPort: Loopback host port derived from `searxng_url`.
@@ -304,6 +309,8 @@ public extension SearXNGEnsurer {
     static func containerRunArguments(settingsPath: String, hostPort: Int, image: String = containerImage) -> [String] {
         [
             "run", "-d",
+            "--cpus", "1",
+            "--memory", "512M",
             "--name", containerName,
             "-p", "127.0.0.1:\(hostPort):8080",
             "-v", "\(settingsPath):/etc/searxng/settings.yml:ro",
@@ -741,23 +748,83 @@ public extension SearXNGEnsurer {
             defer { session.invalidateAndCancel() }
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
-            return (200 ..< 400).contains(http.statusCode)
+            return isReadinessSuccessStatusCode(http.statusCode)
         } catch {
             return false
+        }
+    }
+
+    /// Probes the base URL once for the sick fast path, capturing status plus body.
+    /// Shares the no-follow policy and the short probe budget with `isReachable`
+    /// so both probes agree on success; only a 5xx with a readable capped tail
+    /// counts toward sickness, while success carries no tail, definitive non-5xx
+    /// such as 4xx breaks the streak, and gaps plus empty or undecodable 5xx
+    /// bodies arrive empty so the watch keeps waiting instead of tripping on noise.
+    /// The body is bounded by the shared fetch cap: an advertised `Content-Length`
+    /// beyond the cap short-circuits without decoding, and larger-than-cap payloads
+    /// decode only their shared-cap prefix, so a wedged loopback 5xx with a large
+    /// body cannot allocate unbounded per tick before the capped tail.
+    /// - Parameter baseURL: Configured `searxng_url`.
+    /// - Returns: Status plus capped body tail, or no-response when nothing parsed.
+    static func fetchHTTPProbe(baseURL: String) async -> HTTPProbeSnapshot {
+        if Task.isCancelled {
+            return .noResponse
+        }
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else {
+            return .noResponse
+        }
+        var request = URLRequest(url: url, timeoutInterval: probeTimeoutSeconds)
+        request.httpMethod = "GET"
+        request.setValue(WebFetchTool.userAgent, forHTTPHeaderField: "User-Agent")
+        do {
+            let delegate = NoRedirectDelegate()
+            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            defer { session.invalidateAndCancel() }
+            let (data, response) = try await session.data(for: request)
+            if Task.isCancelled {
+                return .noResponse
+            }
+            guard let http = response as? HTTPURLResponse else {
+                return .noResponse
+            }
+            let code = http.statusCode
+            if isReadinessSuccessStatusCode(code) {
+                return HTTPProbeSnapshot(statusCode: code, bodyTail: "")
+            }
+            guard isReadinessServerErrorStatusCode(code) else {
+                return HTTPProbeSnapshot(statusCode: code, bodyTail: "")
+            }
+            // Bound before decode under the shared fetch cap so per-tick
+            // allocation stays capped even when loopback answers instantly.
+            if let lengthValue = http.value(forHTTPHeaderField: "Content-Length")?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                let advertised = Int(lengthValue),
+                advertised > WebFetchTool.maxFetchBytes
+            {
+                return HTTPProbeSnapshot(statusCode: code, bodyTail: "")
+            }
+            let bounded = data.count > WebFetchTool.maxFetchBytes ? Data(data.prefix(WebFetchTool.maxFetchBytes)) : data
+            guard let tail = countableServerErrorBodyTail(from: bounded) else {
+                return HTTPProbeSnapshot(statusCode: code, bodyTail: "")
+            }
+            return HTTPProbeSnapshot(statusCode: code, bodyTail: tail)
+        } catch {
+            return .noResponse
         }
     }
 
     /// Fail-closed banner naming the terminal cause plus one hatch command.
     /// The banner holds only one retry-aware terminal cause (daemon, pull
     /// timeout with cached-layer retry, pull failure with Hub reachability,
-    /// run/start, watch crash or missing with logs, watch backstop with last
-    /// state, or not-reachable) plus a single `scripts/searxng-up.sh`
-    /// remediation so each of install, daemon, pull timeout, pull failure,
-    /// run, watch, and poll renders once without nesting the unreachable text around
-    /// install text or chaining every stage into the banner. The full
-    /// per-stage detail (stage, exit, capped tail, timeout) travels in
-    /// `diagnosticsUserInfoKey` for server warn logs plus the collapsed
-    /// Settings diagnostics element.
+    /// run/start, watch crash or missing with logs, watch sick 5xx with body,
+    /// watch backstop with last state, or not-reachable) plus a single
+    /// `scripts/searxng-up.sh` remediation so each of install, daemon, pull
+    /// timeout, pull failure, run, watch crash, watch sick, watch stuck, and poll
+    /// renders once without nesting the unreachable text around install text or
+    /// chaining every stage into the banner. The full per-stage detail (stage,
+    /// exit, capped tail, timeout) travels in `diagnosticsUserInfoKey` for server
+    /// warn logs plus the collapsed Settings diagnostics element.
     /// - Parameters:
     ///   - baseURL: Configured `searxng_url`.
     ///   - detail: Chained per-stage fragments from the cascade, if any.
@@ -765,10 +832,11 @@ public extension SearXNGEnsurer {
     static func unreachableError(baseURL: String, detail: String?) -> Error {
         let trimmed = (detail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let pullStage = EnsureStage.pull.rawValue
-        // Match crash and missing only on the waiting state hint before the
-        // logs tail, so backstop log prose containing error or missing never
-        // misrenders as a crash or missing banner.
+        // Match crash, missing, and sickness only on the waiting state hint before
+        // the logs tail, so backstop log or body prose containing error, missing,
+        // or http wording never misrenders as a terminal banner.
         let waitingHint = waitingStateHint(in: trimmed).lowercased()
+        let sickCode = serverErrorStatusCode(in: trimmed)
         let banner: String = if trimmed.contains("stage: \(pullStage)"), trimmed.contains("timed out") {
             pullTimeoutBanner()
         } else if trimmed.contains("stage: \(pullStage)") {
@@ -779,6 +847,8 @@ public extension SearXNGEnsurer {
                   waitingHint.contains("exited") || waitingHint.contains("error") || waitingHint.contains("crash")
         {
             readinessCrashBanner()
+        } else if trimmed.contains("stage: waiting"), sickCode != nil {
+            readinessServerErrorBanner(statusCode: sickCode)
         } else if trimmed.contains("stage: waiting") {
             readinessBackstopBanner(baseURL: baseURL)
         } else if trimmed.contains("stage: run") || trimmed.contains("stage: start") {
@@ -851,11 +921,15 @@ public extension SearXNGEnsurer {
 /// Rune Weaver Tools — Readiness watch with fail-fast terminal states.
 ///
 /// Replaces the fixed short poll after the container heal with a watch that
-/// ticks on short sleeps until a minutes-scale backstop. Reachability wins on
-/// every tick, terminal container states fail fast with the capped logs tail,
-/// and any other or unparseable state keeps waiting so a slow boot past the
-/// old budget still converges. The backstop fails with the last observed state
-/// plus logs tail, and banners name the failing stage instead of a timeout note.
+/// ticks on short sleeps until a minutes-scale backstop. Reachability (2xx/3xx)
+/// wins on every tick and resets the sick streak, terminal container states fail
+/// fast with the capped logs tail, persistent 5xx with a readable body fails fast
+/// with the capped body tail once the consecutive threshold trips, definitive
+/// non-5xx resets the streak, and gaps plus empty-bodied or unparseable states
+/// keep waiting so a slow boot past the old
+/// budget still converges. The backstop fails with the last observed state plus
+/// logs tail (timeout-only when nothing ever answered), and banners name the
+/// failing stage (crash, sick, stuck) instead of a timeout note.
 public extension SearXNGEnsurer {
     /// Lines of container logs captured when the watch fails.
     /// Small enough to stay readable in diagnostics, large enough to carry the
@@ -1247,130 +1321,80 @@ public extension SearXNGEnsurer {
     }
 
     /// Core watch loop shared by production and hermetic tests.
-    /// Ticks on short sleeps: reachable returns success, terminal states return
-    /// failure with the logs tail, any other or unparseable state keeps waiting
-    /// until the backstop, which fails with the last state plus logs tail.
-    /// Cancellation returns the cancelled outcome so callers map it to
-    /// `CancellationError` instead of a crash banner.
+    /// Ticks on short sleeps: reachable (2xx/3xx) returns success and resets the
+    /// sick streak, terminal states return failure with the logs tail, persistent
+    /// countable 5xx returns failure with the capped body tail once the consecutive
+    /// threshold trips, definitive non-5xx resets the streak, and gaps plus
+    /// empty-bodied or unparseable states keep waiting
+    /// until the backstop, which fails with the last state plus logs tail
+    /// (timeout-only when nothing ever answered). Cancellation returns the cancelled
+    /// outcome so callers map it to `CancellationError` instead of a crash banner.
     /// - Parameters:
     ///   - timeoutSeconds: Backstop budget, defaulting to the server readiness watch (165s, settling before the longer client cap which suspends while pulling).
     ///   - pollInterval: Sleep between ticks, defaulting to the short watch interval.
-    ///   - isReachable: Probe answering true once HTTP responds 2xx/3xx.
+    ///   - isReachable: Probe answering true once HTTP responds 2xx/3xx. Skipped on ticks
+    ///     where `httpProbe` is provided, so a single fetch per tick drives both success and sickness.
     ///   - containerState: Probe classifying the tracked entry each tick.
     ///   - containerLogs: Probe fetching the capped logs tail on terminal or backstop.
+    ///   - httpProbe: Rich HTTP probe carrying status plus capped body tail for the sick
+    ///     fast path. Nil preserves the legacy boolean-only watch; provided, it drives success
+    ///     (2xx/3xx resets) and countable 5xx streak tracking per tick.
     /// - Returns: Success plus failure detail with last state and logs tail.
     static func watchReadiness(
         timeoutSeconds: Double = readinessWatchTimeoutSeconds,
         pollInterval: UInt64 = pollIntervalNanoseconds,
-        isReachable: @Sendable () async -> Bool,
-        containerState: @Sendable () async -> ContainerReadinessSnapshot,
-        containerLogs: @Sendable () async -> String
+        isReachable: @Sendable @escaping () async -> Bool,
+        containerState: @Sendable @escaping () async -> ContainerReadinessSnapshot,
+        containerLogs: @Sendable @escaping () async -> String,
+        httpProbe: (@Sendable () async -> HTTPProbeSnapshot)? = nil
     ) async -> ReadinessWatchOutcome {
         if Task.isCancelled {
             return .cancelledOutcome
         }
-        // Fast boot stays fast: an already-answering engine never pays a tick.
-        if await isReachable() {
-            if Task.isCancelled {
-                return .cancelledOutcome
-            }
-            return ReadinessWatchOutcome(succeeded: true, lastState: "running", logsTail: "")
+        let probes = ReadinessWatchProbes(
+            isReachable: isReachable,
+            containerState: containerState,
+            containerLogs: containerLogs,
+            httpProbe: httpProbe
+        )
+        let initial = await initialWatchOutcome(probes: probes)
+        if let outcome = initial.outcome {
+            return outcome
         }
         if Task.isCancelled {
             return .cancelledOutcome
         }
         let backstop = max(1.0, timeoutSeconds)
-        // Monotonic budget so an NTP or sleep clock step never shortens or
-        // stretches the backstop the way a wall-clock deadline would.
-        let budget = Duration.nanoseconds(Int64(backstop * 1_000_000_000))
-        let clock = ContinuousClock()
-        let start = clock.now
-        var lastState = ContainerReadinessState.unknown.rawValue
-        // Slow boots past the old budget keep waiting here: only reachability
-        // or a terminal state settles the loop before the budget elapses.
-        while clock.now - start < budget {
-            if Task.isCancelled {
-                return .cancelledOutcome
-            }
-            if await isReachable() {
-                if Task.isCancelled {
-                    return .cancelledOutcome
-                }
-                return ReadinessWatchOutcome(succeeded: true, lastState: lastState, logsTail: "")
-            }
-            if Task.isCancelled {
-                return .cancelledOutcome
-            }
-            let snapshot = await containerState()
-            if Task.isCancelled {
-                return .cancelledOutcome
-            }
-            if snapshot.state.isTerminal {
-                let tail = await containerLogs()
-                if Task.isCancelled {
-                    return .cancelledOutcome
-                }
-                let detail = readinessFailureDetail(
-                    stateText: snapshot.rawState,
-                    logsTail: tail,
-                    timedOut: false,
-                    exitCode: snapshot.exitCode
-                )
-                return ReadinessWatchOutcome(
-                    succeeded: false,
-                    failureDetail: detail,
-                    lastState: snapshot.rawState,
-                    logsTail: tail,
-                    cancelled: false
-                )
-            }
-            // Remember the last legible state for the backstop; unknown probes
-            // leave the prior hint intact so garbage never overwrites a real state.
-            if snapshot.state != .unknown {
-                lastState = snapshot.rawState
-            }
-            do {
-                try await Task.sleep(nanoseconds: pollInterval)
-            } catch is CancellationError {
-                return .cancelledOutcome
-            } catch {
-                return .cancelledOutcome
-            }
-        }
-        if Task.isCancelled {
-            return .cancelledOutcome
-        }
-        if await isReachable() {
-            if Task.isCancelled {
-                return .cancelledOutcome
-            }
-            return ReadinessWatchOutcome(succeeded: true, lastState: lastState, logsTail: "")
-        }
-        if Task.isCancelled {
-            return .cancelledOutcome
-        }
-        let tail = await containerLogs()
-        if Task.isCancelled {
-            return .cancelledOutcome
-        }
-        let detail = readinessFailureDetail(
-            stateText: "last state \(lastState)",
-            logsTail: tail,
-            timedOut: true,
-            timeoutSeconds: backstop
+        let looped = await pollWatchLoop(
+            pollInterval: pollInterval,
+            backstop: backstop,
+            state: ReadinessLoopState(lastState: ContainerReadinessState.unknown.rawValue, sick: initial.sick),
+            probes: probes
         )
-        return ReadinessWatchOutcome(
-            succeeded: false,
-            failureDetail: detail,
-            lastState: lastState,
-            logsTail: tail,
-            cancelled: false
-        )
+        if let outcome = looped.outcome {
+            return outcome
+        }
+        if Task.isCancelled {
+            return .cancelledOutcome
+        }
+        let final = await tickHTTPOutcome(probes: probes, lastState: looped.state.lastState, sick: looped.state.sick)
+        if let outcome = final.outcome {
+            return outcome
+        }
+        if Task.isCancelled {
+            return .cancelledOutcome
+        }
+        let tail = await probes.containerLogs()
+        if Task.isCancelled {
+            return .cancelledOutcome
+        }
+        return backstopWatchOutcome(lastState: looped.state.lastState, tail: tail, backstop: backstop)
     }
 
     /// Production watch for a managed base with a live container.
-    /// Threads the real HTTP probe plus the inspect and logs probes through the
-    /// shared core, so boot and tests never drift on tick or backstop.
+    /// Threads the real HTTP probe (boolean plus rich status/body for the sick fast
+    /// path) plus the inspect and logs probes through the shared core, so boot and
+    /// tests never drift on tick, threshold, or backstop.
     /// - Parameters:
     ///   - baseURL: Configured `searxng_url` for the reachability probe.
     ///   - runtime: Resolved Apple Container CLI for state and logs probes.
@@ -1387,14 +1411,16 @@ public extension SearXNGEnsurer {
             timeoutSeconds: timeoutSeconds,
             isReachable: { await isReachable(baseURL: capturedBase) },
             containerState: { await fetchContainerReadiness(runtime: capturedRuntime) },
-            containerLogs: { await fetchContainerLogsTail(runtime: capturedRuntime) }
+            containerLogs: { await fetchContainerLogsTail(runtime: capturedRuntime) },
+            httpProbe: { await fetchHTTPProbe(baseURL: capturedBase) }
         )
     }
 
     /// Production wait for an external base with no local container.
     /// Holds HTTP alone until the shared backstop since there is no entry whose
-    /// exit could fail fast; the snapshot stays unknown so the loop never mistakes
-    /// the absence of a container for a vanished one.
+    /// exit could fail fast; persistent 5xx still fails fast with the body tail
+    /// while the snapshot stays unknown so the loop never mistakes the absence of
+    /// a container for a vanished one.
     /// - Parameters:
     ///   - baseURL: Configured `searxng_url` for the reachability probe.
     ///   - timeoutSeconds: Backstop budget, defaulting to the server readiness watch (165s, settling before the longer client cap which suspends while pulling).
@@ -1408,7 +1434,8 @@ public extension SearXNGEnsurer {
             timeoutSeconds: timeoutSeconds,
             isReachable: { await isReachable(baseURL: capturedBase) },
             containerState: { ContainerReadinessSnapshot.unknownNoContainer },
-            containerLogs: { "" }
+            containerLogs: { "" },
+            httpProbe: { await fetchHTTPProbe(baseURL: capturedBase) }
         )
     }
 }

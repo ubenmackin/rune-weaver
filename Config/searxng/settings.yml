@@ -5,16 +5,27 @@
 # (`SearXNGEnsurer`) and `scripts/searxng-up.sh` generate a random per-install
 # key into `~/.runeweaver/searxng/settings.yml` (the preferred override path)
 # and mount that read-only at `/etc/searxng/settings.yml` instead.
-# Keeps JSON output enabled for `web.search` while staying local-first:
-# no third-party search vendor ever sees queries.
+#
+# Inherits the upstream defaults via `use_default_settings` so unspecified
+# options track SearXNG releases without manual sync; only the local overrides
+# below diverge. Keeps three general-purpose engines via `keep_only` to cover
+# general web plus encyclopedic answers without paying the full default engine
+# fan-out. Keeps JSON output enabled for `web.search` while staying
+# local-first: no third-party search vendor ever sees queries.
 #
 # Rotation: delete `~/.runeweaver/searxng/settings.yml` and re-run ensure (or
 # the script) to mint a fresh key, then recreate the `runeweaver-searxng`
 # container so SearXNG picks it up. Alternatively replace the override's
 # `secret_key` by hand and recreate the container.
 
+use_default_settings:
+  engines:
+    keep_only:
+      - duckduckgo
+      - brave
+      - wikipedia
+
 general:
-  debug: false
   instance_name: "Rune Weaver SearXNG"
 
 server:
@@ -25,22 +36,9 @@ server:
   image_proxy: false
 
 search:
-  safe_search: 0
-  autocomplete: ""
   formats:
     - html
     - json
-
-engines:
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddg
-  - name: brave
-    engine: brave
-    shortcut: br
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
 
 outgoing:
   request_timeout: 10.0

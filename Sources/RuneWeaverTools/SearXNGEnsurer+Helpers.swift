@@ -4,7 +4,9 @@
 // loopback management checks, Apple Container runtime resolution, daemon
 // probe plus system-start recovery, failure-detail formatting, host-port
 // mapping, bundled template lookup, and the per-install settings document
-// carrying a random Flask secret. This keeps the `SearXNGEnsurer` actor body
+// carrying a random Flask secret plus a template-version marker so stale
+// installs migrate forward with a fresh secret and a container recreate.
+// This keeps the `SearXNGEnsurer` actor body
 // within the type-length budget while the lifecycle entry points in
 // `WebSearchTool.swift` retain single-flight ensure, honest start reporting,
 // cooperative cancellation, loopback-only publishing, fail-closed settings,
@@ -363,6 +365,107 @@ public extension SearXNGEnsurer {
         return (home as NSString).appendingPathComponent(".runeweaver/searxng/settings.yml")
     }
 
+    /// Current template version stamped into per-install overrides.
+    /// Bumped whenever the generated settings document or the container
+    /// sizing it boots must roll forward together; an override missing the
+    /// marker or carrying an older value is regenerated with a fresh secret
+    /// and the container is recreated so the new document actually boots
+    /// instead of lingering behind a `start` of the old entry.
+    static let settingsTemplateVersion = 2
+
+    /// YAML comment prefix carrying the template version in overrides.
+    /// A comment keeps SearXNG parsing untouched while letting both the
+    /// engine and the escape-hatch script detect stale installs with a
+    /// plain text search instead of parsing YAML.
+    static let settingsTemplateVersionMarkerPrefix = "# rune-weaver-template-version:"
+
+    /// Full marker line stamped into freshly generated overrides.
+    /// - Parameter version: Template version to stamp, defaulting to current.
+    /// - Returns: Comment line carrying the version.
+    static func settingsTemplateVersionMarkerLine(version: Int = settingsTemplateVersion) -> String {
+        "\(settingsTemplateVersionMarkerPrefix) \(version)"
+    }
+
+    /// Whitespace-tolerant marker shape shared with the escape-hatch script.
+    /// The shell matches `^[[:space:]]*#[[:space:]]*rune-weaver-template-version:`
+    /// so `#rune-…` and `#  rune-…` read as stamped; the engine must accept the
+    /// same spellings or a variant file reads stale in one and fresh in the other.
+    static let templateVersionMarkerRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "^[\\s]*#[\\s]*rune-weaver-template-version:",
+        options: []
+    )
+
+    /// Version digits after the marker, tolerating surrounding whitespace.
+    /// Mirrors the shell `sed` extraction so both sides agree on the stamped number.
+    static let templateVersionNumberRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "rune-weaver-template-version:[\\s]*([0-9]+)",
+        options: []
+    )
+
+    /// Whether a line carries the template-version marker under shell-tolerant spacing.
+    /// - Parameter line: Single override line to test.
+    /// - Returns: True when the line matches the tolerant marker shape.
+    static func isTemplateVersionMarkerLine(_ line: String) -> Bool {
+        guard let regex = templateVersionMarkerRegex else { return false }
+        let range = NSRange(line.startIndex..., in: line)
+        return regex.firstMatch(in: line, options: [], range: range) != nil
+    }
+
+    /// Extracts the stamped template version from override text.
+    /// Only the first marker line counts; a malformed value reads as missing
+    /// so the caller regenerates instead of trusting a half-written stamp.
+    /// Whitespace around `#` and the marker name tolerates the shell spellings
+    /// so engine and script never disagree on staleness or duplicate the stamp.
+    /// - Parameter contents: Override file text.
+    /// - Returns: Stamped version, or nil when absent or unparseable.
+    static func overrideTemplateVersion(in contents: String) -> Int? {
+        for line in contents.components(separatedBy: "\n") {
+            guard isTemplateVersionMarkerLine(line) else { continue }
+            guard let regex = templateVersionNumberRegex else { return nil }
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = regex.firstMatch(in: line, options: [], range: range),
+                  match.numberOfRanges > 1,
+                  let codeRange = Range(match.range(at: 1), in: line),
+                  let parsed = Int(line[codeRange])
+            else { return nil }
+            return parsed
+        }
+        return nil
+    }
+
+    /// Whether override text predates the current template.
+    /// Missing or unparseable markers count as stale so installs from before
+    /// stamping still migrate; newer values never migrate so a
+    /// forward-compatible install is never downgraded.
+    /// - Parameter contents: Override file text.
+    /// - Returns: True when the marker is missing or older than current.
+    static func overrideNeedsMigration(contents: String) -> Bool {
+        guard let stamped = overrideTemplateVersion(in: contents) else { return true }
+        return stamped < settingsTemplateVersion
+    }
+
+    /// Whether the on-disk override (if any) is stale.
+    /// A missing file reads as fresh here: creation already mints the current
+    /// marker, so only an existing file with a missing or older marker forces
+    /// the remove-first recreate path. Deletion-based rotation keeps working
+    /// because the recreated file carries the current marker. An existing but
+    /// unreadable file never reads as fresh: it logs and reports stale so a
+    /// permission failure fails closed instead of skipping migration.
+    /// - Returns: True when an existing override needs migration.
+    static func isStaleOverridePresent() -> Bool {
+        let path = overrideSettingsPath()
+        guard FileManager.default.fileExists(atPath: path) else { return false }
+        do {
+            let contents = try String(contentsOfFile: path, encoding: .utf8)
+            return overrideNeedsMigration(contents: contents)
+        } catch {
+            RuneWeaverLog.tools.error(
+                "SearXNGEnsurer: failed reading override at \(path): \(error.localizedDescription)"
+            )
+            return true
+        }
+    }
+
     /// Generates a random Flask secret key as lowercase hex.
     /// - Parameter byteCount: Random bytes before hex encoding (clamped 16-64).
     /// - Returns: Hex string twice `byteCount` chars.
@@ -377,18 +480,32 @@ public extension SearXNGEnsurer {
     }
 
     /// Renders a standalone settings document with the given secret.
+    /// Inherits upstream defaults via `use_default_settings` so unspecified
+    /// options track SearXNG releases; only the local overrides below diverge
+    /// and the engine fan-out stays at three general-purpose entries. Mirrors
+    /// the bundled `Config/searxng/settings.yml` template and the script
+    /// fallback so every producer emits the same schema. The marker line pins
+    /// the template version so later ensures can tell a stale override from a
+    /// current one without parsing YAML.
     /// - Parameter secretKey: Per-install Flask secret.
     /// - Returns: YAML document mountable at `/etc/searxng/settings.yml`.
     static func settingsYAML(secretKey: String) -> String {
         """
         # Rune Weaver — Per-install SearXNG settings (generated).
+        \(settingsTemplateVersionMarkerLine())
         #
         # Created on first ensure into `~/.runeweaver/searxng/settings.yml`.
         # Holds a random per-install Flask `secret_key`. Delete this file and
         # re-run ensure (or `scripts/searxng-up.sh`) to rotate to a fresh key,
         # then recreate the `runeweaver-searxng` container to pick it up.
+        # Inherits upstream defaults; only the overrides below diverge.
+        use_default_settings:
+          engines:
+            keep_only:
+              - duckduckgo
+              - brave
+              - wikipedia
         general:
-          debug: false
           instance_name: "Rune Weaver SearXNG"
         server:
           port: 8080
@@ -397,21 +514,9 @@ public extension SearXNGEnsurer {
           limiter: false
           image_proxy: false
         search:
-          safe_search: 0
-          autocomplete: ""
           formats:
             - html
             - json
-        engines:
-          - name: duckduckgo
-            engine: duckduckgo
-            shortcut: ddg
-          - name: brave
-            engine: brave
-            shortcut: br
-          - name: wikipedia
-            engine: wikipedia
-            shortcut: wp
         outgoing:
           request_timeout: 10.0
           max_request_timeout: 15.0
@@ -421,33 +526,98 @@ public extension SearXNGEnsurer {
     }
 
     /// Replaces the `secret_key` line in a template with a fresh secret.
+    /// Preserves any existing template-version marker when current and stamps
+    /// the current marker when missing or older, so both the placeholder
+    /// rotation and the stale-override migration converge on the same
+    /// document without a second write.
     /// - Parameters:
     ///   - template: Bundled `settings.yml` text.
     ///   - secretKey: Per-install Flask secret.
     /// - Returns: Template with the secret line replaced, or fallback rendering.
     static func renderedSettingsYAML(template: String, secretKey: String) -> String {
-        let replacement = "  secret_key: \"\(secretKey)\""
+        let secretReplacement = "  secret_key: \"\(secretKey)\""
+        let markerReplacement = settingsTemplateVersionMarkerLine()
         let lines = template.components(separatedBy: "\n")
-        var replaced = false
+        var replacedSecret = false
+        var replacedMarker = false
         let mapped = lines.map { line -> String in
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("secret_key:") {
-                replaced = true
-                return replacement
+                replacedSecret = true
+                return secretReplacement
+            }
+            // Tolerant marker match mirrors the shell so `#rune-…` and
+            // `#  rune-…` variants replace in place instead of duplicating.
+            if isTemplateVersionMarkerLine(line) {
+                replacedMarker = true
+                return markerReplacement
             }
             return line
         }
-        if replaced {
-            return mapped.joined(separator: "\n")
+        var stamped = mapped
+        if !replacedMarker {
+            // Keep the stamp near the top so it stays visible without
+            // disturbing the YAML body: after the first header line when the
+            // template opens with one, otherwise at the very top.
+            if stamped.isEmpty {
+                stamped = [markerReplacement]
+            } else {
+                stamped.insert(markerReplacement, at: min(1, stamped.count))
+            }
+        }
+        if replacedSecret {
+            return stamped.joined(separator: "\n")
         }
         return settingsYAML(secretKey: secretKey)
+    }
+
+    /// Writes secret bytes through an owner-only temp before the move.
+    /// A direct atomic write inherits the process umask (022 → 0644), leaving
+    /// the key briefly world-readable before the trailing chmod; staging
+    /// through a 0600 temp keeps the secret owner-only at every instant, then
+    /// the replace-or-move commits it without a readable window.
+    /// - Parameters:
+    ///   - data: Encoded settings document to persist.
+    ///   - path: Destination override path.
+    static func writeSecretFileAtomically(data: Data, toPath path: String) throws {
+        let fileManager = FileManager.default
+        let directory = (path as NSString).deletingLastPathComponent
+        let tmpName = ".searxng-settings.\(UUID().uuidString).tmp"
+        let tmpPath = (directory as NSString).appendingPathComponent(tmpName)
+        let tmpURL = URL(fileURLWithPath: tmpPath)
+        let destinationURL = URL(fileURLWithPath: path)
+        guard fileManager.createFile(atPath: tmpPath, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw NSError(
+                domain: "RuneWeaverSearXNG",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "could not stage secret temp file"]
+            )
+        }
+        do {
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tmpPath)
+            if fileManager.fileExists(atPath: path) {
+                _ = try fileManager.replaceItemAt(destinationURL, withItemAt: tmpURL)
+            } else {
+                try fileManager.moveItem(at: tmpURL, to: destinationURL)
+            }
+            try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        } catch {
+            try? fileManager.removeItem(at: tmpURL)
+            throw error
+        }
     }
 
     /// Ensures the per-install override exists with a random secret.
     /// Enforces `0700` on the containing directory and `0600` on the file on
     /// every path (not just creation) so pre-existing installs keep the
-    /// per-install secret invariant. Permission failures fail closed with nil
-    /// instead of reporting success while the secret stays world-readable.
+    /// per-install secret invariant. An existing file missing the current
+    /// template marker (or carrying an older one) is rebuilt from the current
+    /// template with a fresh secret so the next fresh run boots the new
+    /// document plus current sizing; the placeholder rotation below stays for
+    /// files already on the current marker. Permission failures fail closed
+    /// with nil instead of reporting success while the secret stays
+    /// world-readable. Deleting the override still rotates: recreation mints
+    /// a fresh secret carrying the current marker.
     /// - Returns: Override path when present or created, nil otherwise.
     @discardableResult
     static func ensureOverrideSettingsFile() -> String? {
@@ -466,31 +636,53 @@ public extension SearXNGEnsurer {
                 )
                 return nil
             }
-            // Rotate installs still carrying the old committed secret or the
-            // shipped placeholder to a fresh random key (best-effort).
-            if let existing = try? String(contentsOfFile: overridePath, encoding: .utf8),
-               existing.contains("rune-weaver-local-search") || existing.contains("change-me-generate-per-install-secret")
-            {
-                let fresh = makeSecretKey()
-                let rotated = renderedSettingsYAML(template: existing, secretKey: fresh)
-                if let data = rotated.data(using: .utf8) {
-                    do {
-                        try data.write(to: URL(fileURLWithPath: overridePath), options: .atomic)
-                        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: overridePath)
-                    } catch {
-                        RuneWeaverLog.tools.error(
-                            "SearXNGEnsurer: failed rotating secret at \(overridePath): \(error.localizedDescription)"
-                        )
-                        return nil
+            if let existing = try? String(contentsOfFile: overridePath, encoding: .utf8) {
+                // Stale installs predate the marker entirely, so rebuild from
+                // the current template (not a secret swap in the stale
+                // document) with a fresh secret at 0600. The caller recreates
+                // the container afterwards so the new settings actually boot.
+                if overrideNeedsMigration(contents: existing) {
+                    let fresh = makeSecretKey()
+                    let regenerated: String = if let bundledURL = bundledTemplateURL(), let template = try? String(contentsOf: bundledURL, encoding: .utf8) {
+                        renderedSettingsYAML(template: template, secretKey: fresh)
+                    } else {
+                        settingsYAML(secretKey: fresh)
+                    }
+                    if let data = regenerated.data(using: .utf8) {
+                        do {
+                            try writeSecretFileAtomically(data: data, toPath: overridePath)
+                        } catch {
+                            RuneWeaverLog.tools.error(
+                                "SearXNGEnsurer: failed migrating stale override at \(overridePath): \(error.localizedDescription)"
+                            )
+                            return nil
+                        }
+                    }
+                    return overridePath
+                }
+                // Rotate installs still carrying the old committed secret or the
+                // shipped placeholder to a fresh random key (best-effort). The
+                // render also stamps the current marker, so rotated files never
+                // read as stale on the next ensure.
+                if existing.contains("rune-weaver-local-search") || existing.contains("change-me-generate-per-install-secret") {
+                    let fresh = makeSecretKey()
+                    let rotated = renderedSettingsYAML(template: existing, secretKey: fresh)
+                    if let data = rotated.data(using: .utf8) {
+                        do {
+                            try writeSecretFileAtomically(data: data, toPath: overridePath)
+                        } catch {
+                            RuneWeaverLog.tools.error(
+                                "SearXNGEnsurer: failed rotating secret at \(overridePath): \(error.localizedDescription)"
+                            )
+                            return nil
+                        }
                     }
                 }
             }
             return overridePath
         }
         let secret = makeSecretKey()
-        let content: String = if let bundledURL = bundledTemplateURL(),
-                                 let template = try? String(contentsOf: bundledURL, encoding: .utf8)
-        {
+        let content: String = if let bundledURL = bundledTemplateURL(), let template = try? String(contentsOf: bundledURL, encoding: .utf8) {
             renderedSettingsYAML(template: template, secretKey: secret)
         } else {
             settingsYAML(secretKey: secret)
@@ -502,15 +694,7 @@ public extension SearXNGEnsurer {
                 attributes: [.posixPermissions: 0o700]
             )
             guard let data = content.data(using: .utf8) else { return nil }
-            try data.write(to: URL(fileURLWithPath: overridePath), options: .atomic)
-            do {
-                try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: overridePath)
-            } catch {
-                RuneWeaverLog.tools.error(
-                    "SearXNGEnsurer: failed enforcing secret permissions at \(overridePath): \(error.localizedDescription)"
-                )
-                return nil
-            }
+            try writeSecretFileAtomically(data: data, toPath: overridePath)
             return overridePath
         } catch {
             RuneWeaverLog.tools.error(
@@ -661,6 +845,201 @@ public extension SearXNGEnsurer {
     /// - Returns: Waiting cause with last-state hint plus the single hatch command.
     static func readinessBackstopBanner(baseURL: String) -> String {
         "SearXNG did not become reachable at \(baseURL) while waiting (last state captured with logs). Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Trimmed banner for a watch that kept answering HTTP 5xx while waiting.
+    /// Names sickness (the engine answers but never gets healthy) instead of a
+    /// crash (the container exited or vanished) or a stuck wait (nothing ever
+    /// answered), so each cause renders once. The capped body tail stays in
+    /// diagnostics plus warn logs, never in the banner, mirroring the crash path.
+    /// - Parameter statusCode: Failing HTTP status when known, nil for a generic 5xx line.
+    /// - Returns: Sick cause plus the single hatch command.
+    static func readinessServerErrorBanner(statusCode: Int? = nil) -> String {
+        if let statusCode, (500 ..< 600).contains(statusCode) {
+            return "SearXNG is responding with repeated server errors (HTTP \(statusCode) with body captured). Run `scripts/searxng-up.sh` to retry."
+        }
+        return "SearXNG is responding with repeated server errors (HTTP 5xx with body captured). Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Whether an HTTP status proves the engine answered healthy.
+    /// Mirrors the reachability probe range so the counting loop and the boolean
+    /// probe agree on what counts as success; 4xx stays non-success because the
+    /// engine answered but not with a usable page.
+    /// - Parameter statusCode: Observed HTTP status.
+    /// - Returns: True for 2xx/3xx.
+    static func isReadinessSuccessStatusCode(_ statusCode: Int) -> Bool {
+        (200 ..< 400).contains(statusCode)
+    }
+
+    /// Whether an HTTP status is a countable server-error candidate.
+    /// Only 5xx can prove sickness; 4xx, redirects handled elsewhere, and
+    /// connection gaps keep waiting instead of extending the streak.
+    /// - Parameter statusCode: Observed HTTP status.
+    /// - Returns: True for 5xx.
+    static func isReadinessServerErrorStatusCode(_ statusCode: Int) -> Bool {
+        (500 ..< 600).contains(statusCode)
+    }
+
+    /// Whether a 5xx body carries enough signal to count toward sickness.
+    /// Empty or whitespace-only bodies keep waiting: a bare 500 without a
+    /// readable tail is indistinguishable from a load transient, so it must not
+    /// trip the fail-fast on its own.
+    /// - Parameter bodyTail: Capped, decoded body tail for the probe.
+    /// - Returns: True when the tail holds non-blank text.
+    static func isCountableServerErrorBody(_ bodyTail: String) -> Bool {
+        !bodyTail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Decodes one HTTP body into a countable tail, if it carries signal.
+    /// Non-UTF8 bytes read as unparseable and keep waiting rather than posing
+    /// as sickness; blank text after trimming does the same. The surviving tail
+    /// is capped so the headline cause stays readable in diagnostics.
+    /// - Parameter data: Raw HTTP body bytes from the probe.
+    /// - Returns: Capped single-line tail, or nil when empty or unparseable.
+    static func countableServerErrorBodyTail(from data: Data) -> String? {
+        guard let decoded = String(data: data, encoding: .utf8) else { return nil }
+        let tail = cappedTail(decoded)
+        return isCountableServerErrorBody(tail) ? tail : nil
+    }
+
+    /// Whether one probe response extends the consecutive 5xx streak.
+    /// Requires both the 5xx status and a readable tail so empty or unparseable
+    /// 500s keep waiting instead of tripping the threshold on noise.
+    /// - Parameters:
+    ///   - statusCode: Observed HTTP status, nil when no response arrived.
+    ///   - bodyTail: Capped, decoded body tail, possibly empty.
+    /// - Returns: True only for a countable 5xx.
+    static func shouldCountServerError(statusCode: Int?, bodyTail: String) -> Bool {
+        guard let statusCode, isReadinessServerErrorStatusCode(statusCode) else { return false }
+        return isCountableServerErrorBody(bodyTail)
+    }
+
+    /// Advances the consecutive 5xx streak for one probe response.
+    /// Success proves health and clears the streak; a countable 5xx extends it;
+    /// a definitive non-5xx answer (such as 4xx) breaks consecutiveness and
+    /// clears it, so an interleaved 404 never counts toward the trip. Connection
+    /// gaps (nil status) and 5xx without a readable body preserve the streak and
+    /// keep waiting: they prove neither health nor sickness, so the watch holds
+    /// its prior count until the backstop instead of tripping on noise.
+    /// - Parameters:
+    ///   - current: Streak entering this probe.
+    ///   - statusCode: Observed HTTP status, nil when no response arrived.
+    ///   - bodyTail: Capped, decoded body tail, possibly empty.
+    /// - Returns: Streak leaving this probe.
+    static func nextConsecutiveServerErrorCount(current: Int, statusCode: Int?, bodyTail: String) -> Int {
+        if let statusCode, isReadinessSuccessStatusCode(statusCode) {
+            return 0
+        }
+        if shouldCountServerError(statusCode: statusCode, bodyTail: bodyTail) {
+            return max(0, current) + 1
+        }
+        if let statusCode {
+            // A 5xx without a readable body is a gap, not proof of recovery:
+            // preserve the streak and keep waiting for a countable answer.
+            if isReadinessServerErrorStatusCode(statusCode) {
+                return max(0, current)
+            }
+            // Any other answered status definitively breaks the run of 5xx.
+            return 0
+        }
+        return max(0, current)
+    }
+
+    /// Whether the consecutive streak trips the sick fail-fast.
+    /// Kept beside the counter so the tick and the unit tests share one gate
+    /// instead of duplicating the threshold comparison.
+    /// - Parameter count: Consecutive countable 5xx responses so far.
+    /// - Returns: True once the streak reaches the threshold.
+    static func shouldFailFastOnConsecutiveServerErrors(_ count: Int) -> Bool {
+        count >= SearXNGEnsurer.consecutiveServerErrorThreshold
+    }
+
+    /// One HTTP probe snapshot for the readiness watch.
+    /// Carries the status plus the capped body tail so the tick can tell healthy
+    /// (2xx/3xx, resets), sick (countable 5xx, advances), broken (definitive
+    /// non-5xx such as 4xx, resets), and patience (gaps or empty 5xx, preserves)
+    /// apart without a second fetch per tick.
+    struct HTTPProbeSnapshot: Sendable, Equatable {
+        /// Observed HTTP status, nil when no response arrived or parsing failed.
+        public let statusCode: Int?
+        /// Capped single-line body tail, empty when none arrived or it was blank.
+        public let bodyTail: String
+
+        /// Creates a snapshot.
+        public init(statusCode: Int?, bodyTail: String = "") {
+            self.statusCode = statusCode
+            self.bodyTail = bodyTail
+        }
+
+        /// No-response snapshot for connection gaps and unparseable replies.
+        /// Keeps waiting with the streak preserved until the backstop.
+        static var noResponse: Self {
+            Self(statusCode: nil, bodyTail: "")
+        }
+
+        /// Whether this probe proves the engine answered healthy.
+        /// Mirrors the boolean reachability range so both probes agree.
+        public var isSuccess: Bool {
+            guard let statusCode else { return false }
+            return SearXNGEnsurer.isReadinessSuccessStatusCode(statusCode)
+        }
+
+        /// Whether this probe extends the consecutive 5xx streak.
+        /// Requires both the 5xx status and a readable tail.
+        public var isCountableServerError: Bool {
+            SearXNGEnsurer.shouldCountServerError(statusCode: statusCode, bodyTail: bodyTail)
+        }
+    }
+
+    /// State text naming the sick HTTP status inside waiting detail.
+    /// Kept as `http <code>` so the banner router can tell sickness from crash
+    /// (`exited`/`error`) and disappearance (`missing`) while the body tail after
+    /// `logs:` never leaks crash words into the hint.
+    /// - Parameter statusCode: Failing HTTP status.
+    /// - Returns: Hint such as `http 500`.
+    static func readinessServerErrorStateText(statusCode: Int) -> String {
+        "http \(statusCode)"
+    }
+
+    /// Builds one sick failure fragment carrying the capped body tail.
+    /// Uses the shared waiting shape without a timeout note so the backstop
+    /// (which always carries one) keeps rendering as stuck while sickness renders
+    /// as sick; the hint stays before `logs:` so body prose never poses as state.
+    /// - Parameters:
+    ///   - statusCode: Failing HTTP status at the threshold trip.
+    ///   - bodyTail: Capped body tail to headline, re-capped for safety.
+    /// - Returns: Single-line waiting fragment for the diagnostics chain.
+    static func readinessServerErrorDetail(statusCode: Int, bodyTail: String) -> String {
+        let tail = cappedTail(bodyTail)
+        let combined = if tail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            "container \(readinessServerErrorStateText(statusCode: statusCode))"
+        } else {
+            "container \(readinessServerErrorStateText(statusCode: statusCode)) logs: \(tail)"
+        }
+        return failureMessage(
+            stage: EnsureStage.waiting.rawValue,
+            exitCode: nil,
+            output: combined,
+            timedOut: false
+        )
+    }
+
+    /// Extracts the sick HTTP status from chained waiting detail, if present.
+    /// Reads only the state hint before `logs:` so body prose containing error or
+    /// missing never poses as sickness the way the crash router already avoids.
+    /// - Parameter detail: Chained per-stage fragments from the cascade.
+    /// - Returns: First `http 5xx` status found in a waiting hint, nil otherwise.
+    static func serverErrorStatusCode(in detail: String) -> Int? {
+        let hint = waitingStateHint(in: detail)
+        let pattern = #"\bhttp\s+(5\d\d)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let range = NSRange(hint.startIndex..., in: hint)
+        guard let match = regex.firstMatch(in: hint, options: [], range: range),
+              match.numberOfRanges > 1,
+              let codeRange = Range(match.range(at: 1), in: hint),
+              let code = Int(hint[codeRange])
+        else { return nil }
+        return code
     }
 
     /// Raw daemon probe outcome.
