@@ -28,6 +28,9 @@ public final class AppModel {
     private var vaporApp: Application?
     private var serverTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    /// Best-effort search warmup flight started after boot goes live; stored
+    /// so quit can cancel it instead of leaving a detached ensure running.
+    private var searchWarmupTask: Task<Void, Never>?
     /// The menu label can appear again each time the menu opens, so startup
     /// must be idempotent instead of binding the loopback port twice.
     private var hasStartedBoot = false
@@ -121,6 +124,54 @@ public final class AppModel {
         self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
 
         startPolling()
+    }
+
+    /// Warms the local search engine after the menu bar server is already live.
+    /// Best-effort by design: failures stay in the server log so a down engine
+    /// never flips a healthy boot into a failure, while the health endpoint's
+    /// live stage plus reachability carries state to the dashboard dot and
+    /// message. Detached so boot never waits on the minutes-scale pull, with
+    /// the handle retained so quit can cancel the flight.
+    private func startSearchWarmup(browserConfig: BrowserConfig) {
+        searchWarmupTask?.cancel()
+        let captured = browserConfig
+        searchWarmupTask = Task.detached(priority: .background) {
+            let searxngURL = captured.searxngURL
+            // Same shape as the serve command's boot lines: poll the owner's
+            // live stage snapshot so a long pull stays visible instead of
+            // hanging silently, ticking only when stage or elapsed moves.
+            let stageWatcher = Task {
+                var lastStage: SearXNGEnsurer.StartStage?
+                var lastElapsed: Int?
+                while !Task.isCancelled {
+                    let progress = await SearXNGEnsurer.shared.currentStartProgress(for: searxngURL)
+                    if let progress {
+                        // Clamp clock skew so a future-dated start never renders negative.
+                        let elapsed = max(0, Int(Date().timeIntervalSince(progress.startedAt)))
+                        if progress.stage != lastStage || elapsed != lastElapsed {
+                            lastStage = progress.stage
+                            lastElapsed = elapsed
+                            RuneWeaverLog.server.info("SearXNG \(progress.stage.userCopy)… (\(elapsed)s)")
+                        }
+                    }
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                }
+            }
+            do {
+                try await withTaskCancellationHandler {
+                    try await SearXNGEnsurer.shared.ensure(browser: captured)
+                } onCancel: {
+                    stageWatcher.cancel()
+                }
+                stageWatcher.cancel()
+                RuneWeaverLog.server.info("SearXNG ready at \(captured.searxngURL).")
+            } catch is CancellationError {
+                stageWatcher.cancel()
+            } catch {
+                stageWatcher.cancel()
+                RuneWeaverLog.server.warning("Search engine unavailable: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// Stops the trust reaper started during gate build so a boot failure
@@ -250,6 +301,9 @@ public final class AppModel {
             self.serverContext = context
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
+            // Boot is already live at this point, so warm search detached:
+            // a down engine must never block the menu bar or fail the boot.
+            startSearchWarmup(browserConfig: config.browser)
         } catch {
             await cleanupBootFailure(bootGate: bootGate, error: error)
         }
@@ -347,6 +401,10 @@ public final class AppModel {
     public func quit() {
         pollingTask?.cancel()
         pollingTask = nil
+        // Cancel the detached search flight up front so quit never leaves
+        // the container start plus watch running after the menu bar exits.
+        searchWarmupTask?.cancel()
+        searchWarmupTask = nil
         let context = serverContext
         let app = vaporApp
         let task = serverTask
