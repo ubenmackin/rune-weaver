@@ -68,10 +68,35 @@ struct ServeCommand: AsyncParsableCommand {
         // Ensure the local search engine before accepting turns so first searches stay warm; a down
         // engine never blocks boot — the failure surfaces as closed guidance on the next search
         // instead. The container is left running after quit by design.
+        // Stream the owner flight's live stage plus elapsed time so a minutes-long pull stays
+        // visible instead of hanging silently on one line; the snapshot's Start time is pinned
+        // at flight creation, so elapsed counts the whole Start across stage moves.
+        // The watcher only reads actor snapshots and never drives the flight.
+        let searxngURL = loaded.config.browser.searxngURL
+        let searxngStageWatcher = Task {
+            var lastStage: SearXNGEnsurer.StartStage?
+            var lastElapsed: Int?
+            while !Task.isCancelled {
+                let progress = await SearXNGEnsurer.shared.currentStartProgress(for: searxngURL)
+                if let progress {
+                    // Clamp clock skew so a future-dated Start never renders negative; ticking on
+                    // elapsed change keeps a long pull visibly advancing while the stage is stuck.
+                    let elapsed = max(0, Int(Date().timeIntervalSince(progress.startedAt)))
+                    if progress.stage != lastStage || elapsed != lastElapsed {
+                        lastStage = progress.stage
+                        lastElapsed = elapsed
+                        print(TerminalStyle.dim("SearXNG \(progress.stage.userCopy)… (\(elapsed)s)"))
+                    }
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
         do {
             try await SearXNGEnsurer.shared.ensure(browser: loaded.config.browser)
+            searxngStageWatcher.cancel()
             print(TerminalStyle.dim("SearXNG ready at \(loaded.config.browser.searxngURL)."))
         } catch {
+            searxngStageWatcher.cancel()
             print(TerminalStyle.dim("Search engine unavailable: \(error.localizedDescription)"))
         }
         try await runServerLoop(

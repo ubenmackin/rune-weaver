@@ -1907,9 +1907,9 @@ a {
   animation: pulseTool 2s infinite ease-in-out;
 }
 
-/* Search health line pairs the tri-state pill with the probed URL so state stays
- * scannable while the endpoint remains visible; wrapping plus anywhere-break keeps
- * pill and long URLs readable in narrow panes without horizontal scrolling. */
+/* Search health line shows the tri-state pill only; the SearXNG URL input above
+ * stays the single editor and display, so no endpoint repeats here. Wrapping
+ * keeps the pill inside narrow panes without horizontal scrolling. */
 .search-health-line {
   display: inline-flex;
   align-items: center;
@@ -1917,12 +1917,6 @@ a {
   flex-wrap: wrap;
   min-width: 0;
   max-width: 100%;
-}
-
-.search-health-line .search-health-url {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 /* Shared amber badge for runs or sessions parked awaiting an approval

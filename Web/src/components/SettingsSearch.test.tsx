@@ -257,11 +257,13 @@ describe("SettingsManager search", () => {
     expect(refreshButtons[0].textContent).toMatch(/Refresh/);
   });
 
-  it("renders a trimmed banner once with collapsed diagnostics on failed start", async () => {
+  it("renders the pull-timeout cached-retry banner once with collapsed diagnostics", async () => {
     const user = userEvent.setup();
+    // Mirrors the engine pullTimeoutBanner: a timed-out pull resumes cached
+    // layers, so the banner names the retry instead of a generic pull failure.
     const banner =
-      "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry.";
-    const chained = "stage: run, exit: 1, detail: pull access denied; stage: poll, (timed out after 10s)";
+      "SearXNG image pull timed out after 300s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry.";
+    const chained = "stage: pull, (timed out after 300s), detail: download stalled";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string) => {
@@ -296,7 +298,119 @@ describe("SettingsManager search", () => {
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);
-    // Banner holds the terminal cause plus one remediation only, rendering once
+    // Banner holds the cached-retry cause plus one remediation only, rendering
+    // once without chained stage fragments.
+    await waitFor(() => {
+      const error = screen.getByTestId("search-health-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      // One remediation command in the banner.
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    // Chained detail lives in the optional collapsed element, not the banner.
+    const diagnostics = screen.getByTestId("search-health-diagnostics");
+    expect(diagnostics.tagName.toLowerCase()).toBe("details");
+    expect(diagnostics.textContent).toContain("stage: pull");
+    expect(diagnostics.textContent).toContain("timed out");
+  });
+
+  it("renders the pull-failed Hub banner once with collapsed diagnostics", async () => {
+    const user = userEvent.setup();
+    // Mirrors the engine pullFailedBanner: a non-timeout pull failure points
+    // at Hub reachability rather than the run step.
+    const banner =
+      "SearXNG image pull failed. Check Docker Hub reachability, then run `scripts/searxng-up.sh` to retry.";
+    const chained = "stage: pull, exit: 1, detail: pull access denied";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/search/ensure")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: chained,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Hub cause renders once; registry detail stays collapsed, never nested.
+    await waitFor(() => {
+      const error = screen.getByTestId("search-health-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      // One remediation command in the banner.
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    // Chained detail lives in the optional collapsed element, not the banner.
+    const diagnostics = screen.getByTestId("search-health-diagnostics");
+    expect(diagnostics.tagName.toLowerCase()).toBe("details");
+    expect(diagnostics.textContent).toContain("stage: pull");
+  });
+
+  it("renders the run-failed banner once with collapsed diagnostics", async () => {
+    const user = userEvent.setup();
+    // Mirrors the engine run-only banner: a fresh-run spawn failure names the
+    // run step while the exit plus capped tail stay in diagnostics.
+    const banner =
+      "SearXNG container failed to start (run failed). Run `scripts/searxng-up.sh` to retry.";
+    const chained = "stage: run, exit: 1, detail: container exit tail";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (String(input).includes("/search/health")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+          });
+        }
+        if (String(input).includes("/search/ensure")) {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: chained,
+          });
+        }
+        if (String(input).includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (String(input).includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+    render(<SettingsManager />);
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    await user.click(searchTab);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Banner holds the run cause plus one remediation only, rendering once
     // without chained stage fragments.
     await waitFor(() => {
       const error = screen.getByTestId("search-health-error");
@@ -309,7 +423,6 @@ describe("SettingsManager search", () => {
     const diagnostics = screen.getByTestId("search-health-diagnostics");
     expect(diagnostics.tagName.toLowerCase()).toBe("details");
     expect(diagnostics.textContent).toContain("stage: run");
-    expect(diagnostics.textContent).toContain("stage: poll");
   });
 
   it("hides the diagnostics element when the banner carries no chain", async () => {

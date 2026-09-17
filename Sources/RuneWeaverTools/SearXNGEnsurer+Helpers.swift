@@ -143,9 +143,10 @@ public extension SearXNGEnsurer {
     /// Short so a down daemon fails fast instead of burning the ensure budget.
     static let daemonProbeTimeoutSeconds: Double = 5
     /// Bounded budget for healing the container system service.
-    /// Short enough that the full cascade (probe 5s, system start 8s,
-    /// recheck 5s, start 5s, run 8s, final poll 10s — about 41s worst case)
-    /// stays responsive; the final poll budget does not cover these heals.
+    /// Short enough that the cached-image cascade (probe 5s, system start 8s,
+    /// recheck 5s, start 5s, run 8s, final poll 10s — about 41s worst case,
+    /// plus the minutes-budget pull only when the image is absent) stays
+    /// responsive; the final poll budget does not cover these heals.
     static let containerSystemStartTimeoutSeconds: Double = 8
     /// Cap for the stderr tail carried in failure detail.
     /// Keeps dashboard messages readable while preserving the actionable line.
@@ -597,12 +598,36 @@ public extension SearXNGEnsurer {
         "Container system service failed to start. Run `scripts/searxng-up.sh` to retry."
     }
 
-    /// Trimmed banner for a container start-or-run heal that failed.
-    /// Generic pull guidance covers image-pull and run failures alike so the banner
-    /// renders once without leaking raw registry output; the capped tail stays in
-    /// diagnostics plus warn logs.
+    /// Trimmed banner for a container run heal that failed.
+    /// Covers fresh-run failures (exit plus capped tail stays in diagnostics
+    /// plus warn logs) so the banner renders once without leaking raw
+    /// registry or runtime output.
+    static func runBanner() -> String {
+        "SearXNG container failed to start (run failed). Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Legacy run-banner name kept so existing callers keep compiling.
+    /// Pull failures have their own banners, so new code prefers `runBanner`.
+    @available(*, deprecated, renamed: "runBanner")
     static func pullBanner() -> String {
-        "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry."
+        runBanner()
+    }
+
+    /// Trimmed banner for an image pull that exhausted its minutes budget.
+    /// A timed-out pull is safe to retry because downloaded layers stay
+    /// cached, so the next attempt resumes instead of restarting.
+    /// - Parameter timeoutSeconds: Pull budget that was exceeded.
+    /// - Returns: Retry-with-cached-layers cause plus the single hatch command.
+    static func pullTimeoutBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
+        "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Trimmed banner for an image pull that failed without timing out.
+    /// Points at Hub reachability (auth, network, or registry outage) rather
+    /// than the run step, so a registry miss never renders as a run failure.
+    /// - Returns: Hub-reachability cause plus the single hatch command.
+    static func pullFailedBanner() -> String {
+        "SearXNG image pull failed. Check Docker Hub reachability, then run `scripts/searxng-up.sh` to retry."
     }
 
     /// Trimmed banner for a poll timeout with no heal failure to name.
@@ -849,11 +874,156 @@ public extension SearXNGEnsurer {
 
 /// Rune Weaver Tools — SearXNG container lifecycle plus reachability.
 ///
-/// Holds the container start-or-run cascade, the fresh-run helper, failure
-/// guidance, reachability probing, and bounded process execution so the main
-/// `SearXNGEnsurer` actor body stays within the type-length budget. Behavior
-/// is unchanged; callers keep using the same `SearXNGEnsurer` namespace.
+/// Holds the container start-or-run cascade, the explicit pull-before-run
+/// helper, the fresh-run helper, failure guidance, reachability probing, and
+/// bounded process execution so the main `SearXNGEnsurer` actor body stays
+/// within the type-length budget. Behavior is unchanged; callers keep using
+/// the same `SearXNGEnsurer` namespace.
 public extension SearXNGEnsurer {
+    /// Arguments probing whether the tracked image is already cached locally.
+    /// Exits 0 when cached, so the minutes-budget pull below runs only for
+    /// first installs instead of on every ensure.
+    /// - Parameter image: Tracked image reference, defaulting to the shared constant.
+    /// - Returns: Arguments for the image presence probe.
+    static func imageInspectArguments(image: String = containerImage) -> [String] {
+        ["image", "inspect", image]
+    }
+
+    /// Arguments pulling the tracked image with the long minutes budget.
+    /// Split out from `run` so the short run timeout never hides a registry
+    /// download; a timed-out pull is safe to retry because layers stay cached.
+    /// - Parameter image: Tracked image reference, defaulting to the shared constant.
+    /// - Returns: Arguments for the explicit pull step.
+    static func imagePullArguments(image: String = containerImage) -> [String] {
+        ["image", "pull", image]
+    }
+
+    /// Arguments starting the existing named container.
+    /// Shared by the fast-path start and the wedged half-create fallback so
+    /// both spell the name identically instead of drifting between call sites.
+    /// - Returns: Arguments reviving the existing container.
+    static func containerStartArguments() -> [String] {
+        ["start", containerName]
+    }
+
+    /// Arguments running a fresh container with the per-install settings mount.
+    /// Split from the pull step so each carries its own timeout: pull pays
+    /// minutes once, run stays short. The publish stays loopback-only because
+    /// the engine has no auth.
+    /// - Parameters:
+    ///   - settingsPath: Per-install settings file mounted read-only.
+    ///   - hostPort: Loopback host port derived from `searxng_url`.
+    ///   - image: Tracked image reference, defaulting to the shared constant.
+    /// - Returns: Arguments creating the fresh container.
+    static func containerRunArguments(settingsPath: String, hostPort: Int, image: String = containerImage) -> [String] {
+        [
+            "run", "-d",
+            "--name", containerName,
+            "-p", "127.0.0.1:\(hostPort):8080",
+            "-v", "\(settingsPath):/etc/searxng/settings.yml:ro",
+            image
+        ]
+    }
+
+    /// Whether `run` output shows a wedged same-name container.
+    /// A killed `run` can leave a half-created entry that blocks the next
+    /// `run` with a name conflict; that entry is still startable, so the
+    /// cascade falls back to `start` (the script mirrors with `rm`-first)
+    /// instead of surfacing the conflict as a fresh-run failure.
+    /// - Parameter output: Combined stdout plus stderr from the failed `run`.
+    /// - Returns: True when the output names the same-name conflict.
+    static func isWedgedContainer(output: String) -> Bool {
+        let lowered = output.lowercased()
+        if lowered.contains("already exists") || lowered.contains("already in use") {
+            return true
+        }
+        // Apple Container reports name conflicts with conflict wording tied
+        // to the container name; bare "conflict" without the name could be an
+        // unrelated registry conflict, so require both.
+        if lowered.contains("conflict"), lowered.contains(containerName.lowercased()) {
+            return true
+        }
+        return false
+    }
+
+    /// Ensures the tracked image is cached, pulling explicitly when absent.
+    /// Probes with `image inspect` first so cached hosts skip the minutes
+    /// budget entirely; only an absent image pays the long pull, and a retry
+    /// resumes already-downloaded layers. A pull failure returns its stage
+    /// fragment so the caller can fail closed without also attempting a `run`
+    /// that could not succeed without the image. Reports the user-visible
+    /// pulling stage only while actually downloading, so cached hosts never
+    /// flash a pull step they skipped.
+    /// - Parameters:
+    ///   - runtime: Resolved Apple Container CLI.
+    ///   - onStage: Optional live progress callback for the dashboard and CLI.
+    /// - Returns: Failure fragment when the pull failed, nil when cached or pulled.
+    static func ensureImageAvailable(runtime: URL, onStage: StartStageReporter? = nil) async -> String? {
+        if Task.isCancelled {
+            return nil
+        }
+        do {
+            let (code, _) = try await runProcess(
+                executableURL: runtime,
+                arguments: imageInspectArguments(),
+                timeoutSeconds: containerImageInspectTimeoutSeconds
+            )
+            if Task.isCancelled {
+                return nil
+            }
+            if code == 0 {
+                return nil
+            }
+        } catch is CancellationError {
+            return nil
+        } catch {
+            // Any inspect error (missing image, timeout, daemon hiccup) falls
+            // through to the explicit pull, which surfaces the actionable
+            // timeout versus Hub-reachability detail.
+            if Task.isCancelled {
+                return nil
+            }
+        }
+        if Task.isCancelled {
+            return nil
+        }
+        await onStage?(.pulling)
+        do {
+            let (code, output) = try await runProcess(
+                executableURL: runtime,
+                arguments: imagePullArguments(),
+                timeoutSeconds: containerImagePullTimeoutSeconds
+            )
+            if Task.isCancelled {
+                return nil
+            }
+            if code == 0 {
+                return nil
+            }
+            return failureMessage(
+                stage: EnsureStage.pull.rawValue,
+                exitCode: code,
+                output: output,
+                timedOut: false
+            )
+        } catch is CancellationError {
+            return nil
+        } catch let error as BoundedProcessError {
+            return runFailureMessage(
+                error: error,
+                stage: EnsureStage.pull.rawValue,
+                timeout: containerImagePullTimeoutSeconds
+            )
+        } catch {
+            return failureMessage(
+                stage: EnsureStage.pull.rawValue,
+                exitCode: nil,
+                output: error.localizedDescription,
+                timedOut: false
+            )
+        }
+    }
+
     /// Starts or recreates the SearXNG container with failure detail.
     /// Tries the existing stopped container first, then a fresh run with the
     /// per-install settings mount. Only an exit-0 spawn claims a start so
@@ -862,8 +1032,9 @@ public extension SearXNGEnsurer {
     /// - Parameters:
     ///   - browser: `[browser]` policy carrying the base URL.
     ///   - runtime: Resolved Apple Container CLI.
+    ///   - onStage: Optional live progress callback for the dashboard and CLI.
     /// - Returns: Whether this call started a container plus failure detail.
-    static func startExistingOrRun(browser: BrowserConfig, runtime: URL) async -> ContainerOutcome {
+    static func startExistingOrRun(browser: BrowserConfig, runtime: URL, onStage: StartStageReporter? = nil) async -> ContainerOutcome {
         if Task.isCancelled {
             return ContainerOutcome(didStart: false, failure: nil)
         }
@@ -875,8 +1046,8 @@ public extension SearXNGEnsurer {
         do {
             let (code, output) = try await runProcess(
                 executableURL: runtime,
-                arguments: ["start", containerName],
-                timeoutSeconds: 5
+                arguments: containerStartArguments(),
+                timeoutSeconds: containerStartTimeoutSeconds
             )
             if Task.isCancelled {
                 return ContainerOutcome(didStart: false, failure: nil)
@@ -895,7 +1066,7 @@ public extension SearXNGEnsurer {
         } catch is CancellationError {
             return ContainerOutcome(didStart: false, failure: nil)
         } catch let error as BoundedProcessError {
-            lastFailure = runFailureMessage(error: error, stage: EnsureStage.start.rawValue, timeout: 5)
+            lastFailure = runFailureMessage(error: error, stage: EnsureStage.start.rawValue, timeout: containerStartTimeoutSeconds)
         } catch {
             lastFailure = failureMessage(
                 stage: EnsureStage.start.rawValue,
@@ -912,21 +1083,26 @@ public extension SearXNGEnsurer {
             // instead of carrying a stale stage detail into a success.
             return ContainerOutcome(didStart: false, failure: nil)
         }
-        return await runFreshContainer(browser: browser, runtime: runtime, lastFailure: lastFailure)
+        return await runFreshContainer(browser: browser, runtime: runtime, lastFailure: lastFailure, onStage: onStage)
     }
 
     /// Runs a fresh SearXNG container with the per-install settings mount.
-    /// Extracted from `startExistingOrRun` so the starter stays within the
-    /// function body budget; behavior is unchanged.
+    /// Pulls the tracked image explicitly ahead of `run` when absent (long
+    /// minutes budget, skipped when cached so retries resume layers), then
+    /// runs with a short timeout. A `run` that hits the wedged same-name
+    /// conflict from a killed create falls back to `start` before surfacing a
+    /// failure, mirroring the escape-hatch script's `rm`-first retry.
     /// - Parameters:
     ///   - browser: `[browser]` policy carrying the base URL.
     ///   - runtime: Resolved Apple Container CLI.
     ///   - lastFailure: Failure detail from the start attempt, if any.
+    ///   - onStage: Optional live progress callback for the dashboard and CLI.
     /// - Returns: Whether this call started a container plus failure detail.
     static func runFreshContainer(
         browser: BrowserConfig,
         runtime: URL,
-        lastFailure: String?
+        lastFailure: String?,
+        onStage: StartStageReporter? = nil
     ) async -> ContainerOutcome {
         // Ensure the per-install override exists with a random secret before
         // resolving the mount, so the shipped placeholder is never mounted.
@@ -956,18 +1132,31 @@ public extension SearXNGEnsurer {
             )
             return ContainerOutcome(didStart: false, failure: lastFailure.map { "\($0); \(missing)" } ?? missing)
         }
+        if Task.isCancelled {
+            return ContainerOutcome(didStart: false, failure: nil)
+        }
+        // Explicit pull ahead of run, only when the image is absent. A pull
+        // failure fails closed here without also attempting a `run` that
+        // could not succeed without the image, keeping one cause per banner.
+        // The pull reports its own user-visible stage from inside the helper,
+        // so re-assert `starting` before the run spawn covers the pull-to-run
+        // move on hosts that actually downloaded.
+        var chainedFailure = lastFailure
+        if let pullFailure = await ensureImageAvailable(runtime: runtime, onStage: onStage) {
+            if Task.isCancelled {
+                return ContainerOutcome(didStart: false, failure: nil)
+            }
+            chainedFailure = chainedFailure.map { "\($0); \(pullFailure)" } ?? pullFailure
+            return ContainerOutcome(didStart: false, failure: chainedFailure)
+        }
+        if Task.isCancelled {
+            return ContainerOutcome(didStart: false, failure: nil)
+        }
+        await onStage?(.starting)
         let port = hostPort(from: browser.searxngURL)
-        let runArgs = [
-            "run", "-d",
-            "--name", containerName,
-            // Loopback-only publish: the engine has no auth, so LAN exposure
-            // would open unauthenticated search to the local network.
-            "-p", "127.0.0.1:\(port):8080",
-            "-v", "\(settings):/etc/searxng/settings.yml:ro",
-            containerImage
-        ]
+        let runArgs = containerRunArguments(settingsPath: settings, hostPort: port)
         do {
-            let (code, output) = try await runProcess(executableURL: runtime, arguments: runArgs, timeoutSeconds: 8)
+            let (code, output) = try await runProcess(executableURL: runtime, arguments: runArgs, timeoutSeconds: containerRunTimeoutSeconds)
             if Task.isCancelled {
                 return ContainerOutcome(didStart: false, failure: nil)
             }
@@ -975,6 +1164,17 @@ public extension SearXNGEnsurer {
                 // Exit 0 supersedes the earlier start failure, so success
                 // clears the stale stage detail instead of carrying it forward.
                 return ContainerOutcome(didStart: true, failure: nil)
+            }
+            // A killed `run` can leave a half-created same-name entry that
+            // blocks the next `run`; that entry is still startable, so revive
+            // it before reporting the conflict as a run failure.
+            if isWedgedContainer(output: output) {
+                if let revived = await startWedgedContainer(browser: browser, runtime: runtime) {
+                    return revived
+                }
+                if Task.isCancelled {
+                    return ContainerOutcome(didStart: false, failure: nil)
+                }
             }
             let runFailure = failureMessage(
                 stage: EnsureStage.run.rawValue,
@@ -984,7 +1184,7 @@ public extension SearXNGEnsurer {
             )
             return ContainerOutcome(
                 didStart: false,
-                failure: lastFailure.map { "\($0); \(runFailure)" } ?? runFailure
+                failure: chainedFailure.map { "\($0); \(runFailure)" } ?? runFailure
             )
         } catch is CancellationError {
             return ContainerOutcome(didStart: false, failure: nil)
@@ -992,11 +1192,11 @@ public extension SearXNGEnsurer {
             let runFailure = runFailureMessage(
                 error: error,
                 stage: EnsureStage.run.rawValue,
-                timeout: 8
+                timeout: containerRunTimeoutSeconds
             )
             return ContainerOutcome(
                 didStart: false,
-                failure: lastFailure.map { "\($0); \(runFailure)" } ?? runFailure
+                failure: chainedFailure.map { "\($0); \(runFailure)" } ?? runFailure
             )
         } catch {
             let runFailure = failureMessage(
@@ -1007,8 +1207,45 @@ public extension SearXNGEnsurer {
             )
             return ContainerOutcome(
                 didStart: false,
-                failure: lastFailure.map { "\($0); \(runFailure)" } ?? runFailure
+                failure: chainedFailure.map { "\($0); \(runFailure)" } ?? runFailure
             )
+        }
+    }
+
+    /// Revives a wedged same-name container left by a killed fresh run.
+    /// Runs `start` with the short start budget and gates the claim on a
+    /// reachability probe, so a start that exits 0 without the engine
+    /// answering never reports a start. Returns nil when the wedge did not
+    /// revive, letting the caller surface the original `run` conflict.
+    /// - Parameters:
+    ///   - browser: `[browser]` policy carrying the base URL.
+    ///   - runtime: Resolved Apple Container CLI.
+    /// - Returns: Start outcome when the wedge revived, nil otherwise.
+    static func startWedgedContainer(browser: BrowserConfig, runtime: URL) async -> ContainerOutcome? {
+        if Task.isCancelled {
+            return nil
+        }
+        do {
+            let (code, _) = try await runProcess(
+                executableURL: runtime,
+                arguments: containerStartArguments(),
+                timeoutSeconds: containerStartTimeoutSeconds
+            )
+            if Task.isCancelled {
+                return nil
+            }
+            // Only a true revive claims a start: a nonzero exit leaves the
+            // original run conflict plus chained detail for the caller to
+            // surface, and an unanswered probe does the same.
+            guard code == 0 else {
+                return nil
+            }
+            guard await isReachable(baseURL: browser.searxngURL) else {
+                return nil
+            }
+            return ContainerOutcome(didStart: true, failure: nil)
+        } catch {
+            return nil
         }
     }
 
@@ -1074,21 +1311,28 @@ public extension SearXNGEnsurer {
     }
 
     /// Fail-closed banner naming the terminal cause plus one hatch command.
-    /// The banner holds only the generic terminal cause (daemon, pull/run, or
-    /// not-reachable) plus a single `scripts/searxng-up.sh` remediation so each
-    /// of install, daemon, pull, and timeout renders once without nesting the
-    /// unreachable text around install text or chaining every stage into the
-    /// banner. The full per-stage detail (stage, exit, capped tail, timeout)
-    /// travels in `diagnosticsUserInfoKey` for server warn logs plus the
-    /// collapsed Settings diagnostics element.
+    /// The banner holds only one retry-aware terminal cause (daemon, pull
+    /// timeout with cached-layer retry, pull failure with Hub reachability,
+    /// run/start, or not-reachable) plus a single `scripts/searxng-up.sh`
+    /// remediation so each of install, daemon, pull timeout, pull failure,
+    /// run, and poll renders once without nesting the unreachable text around
+    /// install text or chaining every stage into the banner. The full
+    /// per-stage detail (stage, exit, capped tail, timeout) travels in
+    /// `diagnosticsUserInfoKey` for server warn logs plus the collapsed
+    /// Settings diagnostics element.
     /// - Parameters:
     ///   - baseURL: Configured `searxng_url`.
     ///   - detail: Chained per-stage fragments from the cascade, if any.
     /// - Returns: Error carrying the trimmed banner plus chained diagnostics.
     static func unreachableError(baseURL: String, detail: String?) -> Error {
         let trimmed = (detail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let banner: String = if trimmed.contains("stage: run") || trimmed.contains("stage: start") {
-            pullBanner()
+        let pullStage = EnsureStage.pull.rawValue
+        let banner: String = if trimmed.contains("stage: \(pullStage)"), trimmed.contains("timed out") {
+            pullTimeoutBanner()
+        } else if trimmed.contains("stage: \(pullStage)") {
+            pullFailedBanner()
+        } else if trimmed.contains("stage: run") || trimmed.contains("stage: start") {
+            runBanner()
         } else if trimmed.contains("stage: daemon") {
             daemonBanner()
         } else {

@@ -17,10 +17,10 @@ import {
   DEFAULT_SEARCH_TIMEOUT_SECONDS,
   ensureSearch,
   getSearchHealth,
-  getSettings,
   resolveSearchDiagnostics,
   resolveSearchMessage,
-  resolveSearchURL,
+  searchStageCopy,
+  getSettings,
   updateSettings,
   getPlugins,
   rescanPlugins,
@@ -54,6 +54,7 @@ import {
 } from "./icons";
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
+import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
 // Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
 // and file policy share one Security pane so the sidebar stays within the width budget as settings
@@ -154,7 +155,6 @@ export default function SettingsManager() {
   // directly from Start/Stop action responses so the health line stays honest
   // without a page reload or an extra probe round-trip.
   const [searchReachable, setSearchReachable] = useState<boolean | null>(null);
-  const [searchHealthURL, setSearchHealthURL] = useState<string | null>(null);
   const [searchHealthLoading, setSearchHealthLoading] = useState(false);
   // Tracks which lifecycle action is in flight so Start shows Starting… and
   // Stop shows Stopping… instead of sharing one misleading Starting… label.
@@ -162,6 +162,14 @@ export default function SettingsManager() {
     null
   );
   const searchActionBusy = searchAction !== null;
+  // Shared staged Start progress (1s poll, minutes-budget cap, elapsed, cleanup) feeding the
+  // amber Starting line; busy ownership stays here so the cap path keeps the toggle locked.
+  const {
+    searchStage,
+    searchStartElapsed,
+    beginSearchStartProgress,
+    endSearchStartProgress,
+  } = useSearchStartProgress();
   const [searchHealthError, setSearchHealthError] = useState<string | null>(
     null
   );
@@ -222,20 +230,17 @@ export default function SettingsManager() {
       const response = await getSearchHealth();
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
-        setSearchHealthURL(resolveSearchURL(response, "") || null);
         // Health carries no diagnostics today; clear the collapsed slot so a
         // prior ensure failure never lingers beside fresh health.
         setSearchDiagnostics(resolveSearchDiagnostics(response));
       } else {
         setSearchReachable(null);
-        setSearchHealthURL(null);
         setSearchHealthError(
           "Search health returned an unexpected response; status unknown."
         );
       }
     } catch (err) {
       setSearchReachable(null);
-      setSearchHealthURL(null);
       setSearchDiagnostics(null);
       setSearchHealthError(
         err instanceof Error ? err.message : "Search health check failed."
@@ -249,6 +254,14 @@ export default function SettingsManager() {
     setSearchAction("start");
     setSearchHealthError(null);
     setSearchDiagnostics(null);
+    // A Start fans out to a minutes-budget cascade (notably the first-run image pull), so poll
+    // health about 1s for the live step while it runs. Polls feed the Starting line only; the pill
+    // moves solely on the terminal ensure result below, so mid-flight flaps never flip it early.
+    // The cap clears only the stage line plus a dot re-probe; busy stays locked until the
+    // terminal result below lands so Start/Stop cannot race the hung pull.
+    beginSearchStartProgress(() => {
+      void refreshSearchHealth();
+    });
     try {
       const response = await ensureSearch();
       // Honest tri-state: only a boolean reachable flag may move the dot; shape-drifted payloads
@@ -257,7 +270,6 @@ export default function SettingsManager() {
       // with chained detail in the collapsed diagnostics below, instead of flipping silently to red.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
-        setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
         setSearchDiagnostics(resolveSearchDiagnostics(response));
         if (!response.reachable) {
           const detail = resolveSearchMessage(response);
@@ -273,6 +285,9 @@ export default function SettingsManager() {
         err instanceof Error ? err.message : "Failed to start search."
       );
     } finally {
+      // Terminal result stops the Starting line on every path (success, failure, cancellation),
+      // so no settle leaves the poll or the pill behind.
+      endSearchStartProgress();
       setSearchAction(null);
     }
   };
@@ -289,7 +304,6 @@ export default function SettingsManager() {
       // Stop carries no chained diagnostics today, but the slot clears symmetrically with ensure.
       if (typeof response?.reachable === "boolean") {
         setSearchReachable(response.reachable);
-        setSearchHealthURL(resolveSearchURL(response, searchSearxngURL));
         setSearchDiagnostics(resolveSearchDiagnostics(response));
         if (response.reachable) {
           const detail = resolveSearchMessage(response);
@@ -2457,36 +2471,36 @@ export default function SettingsManager() {
                 on open and Start/Stop update directly from their action
                 response while the global header Refresh stays the single
                 manual refresh. */}
-            {/* Pill carries the tri-state for at-a-glance scanning while the URL stays muted
-                beside it so the probed endpoint remains visible without repeating the sentence. */}
+            {/* Health line stays pill-only: the SearXNG URL input above is the
+                single editor and display, so repeating the endpoint here only
+                duplicates long URLs and forces wrapping in narrow panes. */}
             <span
               data-testid="search-health-text"
               className="search-health-line"
-              title={searchHealthURL || searchSearxngURL}
             >
-              {searchHealthLoading ? (
+              {searchAction === "start" ? (
+                <>
+                  <span
+                    className="status-pill running"
+                    data-testid="search-starting-pill"
+                  >
+                    Starting
+                  </span>
+                  <span
+                    className="muted text-sm"
+                    data-testid="search-start-stage"
+                  >
+                    {searchStageCopy(searchStage)} · {searchStartElapsed}s
+                  </span>
+                </>
+              ) : searchHealthLoading ? (
                 <span className="muted text-sm">Checking search health…</span>
               ) : searchReachable === null ? (
-                <>
-                  <span className="status-pill skipped">Unknown</span>
-                  <span className="muted text-sm search-health-url">
-                    {searchHealthURL || searchSearxngURL}
-                  </span>
-                </>
+                <span className="status-pill skipped">Unknown</span>
               ) : searchReachable ? (
-                <>
-                  <span className="status-pill ok">Reachable</span>
-                  <span className="muted text-sm search-health-url">
-                    {searchHealthURL || searchSearxngURL}
-                  </span>
-                </>
+                <span className="status-pill ok">Reachable</span>
               ) : (
-                <>
-                  <span className="status-pill error">Stopped</span>
-                  <span className="muted text-sm search-health-url">
-                    {searchHealthURL || searchSearxngURL}
-                  </span>
-                </>
+                <span className="status-pill error">Stopped</span>
               )}
             </span>
             {searchHealthError ? (
