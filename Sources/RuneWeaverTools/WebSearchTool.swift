@@ -9,32 +9,41 @@
 //
 // `SearXNGEnsurer` keeps the local engine warm for both serve boot and first
 // search. Concurrent callers for one normalized base URL collapse onto a single
-// in-flight attempt following the runtime, daemon, start, pull, run, poll
-// cascade (cached-image worst case about 41s: probe 5s plus system start 8s
-// plus recheck 5s plus start 5s plus run 8s plus final poll 10s with 500 ms
-// polls; a first-run image pull adds its own minutes budget on top) while
-// racing processes serialize on the shared container name. The owner flight
+// in-flight attempt following the runtime, daemon, start, pull, run, watch
+// cascade (cached-image heals plus a readiness watch with a minutes-scale
+// backstop ticking on short sleeps; a first-run image pull adds its own
+// minutes budget on top) while racing processes serialize on the shared
+// container name. The owner flight
 // publishes a live user-visible stage plus Start time on the actor, so health
 // polls and single-flight joiners watch resolving, daemon, pulling, starting,
 // waiting instead of one static label; the snapshot clears on settle or cancel.
 // A missing runtime
 // fails with install guidance (Apple Container link, Docker unsupported); a
 // down system service heals via a fast probe plus bounded `system start`
-// before any container start. A missing engine then starts an existing
-// container or pulls the tracked `:latest` image once (skipped when already
-// cached so retries resume downloaded layers) before a short-timeout run with
-// a loopback-only publish plus a per-install secret (`0600` file, `0700`
-// directory; the bundled placeholder is never mounted). A half-created
-// same-name container left by a killed run falls back to `start` instead of
-// failing the fresh `run` with a name conflict.
+// before any container start. The container step is existence-aware, mirroring
+// the escape-hatch script `rm`-first: a present entry tries `start`, polls
+// briefly, and returns on reachable, while a refused start removes the wedged
+// entry with `rm` before a fresh `run`; an absent entry goes straight to the
+// fresh `run`. The fresh path then pulls the tracked `:latest` image once
+// (skipped when already cached so retries resume downloaded layers) before a
+// short-timeout run with a loopback-only publish plus a per-install secret
+// (`0600` file, `0700` directory; the bundled placeholder is never mounted).
+// `rm`-first makes a `run` name conflict impossible except for cross-process
+// races recreating the name mid-flight; that residual wedge still revives via
+// `start` instead of failing the fresh `run`.
 // Fresh runs track `:latest` by design so new installs follow upstream without
-// a version bump; pin via `SEARXNG_IMAGE` when reproducibility matters. Failures
-// report a trimmed banner (terminal cause plus one `scripts/searxng-up.sh`
+// a version bump; pin via `SEARXNG_IMAGE` when reproducibility matters. After
+// the heal the readiness watch ticks on short sleeps: HTTP reachable wins,
+// terminal container states (exited, errored, missing mid-wait) fail fast with
+// the capped logs tail, any other or unparseable state keeps waiting until the
+// backstop, which fails with the last state plus logs tail. Banners name the
+// failing stage (start refusal, crash logs) instead of a timeout note.
+// Failures report a trimmed banner (terminal cause plus one `scripts/searxng-up.sh`
 // remediation, retry-aware: pull timeout names cached-layer retry, pull
-// failure names Hub reachability, run failure names the exit plus tail) while
-// per-stage detail (stage, exit, capped tail, timeout) moves to server warn
-// logs plus collapsed diagnostics. The container stays running after quit by
-// design.
+// failure names Hub reachability, run failure names the exit plus tail, watch
+// crash or missing names the exit plus logs) while per-stage detail (stage,
+// exit, capped tail, timeout) moves to server warn logs plus collapsed
+// diagnostics. The container stays running after quit by design.
 
 import Foundation
 import RuneWeaverCore
@@ -59,12 +68,31 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// version bump; pin via `SEARXNG_IMAGE` (script) or this constant when
     /// reproducibility matters. Keep in sync with `scripts/searxng-up.sh`.
     public static let containerImage = "searxng/searxng:latest"
-    /// Budget for the final reachability poll only, not the whole cascade.
-    /// Heals above it (daemon probe, system start, container start/pull/run)
-    /// carry their own timeouts, so a cached-image attempt runs about 41s
-    /// worst case plus the minutes-budget pull only when the image is absent.
-    public static let ensureBudgetSeconds: Double = 10
-    /// Delay between reachability polls while waiting for boot.
+    /// Backstop for the readiness watch after the heal.
+    /// The server settles first at 165s while the dashboard client cap holds longer at 360s
+    /// (suspending while the stage reports pulling), so a slow boot reports its terminal state
+    /// before the client stops the stage line.
+    /// The watch ticks on short sleeps: reachable wins, terminal container states fail fast with
+    /// logs, other or unparseable states keep waiting until this backstop, which fails with the
+    /// last state plus logs tail. Heals above it carry their own timeouts; a first-run pull adds
+    /// its minutes budget on top. Single source for the minutes-scale backstop.
+    public static let readinessWatchTimeoutSeconds: Double = 165
+    /// Legacy cascade-budget name for the same backstop.
+    /// Kept so staged-progress checks compiled against the old name keep agreeing on one backstop.
+    @available(*, deprecated, renamed: "readinessWatchTimeoutSeconds")
+    public static var ensureBudgetSeconds: Double {
+        readinessWatchTimeoutSeconds
+    }
+
+    /// Shorter alias for the same backstop.
+    /// Kept so callers probing the watch budget under this name keep agreeing on one backstop.
+    @available(*, deprecated, renamed: "readinessWatchTimeoutSeconds")
+    public static var readinessTimeoutSeconds: Double {
+        readinessWatchTimeoutSeconds
+    }
+
+    /// Delay between readiness watch ticks while waiting for boot.
+    /// Short so a crash fails fast on the next tick instead of sleeping through the backstop.
     public static let pollIntervalNanoseconds: UInt64 = 500_000_000
     /// Fast reachability probe timeout so a down engine fails fast.
     public static let probeTimeoutSeconds: Double = 2
@@ -81,6 +109,11 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     public static let containerRunTimeoutSeconds: Double = 8
     /// Short budget for starting (or reviving a wedged) existing container.
     public static let containerStartTimeoutSeconds: Double = 5
+    /// Brief settle window after `start` before declaring refusal.
+    /// Lets a slow start answer one extra probe so a present entry that needs
+    /// an extra second never churns via needless `rm` plus fresh `run`; short
+    /// enough that the cached-image cascade stays responsive.
+    public static let containerStartSettleSeconds: Double = 2
 
     /// In-flight ensure tasks keyed by normalized base URL so concurrent
     /// callers for the same origin collapse while different origins run
@@ -94,7 +127,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Coarser than the diagnostics cascade (`EnsureStage` keeps the per-stage
     /// failure detail): one flight moves resolving, daemon, pulling, starting,
     /// waiting so the dashboard can render a single live line plus elapsed time
-    /// instead of one static Starting label for a ~41s worst case.
+    /// instead of one static Starting label across the minutes-scale watch.
     public enum StartStage: String, Sendable, CaseIterable, Codable {
         case resolving
         case daemon
@@ -222,7 +255,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
 
     /// Awaits an owned flight, cancelling it when the waiter cancels.
     /// Cancelling the waiter cancels the owned flight so the container start
-    /// plus poll does not keep running detached after the turn.
+    /// plus watch does not keep running detached after the turn.
     /// Completion, failure, and cancellation all clear the stage snapshot, so
     /// no terminal or cancelled flight leaves a stale Starting display behind.
     private func awaitOwnedFlight(key: String, task: Task<Bool, Error>) async throws -> Bool {
@@ -241,14 +274,14 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Kept explicit so the heal order stays reviewable: runtime must resolve
     /// before any daemon probe, the daemon must answer before container
     /// start, the image pull sits ahead of the fresh run only (skipped when
-    /// cached), and polling always comes last.
+    /// cached), and the readiness watch always comes last under its waiting detail.
     public enum EnsureStage: String, CaseIterable, Sendable {
         case runtime
         case daemon
         case start
         case pull
         case run
-        case poll
+        case waiting
     }
 
     /// Ensures SearXNG answers, starting it when down.
@@ -279,10 +312,10 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
                 return
             }
             // Owner succeeded but this joiner still probes dark (a flap
-            // between flights): fail closed with a poll-stage detail instead
-            // of a bare guidance string.
+            // between flights): fail closed with a waiting-stage detail instead
+            // of a bare guidance string, so the banner stays the shared backstop.
             let flapFailure = Self.failureMessage(
-                stage: EnsureStage.poll.rawValue,
+                stage: EnsureStage.waiting.rawValue,
                 exitCode: nil,
                 output: "owner flight succeeded but engine still unreachable",
                 timedOut: false
@@ -393,16 +426,19 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Runs one self-healing attempt through the ordered cascade.
-    /// Follows runtime, daemon, start, pull, run, poll (cached-image worst
-    /// case about 41s: the 10s budget covers the final poll only, while a
-    /// first-run pull adds its minutes budget once and retries resume cached
-    /// layers): each stage records its own fragment for diagnostics, while
-    /// the thrown banner holds only the retry-aware terminal cause plus one
-    /// hatch command so install, daemon, pull timeout, pull failure, run, and
-    /// poll each render once. User-visible progress reports through `onStage`
-    /// at each phase boundary (the pull step itself reports from inside the
-    /// container heal only when it actually downloads); nil keeps the attempt
-    /// silent for callers with no live display.
+    /// Follows runtime, daemon, start, pull, run, watch (heals plus a readiness
+    /// watch with a minutes-scale backstop ticking on short sleeps, while a
+    /// first-run pull adds its minutes budget once and retries resume cached layers):
+    /// each stage records its own fragment for diagnostics, while the thrown
+    /// banner holds only the retry-aware terminal cause plus one hatch command
+    /// so install, daemon, pull timeout, pull failure, run, and watch crash or
+    /// missing each render once. The start step itself is existence-aware (`inspect` with a
+    /// `list --all` cross-check, then `start` plus brief settle on present,
+    /// `rm`-first then fresh `run` on refusal, straight to `run` on absent,
+    /// with the residual race wedge still revived). User-visible progress
+    /// reports through `onStage` at each phase boundary (the pull step itself
+    /// reports from inside the container heal only when it actually
+    /// downloads); nil keeps the attempt silent for callers with no display.
     /// - Returns: Whether this attempt actually started a local container or the system service.
     private static func ensureImpl(browser: BrowserConfig, onStage: StartStageReporter? = nil) async throws -> Bool {
         try Task.checkCancellation()
@@ -422,30 +458,26 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             throw runtimeNotFoundError()
         }
         try Task.checkCancellation()
-        // External bases need no local heal: poll only, so a remote SearXNG
-        // never triggers a container launch for an unrelated origin.
+        // External bases need no local heal: hold HTTP alone through the shared
+        // watch until the backstop, so a slow remote boot still converges
+        // without ever triggering a container launch for an unrelated origin.
         guard isManagedBaseURL(browser.searxngURL) else {
             await onStage?(.waiting)
-            let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
-            while Date() < deadline {
-                try Task.checkCancellation()
-                if await isReachable(baseURL: browser.searxngURL) {
-                    return false
-                }
-                try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+            let externalOutcome = await watchExternalReadiness(baseURL: browser.searxngURL)
+            if externalOutcome.cancelled {
+                throw CancellationError()
             }
             try Task.checkCancellation()
-            if await isReachable(baseURL: browser.searxngURL) {
+            if externalOutcome.succeeded {
                 return false
             }
-            let pollFailure = failureMessage(
-                stage: EnsureStage.poll.rawValue,
-                exitCode: nil,
-                output: nil,
+            let externalFailure = externalOutcome.failureDetail ?? readinessFailureDetail(
+                stateText: "last state unknown",
+                logsTail: "",
                 timedOut: true,
-                timeoutSeconds: ensureBudgetSeconds
+                timeoutSeconds: readinessWatchTimeoutSeconds
             )
-            throw unreachableError(baseURL: browser.searxngURL, detail: pollFailure)
+            throw unreachableError(baseURL: browser.searxngURL, detail: externalFailure)
         }
         var lastFailure: String?
         await onStage?(.daemon)
@@ -455,9 +487,12 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             lastFailure = daemonFailure
         }
         try Task.checkCancellation()
-        // Best-effort container heal: a failed start simply falls through to
-        // polling and then to the guidance error, so a container-less host
-        // fails closed instead of crashing boot. The real start outcome flows
+        // Best-effort container heal: the existence-aware start checks for the
+        // entry first (present tries `start` plus brief settle, refused
+        // removes with `rm`-first before fresh `run`, absent goes straight to
+        // `run`, residual race wedges still revive), then falls through to
+        // the watch and the guidance error, so a container-less host fails
+        // closed instead of crashing boot. The real start outcome flows
         // back to `ensureReport` so it never reports a precomputed guess.
         // The heal reports `pulling` itself only while actually downloading;
         // every other container step reads as `starting` here.
@@ -471,38 +506,41 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         }
         try Task.checkCancellation()
         await onStage?(.waiting)
-        let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
-        while Date() < deadline {
-            try Task.checkCancellation()
-            if await isReachable(baseURL: browser.searxngURL) {
-                return daemonStarted || containerOutcome.didStart
-            }
-            try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        // Readiness watch replaces the fixed short poll: reachable wins, terminal
+        // container states fail fast with the capped logs tail, any other or
+        // unparseable state keeps waiting until the backstop, which fails with
+        // the last state plus logs tail. Cancellation stays cooperative so the
+        // single-flight joiner contract never mistakes a cancel for a crash.
+        let watchOutcome = await watchEngineReadiness(baseURL: browser.searxngURL, runtime: runtime)
+        if watchOutcome.cancelled {
+            throw CancellationError()
         }
         try Task.checkCancellation()
-        if await isReachable(baseURL: browser.searxngURL) {
+        if watchOutcome.succeeded {
             return daemonStarted || containerOutcome.didStart
         }
-        let pollFailure = failureMessage(
-            stage: EnsureStage.poll.rawValue,
-            exitCode: nil,
-            output: nil,
+        let watchFailure = watchOutcome.failureDetail ?? readinessFailureDetail(
+            stateText: "last state \(watchOutcome.lastState)",
+            logsTail: watchOutcome.logsTail,
             timedOut: true,
-            timeoutSeconds: ensureBudgetSeconds
+            timeoutSeconds: readinessWatchTimeoutSeconds
         )
-        throw unreachableError(baseURL: browser.searxngURL, detail: lastFailure.map { "\($0); \(pollFailure)" } ?? pollFailure)
+        throw unreachableError(baseURL: browser.searxngURL, detail: lastFailure.map { "\($0); \(watchFailure)" } ?? watchFailure)
     }
 
     /// Starts or runs the container without throwing.
     /// Shared by the tool path and the server lifecycle routes so boot logic
     /// cannot drift between loopback bind and settings-mount handling.
-    /// Heals the system daemon first, then the container, so a cold boot
-    /// after restart converges without manual `system start`.
+    /// Heals the system daemon first, then the existence-aware container step
+    /// (present tries `start` plus brief settle, refused removes with
+    /// `rm`-first before fresh `run`, absent goes straight to `run`), then holds
+    /// the shared readiness watch so a slow boot still counts as started once HTTP
+    /// answers instead of reporting false on the first dark probe.
     /// Returns true only when this call actually started a local container
-    /// or the system service (exit 0) and the engine answers afterwards: a
+    /// or the system service (exit 0) and the engine answers before the backstop: a
     /// missing runtime, a cancelled task, an external (non-loopback) base
     /// URL, a missing settings document, a failed spawn, or an engine that
-    /// stays unreachable reports false instead of claiming a start, so
+    /// stays unreachable through the watch reports false instead of claiming a start, so
     /// cross-process races never double-claim.
     @discardableResult
     public static func bestEffortStart(browser: BrowserConfig) async -> Bool {
@@ -524,10 +562,14 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         if Task.isCancelled {
             return false
         }
-        // Never claim a start while the engine stays unreachable: a `system
-        // start` or `run` exiting 0 without the socket answering leaves the
-        // engine dark, so gate the outcome on a final probe.
-        guard await isReachable(baseURL: browser.searxngURL) else {
+        // Never claim a start while the engine stays unreachable: hold the shared
+        // readiness watch so a fresh run needing more than one probe interval still
+        // converges instead of reporting false on the first dark check.
+        let watchOutcome = await watchEngineReadiness(baseURL: browser.searxngURL, runtime: runtime)
+        if Task.isCancelled || watchOutcome.cancelled {
+            return false
+        }
+        guard watchOutcome.succeeded else {
             return false
         }
         return daemon.daemonStarted || container.didStart

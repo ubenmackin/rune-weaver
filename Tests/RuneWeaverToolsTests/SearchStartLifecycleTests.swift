@@ -5,8 +5,8 @@
 // visibility so first-run pulls stay observable and failures stay one-cause.
 // Scope: pure `SearXNGEnsurer` helpers plus actor idle snapshots; no processes
 // are spawned and no network is touched.
-// Architectural role: guards the runtime, daemon, start, pull, run, poll
-// cascade contract shared by the engine, the CLI watcher, the dashboard poll,
+// Architectural role: guards the runtime, daemon, start, pull, run, watch
+// cascade contract shared by the engine, the CLI watcher, the dashboard watch,
 // and the escape-hatch script.
 
 import Foundation
@@ -44,9 +44,9 @@ struct SearchStartLifecycleTests {
         #expect(runArgs.contains("127.0.0.1:8888:8080"))
         #expect(runArgs.contains("/tmp/settings.yml:/etc/searxng/settings.yml:ro"))
         // Cascade order keeps the pull ahead of the run: the stage list reads
-        // runtime, daemon, start, pull, run, poll.
+        // runtime, daemon, start, pull, run, waiting.
         let stages = SearXNGEnsurer.EnsureStage.allCases.map(\.rawValue)
-        #expect(stages == ["runtime", "daemon", "start", "pull", "run", "poll"])
+        #expect(stages == ["runtime", "daemon", "start", "pull", "run", "waiting"])
         let pullIndex = stages.firstIndex(of: "pull") ?? -1
         let runIndex = stages.firstIndex(of: "run") ?? -1
         #expect(pullIndex >= 0 && runIndex >= 0 && pullIndex < runIndex)
@@ -137,13 +137,15 @@ struct SearchStartLifecycleTests {
         let daemonError = SearXNGEnsurer.unreachableError(baseURL: baseURL, detail: daemonFailed)
         #expect(daemonError.localizedDescription == SearXNGEnsurer.daemonBanner())
 
-        let pollFailed = SearXNGEnsurer.failureMessage(
-            stage: "poll", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: 10
+        let waitingBackstop = SearXNGEnsurer.failureMessage(
+            stage: "waiting", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: 165
         )
-        let pollError = SearXNGEnsurer.unreachableError(baseURL: baseURL, detail: pollFailed)
-        #expect(pollError.localizedDescription == SearXNGEnsurer.timeoutBanner(baseURL: baseURL))
+        let waitingError = SearXNGEnsurer.unreachableError(baseURL: baseURL, detail: waitingBackstop)
+        #expect(waitingError.localizedDescription == SearXNGEnsurer.readinessBackstopBanner(baseURL: baseURL))
+        #expect((SearXNGEnsurer.diagnostics(from: waitingError) ?? "").contains("timed out after 165s"))
+        #expect(SearXNGEnsurer.readinessWatchTimeoutSeconds == 165)
         // Every banner renders once: one hatch command, no stage fragments.
-        for error in [pullTimeoutError, pullFailedError, runError, startError, daemonError, pollError] {
+        for error in [pullTimeoutError, pullFailedError, runError, startError, daemonError, waitingError] {
             #expect(error.localizedDescription.components(separatedBy: "scripts/searxng-up.sh").count - 1 == 1)
             #expect(!error.localizedDescription.contains("stage:"))
         }

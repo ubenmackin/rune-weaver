@@ -412,8 +412,10 @@ struct SearXNGEnsurerRuntimeTests {
     func `Unreachable banner holds terminal cause plus one remediation`() {
         // Full cascade chains stay in diagnostics for warn logs plus collapsed
         // UI; the banner holds one generic cause plus one hatch command so each
-        // failure renders once without nesting stage fragments.
-        let chained = "stage: daemon, exit: 1, detail: xpc down; stage: run, exit: 1, detail: pull failed; stage: poll, (timed out after 10s)"
+        // failure renders once without nesting stage fragments. The trailing
+        // watch fragment mirrors the live readiness backstop.
+        let waitingTail = SearXNGEnsurer.failureMessage(stage: "waiting", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: SearXNGEnsurer.readinessWatchTimeoutSeconds)
+        let chained = "stage: daemon, exit: 1, detail: xpc down; stage: run, exit: 1, detail: pull failed; \(waitingTail)"
         let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: chained)
         let banner = error.localizedDescription
         #expect(!banner.contains("stage:"))
@@ -444,25 +446,33 @@ struct SearXNGEnsurerRuntimeTests {
 
     @Test
     func `Timeout banner names reachability with one hatch command`() {
-        // Poll-only timeouts (external bases, flap retries) render as not
-        // reachable plus the single hatch, with the timed-out fragment kept in
-        // diagnostics rather than nested as a second guidance wrapper.
-        let pollDetail = SearXNGEnsurer.failureMessage(stage: "poll", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: 10)
-        let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: pollDetail)
+        // Waiting-watch backstop (no terminal crash to name) renders the
+        // backstop banner plus the single hatch, with the timed-out waiting
+        // fragment kept in diagnostics rather than nested as a second wrapper.
+        let baseURL = "http://127.0.0.1:8888"
+        let waitingDetail = SearXNGEnsurer.failureMessage(stage: "waiting", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: SearXNGEnsurer.readinessWatchTimeoutSeconds)
+        let error = SearXNGEnsurer.unreachableError(baseURL: baseURL, detail: waitingDetail)
         let banner = error.localizedDescription
-        #expect(banner.lowercased().contains("not reachable"))
+        #expect(banner == SearXNGEnsurer.readinessBackstopBanner(baseURL: baseURL))
         #expect(banner.components(separatedBy: "scripts/searxng-up.sh").count - 1 == 1)
         #expect(!banner.contains("stage:"))
-        #expect((SearXNGEnsurer.diagnostics(from: error) ?? "").contains("stage: poll"))
+        #expect((SearXNGEnsurer.diagnostics(from: error) ?? "").contains("stage: waiting"))
+        #expect((SearXNGEnsurer.diagnostics(from: error) ?? "").contains("timed out after \(Int(SearXNGEnsurer.readinessWatchTimeoutSeconds))s"))
     }
 
     @Test
     func `Ensure report threads banner plus diagnostics separately`() {
         // The non-throwing report keeps the trimmed banner apart from the chained
         // diagnostics so routes can warn with both while inline slots show one.
-        let report = SearXNGEnsurer.EnsureReport(reachable: false, started: false, message: "banner", diagnostics: "stage: poll, (timed out after 10s)")
+        // The waiting fragment mirrors the live watch backstop.
+        let waitingDiagnostics = SearXNGEnsurer.failureMessage(
+            stage: "waiting", exitCode: nil, output: nil, timedOut: true, timeoutSeconds: SearXNGEnsurer.readinessWatchTimeoutSeconds
+        )
+        let report = SearXNGEnsurer.EnsureReport(
+            reachable: false, started: false, message: "banner", diagnostics: waitingDiagnostics
+        )
         #expect(report.message == "banner")
-        #expect(report.diagnostics?.contains("stage: poll") == true)
+        #expect(report.diagnostics?.contains("stage: waiting") == true)
         let blanked = SearXNGEnsurer.EnsureReport(reachable: false, started: false, message: "  ", diagnostics: "  ")
         #expect(blanked.message == nil)
         #expect(blanked.diagnostics == nil)

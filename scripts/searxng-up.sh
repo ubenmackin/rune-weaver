@@ -11,14 +11,20 @@ set -euo pipefail
 # container instead of stacking duplicates, so concurrent serve-plus-CLI
 # races serialize on the shared name.
 #
-# Order mirrors the engine cascade: try `start` first (fast path, no pull),
-# then an explicit `image pull` with a minutes budget only when the image is
-# absent (skipped when cached, so a retry resumes downloaded layers), then a
-# short-timeout `run`. A half-created same-name container from a killed run is
-# cleared with `rm`-first so retries never fail with "already exists", with a
-# `start` fallback when `run` still reports the name conflict. Pull timeouts
-# are retryable (layers cached); pull failures point at Hub reachability while
-# run failures carry the exit plus tail.
+# Order mirrors the engine cascade (`SearXNGEnsurer.startExistingOrRun`): check
+# the entry via `inspect` (falling back to `list --all`) before paying `start`
+# or `run`. A present entry tries `start` first (fast path, no pull) and returns
+# on success; a refused `start` removes the wedged entry with `rm`-first before
+# the fresh `run` so the next `run` cannot hit "already exists". An absent entry
+# goes straight to the fresh `run` without a doomed `start`. The fresh path pays
+# an explicit `image pull` with a minutes budget only when the image is absent
+# (skipped when cached, so a retry resumes downloaded layers), then a
+# short-timeout `run` with the per-install settings mount. `rm`-first makes the
+# `run` conflict impossible except for cross-process races recreating the name
+# mid-flight; that residual wedge still revives via a `start` fallback before
+# surfacing the conflict as a run failure. Pull timeouts are retryable (layers
+# cached); pull failures point at Hub reachability while run failures carry the
+# exit plus tail.
 #
 # The bundled `Config/searxng/settings.yml` is a template only: its
 # `secret_key` is a placeholder. This script mints a random per-install Flask
@@ -38,10 +44,12 @@ IMAGE="${SEARXNG_IMAGE:-searxng/searxng:latest}"
 # Budgets mirror the engine ensurer so script and service converge: the pull
 # pays minutes once on first run only (retries resume cached layers) while the
 # fresh run stays short because it never hides a registry download. The image
-# presence probe stays short so cached hosts never pay the pull budget. Keep in
+# presence probe stays short so cached hosts never pay the pull budget. The
+# engine adds a brief start settle (2s) after `start` before declaring refusal;
+# the hatch trusts the `start` exit directly and needs no settle sleep. Keep in
 # sync with `SearXNGEnsurer.containerImagePullTimeoutSeconds` (300),
 # `containerImageInspectTimeoutSeconds` (8), `containerRunTimeoutSeconds` (8),
-# and `containerStartTimeoutSeconds` (5).
+# `containerStartTimeoutSeconds` (5), and `containerStartSettleSeconds` (2).
 PULL_TIMEOUT_SECS=300
 INSPECT_TIMEOUT_SECS=8
 RUN_TIMEOUT_SECS=8
@@ -228,7 +236,8 @@ if printf '%s' "${DAEMON_OUTPUT}" | grep -qiE 'XPC[^[:alnum:]]+connection|system
     echo "Container system service is down; starting with '${RUNTIME} system start'..."
     # Bounded 8s heal on every platform: GNU timeout, Homebrew gtimeout, then a
     # portable background sleep-plus-kill so macOS (no timeout) never blocks
-    # unbounded and stays inside the 41s cascade budget.
+    # unbounded while the engine holds the minutes-scale readiness watch; the 8s
+    # bound covers only this system start heal.
     if command -v timeout >/dev/null 2>&1; then
         timeout 8 "${RUNTIME}" system start || true
     elif command -v gtimeout >/dev/null 2>&1; then
@@ -256,13 +265,45 @@ if printf '%s' "${DAEMON_OUTPUT}" | grep -qiE 'XPC[^[:alnum:]]+connection|system
     "${RUNTIME}" list >/dev/null 2>&1 || true
 fi
 
-# A stopped container from a prior run starts fastest with the short start
-# budget; ignore the failure when none exists yet and fall through to the
-# explicit pull plus fresh `run`. Skipping the pull here keeps cached restarts
-# fast and matches the engine fast path.
-if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
-    echo "Started existing ${CONTAINER_NAME}."
-    exit 0
+# Existence-aware branch mirrors `SearXNGEnsurer.containerEntryExists`: probe
+# the tracked entry via `inspect` (precise exit 0 when present in any state),
+# falling back to the `list --all` dump so a transient inspect miss cannot send
+# a present entry down the absent fast path. Both probes run under the short
+# start budget so a hung daemon cannot hang the hatch, matching the engine 5s
+# probe. Plain `list` without `--all` shows only running entries, so a stopped
+# entry would falsely read as absent and the next `run` would collide on the
+# name. The list match uses token boundaries (same as
+# `SearXNGEnsurer.containerExists`: any char outside [A-Za-z0-9_.-] delimits)
+# so a longer sibling name never poses as the tracked entry while quoted JSON
+# shapes like {"id":"runeweaver-searxng"} still match. Mirrors
+# `SearXNGEnsurer.containerListAllArguments` plus `containerInspectArguments`
+# plus `containerRemoveArguments` so script and engine never drift on verbs.
+ENTRY_EXISTS=0
+if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
+    ENTRY_EXISTS=1
+elif bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" list --all 2>/dev/null | grep -qiE "(^|[^A-Za-z0-9_.-])${CONTAINER_NAME}([^A-Za-z0-9_.-]|$)"; then
+    ENTRY_EXISTS=1
+else
+    ENTRY_EXISTS=0
+fi
+
+if [ "${ENTRY_EXISTS}" -eq 1 ]; then
+    # Present entry: a stopped container from a prior run starts fastest with
+    # the short start budget. Skipping the pull here keeps cached restarts fast
+    # and matches the engine fast path.
+    if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        echo "Started existing ${CONTAINER_NAME}."
+        exit 0
+    fi
+    # Start refusal: remove the wedged entry with `rm`-first before the fresh
+    # `run` below, mirroring `SearXNGEnsurer.removeStaleContainer`. Best-effort:
+    # a concurrent remover win still leaves the fresh `run` safe.
+    "${RUNTIME}" rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+else
+    # Absent entry: go straight to the fresh `run` below without a doomed
+    # `start` that would only burn the start budget and log a misleading
+    # not-found failure. No `rm` needed when nothing exists.
+    :
 fi
 
 # Explicit image pull ahead of `run` with the minutes budget, only when the
@@ -290,9 +331,11 @@ if ! bounded_run "${INSPECT_TIMEOUT_SECS}" "${RUNTIME}" image inspect "${IMAGE}"
     fi
 fi
 
-# A half-created container with the same name blocks `run`; remove it first
-# so retries never fail with "already exists" after an interrupted create.
-"${RUNTIME}" rm "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+# Fresh `run` needs no second `rm`: a refused `start` above already removed
+# with `rm`-first, and an absent entry has nothing to remove. `rm`-first makes
+# this `run` conflict-impossible except for cross-process races recreating the
+# name between `rm` and `run`; that residual wedge still revives via the
+# `start` fallback below before failing.
 
 if [ -z "${SETTINGS_PATH}" ]; then
     echo "Error: no SearXNG settings found (checked ${OVERRIDE_SETTINGS} and ${BUNDLED_SETTINGS})." >&2
@@ -316,11 +359,13 @@ if [ "${RUN_CODE}" -eq 0 ]; then
     echo "Leave it running after quit; stop explicitly with '${RUNTIME} stop ${CONTAINER_NAME}'."
     exit 0
 fi
-# A killed `run` can leave a wedged same-name entry that still starts; fall
-# back to `start` before surfacing the conflict as a run failure. Mirrors
-# `SearXNGEnsurer.isWedgedContainer`: `already exists`/`already in use` alone
-# imply the same-name wedge, but bare `conflict` without the container name
-# could be an unrelated registry conflict, so require the name there.
+# `rm`-first above makes this conflict impossible except for cross-process races
+# recreating the name between `rm` and `run`; that residual wedge is still
+# startable, so fall back to `start` before surfacing the conflict as a run
+# failure. Mirrors `SearXNGEnsurer.isWedgedContainer`: `already exists`/`already
+# in use` alone imply the same-name wedge, but bare `conflict` without the
+# container name could be an unrelated registry conflict, so require the name
+# there.
 if printf '%s' "${RUN_OUTPUT}" | grep -qiE 'already exists|already in use' || { printf '%s' "${RUN_OUTPUT}" | grep -qi 'conflict' && printf '%s' "${RUN_OUTPUT}" | grep -qiF -- "${CONTAINER_NAME}"; }; then
     echo "Fresh run hit a wedged same-name container; falling back to start..."
     if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
