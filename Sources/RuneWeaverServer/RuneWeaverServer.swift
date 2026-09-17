@@ -804,6 +804,9 @@ private func registerHealthRoute(_ app: Application) {
         let modelInfo = await req.application.runeWeaver.orchestrator.modelInfo
         let searchURL = req.application.runeWeaver.browserConfig.searxngURL
         let searchReachable = await SearXNGEnsurer.isReachable(baseURL: searchURL)
+        // Live Start stage rides along so the profile menu polls one endpoint
+        // for both the dot and the Starting line; nil when idle.
+        let searchProgress = await SearXNGEnsurer.shared.currentStartProgress(for: searchURL)
         return HealthResponse(
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
@@ -811,7 +814,9 @@ private func registerHealthRoute(_ app: Application) {
             contextLength: modelInfo.contextLength,
             searchReachable: searchReachable,
             searchURL: searchURL,
-            searchStatus: searchReachable ? "running" : "stopped"
+            searchStatus: searchReachable ? "running" : "stopped",
+            searchStage: searchProgress?.stage.rawValue,
+            searchStartedAt: searchProgress.map(\.startedAt.timeIntervalSince1970)
         )
     }
 }

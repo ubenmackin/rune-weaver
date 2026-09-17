@@ -35,6 +35,11 @@ export interface HealthResponse {
   searchReachable?: boolean;
   searchURL?: string;
   searchStatus?: string;
+  // Live Start stage plus Start time while an ensure flight runs (resolving, daemon, pulling,
+  // starting, waiting). Optional because older engines predate staged progress and because the
+  // keys are absent when idle; absent means no Start is in flight.
+  searchStage?: string | null;
+  searchStartedAt?: number | null;
 }
 
 export interface ToolResult {
@@ -822,6 +827,13 @@ export interface SearchHealthResponse {
   stopped?: boolean | null;
   message?: string | null;
   diagnostics?: string | null;
+  // Live Start stage plus Start time while an ensure flight runs (resolving, daemon, pulling,
+  // starting, waiting). Optional because older engines predate staged progress and because the
+  // keys are absent when idle; absent means no Start is in flight.
+  stage?: string | null;
+  // Unix seconds when the in-flight Start began. Mirrors the engine shape (a number, never a
+  // Date string) so elapsed math stays a subtraction; null or absent means unknown.
+  startedAt?: number | null;
 }
 
 // Resolves the display URL across the dual `url`/`baseURL` contract so custom
@@ -861,6 +873,93 @@ export function resolveSearchDiagnostics(
   return typeof diagnostics === "string" && diagnostics.trim()
     ? diagnostics.trim()
     : null;
+}
+
+// Staged Start progress: while a Start is in flight the engine publishes the current step plus
+// the Start time on health payloads, and the dashboard polls about 1s so the amber Starting
+// line tracks the cascade instead of sitting static. The client cap (~6 min) bounds a hung
+// Start past the minutes-budget image pull plus the cached cascade: past it the UI stops the
+// stage line and re-probes the dot while keeping the toggle locked, and the cap suspends while
+// the stage reports pulling so a first-run pull never trips it early.
+export const SEARCH_START_POLL_INTERVAL_MS = 1000;
+export const SEARCH_START_CAP_MS = 360_000;
+
+// Single-sourced user copy per Start stage, mirroring StartStage.userCopy on the engine. Unknown
+// or drifted stages fall back to a bare Starting label via searchStageCopy so a new engine step
+// never renders blank.
+export const SEARCH_START_STAGE_COPY: Record<string, string> = {
+  resolving: "Checking container runtime",
+  daemon: "Waking container service",
+  pulling: "Pulling search image",
+  starting: "Starting search container",
+  waiting: "Waiting for search to respond",
+};
+
+// Payloads carrying staged progress: /search/health uses stage/startedAt while /health nests the
+// same values under searchStage/searchStartedAt. One shape keeps both poll sites honest.
+export interface SearchStartProgressPayload {
+  stage?: string | null;
+  searchStage?: string | null;
+  startedAt?: number | null;
+  searchStartedAt?: number | null;
+}
+
+// Extracts the live Start stage across both health contracts, normalizing blank or non-string
+// payloads to null so the Starting line only renders for a real in-flight step.
+export function resolveStartStage(
+  response: SearchStartProgressPayload | null | undefined,
+): string | null {
+  if (!response) return null;
+  const raw =
+    (typeof response.stage === "string" && response.stage.trim()) ||
+    (typeof response.searchStage === "string" && response.searchStage.trim()) ||
+    "";
+  return raw || null;
+}
+
+// Extracts the in-flight Start time (Unix seconds) across both health contracts, normalizing
+// missing, non-finite, or non-positive payloads to null so elapsed math falls back to the
+// client-side Start instant instead of rendering from a garbage epoch.
+export function resolveStartStartedAt(
+  response: SearchStartProgressPayload | null | undefined,
+): number | null {
+  if (!response) return null;
+  const raw =
+    typeof response.startedAt === "number"
+      ? response.startedAt
+      : typeof response.searchStartedAt === "number"
+        ? response.searchStartedAt
+        : null;
+  return raw != null && Number.isFinite(raw) && raw > 0 ? raw : null;
+}
+
+// Maps a stage to its user copy, degrading unknown stages to a bare Starting label so engine
+// drift never blanks the in-flight line.
+export function searchStageCopy(stage: string | null | undefined): string {
+  if (stage && SEARCH_START_STAGE_COPY[stage]) return SEARCH_START_STAGE_COPY[stage];
+  return "Starting";
+}
+
+// Reports whether the live Start stage is the minutes-budget image pull, during which the client
+// cap suspends so a first-run pull never trips the hung-Start path early. Single-sourced so the
+// shared progress hook and any future poll sites agree on the suspend condition.
+export function isSearchStartPullingStage(stage: string | null | undefined): boolean {
+  return stage === "pulling";
+}
+
+// Elapsed whole seconds since the Start began, preferring the engine Start time and falling back
+// to the client-side Start instant when the payload carries none. Clamped at zero so clock skew
+// never renders a negative count.
+export function startElapsedSeconds(
+  startedAtSeconds: number | null | undefined,
+  clientStartMs: number,
+  nowMs: number = Date.now(),
+): number {
+  const baseMs =
+    startedAtSeconds != null && Number.isFinite(startedAtSeconds) && startedAtSeconds > 0
+      ? startedAtSeconds * 1000
+      : clientStartMs;
+  return Math.max(0, Math.floor((nowMs - baseMs) / 1000));
 }
 
 // Reads live SearXNG reachability without touching settings: the profile

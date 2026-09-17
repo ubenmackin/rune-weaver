@@ -49,7 +49,7 @@ describe("TopNav SearXNG row", () => {
     expect(DEFAULT_SEARCH_MAX_RESULTS).toBe(10);
   });
 
-  it("shows a green dot and Running when search is reachable", async () => {
+  it("shows a green dot and Reachable when search is reachable", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -68,7 +68,7 @@ describe("TopNav SearXNG row", () => {
     const dot = screen.getByTestId("searxng-status-dot");
     expect(dot.getAttribute("aria-label")).toBe("SearXNG reachable");
     expect(screen.getByTestId("searxng-status-text").textContent).toBe(
-      "Running"
+      "Reachable"
     );
     // Green dot for the reachable state.
     expect(dot.style.backgroundColor).toContain("52, 211, 153");
@@ -169,7 +169,7 @@ describe("TopNav SearXNG row", () => {
     await waitFor(() => {
       expect(seen).toContain("/search/ensure");
       expect(screen.getByTestId("searxng-status-text").textContent).toBe(
-        "Running"
+        "Reachable"
       );
     });
   });
@@ -208,10 +208,12 @@ describe("TopNav SearXNG row", () => {
     });
   });
 
-  it("renders a single trimmed banner on failed start without nesting stages", async () => {
+  it("renders the pull-timeout cached-retry banner once without stage fragments", async () => {
     const user = userEvent.setup();
+    // Mirrors the engine pullTimeoutBanner: a timed-out pull resumes cached
+    // layers, so the banner names the retry instead of a generic pull failure.
     const banner =
-      "SearXNG container failed to start (image pull or run failed). Run `scripts/searxng-up.sh` to retry.";
+      "SearXNG image pull timed out after 300s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry.";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string, init?: RequestInit) => {
@@ -220,7 +222,7 @@ describe("TopNav SearXNG row", () => {
             reachable: false,
             url: ENGINE_SEARCH_URL,
             message: banner,
-            diagnostics: "stage: run, exit: 1, detail: pull denied; stage: poll, (timed out after 10s)",
+            diagnostics: "stage: pull, (timed out after 300s), detail: download stalled",
           });
         }
         return jsonResponse({});
@@ -236,8 +238,95 @@ describe("TopNav SearXNG row", () => {
     await openProfile(user);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);
-    // Banner renders once with the generic pull cause plus one remediation;
+    // Banner renders once with the cached-retry cause plus one remediation;
     // chained stage detail stays out of this slot (Settings diagnostics only).
+    await waitFor(() => {
+      const error = screen.getByTestId("searxng-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    // Tri-state dot stays honest: failed start keeps the red Stopped dot.
+    expect(screen.getByTestId("searxng-status-text").textContent).toBe(
+      "Stopped"
+    );
+  });
+
+  it("renders the pull-failed Hub banner once without stage fragments", async () => {
+    const user = userEvent.setup();
+    // Mirrors the engine pullFailedBanner: a non-timeout pull failure points
+    // at Hub reachability rather than the run step.
+    const banner =
+      "SearXNG image pull failed. Check Docker Hub reachability, then run `scripts/searxng-up.sh` to retry.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (String(input) === "/search/ensure" && init?.method === "POST") {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: "stage: pull, exit: 1, detail: pull access denied",
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    renderNav({
+      status: "ok",
+      engine: "Rune Weaver",
+      version: "0.1.0",
+      searchReachable: false,
+      searchURL: ENGINE_SEARCH_URL,
+    });
+    await openProfile(user);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Hub cause renders once; registry detail stays in server warn logs plus
+    // the Settings collapsed diagnostics, never nested here.
+    await waitFor(() => {
+      const error = screen.getByTestId("searxng-error");
+      expect(error.textContent).toBe(banner);
+      expect(error.textContent).not.toContain("stage:");
+      expect(error.textContent?.split("searxng-up.sh").length).toBe(2);
+    });
+    expect(screen.getByTestId("searxng-status-text").textContent).toBe(
+      "Stopped"
+    );
+  });
+
+  it("renders the run-failed banner once without stage fragments", async () => {
+    const user = userEvent.setup();
+    // Mirrors the engine run-only banner: a fresh-run spawn failure names the
+    // run step while the exit plus capped tail stay in diagnostics.
+    const banner =
+      "SearXNG container failed to start (run failed). Run `scripts/searxng-up.sh` to retry.";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (String(input) === "/search/ensure" && init?.method === "POST") {
+          return jsonResponse({
+            reachable: false,
+            url: ENGINE_SEARCH_URL,
+            message: banner,
+            diagnostics: "stage: run, exit: 1, detail: container exit tail",
+          });
+        }
+        return jsonResponse({});
+      })
+    );
+    renderNav({
+      status: "ok",
+      engine: "Rune Weaver",
+      version: "0.1.0",
+      searchReachable: false,
+      searchURL: ENGINE_SEARCH_URL,
+    });
+    await openProfile(user);
+    const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
+    await user.click(startBtn);
+    // Run cause renders once with one remediation; exit plus tail never leak
+    // into this slot.
     await waitFor(() => {
       const error = screen.getByTestId("searxng-error");
       expect(error.textContent).toBe(banner);

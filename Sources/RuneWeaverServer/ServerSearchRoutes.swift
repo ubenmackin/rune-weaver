@@ -1,11 +1,15 @@
 // Rune Weaver Server — Local SearXNG lifecycle routes for search settings.
 //
 // Thin HTTP adapters over the shared `SearXNGEnsurer`: health probes the
-// configured base URL, ensure collapses onto the self-healing cascade
-// (runtime, daemon, start, run, poll) with a trimmed banner plus chained
-// diagnostics, and stop halts the managed container. Lifecycle policy
+// configured base URL plus the live Start stage (resolving, daemon, pulling,
+// starting, waiting with the Start time) so the dashboard can poll one
+// endpoint about 1s for the amber Starting line, ensure collapses onto the
+// self-healing cascade (runtime, daemon, start, pull, run, poll) with a
+// trimmed banner plus chained diagnostics, and stop halts the managed
+// container. Lifecycle policy
 // (loopback-only bind, per-install secret mount, tracked `:latest` image,
-// final poll 10s with 500 ms polls inside an about-41s worst-case cascade,
+// final poll 10s with 500 ms polls inside an about-41s cached worst-case
+// cascade plus a minutes-budget pull when the image is absent,
 // bounded 8s system start) lives single-source in the ensurer so boot,
 // `web.search`, and these routes cannot drift; the routes only translate
 // outcomes to HTTP shapes. Fresh runs track `:latest` by design so new
@@ -32,10 +36,15 @@ func registerSearchRoutes(_ app: Application) {
         let context = req.application.runeWeaver
         let baseURL = context.browserConfig.searxngURL
         let reachable = await SearXNGEnsurer.isReachable(baseURL: baseURL)
+        // Live stage rides along so a Start in flight renders its current step
+        // plus elapsed time; nil when idle, so the dot alone decides the row.
+        let progress = await SearXNGEnsurer.shared.currentStartProgress(for: baseURL)
         return SearchHealthResponse(
             reachable: reachable,
             baseURL: baseURL,
-            containerName: SearXNGEnsurer.containerName
+            containerName: SearXNGEnsurer.containerName,
+            stage: progress?.stage.rawValue,
+            startedAt: progress.map(\.startedAt.timeIntervalSince1970)
         )
     }
 
@@ -44,7 +53,8 @@ func registerSearchRoutes(_ app: Application) {
         // Single-sourced through the shared ensurer so boot, search, and this
         // route collapse onto one in-flight attempt keyed by base URL instead
         // of duplicating the cascade budgets (final poll 10s with 500 ms
-        // polls inside the worst-case cascade). The trimmed banner threads
+        // polls inside the about-41s cached cascade plus a minutes-budget
+        // pull when the image is absent). The trimmed banner threads
         // through for the inline slot while chained diagnostics thread through
         // for logs plus collapsed UI, so each failure renders once.
         let report = await SearXNGEnsurer.shared.ensureReport(browser: context.browserConfig)

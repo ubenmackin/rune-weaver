@@ -9,21 +9,32 @@
 //
 // `SearXNGEnsurer` keeps the local engine warm for both serve boot and first
 // search. Concurrent callers for one normalized base URL collapse onto a single
-// in-flight attempt following the runtime, daemon, start, run, poll cascade
-// (worst case about 41s: probe 5s plus system start 8s plus recheck 5s plus
-// start 5s plus run 8s plus final poll 10s with 500 ms polls) while racing
-// processes serialize on the shared container name. A missing runtime fails with install
-// guidance (Apple Container link, Docker unsupported); a down system service
-// heals via a fast probe plus bounded `system start` before any container
-// start. A missing engine then starts an existing container or runs the tracked
-// `:latest` image with a loopback-only publish plus a per-install secret
-// (`0600` file, `0700` directory; the bundled placeholder is never mounted).
+// in-flight attempt following the runtime, daemon, start, pull, run, poll
+// cascade (cached-image worst case about 41s: probe 5s plus system start 8s
+// plus recheck 5s plus start 5s plus run 8s plus final poll 10s with 500 ms
+// polls; a first-run image pull adds its own minutes budget on top) while
+// racing processes serialize on the shared container name. The owner flight
+// publishes a live user-visible stage plus Start time on the actor, so health
+// polls and single-flight joiners watch resolving, daemon, pulling, starting,
+// waiting instead of one static label; the snapshot clears on settle or cancel.
+// A missing runtime
+// fails with install guidance (Apple Container link, Docker unsupported); a
+// down system service heals via a fast probe plus bounded `system start`
+// before any container start. A missing engine then starts an existing
+// container or pulls the tracked `:latest` image once (skipped when already
+// cached so retries resume downloaded layers) before a short-timeout run with
+// a loopback-only publish plus a per-install secret (`0600` file, `0700`
+// directory; the bundled placeholder is never mounted). A half-created
+// same-name container left by a killed run falls back to `start` instead of
+// failing the fresh `run` with a name conflict.
 // Fresh runs track `:latest` by design so new installs follow upstream without
 // a version bump; pin via `SEARXNG_IMAGE` when reproducibility matters. Failures
 // report a trimmed banner (terminal cause plus one `scripts/searxng-up.sh`
-// remediation) while per-stage detail (stage, exit, capped tail, timeout) moves
-// to server warn logs plus collapsed diagnostics. The container stays running
-// after quit by design.
+// remediation, retry-aware: pull timeout names cached-layer retry, pull
+// failure names Hub reachability, run failure names the exit plus tail) while
+// per-stage detail (stage, exit, capped tail, timeout) moves to server warn
+// logs plus collapsed diagnostics. The container stays running after quit by
+// design.
 
 import Foundation
 import RuneWeaverCore
@@ -49,13 +60,27 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// reproducibility matters. Keep in sync with `scripts/searxng-up.sh`.
     public static let containerImage = "searxng/searxng:latest"
     /// Budget for the final reachability poll only, not the whole cascade.
-    /// Heals above it (daemon probe, system start, container start/run) carry
-    /// their own timeouts, so one attempt runs about 41s worst case.
+    /// Heals above it (daemon probe, system start, container start/pull/run)
+    /// carry their own timeouts, so a cached-image attempt runs about 41s
+    /// worst case plus the minutes-budget pull only when the image is absent.
     public static let ensureBudgetSeconds: Double = 10
     /// Delay between reachability polls while waiting for boot.
     public static let pollIntervalNanoseconds: UInt64 = 500_000_000
     /// Fast reachability probe timeout so a down engine fails fast.
     public static let probeTimeoutSeconds: Double = 2
+    /// Long budget for the explicit image pull when the local image is absent.
+    /// First pulls download ~150 MB, so the run stays short by paying the
+    /// download here once; retries resume already-cached layers instead of
+    /// restarting from zero.
+    public static let containerImagePullTimeoutSeconds: Double = 300
+    /// Short probe for image presence so a cached image never pays the pull budget.
+    public static let containerImageInspectTimeoutSeconds: Double = 8
+    /// Short budget for the fresh container run.
+    /// Kept small because the image pull is split out ahead of it, so `run`
+    /// only creates plus starts and never hides a registry download.
+    public static let containerRunTimeoutSeconds: Double = 8
+    /// Short budget for starting (or reviving a wedged) existing container.
+    public static let containerStartTimeoutSeconds: Double = 5
 
     /// In-flight ensure tasks keyed by normalized base URL so concurrent
     /// callers for the same origin collapse while different origins run
@@ -64,6 +89,93 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// so `ensureReport` can return the real start outcome instead of a
     /// precomputed guess.
     private var inFlight: [String: Task<Bool, Error>] = [:]
+
+    /// User-visible Start stage reported while one ensure flight runs.
+    /// Coarser than the diagnostics cascade (`EnsureStage` keeps the per-stage
+    /// failure detail): one flight moves resolving, daemon, pulling, starting,
+    /// waiting so the dashboard can render a single live line plus elapsed time
+    /// instead of one static Starting label for a ~41s worst case.
+    public enum StartStage: String, Sendable, CaseIterable, Codable {
+        case resolving
+        case daemon
+        case pulling
+        case starting
+        case waiting
+
+        /// Short operator-facing copy naming the in-flight step.
+        /// Kept beside the raw value (instead of in the dashboard) so the CLI
+        /// boot lines and every client render the same wording without drifting.
+        public var userCopy: String {
+            switch self {
+            case .resolving:
+                "Checking container runtime"
+            case .daemon:
+                "Waking container service"
+            case .pulling:
+                "Pulling search image"
+            case .starting:
+                "Starting search container"
+            case .waiting:
+                "Waiting for search to respond"
+            }
+        }
+    }
+
+    /// One in-flight Start snapshot: the current stage plus when the Start began.
+    /// `startedAt` is pinned at flight creation and preserved across stage moves
+    /// so elapsed time counts the whole Start, not the current step.
+    public struct StartProgress: Sendable, Equatable {
+        public let stage: StartStage
+        public let startedAt: Date
+
+        public init(stage: StartStage, startedAt: Date = Date()) {
+            self.stage = stage
+            self.startedAt = startedAt
+        }
+    }
+
+    /// Stage callback threaded through the static cascade so each phase can
+    /// report without owning actor state; the owning flight maps it onto the
+    /// per-URL progress below.
+    public typealias StartStageReporter = @Sendable (StartStage) async -> Void
+
+    /// Live Start snapshots keyed by normalized base URL, mirroring `inFlight`.
+    /// Stored on the actor (not in the Task) so single-flight joiners polling
+    /// health see the owner's stage while the flight runs, and so completion,
+    /// failure, or cancellation clears it instead of sticking the UI on Starting.
+    private var startProgressByKey: [String: StartProgress] = [:]
+
+    /// Returns the live Start snapshot for a base URL, if a flight is running.
+    /// - Parameter baseURL: Configured `searxng_url`.
+    /// - Returns: Current stage plus Start time, or nil when idle.
+    public func currentStartProgress(for baseURL: String) -> StartProgress? {
+        startProgressByKey[Self.inFlightKey(for: baseURL)]
+    }
+
+    /// Pins the initial snapshot when an owner flight starts.
+    /// Idempotent: a repeated begin keeps the original `startedAt` so elapsed
+    /// time never rewinds when stages are re-entered.
+    private func beginStartProgress(forKey key: String) {
+        if startProgressByKey[key] == nil {
+            startProgressByKey[key] = StartProgress(stage: .resolving, startedAt: Date())
+        }
+    }
+
+    /// Moves the snapshot to a new stage, preserving the original `startedAt`.
+    /// A report for an unknown key starts a snapshot rather than dropping the
+    /// stage, so late cascade reports still surface instead of vanishing.
+    private func noteStartStage(_ stage: StartStage, forKey key: String) {
+        if let existing = startProgressByKey[key] {
+            startProgressByKey[key] = StartProgress(stage: stage, startedAt: existing.startedAt)
+        } else {
+            startProgressByKey[key] = StartProgress(stage: stage, startedAt: Date())
+        }
+    }
+
+    /// Clears the snapshot when its flight settles or cancels.
+    private func clearStartProgress(forKey key: String) {
+        startProgressByKey[key] = nil
+    }
 
     /// Single-flight handle collapsing concurrent ensure callers onto one task.
     /// Carries the normalized key plus whether this caller owns the flight;
@@ -96,8 +208,13 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             return EnsureFlight(key: key, task: existing, isOwner: false)
         }
         let captured = browser
+        // Pin the snapshot before the Task starts so joiners and health polls
+        // see `resolving` from the first instant instead of a gap that reads idle.
+        beginStartProgress(forKey: key)
         let task = Task<Bool, Error> {
-            try await Self.ensureImpl(browser: captured)
+            try await Self.ensureImpl(browser: captured, onStage: { stage in
+                await self.noteStartStage(stage, forKey: key)
+            })
         }
         inFlight[key] = task
         return EnsureFlight(key: key, task: task, isOwner: true)
@@ -106,8 +223,13 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Awaits an owned flight, cancelling it when the waiter cancels.
     /// Cancelling the waiter cancels the owned flight so the container start
     /// plus poll does not keep running detached after the turn.
+    /// Completion, failure, and cancellation all clear the stage snapshot, so
+    /// no terminal or cancelled flight leaves a stale Starting display behind.
     private func awaitOwnedFlight(key: String, task: Task<Bool, Error>) async throws -> Bool {
-        defer { inFlight[key] = nil }
+        defer {
+            inFlight[key] = nil
+            clearStartProgress(forKey: key)
+        }
         return try await withTaskCancellationHandler {
             try await task.value
         } onCancel: {
@@ -118,11 +240,13 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// Ordered cascade stages for one ensure attempt.
     /// Kept explicit so the heal order stays reviewable: runtime must resolve
     /// before any daemon probe, the daemon must answer before container
-    /// start/run, and polling always comes last.
+    /// start, the image pull sits ahead of the fresh run only (skipped when
+    /// cached), and polling always comes last.
     public enum EnsureStage: String, CaseIterable, Sendable {
         case runtime
         case daemon
         case start
+        case pull
         case run
         case poll
     }
@@ -269,13 +393,18 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     }
 
     /// Runs one self-healing attempt through the ordered cascade.
-    /// Follows runtime, daemon, start, run, poll (worst case about 41s: the
-    /// 10s budget covers the final poll only): each stage records its own
-    /// fragment for diagnostics, while the thrown banner holds only the generic
-    /// terminal cause plus one hatch command so install, daemon, pull, and
-    /// timeout each render once.
+    /// Follows runtime, daemon, start, pull, run, poll (cached-image worst
+    /// case about 41s: the 10s budget covers the final poll only, while a
+    /// first-run pull adds its minutes budget once and retries resume cached
+    /// layers): each stage records its own fragment for diagnostics, while
+    /// the thrown banner holds only the retry-aware terminal cause plus one
+    /// hatch command so install, daemon, pull timeout, pull failure, run, and
+    /// poll each render once. User-visible progress reports through `onStage`
+    /// at each phase boundary (the pull step itself reports from inside the
+    /// container heal only when it actually downloads); nil keeps the attempt
+    /// silent for callers with no live display.
     /// - Returns: Whether this attempt actually started a local container or the system service.
-    private static func ensureImpl(browser: BrowserConfig) async throws -> Bool {
+    private static func ensureImpl(browser: BrowserConfig, onStage: StartStageReporter? = nil) async throws -> Bool {
         try Task.checkCancellation()
         if await isReachable(baseURL: browser.searxngURL) {
             try Task.checkCancellation()
@@ -288,6 +417,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         // the unreachable-engine text around it would bury the one actionable
         // cause under a second message, so the single error propagates as-is
         // through the web.search failure path.
+        await onStage?(.resolving)
         guard let runtime = resolveRuntimeURL() else {
             throw runtimeNotFoundError()
         }
@@ -295,6 +425,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         // External bases need no local heal: poll only, so a remote SearXNG
         // never triggers a container launch for an unrelated origin.
         guard isManagedBaseURL(browser.searxngURL) else {
+            await onStage?(.waiting)
             let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
             while Date() < deadline {
                 try Task.checkCancellation()
@@ -317,6 +448,7 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
             throw unreachableError(baseURL: browser.searxngURL, detail: pollFailure)
         }
         var lastFailure: String?
+        await onStage?(.daemon)
         let daemonOutcome = await ensureDaemonStarted(runtime: runtime)
         var daemonStarted = daemonOutcome.daemonStarted
         if let daemonFailure = daemonOutcome.failure {
@@ -327,14 +459,18 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
         // polling and then to the guidance error, so a container-less host
         // fails closed instead of crashing boot. The real start outcome flows
         // back to `ensureReport` so it never reports a precomputed guess.
-        let containerOutcome = await startExistingOrRun(browser: browser, runtime: runtime)
+        // The heal reports `pulling` itself only while actually downloading;
+        // every other container step reads as `starting` here.
+        await onStage?(.starting)
+        let containerOutcome = await startExistingOrRun(browser: browser, runtime: runtime, onStage: onStage)
         if containerOutcome.didStart {
             daemonStarted = daemonStarted || containerOutcome.didStart
         }
         if let containerFailure = containerOutcome.failure {
-            lastFailure = containerFailure
+            lastFailure = lastFailure.map { "\($0); \(containerFailure)" } ?? containerFailure
         }
         try Task.checkCancellation()
+        await onStage?(.waiting)
         let deadline = Date().addingTimeInterval(ensureBudgetSeconds)
         while Date() < deadline {
             try Task.checkCancellation()

@@ -7,10 +7,12 @@ import {
   DEFAULT_SEARCH_SEARXNG_URL,
   ensureSearch,
   getSearchHealth,
+  stopSearch,
   resolveSearchMessage,
   resolveSearchURL,
-  stopSearch,
+  searchStageCopy,
 } from "../api";
+import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import {
   ApprovalsIcon,
   BellIcon,
@@ -72,6 +74,14 @@ export default function TopNav({
     null
   );
   const [searchError, setSearchError] = useState<string | null>(null);
+  // Shared staged Start progress (1s poll, minutes-budget cap, elapsed, cleanup) feeding the
+  // amber Starting line; busy ownership stays here so the cap path keeps the toggle locked.
+  const {
+    searchStage,
+    searchStartElapsed,
+    beginSearchStartProgress,
+    endSearchStartProgress,
+  } = useSearchStartProgress();
 
   // Tri-state reachability: an explicit Start/Stop result wins, then the /health payload, otherwise
   // unknown. Unknown renders as a gray Unknown row (never red Stopped) so older engines without
@@ -186,6 +196,27 @@ export default function TopNav({
     const wasStarting = !searchRunning;
     setSearchBusyAction(wasStarting ? "start" : "stop");
     setSearchError(null);
+    // A Start fans out to a minutes-budget cascade (notably the first-run image pull), so poll
+    // health about 1s for the live step while it runs. Polls feed the Starting line only; the dot
+    // moves solely on the terminal ensure result below, so mid-flight flaps never flip it early.
+    // The cap clears only the stage line plus a dot re-probe; busy stays locked until the
+    // terminal result below lands so Start/Stop cannot race the hung pull.
+    if (wasStarting) {
+      beginSearchStartProgress(() => {
+        getSearchHealth()
+          .then((probe) => {
+            if (typeof probe?.reachable === "boolean") {
+              setSearchHealth({
+                reachable: probe.reachable,
+                url: resolveSearchURL(probe, searchURL),
+              });
+            }
+          })
+          .catch(() => {
+            // Probe failure keeps the previous dot; the Starting line is already cleared.
+          });
+      });
+    }
     try {
       const response = searchRunning
         ? await stopSearch()
@@ -213,9 +244,12 @@ export default function TopNav({
         error instanceof Error ? error.message : "Search toggle failed"
       );
     } finally {
+      // Terminal result stops the Starting line on every path (success, failure, cancellation),
+      // so no settle leaves the poll or the pill behind.
+      endSearchStartProgress();
       setSearchBusyAction(null);
     }
-  }, [searchBusyAction, searchRunning, searchURL]);
+  }, [searchBusyAction, searchRunning, searchURL, beginSearchStartProgress, endSearchStartProgress]);
 
   return (
     <header className="top-nav" aria-label="Main navigation">
@@ -384,9 +418,39 @@ export default function TopNav({
                             : "0 0 5px rgba(245, 101, 101, 0.6)",
                       }}
                     />
+                    {/* Status text stays mounted during Start so consumers keep a stable id;
+                        the Starting pill plus stage and elapsed render additively beside it. */}
                     <span data-testid="searxng-status-text">
-                      {!searchKnown ? "Unknown" : searchRunning ? "Running" : "Stopped"}
+                      {!searchKnown ? "Unknown" : searchRunning ? "Reachable" : "Stopped"}
                     </span>
+                    {searchBusyAction === "start" ? (
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "6px",
+                        }}
+                      >
+                        <span
+                          data-testid="searxng-starting-pill"
+                          className="status-pill running"
+                        >
+                          Starting
+                        </span>
+                        <span
+                          data-testid="searxng-start-stage"
+                          style={{ fontSize: "11px", opacity: 0.85 }}
+                        >
+                          {searchStageCopy(searchStage)}
+                        </span>
+                        <span
+                          data-testid="searxng-start-elapsed"
+                          style={{ fontSize: "11px", opacity: 0.65 }}
+                        >
+                          {searchStartElapsed}s
+                        </span>
+                      </span>
+                    ) : null}
                     <button
                       type="button"
                       data-testid="searxng-toggle"

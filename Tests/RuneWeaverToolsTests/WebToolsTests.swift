@@ -426,17 +426,20 @@ struct SearXNGEnsurerRuntimeTests {
 
     @Test
     func `Pull failures carry generic guidance with raw tail in diagnostics`() {
-        // Image pull or run output never leaks raw registry text into the banner;
-        // the banner names the generic pull cause once while diagnostics keeps
-        // the capped tail for logs plus collapsed UI.
+        // Run output never leaks raw registry text into the banner; the run
+        // banner names only the run cause while pull wording lives solely on
+        // the pull-specific banners, with the capped tail kept in diagnostics.
         let runDetail = SearXNGEnsurer.failureMessage(stage: "run", exitCode: 1, output: "pull access denied for searxng", timedOut: false)
         let error = SearXNGEnsurer.unreachableError(baseURL: "http://127.0.0.1:8888", detail: runDetail)
-        let banner = error.localizedDescription.lowercased()
-        #expect(banner.contains("pull"))
+        let banner = error.localizedDescription
+        #expect(banner.contains("run failed"))
+        #expect(!banner.lowercased().contains("pull"))
         #expect(banner.contains("scripts/searxng-up.sh"))
-        #expect(!error.localizedDescription.contains("stage:"))
+        #expect(!banner.contains("stage:"))
         let raw = SearXNGEnsurer.diagnostics(from: error) ?? ""
         #expect(raw.contains("stage: run"))
+        #expect(SearXNGEnsurer.pullFailedBanner().lowercased().contains("pull"))
+        #expect(SearXNGEnsurer.pullTimeoutBanner().lowercased().contains("pull"))
     }
 
     @Test

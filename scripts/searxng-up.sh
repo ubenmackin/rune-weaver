@@ -11,6 +11,15 @@ set -euo pipefail
 # container instead of stacking duplicates, so concurrent serve-plus-CLI
 # races serialize on the shared name.
 #
+# Order mirrors the engine cascade: try `start` first (fast path, no pull),
+# then an explicit `image pull` with a minutes budget only when the image is
+# absent (skipped when cached, so a retry resumes downloaded layers), then a
+# short-timeout `run`. A half-created same-name container from a killed run is
+# cleared with `rm`-first so retries never fail with "already exists", with a
+# `start` fallback when `run` still reports the name conflict. Pull timeouts
+# are retryable (layers cached); pull failures point at Hub reachability while
+# run failures carry the exit plus tail.
+#
 # The bundled `Config/searxng/settings.yml` is a template only: its
 # `secret_key` is a placeholder. This script mints a random per-install Flask
 # secret into `~/.runeweaver/searxng/settings.yml` (the preferred override
@@ -26,6 +35,17 @@ CONTAINER_NAME="runeweaver-searxng"
 # version bump; pin via `SEARXNG_IMAGE=searxng/searxng:<tag>` when
 # reproducibility matters. Keep in sync with `SearXNGEnsurer.containerImage`.
 IMAGE="${SEARXNG_IMAGE:-searxng/searxng:latest}"
+# Budgets mirror the engine ensurer so script and service converge: the pull
+# pays minutes once on first run only (retries resume cached layers) while the
+# fresh run stays short because it never hides a registry download. The image
+# presence probe stays short so cached hosts never pay the pull budget. Keep in
+# sync with `SearXNGEnsurer.containerImagePullTimeoutSeconds` (300),
+# `containerImageInspectTimeoutSeconds` (8), `containerRunTimeoutSeconds` (8),
+# and `containerStartTimeoutSeconds` (5).
+PULL_TIMEOUT_SECS=300
+INSPECT_TIMEOUT_SECS=8
+RUN_TIMEOUT_SECS=8
+START_TIMEOUT_SECS=5
 # Port sync: the engine derives the publish port from [browser] searxng_url via
 # SearXNGEnsurer.hostPort(from:) (explicit port wins, else 80 for http / 443 for
 # https). This hatch mirrors it exactly: SEARXNG_URL (when set) wins with its
@@ -146,6 +166,41 @@ ensure_override_settings() {
     echo "Generated per-install SearXNG secret at ${OVERRIDE_SETTINGS}."
 }
 
+# Portable bounded run: GNU timeout, Homebrew gtimeout, then a background
+# sleep-plus-kill so macOS (no timeout) never blocks unbounded. Returns the
+# command exit code (124 on timeout with GNU timeout) so callers can tell a
+# minutes-budget pull timeout (retry, layers cached) from a registry failure.
+bounded_run() {
+    # All variables stay function-local: the `system start` heal block below
+    # reuses SLEEP_PID/WATCHER_PID (plus START_PID) and the pull/run captures
+    # use PULL_CODE/RUN_CODE, so globals here would clobber (or be clobbered
+    # by) those callers across nested or sequential runs.
+    local BOUNDED_SECS="$1"
+    local CMD_PID SLEEP_PID WATCHER_PID CMD_CODE
+    shift
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "${BOUNDED_SECS}" "$@"
+        return $?
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "${BOUNDED_SECS}" "$@"
+        return $?
+    else
+        "$@" &
+        CMD_PID=$!
+        sleep "${BOUNDED_SECS}" &
+        SLEEP_PID=$!
+        (wait "${SLEEP_PID}" 2>/dev/null; kill "${CMD_PID}" 2>/dev/null) &
+        WATCHER_PID=$!
+        wait "${CMD_PID}" 2>/dev/null
+        CMD_CODE=$?
+        kill "${SLEEP_PID}" 2>/dev/null || true
+        wait "${SLEEP_PID}" 2>/dev/null || true
+        kill "${WATCHER_PID}" 2>/dev/null || true
+        wait "${WATCHER_PID}" 2>/dev/null || true
+        return "${CMD_CODE}"
+    fi
+}
+
 ensure_override_settings
 
 SETTINGS_PATH=""
@@ -201,11 +256,38 @@ if printf '%s' "${DAEMON_OUTPUT}" | grep -qiE 'XPC[^[:alnum:]]+connection|system
     "${RUNTIME}" list >/dev/null 2>&1 || true
 fi
 
-# A stopped container from a prior run starts fastest; ignore the failure
-# when none exists yet and fall through to `run`.
-if "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
+# A stopped container from a prior run starts fastest with the short start
+# budget; ignore the failure when none exists yet and fall through to the
+# explicit pull plus fresh `run`. Skipping the pull here keeps cached restarts
+# fast and matches the engine fast path.
+if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
     echo "Started existing ${CONTAINER_NAME}."
     exit 0
+fi
+
+# Explicit image pull ahead of `run` with the minutes budget, only when the
+# image is absent. A retry resumes already-cached layers, so a timeout stays
+# retryable instead of restarting from zero. The presence probe stays short so
+# cached hosts never pay the pull budget.
+# Presence probe uses the shared inspect budget (mirrors
+# `containerImageInspectTimeoutSeconds`), not the minutes pull budget, so
+# cached hosts skip the pull fast.
+if ! bounded_run "${INSPECT_TIMEOUT_SECS}" "${RUNTIME}" image inspect "${IMAGE}" >/dev/null 2>&1; then
+    echo "Pulling ${IMAGE} (first run, up to ${PULL_TIMEOUT_SECS}s; retry resumes cached layers)..."
+    set +e
+    PULL_OUTPUT="$(bounded_run "${PULL_TIMEOUT_SECS}" "${RUNTIME}" image pull "${IMAGE}" 2>&1)"
+    PULL_CODE=$?
+    set -e
+    # GNU timeout reports 124 on expiry; the portable fallback kills the pull
+    # instead (143/137), which is still a timeout with cached layers.
+    if [ "${PULL_CODE}" -eq 124 ] || [ "${PULL_CODE}" -eq 143 ] || [ "${PULL_CODE}" -eq 137 ]; then
+        echo "Error: image pull timed out after ${PULL_TIMEOUT_SECS}s. Retry — downloaded layers are cached." >&2
+        exit 1
+    elif [ "${PULL_CODE}" -ne 0 ]; then
+        echo "Error: image pull failed. Check Docker Hub reachability, then retry." >&2
+        printf '%s\n' "${PULL_OUTPUT}" >&2 || true
+        exit 1
+    fi
 fi
 
 # A half-created container with the same name blocks `run`; remove it first
@@ -223,6 +305,29 @@ RUN_ARGS+=(-v "${SETTINGS_PATH}:/etc/searxng/settings.yml:ro")
 echo "Using settings ${SETTINGS_PATH}."
 RUN_ARGS+=("${IMAGE}")
 
-"${RUNTIME}" "${RUN_ARGS[@]}"
-echo "SearXNG starting at http://127.0.0.1:${PORT} (${CONTAINER_NAME} via ${RUNTIME})."
-echo "Leave it running after quit; stop explicitly with '${RUNTIME} stop ${CONTAINER_NAME}'."
+# Short-timeout fresh run: the image is already cached above, so `run` only
+# creates plus starts and never hides a registry download.
+set +e
+RUN_OUTPUT="$(bounded_run "${RUN_TIMEOUT_SECS}" "${RUNTIME}" "${RUN_ARGS[@]}" 2>&1)"
+RUN_CODE=$?
+set -e
+if [ "${RUN_CODE}" -eq 0 ]; then
+    echo "SearXNG starting at http://127.0.0.1:${PORT} (${CONTAINER_NAME} via ${RUNTIME})."
+    echo "Leave it running after quit; stop explicitly with '${RUNTIME} stop ${CONTAINER_NAME}'."
+    exit 0
+fi
+# A killed `run` can leave a wedged same-name entry that still starts; fall
+# back to `start` before surfacing the conflict as a run failure. Mirrors
+# `SearXNGEnsurer.isWedgedContainer`: `already exists`/`already in use` alone
+# imply the same-name wedge, but bare `conflict` without the container name
+# could be an unrelated registry conflict, so require the name there.
+if printf '%s' "${RUN_OUTPUT}" | grep -qiE 'already exists|already in use' || { printf '%s' "${RUN_OUTPUT}" | grep -qi 'conflict' && printf '%s' "${RUN_OUTPUT}" | grep -qiF -- "${CONTAINER_NAME}"; }; then
+    echo "Fresh run hit a wedged same-name container; falling back to start..."
+    if bounded_run "${START_TIMEOUT_SECS}" "${RUNTIME}" start "${CONTAINER_NAME}" >/dev/null 2>&1; then
+        echo "Started wedged ${CONTAINER_NAME}."
+        exit 0
+    fi
+fi
+echo "Error: SearXNG run failed (exit ${RUN_CODE})." >&2
+printf '%s\n' "${RUN_OUTPUT}" | tail -c 500 >&2 || true
+exit 1

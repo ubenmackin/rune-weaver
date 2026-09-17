@@ -107,6 +107,9 @@ public enum DTODefaults {
 }
 
 /// Health probe response for `GET /health`.
+/// Carries the live Start stage when a SearXNG ensure flight is running so the
+/// dashboard profile menu can poll one endpoint for both the dot and the
+/// Starting line. Older engines omit the stage keys, which decode to nil.
 public struct HealthResponse: Content, Equatable {
     /// Always `"ok"` when the engine answers.
     public let status: String
@@ -126,6 +129,13 @@ public struct HealthResponse: Content, Equatable {
     public let searchURL: String?
     /// Collapsed search status (`"running"`, `"stopped"`, or nil when unknown).
     public let searchStatus: String?
+    /// In-flight Start stage (`resolving`, `daemon`, `pulling`, `starting`,
+    /// `waiting`), nil when no Start is running.
+    public let searchStage: String?
+    /// Unix seconds when the in-flight Start began, nil when idle.
+    /// A number (not a Date) so every dashboard decodes it without sharing a
+    /// date strategy with the engine.
+    public let searchStartedAt: Double?
 
     /// Creates a health response.
     public init(
@@ -137,7 +147,9 @@ public struct HealthResponse: Content, Equatable {
         contextLength: Int? = nil,
         searchReachable: Bool? = nil,
         searchURL: String? = nil,
-        searchStatus: String? = nil
+        searchStatus: String? = nil,
+        searchStage: String? = nil,
+        searchStartedAt: Double? = nil
     ) {
         self.status = status
         self.engine = engine
@@ -148,6 +160,67 @@ public struct HealthResponse: Content, Equatable {
         self.searchReachable = searchReachable
         self.searchURL = searchURL
         self.searchStatus = searchStatus
+        let trimmedStage = (searchStage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.searchStage = trimmedStage.isEmpty ? nil : trimmedStage
+        if let searchStartedAt, searchStartedAt.isFinite, searchStartedAt > 0 {
+            self.searchStartedAt = searchStartedAt
+        } else {
+            self.searchStartedAt = nil
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case engine
+        case version
+        case model
+        case provider
+        case contextLength
+        case searchReachable
+        case searchURL
+        case searchStatus
+        case searchStage
+        case searchStartedAt
+    }
+
+    /// Decodes tolerantly so payloads from engines that predate staged Start
+    /// progress still parse with a nil stage instead of failing the probe.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decodeIfPresent(String.self, forKey: .status) ?? "ok"
+        engine = try container.decodeIfPresent(String.self, forKey: .engine) ?? "Rune Weaver"
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? ServerPaths.apiVersion
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        provider = try container.decodeIfPresent(String.self, forKey: .provider)
+        contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+        searchReachable = try container.decodeIfPresent(Bool.self, forKey: .searchReachable)
+        searchURL = try container.decodeIfPresent(String.self, forKey: .searchURL)
+        searchStatus = try container.decodeIfPresent(String.self, forKey: .searchStatus)
+        let rawStage = try container.decodeIfPresent(String.self, forKey: .searchStage)
+        let trimmedStage = (rawStage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        searchStage = trimmedStage.isEmpty ? nil : trimmedStage
+        let rawStartedAt = try container.decodeIfPresent(Double.self, forKey: .searchStartedAt)
+        if let rawStartedAt, rawStartedAt.isFinite, rawStartedAt > 0 {
+            searchStartedAt = rawStartedAt
+        } else {
+            searchStartedAt = nil
+        }
+    }
+
+    /// Encodes the stage keys only when a Start is in flight.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encode(engine, forKey: .engine)
+        try container.encode(version, forKey: .version)
+        try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(provider, forKey: .provider)
+        try container.encodeIfPresent(contextLength, forKey: .contextLength)
+        try container.encodeIfPresent(searchReachable, forKey: .searchReachable)
+        try container.encodeIfPresent(searchURL, forKey: .searchURL)
+        try container.encodeIfPresent(searchStatus, forKey: .searchStatus)
+        try container.encodeIfPresent(searchStage, forKey: .searchStage)
+        try container.encodeIfPresent(searchStartedAt, forKey: .searchStartedAt)
     }
 }
 
@@ -594,213 +667,6 @@ public struct RunLogsResponse: Content, Equatable {
     public init(runs: [RunLogEntry]) {
         self.runs = runs
         self.count = runs.count
-    }
-}
-
-/// Search engine health response for `GET /search/health`.
-/// Encodes both `baseURL` (canonical) and `url` plus `status` so dashboard
-/// clients reading either contract keep the custom port instead of falling
-/// back to the default.
-public struct SearchHealthResponse: Content, Equatable {
-    /// Whether the SearXNG base URL answered with 2xx/3xx.
-    public let reachable: Bool
-    /// Configured SearXNG base URL that was probed.
-    public let baseURL: String
-    /// Container name backing the lifecycle, when managed.
-    public let containerName: String
-    /// Alias of `baseURL` for dashboard clients expecting `url`.
-    public let url: String
-    /// Collapsed status (`"running"` when reachable, else `"stopped"`).
-    public let status: String
-
-    /// Creates a health response.
-    public init(reachable: Bool, baseURL: String, containerName: String, url: String? = nil, status: String? = nil) {
-        self.reachable = reachable
-        self.baseURL = baseURL
-        self.containerName = containerName
-        self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case reachable
-        case baseURL
-        case containerName
-        case url
-        case status
-    }
-
-    /// Decodes tolerantly across `baseURL`/`url` shapes.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        reachable = try container.decode(Bool.self, forKey: .reachable)
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
-        containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-    }
-
-    /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(reachable, forKey: .reachable)
-        try container.encode(baseURL, forKey: .baseURL)
-        try container.encode(url, forKey: .url)
-        try container.encode(containerName, forKey: .containerName)
-        try container.encode(status, forKey: .status)
-    }
-}
-
-/// Search engine ensure response for `POST /search/ensure`.
-/// `message` carries the trimmed banner (terminal cause plus one hatch command)
-/// for inline error slots, while `diagnostics` carries the full per-stage detail
-/// (stage, exit, capped tail, timeout) for warn logs plus the collapsed Settings
-/// diagnostics element. Older engines omit `diagnostics`, which decodes to nil.
-public struct SearchEnsureResponse: Content, Equatable {
-    /// Whether the engine answers after the ensure attempt.
-    public let reachable: Bool
-    /// Configured SearXNG base URL that was ensured.
-    public let baseURL: String
-    /// Whether a start was attempted during this call.
-    public let started: Bool
-    /// Alias of `baseURL` for dashboard clients expecting `url`.
-    public let url: String
-    /// Collapsed status (`"running"` when reachable, else `"stopped"`).
-    public let status: String
-    /// Trimmed banner (terminal cause plus one remediation) when unreachable.
-    public let message: String?
-    /// Full per-stage detail for logs plus collapsed diagnostics, when unreachable.
-    public let diagnostics: String?
-
-    /// Creates an ensure response.
-    public init(reachable: Bool, baseURL: String, started: Bool, url: String? = nil, status: String? = nil, message: String? = nil, diagnostics: String? = nil) {
-        self.reachable = reachable
-        self.baseURL = baseURL
-        self.started = started
-        self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.message = trimmed.isEmpty ? nil : trimmed
-        let trimmedDiagnostics = (diagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case reachable
-        case baseURL
-        case started
-        case url
-        case status
-        case message
-        case diagnostics
-    }
-
-    /// Decodes tolerantly across `baseURL`/`url` shapes plus optional message and diagnostics.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        reachable = try container.decode(Bool.self, forKey: .reachable)
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
-        started = try container.decodeIfPresent(Bool.self, forKey: .started) ?? false
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
-        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? nil : trimmed
-        let rawDiagnostics = try container.decodeIfPresent(String.self, forKey: .diagnostics)
-        let trimmedDiagnostics = (rawDiagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
-    }
-
-    /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(reachable, forKey: .reachable)
-        try container.encode(baseURL, forKey: .baseURL)
-        try container.encode(url, forKey: .url)
-        try container.encode(started, forKey: .started)
-        try container.encode(status, forKey: .status)
-        try container.encodeIfPresent(message, forKey: .message)
-        try container.encodeIfPresent(diagnostics, forKey: .diagnostics)
-    }
-}
-
-/// Search engine stop response for `POST /search/stop`.
-/// Carries a failure detail in `message` when the engine still answers after
-/// the stop, so the dashboard can render why the halt did not take instead of
-/// falling back to a generic notice.
-public struct SearchStopResponse: Content, Equatable {
-    /// Whether the container is stopped (honest re-probe: false when the engine still answers).
-    public let stopped: Bool
-    /// Container name that was stopped.
-    public let containerName: String
-    /// Whether the engine answers after the stop (honest re-probe; true when the stop failed or the engine still answers).
-    public let reachable: Bool
-    /// Configured SearXNG base URL for dashboard fallback display.
-    public let baseURL: String
-    /// Alias of `baseURL` for dashboard clients expecting `url`.
-    public let url: String
-    /// Collapsed status (honest re-probe: `"running"` when still reachable, else `"stopped"`).
-    public let status: String
-    /// Failure detail when the engine still answers after the stop.
-    public let message: String?
-
-    /// Creates a stop response.
-    public init(stopped: Bool, containerName: String, reachable: Bool = false, baseURL: String = "", url: String? = nil, status: String? = nil, message: String? = nil) {
-        self.stopped = stopped
-        self.containerName = containerName
-        self.reachable = reachable
-        self.baseURL = baseURL
-        self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.message = trimmed.isEmpty ? nil : trimmed
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case stopped
-        case containerName
-        case reachable
-        case baseURL
-        case url
-        case status
-        case message
-    }
-
-    /// Decodes tolerantly so dashboard `SearchHealthResponse` shapes still parse.
-    /// An absent `stopped` derives from the honest `reachable` probe instead
-    /// of optimistically assuming stopped on shape drift.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        reachable = try container.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
-        stopped = try container.decodeIfPresent(Bool.self, forKey: .stopped) ?? !reachable
-        containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
-        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? nil : trimmed
-    }
-
-    /// Encodes the full shape so health-style readers keep working.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(stopped, forKey: .stopped)
-        try container.encode(containerName, forKey: .containerName)
-        try container.encode(reachable, forKey: .reachable)
-        try container.encode(baseURL, forKey: .baseURL)
-        try container.encode(url, forKey: .url)
-        try container.encode(status, forKey: .status)
-        try container.encodeIfPresent(message, forKey: .message)
     }
 }
 
