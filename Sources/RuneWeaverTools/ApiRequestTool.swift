@@ -256,7 +256,7 @@ public struct ApiRequestTool: Tool, Sendable {
             rawValue: #"{"type":"object","properties":{"method":{"type":"string","enum":["GET","POST","PUT","DELETE"],"#
                 + #""description":"HTTP method"},"verb":{"type":"string","description":"Alias for method"},"#
                 + #""url":{"type":"string","description":"Absolute http(s) URL to request"},"uri":{"type":"string","#
-                + #"description":"Alias for url"},"link":{"type":"string","description":"Alias for url"},"#
+                + #""description":"Alias for url"},"link":{"type":"string","description":"Alias for url"},"#
                 + #""headers":{"type":"object","description":"Optional headers (Accept, Content-Type, Authorization only)","#
                 + #""additionalProperties":{"type":"string"}},"header":{"type":"object","description":"Alias for headers","#
                 + #""additionalProperties":{"type":"string"}},"body":{"type":"string","description":"Optional request body (64KB cap)"},"#

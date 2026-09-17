@@ -1,6 +1,7 @@
 // Typed client for the engine JSON API.
 
 import { isRecord } from "./typeGuards";
+import { sanitizeWarnings } from "./warnings";
 
 export type TrustDuration =
   | "thisTime"
@@ -61,6 +62,10 @@ export interface OrchestratorResponse {
   // filed gated approvals and waits on the inbox. Optional for back-compat
   // with older engines; absent or null decodes to not parked.
   isParked?: boolean | null;
+  // Degraded-tool notices for tools omitted this turn. Optional because older
+  // engines predate the resilient filter; absent means no tools were skipped
+  // and the turn renders without a banner.
+  warnings?: string[];
 }
 
 export interface CancelChatResponse {
@@ -314,13 +319,19 @@ export class ApiError extends Error {
 // Validates an orchestrator turn before it enters chat state: the engine always emits text,
 // session, and tool actions together, so a partial object must never render as a completed reply.
 // The parked flag stays optional for back-compat and defaults to not parked when absent.
+// Degraded-tool notices stay optional the same way: missing or malformed warnings degrade to
+// absent via the shared sanitizer so an older or drifted payload never fails a complete turn.
 function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   if (!isRecord(value)) return false;
   if (typeof value.text !== "string") return false;
   if (typeof value.sessionID !== "string") return false;
   if (!Array.isArray(value.toolActions)) return false;
   const parked = value.isParked;
-  return parked === undefined || parked === null || typeof parked === "boolean";
+  if (parked !== undefined && parked !== null && typeof parked !== "boolean") return false;
+  // Probe the shared sanitizer so malformed shapes degrade to absent without a second inline
+  // validator drifting from the banner path; any result still validates the turn.
+  sanitizeWarnings(value.warnings);
+  return true;
 }
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -423,6 +434,12 @@ export function postChat(
     // payload surfaces as an error instead of rendering a partial reply.
     if (!isOrchestratorResponse(response)) {
       throw new ApiError("Invalid chat response", 0);
+    }
+    // Normalize warnings through the shared sanitizer so drifted shapes degrade to absent
+    // identically across REST and streaming paths.
+    if (response.warnings !== undefined && response.warnings !== null) {
+      const cleaned = sanitizeWarnings(response.warnings);
+      response.warnings = cleaned;
     }
     return response;
   });
@@ -604,6 +621,11 @@ export function runJobNow(id: string): Promise<OrchestratorResponse> {
     // run history renders them as completed executions.
     if (!isOrchestratorResponse(response)) {
       throw new ApiError("Invalid job run response", 0);
+    }
+    // Shared sanitizer keeps job-run warnings degrading to absent like chat turns.
+    if (response.warnings !== undefined && response.warnings !== null) {
+      const cleaned = sanitizeWarnings(response.warnings);
+      response.warnings = cleaned;
     }
     return response;
   });

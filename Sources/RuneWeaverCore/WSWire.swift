@@ -79,6 +79,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public var sessionTokens: Int?
     /// Whether this turn parked waiting on approval.
     public var isParked: Bool = false
+    /// Degraded-tool notices for tools omitted this turn. Nil when absent for back-compat.
+    public var warnings: [String]?
 
     /// Creates a stream done frame.
     public init(
@@ -89,7 +91,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         modelName: String? = nil,
         contextLength: Int? = nil,
         sessionTokens: Int? = nil,
-        isParked: Bool = false
+        isParked: Bool = false,
+        warnings: [String]? = nil
     ) {
         self.type = "done"
         self.text = text
@@ -100,6 +103,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
         self.isParked = isParked
+        self.warnings = warnings
     }
 
     /// Coding keys for the terminal frame.
@@ -122,6 +126,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case sessionTokens
         /// Whether the turn parked waiting on approval.
         case isParked
+        /// Degraded-tool notices.
+        case warnings
     }
 
     /// Decodes a terminal frame, defaulting a missing parked flag for back-compat.
@@ -137,6 +143,7 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
         self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
+        self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings)
     }
 
     /// Creates a terminal frame from an orchestrator response.
@@ -149,8 +156,47 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             modelName: response.modelName,
             contextLength: response.contextLength,
             sessionTokens: response.sessionTokens,
-            isParked: response.isParked
+            isParked: response.isParked,
+            warnings: response.warnings.isEmpty ? nil : response.warnings
         )
+    }
+}
+
+/// Mid-turn degraded-tool notice sent by the engine over WebSocket.
+/// Carries only the preformatted warning line plus its session so streaming
+/// clients can surface skips without failing the turn or leaking schemas.
+public struct WSWarningFrame: Codable, Sendable, Equatable {
+    /// Always `"warning"`.
+    public let type: String
+    /// Preformatted warning line naming only the skipped tool.
+    public let message: String
+    /// Owning session identifier.
+    public var sessionID: UUID?
+
+    /// Creates a warning frame.
+    public init(message: String, sessionID: UUID? = nil) {
+        self.type = "warning"
+        self.message = message
+        self.sessionID = sessionID
+    }
+
+    /// Coding keys for the warning frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Preformatted warning line.
+        case message
+        /// Owning session.
+        case sessionID
+    }
+
+    /// Decodes a warning frame, defaulting a missing discriminator for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "warning"
+        self.message = try container.decode(String.self, forKey: .message)
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
     }
 }
 

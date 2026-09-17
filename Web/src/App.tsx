@@ -34,6 +34,8 @@ export default function App() {
     clearRunsBadge,
     approvalsBadge,
     clearApprovalsBadge,
+    warningsBadge,
+    clearWarningsBadge,
   } = useWebNotifications();
 
   useEffect(() => {
@@ -71,6 +73,16 @@ export default function App() {
     }
     if (selected === "runs") clearRunsBadge();
     if (selected === "approvals") clearApprovalsBadge();
+    // Warnings surface in the chat banner, so viewing chat clears the bell badge.
+    if (selected === "chat") clearWarningsBadge();
+  }
+
+  // Bell doubles as the warnings badge: opening notifications means the operator saw the
+  // count, so clear the badge alongside the permission prompt instead of letting it grow
+  // while the banner already informs on the chat tab.
+  function handleRequestNotifications() {
+    clearWarningsBadge();
+    void requestPermission();
   }
 
   return (
@@ -82,8 +94,9 @@ export default function App() {
         health={health}
         runsBadge={runsBadge}
         approvalsBadge={approvalsBadge}
+        warningsBadge={warningsBadge}
         notificationsEnabled={notificationsEnabled}
-        onRequestNotifications={requestPermission}
+        onRequestNotifications={handleRequestNotifications}
       />
 
       {/* Main Content Area */}

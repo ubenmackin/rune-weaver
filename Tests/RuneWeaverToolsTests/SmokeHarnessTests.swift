@@ -331,19 +331,28 @@ struct SmokeHarnessTests {
             gateway: ToolsTestSupport.StubEmailGateway(hits: hits)
         )
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
-        let tools = await bus.availableTools()
-        let expected: Set = ["email.search", "email.read", "email.attachment", "remember_fact", "recall_memories"]
-        let names = Set(tools.map(\.name))
+        let busTools = await bus.availableTools()
+        let smokeExpected: Set = ["email.search", "email.read", "email.attachment", "remember_fact", "recall_memories"]
+        let busNames = Set(busTools.map(\.name))
+        #expect(smokeExpected.isSubset(of: busNames), "Missing tools: \(smokeExpected.subtracting(busNames))")
+        // Exhaustive registry mirrors the dedicated schema suite so smoke stays
+        // honest when a new builtin lands: email plus memory plus files plus web.
+        let fullTools: [any Tool] = busTools + FilesTools.makeTools() + BuiltinToolPlugins.makeTools()
+        let expected: Set<String> = Set(EmailTools.toolNames + MemoryTools.toolNames + FilesTools.toolNames + BuiltinToolPlugins.toolNames)
+        let names = Set(fullTools.map(\.name))
         #expect(expected.isSubset(of: names), "Missing tools: \(expected.subtracting(names))")
-        #expect(tools.count >= expected.count)
-        for tool in tools {
+        #expect(fullTools.count >= expected.count)
+        for tool in fullTools {
             let parsed = try encodeToolParameters(ToolDefinition(tool))
-            #expect(parsed["type"] as? String == "object")
+            #expect(parsed["type"] as? String == "object", "Tool \(tool.name) must declare type object")
+            #expect(parsed["additionalProperties"] as? Bool == false, "Tool \(tool.name) must be strict")
+            #expect((parsed["properties"] as? [String: Any]) != nil, "Tool \(tool.name) must declare properties")
         }
-        let definitions = tools.map { ToolDefinition($0) }
+        let definitions = fullTools.map { ToolDefinition($0) }
         for definition in definitions {
             let parsed = try encodeToolParameters(definition)
             #expect(parsed["type"] as? String == "object")
+            #expect(parsed["additionalProperties"] as? Bool == false)
         }
         let wireMessages = [Message(role: .user, content: "Smoke wire check")]
         let chatBody = try openAIChatRequestBody(model: "smoke-model", messages: wireMessages, tools: definitions, stream: true)
@@ -358,6 +367,7 @@ struct SmokeHarnessTests {
             let function = try #require(entry["function"] as? [String: Any])
             let parameters = try #require(function["parameters"] as? [String: Any])
             #expect(parameters["type"] as? String == "object")
+            #expect(parameters["additionalProperties"] as? Bool == false)
         }
         let responsesBody = try openAIResponsesRequestBody(model: "smoke-model", messages: wireMessages, tools: definitions, stream: true)
         let responsesJSON = try #require(try JSONSerialization.jsonObject(with: responsesBody) as? [String: Any])
@@ -369,7 +379,29 @@ struct SmokeHarnessTests {
             #expect(entry["type"] as? String == "function")
             let parameters = try #require(entry["parameters"] as? [String: Any])
             #expect(parameters["type"] as? String == "object")
+            #expect(parameters["additionalProperties"] as? Bool == false)
         }
+        // One corrupt schema must not fail the turn: the filter skips it while
+        // direct encoding stays loud, keeping valid tools on both wires.
+        let broken = ToolDefinition(name: "broken.tool", description: "Corrupt", parameters: JSONSchema(rawValue: "not-json"))
+        do {
+            _ = try encodeToolParameters(broken)
+            Issue.record("encodeToolParameters should throw for corrupt schemas")
+        } catch {
+            #expect(error is LLMProviderError)
+        }
+        let mixed = definitions + [broken]
+        let filtered = validatedDefinitions(mixed)
+        #expect(filtered.valid.count == definitions.count)
+        #expect(filtered.skipped == ["broken.tool"])
+        let degradedChat = try openAIChatRequestBody(model: "smoke-model", messages: wireMessages, tools: mixed, stream: true)
+        let degradedChatJSON = try #require(try JSONSerialization.jsonObject(with: degradedChat) as? [String: Any])
+        let degradedChatTools = try #require(degradedChatJSON["tools"] as? [[String: Any]])
+        #expect(degradedChatTools.count == definitions.count)
+        let degradedResponses = try openAIResponsesRequestBody(model: "smoke-model", messages: wireMessages, tools: mixed, stream: true)
+        let degradedResponsesJSON = try #require(try JSONSerialization.jsonObject(with: degradedResponses) as? [String: Any])
+        let degradedResponsesTools = try #require(degradedResponsesJSON["tools"] as? [[String: Any]])
+        #expect(degradedResponsesTools.count == definitions.count)
         let attachment = try #require(await bus.tool(named: "email.attachment"))
         let parsed = try encodeToolParameters(ToolDefinition(attachment))
         let properties = try #require(parsed["properties"] as? [String: Any])
@@ -380,6 +412,15 @@ struct SmokeHarnessTests {
         let prompt = systemPrompt
         for name in ["email.search", "email.read", "email.attachment", "remember_fact", "recall_memories"] {
             #expect(prompt.contains(name))
+        }
+        // Full prompt composition covers the same sixteen so drift surfaces here too.
+        let fullBus = ToolBus()
+        for tool in fullTools {
+            await fullBus.register(tool: tool)
+        }
+        let fullPrompt = await SystemPromptComposer.compose(toolBus: fullBus)
+        for name in expected {
+            #expect(fullPrompt.contains(name), "System prompt missing \(name)")
         }
     }
 

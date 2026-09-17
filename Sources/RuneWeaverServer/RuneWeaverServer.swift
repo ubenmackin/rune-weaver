@@ -856,11 +856,22 @@ private func registerChatRoute(_ app: Application) {
         let taskBox = TurnTaskBox()
         let registration = await context.activeTurns.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
         let chatTask: Task<OrchestratorResponse, Error> = Task {
-            try await context.orchestrator.process(input: UserInput(
-                text: text,
-                sessionID: sessionID,
-                source: body.resolvedSource
-            ))
+            try await context.orchestrator.process(
+                input: UserInput(
+                    text: text,
+                    sessionID: sessionID,
+                    source: body.resolvedSource
+                ),
+                onEvent: { event in
+                    // REST has no stream, but dashboard WebSocket clients still deserve
+                    // mid-turn degraded-tool notices. Forward session-tagged warnings through the
+                    // shared broadcast helper so REST and resume share one session-filtered path
+                    // and clients ignore other sessions; failures never fail the turn.
+                    if case .warning = event {
+                        await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
+                    }
+                }
+            )
         }
         taskBox.set(chatTask)
 

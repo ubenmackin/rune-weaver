@@ -2,6 +2,34 @@
 
 import Foundation
 
+/// Validated tool set after prompt schema filtering.
+/// Groups prompt-safe tools with skipped names so one corrupt plugin degrades to fewer entries.
+public struct ValidatedTools: Sendable {
+    /// Tools safe to advertise in prompts.
+    public let valid: [any Tool]
+    /// Names omitted for invalid schemas, carrying only names plus static reasons at call sites.
+    public let skipped: [String]
+
+    /// Creates a validated set.
+    public init(valid: [any Tool], skipped: [String]) {
+        self.valid = valid
+        self.skipped = skipped
+    }
+}
+
+/// One prompt-safe tool entry for system prompt rendering.
+/// Exists as a struct because tuples beyond two members trip the tuple-size budget.
+private struct PromptToolEntry: Sendable {
+    /// Stable tool name.
+    let name: String
+    /// Human-readable summary.
+    let description: String
+    /// Advertised input schema.
+    let schema: JSONSchema
+    /// Permission level raw value.
+    let permission: String
+}
+
 /// Builds the default chat system prompt from the live tool registry.
 public enum VisionSchemaFilter: Sendable {
     /// Screenshot-related schema keys hidden from text-only models.
@@ -10,6 +38,94 @@ public enum VisionSchemaFilter: Sendable {
         "screenshot",
         "include_screenshot"
     ]
+
+    /// Checks whether a decoded schema object is safe to advertise in prompts or on the wire.
+    /// Strict backends reject non-object types and malformed additionalProperties,
+    /// so those shapes must be omitted rather than corrupting the prompt.
+    public static func isValidParametersObject(_ object: [String: Any]) -> Bool {
+        guard let type = object["type"] as? String, type == "object" else {
+            return false
+        }
+        if let additional = object["additionalProperties"] {
+            if additional is Bool {
+                // Boolean form is the usual strict-mode contract.
+            } else if additional is [String: Any] {
+                // Dictionary form is a nested schema and remains encodable.
+            } else {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Shared wording for unparseable schemas so prompt and wire logs agree.
+    /// Carries only the tool name plus a static reason, never schema payloads.
+    public static func unparseableSchemaMessage(for toolName: String) -> String {
+        "Omitting tool '\(toolName)' with unparseable input schema for this turn"
+    }
+
+    /// Shared wording for invalid schemas so prompt and wire logs agree.
+    /// Carries only the tool name plus a static reason, never schema payloads.
+    public static func invalidSchemaMessage(for toolName: String) -> String {
+        "Omitting tool '\(toolName)' with invalid input schema for this turn"
+    }
+
+    /// Partitions arbitrary entries into valid plus skipped names.
+    /// Single-sources JSON parsing, the validity predicate, and log wording so
+    /// prompt composition and wire builders withhold the same schemas with one message.
+    /// - Parameters:
+    ///   - entries: Candidates to partition.
+    ///   - name: Stable tool name for logging and skip reporting.
+    ///   - rawSchema: Raw JSON Schema document for parsing and validation.
+    ///   - logSkips: Whether to log each skip; warning collectors pass false so
+    ///     the prompt and wire filters remain the single logging sites per turn.
+    /// - Returns: Valid entries plus skipped names in input order.
+    public static func partitionValidSchemas<Entry>(
+        entries: [Entry],
+        name: (Entry) -> String,
+        rawSchema: (Entry) -> String,
+        logSkips: Bool = true
+    ) -> (valid: [Entry], skipped: [String]) {
+        var valid: [Entry] = []
+        var skipped: [String] = []
+        for entry in entries {
+            let toolName = name(entry)
+            guard let data = rawSchema(entry).data(using: .utf8),
+                  let parsed = try? JSONSerialization.jsonObject(with: data),
+                  let object = parsed as? [String: Any]
+            else {
+                // Unparseable payloads would otherwise enter the prompt or wire verbatim.
+                if logSkips {
+                    RuneWeaverLog.tools.error("\(unparseableSchemaMessage(for: toolName))")
+                }
+                skipped.append(toolName)
+                continue
+            }
+            guard isValidParametersObject(object) else {
+                // Type and additionalProperties mismatches fail strict validation upstream.
+                if logSkips {
+                    RuneWeaverLog.tools.warning("\(invalidSchemaMessage(for: toolName))")
+                }
+                skipped.append(toolName)
+                continue
+            }
+            valid.append(entry)
+        }
+        return (valid, skipped)
+    }
+
+    /// Partitions tools into prompt-safe entries plus skipped names.
+    /// One corrupt plugin must not corrupt the whole prompt, so invalid entries
+    /// are logged with their tool name and omitted while valid tools remain.
+    public static func validatedTools(_ tools: [any Tool], logSkips: Bool = true) -> ValidatedTools {
+        let part = partitionValidSchemas(
+            entries: tools,
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: logSkips
+        )
+        return ValidatedTools(valid: part.valid, skipped: part.skipped)
+    }
 
     /// Removes the screenshot opt-in from a navigate schema.
     public static func strippedNavigateSchema(_ schema: JSONSchema) -> JSONSchema {
@@ -38,12 +154,34 @@ public enum VisionSchemaFilter: Sendable {
         return JSONSchema(rawValue: raw)
     }
 
-    /// Schema advertised for one tool given the model's vision capability.
-    public static func displaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema {
+    /// Validated schema advertised for one tool, or nil when the schema must be omitted.
+    /// Returning nil keeps unparseable schemas out of the prompt while naming the skip.
+    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema? {
+        // Single-source validation through the shared partition so prompt and wire withhold
+        // the same schemas with one wording; the partition logs the skip.
+        let initial = partitionValidSchemas(
+            entries: [tool],
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue }
+        )
+        guard initial.valid.first != nil else {
+            return nil
+        }
         guard !supportsVision, tool.name == BrowserScreenshotPolicy.navigateToolName else {
             return tool.inputSchema
         }
-        return strippedNavigateSchema(tool.inputSchema)
+        let stripped = strippedNavigateSchema(tool.inputSchema)
+        // Re-validate the stripped shape through the same partition so a transform that broke
+        // validity withholds with the same wording instead of a second inline predicate.
+        let rechecked = partitionValidSchemas(
+            entries: [stripped.rawValue],
+            name: { _ in tool.name },
+            rawSchema: { $0 }
+        )
+        guard !rechecked.valid.isEmpty else {
+            return nil
+        }
+        return stripped
     }
 }
 
@@ -66,13 +204,22 @@ public enum SystemPromptComposer {
         )
         lines.append("")
         lines.append("Available tools:")
-        if sorted.isEmpty {
+        // Omit invalid schemas so one bad plugin degrades to fewer prompt entries, not a corrupt prompt.
+        var validEntries: [PromptToolEntry] = []
+        validEntries.reserveCapacity(sorted.count)
+        for tool in sorted {
+            guard let schema = VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision) else {
+                continue
+            }
+            validEntries.append(PromptToolEntry(name: tool.name, description: tool.description, schema: schema, permission: tool.permissionLevel.rawValue))
+        }
+        if validEntries.isEmpty {
             lines.append("No tools are currently registered.")
         } else {
-            for tool in sorted {
-                lines.append("- \(tool.name): \(tool.description)")
-                lines.append("  Input schema: \(displaySchema(for: tool, supportsVision: supportsVision).rawValue)")
-                lines.append("  Permission: \(tool.permissionLevel.rawValue)")
+            for entry in validEntries {
+                lines.append("- \(entry.name): \(entry.description)")
+                lines.append("  Input schema: \(entry.schema.rawValue)")
+                lines.append("  Permission: \(entry.permission)")
             }
         }
         lines.append("")
@@ -177,9 +324,14 @@ public enum SystemPromptComposer {
         await composeScheduled(tools: toolBus.availableTools(), supportsVision: supportsVision)
     }
 
-    /// Schema advertised for one tool given the model's vision capability.
-    public static func displaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema {
-        VisionSchemaFilter.displaySchema(for: tool, supportsVision: supportsVision)
+    /// Validated schema for one tool, or nil when the schema must be omitted from the prompt.
+    public static func validatedDisplaySchema(for tool: any Tool, supportsVision: Bool) -> JSONSchema? {
+        VisionSchemaFilter.validatedDisplaySchema(for: tool, supportsVision: supportsVision)
+    }
+
+    /// Partitions tools into prompt-safe entries plus skipped names.
+    public static func validatedTools(_ tools: [any Tool], logSkips: Bool = true) -> ValidatedTools {
+        VisionSchemaFilter.validatedTools(tools, logSkips: logSkips)
     }
 
     /// Removes the screenshot opt-in from a navigate schema.

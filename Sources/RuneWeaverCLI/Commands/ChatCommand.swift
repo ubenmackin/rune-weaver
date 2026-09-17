@@ -441,6 +441,7 @@ private func runChatREPL(
                 sessionID: context.sessionID,
                 memoryEngine: context.memoryEngine,
                 sessionTokens: context.sessionTokens,
+                toolBus: context.toolBus,
                 embedder: context.embedder
             ) {
                 if action == .quit {
@@ -455,6 +456,7 @@ private func runChatREPL(
                     conversations: context.conversations,
                     sessionID: context.sessionID,
                     engine: context.memoryEngine,
+                    toolBus: context.toolBus,
                     embedder: context.embedder
                 )
                 continue
@@ -506,6 +508,7 @@ private func chatStoreRememberedFact(
     engine: MemoryEngine,
     conversations: ConversationManager,
     sessionID: UUID,
+    toolBus: ToolBus,
     embedder: (any EmbeddingsBackend)? = nil
 ) async throws {
     let storable = MemoryEngine.isStorableFact(fact)
@@ -524,6 +527,11 @@ private func chatStoreRememberedFact(
     } else {
         cliPrintError(TerminalStyle.dim(acknowledgement))
     }
+    // Remember turns bypass the model but must stay honest about omitted tools:
+    // surface the same degraded-tool notices as model turns so skips never go silent.
+    for warning in await OrchestratorToolLoop.degradedToolWarnings(for: toolBus.availableTools()) {
+        cliPrintError(warning)
+    }
 }
 
 /// Appends a remember request to working memory and stores the fact.
@@ -533,6 +541,7 @@ private func appendUserAndHandleRemember(
     conversations: ConversationManager,
     sessionID: UUID,
     engine: MemoryEngine,
+    toolBus: ToolBus,
     embedder: (any EmbeddingsBackend)? = nil
 ) async throws {
     await conversations.append(Message(role: .user, content: input), to: sessionID)
@@ -543,7 +552,7 @@ private func appendUserAndHandleRemember(
         failurePolicy: .report,
         onFailure: chatMirrorFailureHandler
     )
-    try await chatStoreRememberedFact(fact, engine: engine, conversations: conversations, sessionID: sessionID, embedder: embedder)
+    try await chatStoreRememberedFact(fact, engine: engine, conversations: conversations, sessionID: sessionID, toolBus: toolBus, embedder: embedder)
 }
 
 /// REPL slash-command outcome.
@@ -561,6 +570,7 @@ private func handleSlashCommand(
     sessionID: UUID,
     memoryEngine: MemoryEngine,
     sessionTokens: CLILockedValue<Int>,
+    toolBus: ToolBus,
     embedder: (any EmbeddingsBackend)? = nil
 ) async throws -> REPLAction? {
     if input.hasPrefix("/"), let fact = MemoryEngine.rememberFactText(from: input) {
@@ -570,6 +580,7 @@ private func handleSlashCommand(
             conversations: conversations,
             sessionID: sessionID,
             engine: memoryEngine,
+            toolBus: toolBus,
             embedder: embedder
         )
         return .keepGoing
@@ -759,7 +770,32 @@ private func handleChunkedStructuredTurn(
     if ChatTurnInterrupt.isCancelled(interrupt) {
         return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
     }
-    let inputs = calls.map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
+    // Fail-closed per tool: withhold hallucinated names for omitted schemas so invalid tools
+    // never reach execution. Silent partition keeps the prompt and wire filters as the single log sites.
+    let validNames = await Set(VisionSchemaFilter.partitionValidSchemas(
+        entries: context.toolBus.availableTools(),
+        name: { $0.name },
+        rawSchema: { $0.inputSchema.rawValue },
+        logSkips: false
+    ).valid.map(\.name))
+    let inputs = calls.filter { validNames.contains($0.name) }
+        .map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
+    // All calls withheld: end as text-only so the turn stays honest without looping for another round.
+    if inputs.isEmpty {
+        guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return .completed }
+        if ChatTurnInterrupt.isCancelled(interrupt) {
+            return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
+        }
+        await context.conversations.append(Message(role: .assistant, content: text), to: context.sessionID)
+        await context.memoryEngine.mirrorTurn(
+            content: text,
+            sessionID: context.sessionID,
+            role: .assistant,
+            failurePolicy: .report,
+            onFailure: chatMirrorFailureHandler
+        )
+        return .completed
+    }
     let assistantContent = OrchestratorToolLoop.assistantNoteContent(text: text, calls: inputs)
     await context.conversations.append(Message(role: .assistant, content: assistantContent), to: context.sessionID)
     let toolsCancelled = await executeChunkedInputs(inputs, context: context, interrupt: interrupt)
@@ -777,7 +813,15 @@ private func runChunkedTurn(
     interrupt: ChatInterruptState
 ) async throws -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
-    let definitions = tools.map { ToolDefinition($0) }
+    // Degraded tools stay out of the model request but must not fail the turn:
+    // warn once per skipped name on stderr and continue with the valid subset.
+    let filteredTools = VisionSchemaFilter.validatedTools(tools)
+    for skipped in filteredTools.skipped.sorted() {
+        // Single-source warning wording so CLI and orchestrator banners agree.
+        cliPrintError(OrchestratorToolLoop.degradedToolWarning(for: skipped))
+    }
+    let validTools = filteredTools.valid
+    let definitions = validTools.map { ToolDefinition($0) }
     let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var progress = ChunkedTurnProgress(snapshot: historySnapshot, rounds: 0)
@@ -945,6 +989,13 @@ private func runTextTurn(
     interrupt: ChatInterruptState
 ) async throws -> ChatTurnOutcome {
     let tools = await context.toolBus.availableTools()
+    // Mirror the chunked path: degraded tools stay out of the wire request with one honest
+    // warning per skipped name so text-only turns never go silent about omissions.
+    let filteredTextTools = VisionSchemaFilter.validatedTools(tools)
+    for skipped in filteredTextTools.skipped.sorted() {
+        cliPrintError(OrchestratorToolLoop.degradedToolWarning(for: skipped))
+    }
+    let validTextTools = filteredTextTools.valid
     let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var toolRounds = 0
@@ -964,7 +1015,7 @@ private func runTextTurn(
         let draft = await drainTextStream(
             provider: provider,
             history: history,
-            tools: tools,
+            tools: validTextTools,
             interrupt: interrupt
         )
         let text = draft.text

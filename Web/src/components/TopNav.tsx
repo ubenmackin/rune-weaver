@@ -41,6 +41,7 @@ interface TopNavProps {
   health: HealthResponse | null;
   runsBadge?: number;
   approvalsBadge?: number;
+  warningsBadge?: number;
   notificationsEnabled: boolean;
   onRequestNotifications: () => void;
 }
@@ -51,6 +52,7 @@ export default function TopNav({
   health,
   runsBadge = 0,
   approvalsBadge = 0,
+  warningsBadge = 0,
   notificationsEnabled,
   onRequestNotifications,
 }: TopNavProps) {
@@ -247,9 +249,13 @@ export default function TopNav({
       </nav>
 
       <div className="top-nav-right">
+        {/* Bell doubles as the warnings badge: degraded-tool skips have no tab,
+            so the unread count sits on the notification toggle in amber and
+            clears when the chat view is shown. */}
         <button
           type="button"
           className={`icon-button ${notificationsEnabled ? "active" : ""}`}
+          style={{ position: "relative" }}
           title={
             notificationsEnabled
               ? "Web notifications enabled"
@@ -259,6 +265,20 @@ export default function TopNav({
           aria-label="Browser notifications"
         >
           <BellIcon size={16} />
+          {warningsBadge > 0 ? (
+            <span
+              className="nav-badge"
+              aria-label={`${warningsBadge} unread warnings`}
+              style={{
+                position: "absolute",
+                top: "-8px",
+                right: "-8px",
+                background: "#f59e0b",
+              }}
+            >
+              {warningsBadge > 99 ? "99+" : warningsBadge}
+            </span>
+          ) : null}
         </button>
 
         {/* Profile Dropdown: click/keyboard driven with Escape to close and

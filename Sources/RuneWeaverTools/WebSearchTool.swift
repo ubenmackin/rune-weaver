@@ -539,7 +539,7 @@ public struct WebSearchTool: Tool, Sendable {
             rawValue: #"{"type":"object","properties":{"query":{"type":"string","description":"Free-text search query"},"#
                 + #""q":{"type":"string","description":"Alias for query"},"limit":{"type":"integer","description":"Maximum results "#
                 + #"(1-50, default 10, capped by browser.max_results)","minimum":1,"maximum":50},"count":{"type":"integer","#
-                + #"description":"Alias for limit (1-50)","minimum":1,"maximum":50}},"anyOf":[{"required":["query"]},"#
+                + #""description":"Alias for limit (1-50)","minimum":1,"maximum":50}},"anyOf":[{"required":["query"]},"#
                 + #"{"required":["q"]}],"additionalProperties":false}"#
         )
     /// Always allowed: search never changes engine or remote state.

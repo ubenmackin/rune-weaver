@@ -15,10 +15,12 @@ public typealias ClientStreamDone = RuneWeaverCore.WSStreamDone
 public typealias ClientApprovalPrompt = RuneWeaverCore.WSApprovalPrompt
 /// Error frame, single-sourced from core (`WSErrorFrame`).
 public typealias ClientErrorFrame = RuneWeaverCore.WSErrorFrame
+/// Degraded-tool notice, single-sourced from core (`WSWarningFrame`).
+public typealias ClientWarningFrame = RuneWeaverCore.WSWarningFrame
 
 /// Peek at the `type` discriminator of one inbound engine frame.
 private struct ClientFramePeek: Codable {
-    /// Frame discriminator (`delta`, `done`, `approval`, or `error`).
+    /// Frame discriminator (`delta`, `done`, `warning`, `tool_start`, `tool_end`, `approval`, `cancelled`, or `error`).
     let type: String
 }
 
@@ -151,6 +153,7 @@ public actor RuneWeaverClient {
             let frame = try Self.chatFrame(text: text, sessionID: sessionID, source: source)
             try await task.send(.string(frame))
             var accumulated = ""
+            var liveWarningLines = Set<String>()
             while true {
                 if Task.isCancelled {
                     continuation.finish()
@@ -163,6 +166,7 @@ public actor RuneWeaverClient {
                 let result = try Self.handleFrame(
                     replyData,
                     accumulated: &accumulated,
+                    liveWarnings: &liveWarningLines,
                     continuation: continuation
                 )
                 if result == .finished {
@@ -209,6 +213,7 @@ public actor RuneWeaverClient {
     private static func handleFrame(
         _ replyData: Data,
         accumulated: inout String,
+        liveWarnings: inout Set<String>,
         continuation: AsyncStream<Message>.Continuation
     ) throws -> ChatFrameResult {
         if let peek = try? JSONDecoder().decode(ClientFramePeek.self, from: replyData) {
@@ -216,6 +221,7 @@ public actor RuneWeaverClient {
                 peek.type,
                 replyData: replyData,
                 accumulated: &accumulated,
+                liveWarnings: &liveWarnings,
                 continuation: continuation
             )
         }
@@ -227,6 +233,7 @@ public actor RuneWeaverClient {
         _ type: String,
         replyData: Data,
         accumulated: inout String,
+        liveWarnings: inout Set<String>,
         continuation: AsyncStream<Message>.Continuation
     ) throws -> ChatFrameResult {
         switch type {
@@ -235,9 +242,33 @@ public actor RuneWeaverClient {
                 accumulated += delta.delta
             }
             return .continued
+        case "warning":
+            // Degraded-tool notices stay informational but must not go silent for library
+            // consumers: surface each skip as a system message so fail-open turns stay honest.
+            if let warning = try? JSONDecoder().decode(ClientWarningFrame.self, from: replyData) {
+                let trimmed = warning.message.trimmingCharacters(in: .whitespacesAndNewlines)
+                // One message per skipped tool even on retransmit: collapse live repeats by value.
+                if !trimmed.isEmpty, liveWarnings.insert(trimmed).inserted {
+                    continuation.yield(Message(role: .system, content: trimmed))
+                }
+            }
+            return .continued
         case "done":
             guard let done = try? JSONDecoder().decode(ClientStreamDone.self, from: replyData) else {
                 return .continued
+            }
+            // Terminal warnings repeat mid-turn notices for polling clients; surface only lines
+            // not already streamed live so library turns carry one message per skipped tool.
+            if let warnings = done.warnings {
+                var emittedTerminal = Set<String>()
+                for line in warnings {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { continue }
+                    guard !liveWarnings.contains(trimmed) else { continue }
+                    guard emittedTerminal.insert(trimmed).inserted else { continue }
+                    liveWarnings.insert(trimmed)
+                    continuation.yield(Message(role: .system, content: trimmed))
+                }
             }
             let content = done.text.isEmpty ? accumulated : done.text
             continuation.yield(Message(role: .assistant, content: content))
