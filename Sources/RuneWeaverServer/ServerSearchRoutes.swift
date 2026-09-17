@@ -4,12 +4,13 @@
 // configured base URL plus the live Start stage (resolving, daemon, pulling,
 // starting, waiting with the Start time) so the dashboard can poll one
 // endpoint about 1s for the amber Starting line, ensure collapses onto the
-// self-healing cascade (runtime, daemon, start, pull, run, poll) with a
+// self-healing cascade (runtime, daemon, start, pull, run, watch) with a
 // trimmed banner plus chained diagnostics, and stop halts the managed
 // container. Lifecycle policy
 // (loopback-only bind, per-install secret mount, tracked `:latest` image,
-// final poll 10s with 500 ms polls inside an about-41s cached worst-case
-// cascade plus a minutes-budget pull when the image is absent,
+// 165s readiness watch ticking on short sleeps where reachable wins,
+// terminal states fail fast with the logs tail and the backstop reports the
+// last state plus logs, plus a minutes-budget pull when the image is absent,
 // bounded 8s system start) lives single-source in the ensurer so boot,
 // `web.search`, and these routes cannot drift; the routes only translate
 // outcomes to HTTP shapes. Fresh runs track `:latest` by design so new
@@ -52,8 +53,8 @@ func registerSearchRoutes(_ app: Application) {
         let context = req.application.runeWeaver
         // Single-sourced through the shared ensurer so boot, search, and this
         // route collapse onto one in-flight attempt keyed by base URL instead
-        // of duplicating the cascade budgets (final poll 10s with 500 ms
-        // polls inside the about-41s cached cascade plus a minutes-budget
+        // of duplicating the cascade budgets (shared `readinessWatchTimeoutSeconds`
+        // 165s watch single-sourced in the ensurer plus a minutes-budget
         // pull when the image is absent). The trimmed banner threads
         // through for the inline slot while chained diagnostics thread through
         // for logs plus collapsed UI, so each failure renders once.
