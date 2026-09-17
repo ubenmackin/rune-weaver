@@ -52,21 +52,91 @@ public extension SearXNGEnsurer {
         return false
     }
 
+    /// Known install locations always probed after PATH entries.
+    /// A minimal or GUI-launched PATH often omits Homebrew, so the fallback
+    /// keeps a standard install discoverable without trusting PATH alone.
+    static let fallbackRuntimeDirectories = ["/opt/homebrew/bin", "/usr/local/bin"]
+
+    /// Ordered directories probed for the container runtime.
+    /// PATH order wins so an operator override shadows the fallback, while the
+    /// appended fallbacks keep a Homebrew install visible when PATH is minimal.
+    /// Duplicates collapse so a PATH that already carries a fallback probes it
+    /// once; blanks are skipped so empty segments never become relative probes.
+    /// - Parameter pathValue: Raw `PATH` value, or nil when unset.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    static func runtimeSearchDirectories(pathValue: String?) -> [String] {
+        var ordered: [String] = []
+        var seen = Set<String>()
+        func append(_ dir: String) {
+            let trimmed = dir.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { return }
+            ordered.append(trimmed)
+        }
+        if let pathValue {
+            for part in pathValue.split(separator: ":") {
+                append(String(part))
+            }
+        }
+        for fallback in fallbackRuntimeDirectories {
+            append(fallback)
+        }
+        return ordered
+    }
+
+    /// Ordered directories probed for the container runtime in this process.
+    /// Reads the live `PATH` so production and diagnostics share one ordering
+    /// instead of drifting between call sites.
+    /// - Returns: Deduplicated directories, PATH entries first.
+    static func runtimeSearchDirectories() -> [String] {
+        runtimeSearchDirectories(pathValue: ProcessInfo.processInfo.environment["PATH"])
+    }
+
+    /// Resolves the Apple Container runtime with no Docker fallback.
+    /// Docker is intentionally unsupported: the soul reuses the Tier-3
+    /// dependency instead of adding a second container runtime, so hosts
+    /// without `container` fail closed with the escape-hatch guidance.
+    /// Probes the shared search ordering so a minimal PATH never hides a
+    /// Homebrew install; nil preserves the missing-runtime contract for the
+    /// cascade to fail closed with guidance.
+    /// - Parameters:
+    ///   - searchDirectories: Ordered directories to probe.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when the Apple Container CLI is missing.
+    static func resolveRuntimeURL(
+        searchDirectories: [String],
+        isExecutable: (String) -> Bool
+    ) -> URL? {
+        let runtime = "container"
+        for dir in searchDirectories {
+            let candidate = URL(fileURLWithPath: dir).appendingPathComponent(runtime)
+            if isExecutable(candidate.path) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    /// Resolves the runtime against an explicit PATH value for testing.
+    /// Keeps the production lookup honest by routing the same fallback
+    /// ordering through a stubbed filesystem probe.
+    /// - Parameters:
+    ///   - pathValue: Raw `PATH` value driving the search ordering.
+    ///   - isExecutable: Filesystem probe, injectable so tests can stub an install.
+    /// - Returns: Executable URL, or nil when missing everywhere searched.
+    static func resolveRuntimeURL(pathValue: String?, isExecutable: (String) -> Bool) -> URL? {
+        resolveRuntimeURL(searchDirectories: runtimeSearchDirectories(pathValue: pathValue), isExecutable: isExecutable)
+    }
+
     /// Resolves the Apple Container runtime with no Docker fallback.
     /// Docker is intentionally unsupported: the soul reuses the Tier-3
     /// dependency instead of adding a second container runtime, so hosts
     /// without `container` fail closed with the escape-hatch guidance.
     /// - Returns: Executable URL, or nil when the Apple Container CLI is missing.
     static func resolveRuntimeURL() -> URL? {
-        let pathEnv = ProcessInfo.processInfo.environment["PATH"] ?? "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
-        let runtime = "container"
-        for dir in pathEnv.split(separator: ":") {
-            let candidate = URL(fileURLWithPath: String(dir)).appendingPathComponent(runtime)
-            if FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-        }
-        return nil
+        resolveRuntimeURL(
+            searchDirectories: runtimeSearchDirectories(),
+            isExecutable: { FileManager.default.isExecutableFile(atPath: $0) }
+        )
     }
 
     /// Fast probe budget for the container system daemon check.
@@ -85,12 +155,29 @@ public extension SearXNGEnsurer {
 
     /// Guidance returned when the container runtime cannot be resolved.
     /// Points at the Apple Container install and rules out Docker, so a bare
-    /// host fails with a next step instead of a bare exit code.
-    /// - Returns: Human-readable install guidance.
-    static func installGuidanceMessage() -> String {
-        "Container runtime 'container' not found. Install the Apple Container CLI "
+    /// host fails with a next step instead of a bare exit code. Names the
+    /// searched directories so the banner alone explains the miss without
+    /// re-running the lookup; the list mirrors the resolver ordering.
+    /// - Parameter searchedDirectories: Directories probed, defaulting to the live search ordering.
+    /// - Returns: Human-readable install guidance naming where it looked.
+    static func installGuidanceMessage(searchedDirectories: [String]? = nil) -> String {
+        let searched = (searchedDirectories ?? runtimeSearchDirectories()).joined(separator: ", ")
+        return "Container runtime 'container' not found. Install the Apple Container CLI "
             + "(\(appleContainerInstallURL)), then retry. Docker is not supported. "
-            + "After installing, start the system with `container system start` and verify with `container list`."
+            + "After installing, start the system with `container system start` and verify with `container list`. "
+            + "Searched: \(searched)."
+    }
+
+    /// Single-cause error for a missing container runtime.
+    /// Carries only the install guidance (with the searched directories) so
+    /// callers surface one cause plus one command instead of nesting the
+    /// unreachable-engine text around the install text.
+    /// - Parameter searchedDirectories: Directories probed, defaulting to the live search ordering.
+    /// - Returns: Error carrying the install next step.
+    static func runtimeNotFoundError(searchedDirectories: [String]? = nil) -> Error {
+        let directories = searchedDirectories ?? runtimeSearchDirectories()
+        let message = installGuidanceMessage(searchedDirectories: directories)
+        return NSError(domain: "RuneWeaverSearXNG", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
     /// Arguments probing the container system daemon without side effects.

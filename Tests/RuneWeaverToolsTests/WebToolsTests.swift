@@ -333,3 +333,71 @@ struct BrowserConfigTests {
         }
     }
 }
+
+@Suite("SearXNG Runtime Search")
+struct SearXNGEnsurerRuntimeTests {
+    @Test
+    func `Minimal PATH still finds a fallback install`() {
+        // A GUI-launched process often carries a minimal PATH without
+        // Homebrew; the fallback keeps the standard install discoverable so
+        // the cascade never misses a present binary.
+        let minimalPATH = "/usr/bin:/bin"
+        let directories = SearXNGEnsurer.runtimeSearchDirectories(pathValue: minimalPATH)
+        #expect(Array(directories.prefix(2)) == ["/usr/bin", "/bin"])
+        #expect(directories.contains("/opt/homebrew/bin"))
+        #expect(directories.contains("/usr/local/bin"))
+        let resolved = SearXNGEnsurer.resolveRuntimeURL(
+            pathValue: minimalPATH,
+            isExecutable: { $0 == "/opt/homebrew/bin/container" }
+        )
+        #expect(resolved?.path == "/opt/homebrew/bin/container")
+    }
+
+    @Test
+    func `Missing runtime returns nil while naming where it looked`() {
+        // A miss preserves the fail-closed contract (nil, no Docker probe)
+        // while the directory list lets the banner explain the miss alone.
+        let directories = SearXNGEnsurer.runtimeSearchDirectories(pathValue: "/usr/bin:/bin")
+        let resolved = SearXNGEnsurer.resolveRuntimeURL(pathValue: "/usr/bin:/bin", isExecutable: { _ in false })
+        #expect(resolved == nil)
+        #expect(directories.contains("/opt/homebrew/bin"))
+        #expect(directories.contains("/usr/local/bin"))
+        let guidance = SearXNGEnsurer.installGuidanceMessage(searchedDirectories: directories)
+        #expect(guidance.contains("/opt/homebrew/bin"))
+        #expect(guidance.contains("/usr/local/bin"))
+    }
+
+    @Test
+    func `Runtime miss guidance carries a single install pointer`() {
+        // One miss carries one cause plus one command: the install link
+        // appears exactly once and the engine-unreachable hatch never wraps
+        // it, so callers surface a single actionable message.
+        let directories = ["/usr/bin", "/opt/homebrew/bin", "/usr/local/bin"]
+        let message = SearXNGEnsurer.runtimeNotFoundError(searchedDirectories: directories).localizedDescription
+        let installHits = message.components(separatedBy: SearXNGEnsurer.appleContainerInstallURL).count - 1
+        #expect(installHits == 1)
+        #expect(!message.lowercased().contains("not reachable"))
+        #expect(!message.contains("searxng-up.sh"))
+        #expect(message.contains("/opt/homebrew/bin"))
+    }
+
+    @Test
+    func `Detonation lookup shares the fallback ordering`() {
+        // Detonation and search must converge on the same install: a minimal
+        // PATH plus a stubbed Homebrew binary resolves on both sides, and a
+        // PATH that already carries a fallback probes it once with PATH first.
+        let minimalPATH = "/usr/bin:/bin"
+        let coreDirectories = ContainerMachineManager.runtimeSearchDirectories(pathValue: minimalPATH)
+        #expect(coreDirectories.contains("/opt/homebrew/bin"))
+        #expect(coreDirectories.contains("/usr/local/bin"))
+        let coreResolved = ContainerMachineManager.resolveRuntimeURL(
+            runtime: "container",
+            pathValue: minimalPATH,
+            isExecutable: { $0 == "/opt/homebrew/bin/container" }
+        )
+        #expect(coreResolved?.path == "/opt/homebrew/bin/container")
+        let crowded = SearXNGEnsurer.runtimeSearchDirectories(pathValue: "/opt/homebrew/bin:/usr/bin")
+        #expect(crowded.filter { $0 == "/opt/homebrew/bin" }.count == 1)
+        #expect(crowded.first == "/opt/homebrew/bin")
+    }
+}
