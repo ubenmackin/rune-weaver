@@ -5,7 +5,7 @@ import Foundation
 /// Embedded `python3 imaplib` helper.
 enum EmailIMAPBridgeScript {
     /// Python source executed via `python3 -c`.
-    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptTail.text
+    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptMiddle.text + "\n" + EmailIMAPBridgeScriptTail.text
 }
 
 /// First half of the embedded `python3 imaplib` helper (imports through connect).
@@ -135,18 +135,39 @@ private enum EmailIMAPBridgeScriptHead {
             rest = text[m.end():].strip()
         else:
             rest = text.strip()
+        delimiter = None
         name = ""
         if rest.endswith('"'):
             quoted = re.findall(r'"([^"]*)"', rest)
             if quoted:
-                name = quoted[-1]
+                if len(quoted) >= 2:
+                    raw_delim = quoted[0]
+                    delimiter = raw_delim if raw_delim else None
+                    name = quoted[-1]
+                else:
+                    if re.match(r'(?i)^NIL\b', rest.strip()):
+                        delimiter = None
+                        name = quoted[-1]
+                    else:
+                        name = quoted[-1]
             else:
                 name = rest.strip().strip('"')
         else:
             parts = rest.split()
             if parts:
-                name = parts[-1].strip().strip('"')
-        return (flags, name.strip())
+                if len(parts) >= 2 and parts[0].upper() == "NIL":
+                    delimiter = None
+                    name = parts[-1].strip().strip('"')
+                elif len(parts) >= 2:
+                    raw_delim = parts[0].strip().strip('"').strip("'")
+                    if raw_delim.upper() == "NIL" or raw_delim == "":
+                        delimiter = None
+                    else:
+                        delimiter = raw_delim
+                    name = parts[-1].strip().strip('"')
+                else:
+                    name = parts[-1].strip().strip('"')
+        return (flags, delimiter, name.strip())
 
     def is_selectable(flags):
         lowered = (flags or "").lower()
@@ -202,6 +223,25 @@ private enum EmailIMAPBridgeScriptHead {
                 return
         elif op == "list":
             pass
+        elif op == "move":
+            early_mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
+            if not early_mid:
+                fail("Missing message id")
+                return
+            if not re.fullmatch(r"[0-9][0-9:,]*", early_mid):
+                fail("Invalid message id")
+                return
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
+                return
+            early_dest = str(req.get("destination") or req.get("dest") or "")
+            if not early_dest.strip():
+                fail("Invalid destination: destination must not be empty")
+                return
+            if "\r" in early_dest or "\n" in early_dest:
+                fail("Invalid destination: destination must not contain CR or LF")
+                return
         elif op == "append":
             early_box = str(req.get("mailbox") or "")
             if not early_box.strip():
@@ -237,9 +277,9 @@ private enum EmailIMAPBridgeScriptHead {
     """#
 }
 
-/// Second half of the embedded `python3 imaplib` helper (login through `main()`).
-private enum EmailIMAPBridgeScriptTail {
-    /// Second half of the Python source.
+/// Middle segment of the embedded `python3 imaplib` helper (login through move).
+private enum EmailIMAPBridgeScriptMiddle {
+    /// Middle Python source.
     static let text = #"""
         try:
             try:
@@ -257,18 +297,165 @@ private enum EmailIMAPBridgeScriptTail {
                     fail("IMAP list failed")
                     return
                 boxes = []
+                delims = []
                 for line in (ldata or []):
                     if line is None:
                         continue
-                    flags, name = parse_list_entry(line)
+                    flags, delimiter, name = parse_list_entry(line)
                     if not name:
                         continue
                     if not is_selectable(flags):
                         continue
                     boxes.append(name)
-                sys.stdout.write(json.dumps({"ok": True, "mailboxes": boxes}))
+                    if delimiter:
+                        delims.append(delimiter)
+                common = None
+                if delims:
+                    uniq = sorted(set(delims))
+                    if len(uniq) == 1:
+                        common = uniq[0]
+                sys.stdout.write(json.dumps({"ok": True, "mailboxes": boxes, "delimiter": common, "commonDelimiter": common}))
                 sys.stdout.flush()
                 return
+            if op == "move":
+                src_box = str(req.get("mailbox") or "INBOX").strip()
+                dest_box = str(req.get("destination") or req.get("dest") or "").strip()
+                mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
+                mark_raw = req.get("markAsRead")
+                if mark_raw is None:
+                    mark_raw = req.get("mark_as_read")
+                if mark_raw is None:
+                    mark_raw = req.get("markedAsRead")
+                if mark_raw is None:
+                    mark_raw = req.get("marked_as_read")
+                if isinstance(mark_raw, bool):
+                    mark_read = mark_raw
+                elif mark_raw is None or mark_raw == "":
+                    mark_read = False
+                else:
+                    mark_read = str(mark_raw).lower() in ("1", "true", "yes")
+                if not mid:
+                    fail("Missing message id")
+                    return
+                if not re.fullmatch(r"[0-9][0-9:,]*", mid):
+                    fail("Invalid message id")
+                    return
+                if "\r" in src_box or "\n" in src_box:
+                    fail("Invalid mailbox")
+                    return
+                if not dest_box:
+                    fail("Invalid destination: destination must not be empty")
+                    return
+                if "\r" in dest_box or "\n" in dest_box:
+                    fail("Invalid destination: destination must not contain CR or LF")
+                    return
+                def quote_mailbox(name):
+                    esc = name.replace("\\", "\\\\").replace('"', '\\"')
+                    return '"%s"' % esc
+                try:
+                    typ, _ = conn.select(src_box, readonly=False)
+                except Exception as exc:
+                    fail("Could not open mailbox %s: %s" % (src_box, exc))
+                    return
+                if typ != "OK":
+                    fail("Could not open mailbox %s" % src_box)
+                    return
+                if src_box.lower() == dest_box.lower():
+                    marked = False
+                    if mark_read:
+                        try:
+                            styp, _ = conn.uid("STORE", mid, "+FLAGS", "(\\Seen)")
+                            if styp == "OK":
+                                marked = True
+                        except Exception:
+                            marked = False
+                    sys.stdout.write(json.dumps({"ok": True, "mailbox": src_box, "destination": dest_box, "moved": False, "markedAsRead": marked}))
+                    sys.stdout.flush()
+                    return
+                moved = False
+                dest_uid = None
+                def dest_uid_of(resp):
+                    try:
+                        if resp is None:
+                            return None
+                        chunks = []
+                        if isinstance(resp, (list, tuple)):
+                            for item in resp:
+                                if item is None:
+                                    continue
+                                if isinstance(item, bytes):
+                                    try:
+                                        chunks.append(item.decode("utf-8", errors="replace"))
+                                    except Exception:
+                                        chunks.append(str(item))
+                                else:
+                                    chunks.append(str(item))
+                        else:
+                            chunks.append(str(resp))
+                        blob = " ".join(chunks)
+                        found = re.search(r"COPYUID\s+\d+\s+[\d:,]+\s+([\d:,]+)", blob, re.IGNORECASE)
+                        if not found:
+                            return None
+                        token = (found.group(1) or "").strip()
+                        first = re.split(r"[:,]", token)[0].strip() if token else ""
+                        return first or None
+                    except Exception:
+                        return None
+                try:
+                    try:
+                        mtyp, mdata = conn.uid("MOVE", mid, quote_mailbox(dest_box))
+                    except Exception:
+                        mtyp, mdata = "NO", None
+                    if mtyp == "OK":
+                        moved = True
+                        dest_uid = dest_uid_of(mdata)
+                    else:
+                        try:
+                            ctyp, cdata = conn.uid("COPY", mid, quote_mailbox(dest_box))
+                        except Exception as exc:
+                            fail("IMAP move failed: %s" % exc)
+                            return
+                        if ctyp != "OK":
+                            fail("IMAP move to %s failed" % dest_box)
+                            return
+                        dest_uid = dest_uid_of(cdata)
+                        try:
+                            conn.uid("STORE", mid, "+FLAGS", "(\\Deleted)")
+                        except Exception as exc:
+                            fail("IMAP move failed: %s" % exc)
+                            return
+                        try:
+                            conn.expunge()
+                        except Exception as exc:
+                            fail("IMAP move failed: %s" % exc)
+                            return
+                        moved = True
+                except Exception as exc:
+                    fail("IMAP move failed: %s" % exc)
+                    return
+                marked = False
+                if mark_read and moved and dest_uid:
+                    try:
+                        try:
+                            conn.select(dest_box, readonly=False)
+                        except Exception:
+                            dest_uid = None
+                        else:
+                            styp, _ = conn.uid("STORE", dest_uid, "+FLAGS", "(\\Seen)")
+                            if styp == "OK":
+                                marked = True
+                    except Exception:
+                        marked = False
+                sys.stdout.write(json.dumps({"ok": True, "mailbox": src_box, "destination": dest_box, "moved": moved, "markedAsRead": marked}))
+                sys.stdout.flush()
+                return
+    """#
+}
+
+/// Final segment of the embedded `python3 imaplib` helper (append through `main()`).
+private enum EmailIMAPBridgeScriptTail {
+    /// Final Python source.
+    static let text = #"""
             if op == "append":
                 append_box = str(req.get("mailbox") or "").strip()
                 if not append_box:

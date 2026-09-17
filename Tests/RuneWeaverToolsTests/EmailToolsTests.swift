@@ -210,16 +210,18 @@ struct EmailToolsTests {
     }
 
     @Test
-    func `Email tools expose search read and gated attachment`() {
+    func `Email tools expose six-tool set with search read and gated attachment`() {
         let config = ToolsTestSupport.testEmailConfig()
         let tools = EmailTools.makeTools(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
-        #expect(tools.count == 4)
-        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send"]))
+        #expect(tools.count == 6)
+        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"]))
         let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
         #expect(levels["email.search"] == .readOnly)
         #expect(levels["email.read"] == .readOnly)
+        #expect(levels["email.listMailboxes"] == .readOnly)
         #expect(levels["email.attachment"] == .requiresApproval)
         #expect(levels["email.send"] == .requiresApproval)
+        #expect(levels["email.move"] == .requiresApproval)
     }
 
     @Test
@@ -232,7 +234,7 @@ struct EmailToolsTests {
             await bus.register(tool: tool)
         }
         let names = await bus.toolNames()
-        #expect(names.sorted() == ["email.attachment", "email.read", "email.search", "email.send"])
+        #expect(names.sorted() == ["email.attachment", "email.listMailboxes", "email.move", "email.read", "email.search", "email.send"])
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"quarterly","limit":10}"#)
             let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
@@ -1641,5 +1643,326 @@ struct EmailToolsTests {
         )
         #expect(followUp.trimmedSubpath == "hello.txt")
         #expect(followUp.trimmedSaveToPath == "~/workspace/hello.txt")
+    }
+
+    @Test
+    func `Stub mailboxListing reports delimiters and honors failure`() async throws {
+        // Direct gateway coverage keeps hierarchy-separator regressions visible without network use.
+        let creds = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.yourdomain.com",
+            port: 993,
+            username: "you@yourdomain.com",
+            password: "test-secret"
+        )
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX", "Archive"], delimiter: ".")
+        let listing = try await gateway.mailboxListing(credentials: creds)
+        #expect(listing.mailboxes.count == 2)
+        #expect(listing.mailboxes == ["INBOX", "Archive"])
+        #expect(listing.delimiter == ".")
+        let failing = ToolsTestSupport.StubEmailGateway(failure: "listing boom")
+        do {
+            _ = try await failing.mailboxListing(credentials: creds)
+            Issue.record("Expected listing failure")
+        } catch {
+            #expect(error.localizedDescription.contains("listing boom"))
+        }
+    }
+
+    @Test
+    func `Stub move captures routing and honors failure`() async throws {
+        // Move capture proves which folders the tool asked for without touching IMAP.
+        let creds = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.yourdomain.com",
+            port: 993,
+            username: "you@yourdomain.com",
+            password: "test-secret"
+        )
+        let mailboxCapture = ToolsTestSupport.QueryCapture()
+        let moveCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            mailboxCapture: mailboxCapture,
+            moveCapture: moveCapture
+        )
+        let moved = try await gateway.move(credentials: creds, mailbox: "INBOX", messageID: "42", destination: "Archive", markAsRead: false)
+        #expect(moved.moved == true)
+        #expect(moved.mailbox == "INBOX")
+        #expect(moved.destination == "Archive")
+        #expect(mailboxCapture.value == "INBOX")
+        #expect(moveCapture.value == "Archive")
+        let failing = ToolsTestSupport.StubEmailGateway(failure: "move boom")
+        do {
+            _ = try await failing.move(credentials: creds, mailbox: "INBOX", messageID: "42", destination: "Archive", markAsRead: false)
+            Issue.record("Expected move failure")
+        } catch {
+            #expect(error.localizedDescription.contains("move boom"))
+        }
+    }
+
+    @Test
+    func `ListMailboxes shim delegates to mailboxListing for old callers`() async throws {
+        // Old search/read paths still call listMailboxes, so the shim must stay equivalent to the listing.
+        let creds = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.yourdomain.com",
+            port: 993,
+            username: "you@yourdomain.com",
+            password: "test-secret"
+        )
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX", "Archive"], delimiter: "/")
+        let names = try await gateway.listMailboxes(credentials: creds)
+        #expect(names == ["INBOX", "Archive"])
+        let listing = try await gateway.mailboxListing(credentials: creds)
+        #expect(listing.mailboxes == names)
+    }
+
+    @Test
+    func `List tool returns envelope with delimiters through ToolBus`() async {
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX", "Archive"], delimiter: "/")
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(toolName: "email.listMailboxes", argumentsJSON: #"{"account":"personal"}"#)
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == false)
+            #expect(result.content.contains("INBOX"))
+            #expect(result.content.contains("Archive"))
+            #expect(result.content.contains("\"count\""))
+            #expect(result.content.contains("/"))
+            struct ListCount: Decodable { let count: Int }
+            if let data = result.content.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(ListCount.self, from: data)
+            {
+                #expect(decoded.count == 2)
+            }
+            #expect(!result.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `List and move reject unknown account without secrets`() async {
+        // Unknown accounts must fail before credential resolution so no secret can leak.
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX"])
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        let listInput = ToolInput(toolName: "email.listMailboxes", argumentsJSON: #"{"account":"missing"}"#)
+        let listResult = await bus.execute(toolCall: listInput, context: ToolContext(conversationID: UUID()))
+        #expect(listResult.isError == true)
+        #expect(listResult.content.contains("missing"))
+        #expect(!listResult.content.contains("test-secret"))
+        let moveInput = ToolInput(
+            toolName: "email.move",
+            argumentsJSON: #"{"account":"missing","id":"42","mailbox":"INBOX","destinationMailbox":"Archive"}"#
+        )
+        let moveResult = await bus.execute(toolCall: moveInput, context: ToolContext(conversationID: UUID()))
+        #expect(moveResult.isError == true)
+        #expect(moveResult.content.contains("missing"))
+        #expect(!moveResult.content.contains("test-secret"))
+    }
+
+    @Test
+    func `Move accepts folder alias and defaults source to INBOX`() async {
+        // Folder alias plus omitted-source default keep move consistent with search/read routing.
+        let mailboxCapture = ToolsTestSupport.QueryCapture()
+        let moveCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            mailboxCapture: mailboxCapture,
+            moveCapture: moveCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        await ToolsTestSupport.withTestPassword {
+            let aliased = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","uid":"42","folder":"INBOX","destination":"Archive"}"#
+            )
+            let aliasedResult = await bus.execute(toolCall: aliased, context: ToolContext(conversationID: UUID()))
+            #expect(aliasedResult.isError == false)
+            #expect(mailboxCapture.value == "INBOX")
+            #expect(moveCapture.value == "Archive")
+            let defaulted = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","id":"42","destinationMailbox":"Archive"}"#
+            )
+            let defaultedResult = await bus.execute(toolCall: defaulted, context: ToolContext(conversationID: UUID()))
+            #expect(defaultedResult.isError == false)
+            #expect(mailboxCapture.value == "INBOX")
+            #expect(moveCapture.value == "Archive")
+        }
+    }
+
+    @Test
+    func `Move rejects bad id CR-LF and empty destination`() async {
+        // Fail-closed validation must win before any mailbox lookup or credential use.
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX", "Archive"])
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        let payloads = [
+            #"{"account":"personal","id":"1;DROP","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
+            #"{"account":"personal","id":"abc","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
+            "{\"account\":\"personal\",\"id\":\"42\",\"mailbox\":\"INBOX\r\nSELECT\",\"destinationMailbox\":\"Archive\"}",
+            "{\"account\":\"personal\",\"id\":\"42\",\"mailbox\":\"INBOX\",\"destinationMailbox\":\"Archive\r\nSELECT\"}",
+            #"{"account":"personal","id":"42","mailbox":"INBOX","destinationMailbox":"   "}"#,
+            #"{"account":"personal","id":"42","mailbox":"INBOX"}"#
+        ]
+        for payload in payloads {
+            let input = ToolInput(toolName: "email.move", argumentsJSON: payload)
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == true)
+            #expect(result.content.contains("Invalid"))
+        }
+    }
+
+    @Test
+    func `Move with unknown destination reports available folders`() async {
+        let gateway = ToolsTestSupport.StubEmailGateway(listedMailboxes: ["INBOX", "Archive"])
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX","destinationMailbox":"Missing"}"#
+            )
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == true)
+            #expect(result.content.contains("Unknown mailbox"))
+            #expect(result.content.contains("Missing"))
+            #expect(result.content.contains("INBOX"))
+            #expect(result.content.contains("Archive"))
+            #expect(!result.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Move to same folder reports moved false without gateway call`() async {
+        // Same-folder moves are no-ops by contract, so the gateway must never be dialed.
+        let moveCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            moveCapture: moveCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX","destinationMailbox":"inbox"}"#
+            )
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == false)
+            #expect(result.content.lowercased().contains("moved"))
+            #expect(moveCapture.value == nil)
+            struct MoveFlag: Decodable { let moved: Bool? }
+            if let data = result.content.data(using: .utf8),
+               let decoded = try? JSONDecoder().decode(MoveFlag.self, from: data)
+            {
+                #expect(decoded.moved == false)
+            }
+        }
+    }
+
+    @Test
+    func `Move dry run previews without network use`() async {
+        // Dry runs validate routing and report the would-be move without mutating any mailbox.
+        let moveCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            moveCapture: moveCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus()
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await bus.setApprovalHandler { _, _ in true }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX","destinationMailbox":"Archive"}"#
+            )
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID(), dryRun: true))
+            #expect(result.isError == false)
+            #expect(moveCapture.value == nil)
+            #expect(result.content.contains("Dry run"))
+            #expect(result.content.contains("INBOX"))
+            #expect(result.content.contains("Archive"))
+            #expect(!result.content.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Move requires approval without a handler`() async {
+        // Mutating moves must park in the approvals inbox when no handler is installed.
+        let moveCapture = ToolsTestSupport.QueryCapture()
+        let gateway = ToolsTestSupport.StubEmailGateway(
+            listedMailboxes: ["INBOX", "Archive"],
+            moveCapture: moveCapture
+        )
+        let config = ToolsTestSupport.testEmailConfig()
+        let bus = ToolBus(permissionGate: PermissionGate())
+        for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
+            await bus.register(tool: tool)
+        }
+        await ToolsTestSupport.withTestPassword {
+            let input = ToolInput(
+                toolName: "email.move",
+                argumentsJSON: #"{"account":"personal","id":"42","mailbox":"INBOX","destinationMailbox":"Archive"}"#
+            )
+            let result = await bus.execute(toolCall: input, context: ToolContext(conversationID: UUID()))
+            #expect(result.isError == true)
+            #expect(result.content.contains("requires approval"))
+            #expect(moveCapture.value == nil)
+        }
+    }
+
+    @Test
+    func `Email tools expose six tools including list and move`() {
+        // Registration order stays stable so prompts and dashboards can rely on it.
+        let config = ToolsTestSupport.testEmailConfig()
+        let tools = EmailTools.makeTools(emailConfig: config, gateway: ToolsTestSupport.StubEmailGateway())
+        #expect(tools.count == 6)
+        #expect(Set(tools.map(\.name)) == Set(["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"]))
+        #expect(EmailTools.toolNames == ["email.search", "email.read", "email.attachment", "email.send", "email.listMailboxes", "email.move"])
+        let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
+        #expect(levels["email.listMailboxes"] == .readOnly)
+        #expect(levels["email.move"] == .requiresApproval)
+    }
+
+    @Test
+    func `Bridge script supports list and move with verified TLS`() throws {
+        // The embedded helper must stay parseable while covering every list/move op the tools dial.
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("op == \"list\""))
+        #expect(source.contains("op == \"move\""))
+        #expect(source.contains("ssl.create_default_context()"))
+        #expect(!source.contains("_create_unverified_context"))
+        #expect(!source.contains("CERT_NONE"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
     }
 }

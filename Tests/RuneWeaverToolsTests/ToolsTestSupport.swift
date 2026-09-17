@@ -138,12 +138,16 @@ enum ToolsTestSupport {
         let failure: String?
         /// Box receiving the normalized query passed to `search`.
         let capture: QueryCapture?
-        /// Selectable mailboxes reported by `listMailboxes` (nil means `["INBOX"]`).
+        /// Selectable mailboxes reported by the listing (nil means `["INBOX"]`).
         let listedMailboxes: [String]?
         /// Per-mailbox hits for fan-out (nil means every folder returns `hits`).
         let hitsByMailbox: [String: [EmailSearchHit]]?
         /// Box receiving the mailbox passed to per-mailbox `search`, when set.
         let mailboxCapture: QueryCapture?
+        /// Hierarchy separator reported for every mailbox in `mailboxListing` (nil means `"/"`).
+        let delimiter: String?
+        /// Box receiving the destination mailbox passed to `move`, when set.
+        let moveCapture: QueryCapture?
 
         /// Creates a stub gateway.
         init(
@@ -154,7 +158,9 @@ enum ToolsTestSupport {
             capture: QueryCapture? = nil,
             listedMailboxes: [String]? = nil,
             hitsByMailbox: [String: [EmailSearchHit]]? = nil,
-            mailboxCapture: QueryCapture? = nil
+            mailboxCapture: QueryCapture? = nil,
+            delimiter: String? = nil,
+            moveCapture: QueryCapture? = nil
         ) {
             self.hits = hits
             self.message = message
@@ -164,6 +170,8 @@ enum ToolsTestSupport {
             self.listedMailboxes = listedMailboxes
             self.hitsByMailbox = hitsByMailbox
             self.mailboxCapture = mailboxCapture
+            self.delimiter = delimiter
+            self.moveCapture = moveCapture
         }
 
         /// Stub append (no-op unless failure set).
@@ -173,14 +181,60 @@ enum ToolsTestSupport {
             }
         }
 
-        /// Returns canned selectable mailboxes.
+        /// Returns canned mailboxes with hierarchy separators for list-envelope assertions.
         /// - Parameter credentials: Ignored resolved credentials.
-        /// - Returns: Canned folders in server order.
-        func listMailboxes(credentials _: ResolvedEmailCredentials) async throws -> [String] {
+        /// - Returns: Canned folders in server order with the stub delimiter.
+        func mailboxListing(credentials _: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
             if let failure {
                 throw EmailIMAPError.bridgeFailed(failure)
             }
-            return listedMailboxes ?? ["INBOX"]
+            let boxes = listedMailboxes ?? ["INBOX"]
+            let separator = delimiter ?? "/"
+            return EmailMailboxListing(mailboxes: boxes, delimiter: separator)
+        }
+
+        /// Canned move honoring failure and capturing routing for assertions.
+        /// - Parameters:
+        ///   - credentials: Ignored resolved credentials.
+        ///   - mailbox: Source folder.
+        ///   - messageID: Message being relocated.
+        ///   - destination: Target folder.
+        ///   - markAsRead: Whether `\Seen` is set on the resulting message.
+        /// - Returns: Move result reporting relocation and read flag.
+        func move(
+            credentials _: ResolvedEmailCredentials,
+            mailbox sourceMailbox: String,
+            messageID _: String,
+            destination: String,
+            markAsRead: Bool
+        ) async throws -> EmailMoveResult {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            mailboxCapture?.set(sourceMailbox)
+            moveCapture?.set(destination)
+            // Same-folder moves are no-ops by contract, so report them without pretending to copy.
+            if sourceMailbox.lowercased() == destination.lowercased() {
+                return EmailMoveResult(
+                    mailbox: sourceMailbox,
+                    destination: destination,
+                    moved: false,
+                    markedAsRead: markAsRead
+                )
+            }
+            return EmailMoveResult(
+                mailbox: sourceMailbox,
+                destination: destination,
+                moved: true,
+                markedAsRead: markAsRead
+            )
+        }
+
+        /// Shim for old callers delegating to the richer listing so search/read paths stay covered.
+        /// - Parameter credentials: Ignored resolved credentials.
+        /// - Returns: Canned folders in server order.
+        func listMailboxes(credentials: ResolvedEmailCredentials) async throws -> [String] {
+            try await mailboxListing(credentials: credentials).mailboxes
         }
 
         /// Returns canned per-mailbox hits labeled with the folder.
