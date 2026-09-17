@@ -67,8 +67,13 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public let text: String
     /// Owning session identifier.
     public let sessionID: UUID
-    /// Tool invocations performed while answering.
+    /// Tool invocations performed while answering. Each entry carries its own
+    /// chronological `roundIndex` so clients interleave text and tools oldest-first.
     public var toolActions: [ToolAction]?
+    /// Highest round index in this turn, when any tool ran. Lets clients that only
+    /// inspect the terminal frame learn the turn had multiple rounds without scanning
+    /// every action; nil for text-only or legacy turns.
+    public var roundIndex: Int?
     /// Billed tokens accumulated across LLM rounds in this turn.
     public var totalTokens: Int?
     /// Serving model name.
@@ -92,7 +97,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         contextLength: Int? = nil,
         sessionTokens: Int? = nil,
         isParked: Bool = false,
-        warnings: [String]? = nil
+        warnings: [String]? = nil,
+        roundIndex: Int? = nil
     ) {
         self.type = "done"
         self.text = text
@@ -104,6 +110,13 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.sessionTokens = sessionTokens
         self.isParked = isParked
         self.warnings = warnings
+        // Derive the turn's highest round from its actions when the caller omits it,
+        // so multi-round turns advertise their boundary count without extra bookkeeping.
+        if let roundIndex {
+            self.roundIndex = roundIndex
+        } else {
+            self.roundIndex = toolActions?.compactMap(\.roundIndex).max()
+        }
     }
 
     /// Coding keys for the terminal frame.
@@ -116,6 +129,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case sessionID
         /// Tool invocations performed.
         case toolActions
+        /// Highest round index in this turn.
+        case roundIndex
         /// Billed tokens for turn.
         case totalTokens
         /// Serving model name.
@@ -138,12 +153,30 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.text = try container.decode(String.self, forKey: .text)
         self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
         self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions)
+        self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex) ?? toolActions?.compactMap(\.roundIndex).max()
         self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
         self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
         self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings)
+    }
+
+    /// Encodes a terminal frame, omitting an absent round so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(text, forKey: .text)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(toolActions, forKey: .toolActions)
+        try container.encodeIfPresent(roundIndex, forKey: .roundIndex)
+        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
+        try container.encodeIfPresent(modelName, forKey: .modelName)
+        try container.encodeIfPresent(contextLength, forKey: .contextLength)
+        try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
+        try container.encode(isParked, forKey: .isParked)
+        try container.encodeIfPresent(warnings, forKey: .warnings)
     }
 
     /// Creates a terminal frame from an orchestrator response.
@@ -212,14 +245,59 @@ public struct WSToolStartFrame: Codable, Sendable, Equatable {
     public let argumentsJSON: String
     /// Owning session identifier.
     public var sessionID: UUID?
+    /// Zero-based LLM round that produced this call, oldest first. Nil on payloads
+    /// written before round tracking so older dashboards still decode; clients treat
+    /// absent as unordered and fall back to arrival order, which remains chronological.
+    public var roundIndex: Int?
 
     /// Creates a tool start frame.
-    public init(toolName: String, callID: String, argumentsJSON: String, sessionID: UUID? = nil) {
+    public init(toolName: String, callID: String, argumentsJSON: String, sessionID: UUID? = nil, roundIndex: Int? = nil) {
         self.type = "tool_start"
         self.toolName = toolName
         self.callID = callID
         self.argumentsJSON = argumentsJSON
         self.sessionID = sessionID
+        self.roundIndex = roundIndex
+    }
+
+    /// Coding keys for the tool start frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Name of the tool being called.
+        case toolName
+        /// Correlation identifier of the call.
+        case callID
+        /// Raw JSON arguments sent to the tool.
+        case argumentsJSON
+        /// Owning session identifier.
+        case sessionID
+        /// Zero-based LLM round that produced the call.
+        case roundIndex
+    }
+
+    /// Decodes a tool start frame, defaulting a missing round for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_start"
+        self.toolName = try container.decode(String.self, forKey: .toolName)
+        self.callID = try container.decode(String.self, forKey: .callID)
+        self.argumentsJSON = try container.decode(String.self, forKey: .argumentsJSON)
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex)
+    }
+
+    /// Encodes a tool start frame, omitting an absent round so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(toolName, forKey: .toolName)
+        try container.encode(callID, forKey: .callID)
+        try container.encode(argumentsJSON, forKey: .argumentsJSON)
+        try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(roundIndex, forKey: .roundIndex)
     }
 }
 
@@ -235,14 +313,58 @@ public struct WSToolEndFrame: Codable, Sendable, Equatable {
     public let result: ToolResult
     /// Owning session identifier.
     public var sessionID: UUID?
+    /// Zero-based LLM round that produced this call, mirroring the start frame so
+    /// resumed batches rejoin the same chronological timeline instead of collapsing.
+    public var roundIndex: Int?
 
     /// Creates a tool end frame.
-    public init(toolName: String, callID: String, result: ToolResult, sessionID: UUID? = nil) {
+    public init(toolName: String, callID: String, result: ToolResult, sessionID: UUID? = nil, roundIndex: Int? = nil) {
         self.type = "tool_end"
         self.toolName = toolName
         self.callID = callID
         self.result = result
         self.sessionID = sessionID
+        self.roundIndex = roundIndex
+    }
+
+    /// Coding keys for the tool end frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Name of the tool that ran.
+        case toolName
+        /// Correlation identifier of the call.
+        case callID
+        /// Result returned by the tool.
+        case result
+        /// Owning session identifier.
+        case sessionID
+        /// Zero-based LLM round that produced the call.
+        case roundIndex
+    }
+
+    /// Decodes a tool end frame, defaulting a missing round for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_end"
+        self.toolName = try container.decode(String.self, forKey: .toolName)
+        self.callID = try container.decode(String.self, forKey: .callID)
+        self.result = try container.decode(ToolResult.self, forKey: .result)
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex)
+    }
+
+    /// Encodes a tool end frame, omitting an absent round for older decoders.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(toolName, forKey: .toolName)
+        try container.encode(callID, forKey: .callID)
+        try container.encode(result, forKey: .result)
+        try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(roundIndex, forKey: .roundIndex)
     }
 }
 
@@ -361,5 +483,58 @@ public struct WSErrorFrame: Codable, Sendable, Equatable {
         self.type = "error"
         self.message = message
         self.sessionID = sessionID
+    }
+}
+
+/// Session-tagged liveness heartbeat proving a turn is still processing while
+/// prompt evaluation produces no deltas to stream. Older dashboards decode an
+/// unknown `type` as ignorable, so they drop this without rendering while newer
+/// clients re-arm their inactivity timer on it. Lives here so REST and WebSocket
+/// turns share one encoding; the TypeScript `WSTurnAliveFrame` mirrors this shape.
+public struct WSTurnAliveFrame: Codable, Sendable, Equatable {
+    /// Always `"turn_alive"`.
+    public let type: String
+    /// Owning session so multiplexed views only re-arm their own turn.
+    public var sessionID: UUID?
+
+    /// Creates a heartbeat for a session.
+    public init(sessionID: UUID? = nil) {
+        self.type = "turn_alive"
+        self.sessionID = sessionID
+    }
+
+    /// Coding keys for the heartbeat.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Owning session.
+        case sessionID
+    }
+
+    /// Decodes a heartbeat, defaulting a missing discriminator for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "turn_alive"
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+    }
+}
+
+/// Namespace for the heartbeat cadence and encoder paired with the frame above.
+/// Kept beside the frame so the interval and the wire shape change together.
+public enum WSTurnAlive: Sendable {
+    /// Cadence for liveness heartbeats while a turn produces no streamable frames.
+    /// Twenty seconds sits inside the window where a dashboard can distinguish a
+    /// healthy long prompt evaluation from a dropped socket without spamming it.
+    public static let intervalNanoseconds: UInt64 = 20_000_000_000
+
+    /// Encodes a session-tagged liveness heartbeat, nil when encoding fails.
+    /// - Parameter sessionID: Owning session.
+    /// - Returns: Wire text, or nil when encoding fails.
+    public static func frameText(sessionID: UUID) -> String? {
+        guard let data = try? JSONEncoder().encode(WSTurnAliveFrame(sessionID: sessionID)),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+        return text
     }
 }

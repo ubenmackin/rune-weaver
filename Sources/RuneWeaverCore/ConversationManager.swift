@@ -414,7 +414,10 @@ public actor ConversationManager {
         await persistUncancellable(restored)
     }
 
-    /// Structured tool actions grouped by parent assistant message.
+    /// Structured tool actions grouped by parent assistant message, oldest message first.
+    /// Each placeholder-bearing assistant note marks one chronological round boundary, so the
+    /// assigned round index increments per note in stored order. Reloads therefore interleave
+    /// identically to live turns even for payloads written before round tracking.
     public func toolActionsByMessage(for sessionID: UUID) async -> [UUID: [ToolAction]] {
         guard let session = await readSingleMerged(id: sessionID) else { return [:] }
         var resultsByCallID: [String: ToolResult] = [:]
@@ -425,6 +428,9 @@ public actor ConversationManager {
             resultsByCallID[callID] = ToolResult(toolCallID: callID, content: message.content, isError: message.isError ?? false)
         }
         var grouped: [UUID: [ToolAction]] = [:]
+        // Round boundaries persist as per-round assistant notes: one note per LLM round in
+        // stored order, so enumerate them oldest-first and tag every action with its round.
+        var roundIndex = 0
         for message in session.messages where message.role == .assistant {
             var actions: [ToolAction] = []
             for line in message.content.components(separatedBy: "\n") {
@@ -433,11 +439,13 @@ public actor ConversationManager {
                     toolName: parsed.toolName,
                     callID: parsed.callID,
                     argumentsJSON: parsed.argumentsJSON,
-                    result: resultsByCallID[parsed.callID]
+                    result: resultsByCallID[parsed.callID],
+                    roundIndex: roundIndex
                 ))
             }
             if !actions.isEmpty {
                 grouped[message.id] = actions
+                roundIndex += 1
             }
         }
         return grouped
@@ -461,49 +469,6 @@ public actor ConversationManager {
         sessions[sessionID] = session
         await persist(session)
         return session.summary
-    }
-
-    /// Evicts oldest non-system turns when over `maxMessages`.
-    private func truncateIfNeeded(messages: inout [Message], summary: inout String?) {
-        guard messages.count > maxMessages else { return }
-        let overflow = messages.count - maxMessages
-        var evicted: [Message] = []
-        var kept: [Message] = []
-        kept.reserveCapacity(maxMessages)
-        var dropped = 0
-        for message in messages {
-            if dropped < overflow, message.role != .system {
-                evicted.append(message)
-                dropped += 1
-            } else {
-                kept.append(message)
-            }
-        }
-        if dropped < overflow {
-            let extra = overflow - dropped
-            // Invariant: never evict the leading system prompt (index 0 if .system)
-            // so developer/system instructions remain preserved in context.
-            let preserveFirstSystem = kept.first?.role == .system
-            let startIndex = preserveFirstSystem ? 1 : 0
-            let evictCount = min(extra, max(0, kept.count - startIndex))
-            if evictCount > 0 {
-                evicted.append(contentsOf: kept[startIndex ..< (startIndex + evictCount)])
-                kept.removeSubrange(startIndex ..< (startIndex + evictCount))
-            }
-        }
-        guard !evicted.isEmpty else { return }
-        let chunk = summarizer(evicted)
-        let combinedSummary = if let existing = summary, !existing.isEmpty {
-            existing + "\n" + chunk
-        } else {
-            chunk
-        }
-        summary = if combinedSummary.count > Self.maxSummaryLength {
-            "…" + String(combinedSummary.suffix(Self.maxSummaryLength))
-        } else {
-            combinedSummary
-        }
-        messages = kept
     }
 
     // MARK: - Persistence (SQLite with JSON fallback)
@@ -567,6 +532,55 @@ public actor ConversationManager {
                 RuneWeaverLog.stores.error("ConversationManager: Failed to uncancellably delete session \(id): \(error)")
             }
         }
+    }
+}
+
+// MARK: - ConversationManager truncation
+
+/// Holds the history-eviction helper so the main actor body stays within the
+/// length budget while sharing file-private state.
+extension ConversationManager {
+    /// Evicts oldest non-system turns when over `maxMessages`.
+    private func truncateIfNeeded(messages: inout [Message], summary: inout String?) {
+        guard messages.count > maxMessages else { return }
+        let overflow = messages.count - maxMessages
+        var evicted: [Message] = []
+        var kept: [Message] = []
+        kept.reserveCapacity(maxMessages)
+        var dropped = 0
+        for message in messages {
+            if dropped < overflow, message.role != .system {
+                evicted.append(message)
+                dropped += 1
+            } else {
+                kept.append(message)
+            }
+        }
+        if dropped < overflow {
+            let extra = overflow - dropped
+            // Invariant: never evict the leading system prompt (index 0 if .system)
+            // so developer/system instructions remain preserved in context.
+            let preserveFirstSystem = kept.first?.role == .system
+            let startIndex = preserveFirstSystem ? 1 : 0
+            let evictCount = min(extra, max(0, kept.count - startIndex))
+            if evictCount > 0 {
+                evicted.append(contentsOf: kept[startIndex ..< (startIndex + evictCount)])
+                kept.removeSubrange(startIndex ..< (startIndex + evictCount))
+            }
+        }
+        guard !evicted.isEmpty else { return }
+        let chunk = summarizer(evicted)
+        let combinedSummary = if let existing = summary, !existing.isEmpty {
+            existing + "\n" + chunk
+        } else {
+            chunk
+        }
+        summary = if combinedSummary.count > Self.maxSummaryLength {
+            "…" + String(combinedSummary.suffix(Self.maxSummaryLength))
+        } else {
+            combinedSummary
+        }
+        messages = kept
     }
 }
 

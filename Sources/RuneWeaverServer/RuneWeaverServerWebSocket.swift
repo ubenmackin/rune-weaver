@@ -51,14 +51,30 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
 /// Encodes an orchestrator event to its shared WebSocket wire text, if any.
 func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
     switch event {
-    case let .toolStarted(toolName, callID, argumentsJSON):
+    case let .toolStarted(toolName, callID, argumentsJSON, roundIndex):
         try? String(
-            data: JSONEncoder().encode(WSToolStartFrame(toolName: toolName, callID: callID, argumentsJSON: argumentsJSON, sessionID: sessionID)),
+            data: JSONEncoder().encode(
+                WSToolStartFrame(
+                    toolName: toolName,
+                    callID: callID,
+                    argumentsJSON: argumentsJSON,
+                    sessionID: sessionID,
+                    roundIndex: roundIndex
+                )
+            ),
             encoding: .utf8
         )
-    case let .toolCompleted(toolName, callID, result):
+    case let .toolCompleted(toolName, callID, result, roundIndex):
         try? String(
-            data: JSONEncoder().encode(WSToolEndFrame(toolName: toolName, callID: callID, result: result, sessionID: sessionID)),
+            data: JSONEncoder().encode(
+                WSToolEndFrame(
+                    toolName: toolName,
+                    callID: callID,
+                    result: result,
+                    sessionID: sessionID,
+                    roundIndex: roundIndex
+                )
+            ),
             encoding: .utf8
         )
     case let .textDelta(delta):
@@ -123,6 +139,32 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     let chatTask: Task<Void, Never> = Task { [context, connectionID, sessionID, source, trimmed, registration, connectionTasks, trackingID] in
         defer { connectionTasks.remove(id: trackingID) }
         let startTime = Date()
+        // Liveness heartbeat covers the silent stretches where prompt evaluation
+        // produces no deltas, tool frames, or warnings: without it a healthy
+        // multi-minute local inference looks identical to a dropped socket and
+        // the dashboard's inactivity timer cancels the turn mid-eval. The task
+        // is unstructured so it ticks alongside `process`; the defer below
+        // guarantees it stops on every terminal path, and per-send delivery
+        // still flows through the queued 5s timeout so a slow peer cannot wedge
+        // the turn. Sends targeted to the owning socket so unrelated sessions
+        // never wake; the REST path keeps broadcasting because it has no owning
+        // socket for multi-viewer turns.
+        let heartbeat = Task { [context, connectionID, sessionID] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: WSTurnAlive.intervalNanoseconds)
+                } catch {
+                    break
+                }
+                if Task.isCancelled {
+                    break
+                }
+                if let alive = WSTurnAlive.frameText(sessionID: sessionID) {
+                    await context.hub.send(id: connectionID, text: alive)
+                }
+            }
+        }
+        defer { heartbeat.cancel() }
         do {
             let response = try await context.orchestrator.process(
                 input: UserInput(

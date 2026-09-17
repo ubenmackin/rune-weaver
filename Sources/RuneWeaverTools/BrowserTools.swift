@@ -441,12 +441,10 @@ public struct BrowserNavigateTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "browser.navigate"
     /// When the LLM should use this tool.
+    /// Kept to one line so the composed prompt stays within budget across the full registry.
     public let description =
-        "Opens a web page in a fresh isolated browser context and returns distilled text plus element refs. "
-            + "Use when the user asks to open, read, or summarize a web page. "
-            + "Returns the final URL, title, bounded text, and snapshot refs (e1, e2, ...) for browser.act. "
-            + "If the page reports auth_required, escalate to a human login via browser.navigate and never re-fetch with credentials or invent credentials. "
-            + "Downloads are manifest-only and never written to the host."
+        "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act. "
+            + "Auth walls escalate to human login; downloads are manifest-only."
     /// Function-calling contract for `url` (plus accepted aliases) and the screenshot opt-in.
     /// Every decoder alias is advertised so a compliant validator accepts
     /// exactly what the decoder handles.
@@ -578,13 +576,10 @@ public struct BrowserActTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "browser.act"
     /// When the LLM should use this tool.
+    /// Kept to one line so the composed prompt stays within budget across the full registry.
     public let description =
-        "Performs one validated browser action against a browser.navigate snapshot ref in a fresh isolated context. "
-            + "Use with action one of click, fill, select, press, scroll plus the snapshot ref (e.g. e12) and the snapshot URL. "
-            + "fill and select require text; press takes an optional key (default Enter); click and scroll take no text. "
-            + "Every call requires approval parked with target plus URL. "
-            + "If the page reports auth_required, escalate to a human login via browser.navigate and never re-fetch with credentials or invent credentials. "
-            + "Downloads are manifest-only and never written to the host."
+        "Runs one validated action (click/fill/select/press/scroll) on a browser.navigate ref plus URL; "
+            + "fill/select need text, approval-gated, manifest-only downloads."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
     /// Every decoder alias is advertised so a compliant validator accepts
     /// exactly what the decoder handles.
