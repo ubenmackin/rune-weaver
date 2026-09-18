@@ -150,4 +150,52 @@ struct SystemPromptComposerTests {
         #expect(oneLine == "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act.")
         #expect(oneLine.contains("e12) for browser.act"))
     }
+
+    @Test
+    func `Omitting tool schemas excludes Available tools block and schemas but preserves identity and policy`() {
+        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
+        let withSchemas = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true)
+        let withoutSchemas = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: false)
+
+        #expect(withSchemas != withoutSchemas)
+        #expect(SystemPromptComposer.isComposedPrompt(withoutSchemas))
+
+        // Without schemas should omit tool listings and schemas
+        #expect(!withoutSchemas.contains("Available tools:"))
+        #expect(!withoutSchemas.contains("stub.read"))
+        #expect(!withoutSchemas.contains("stub.write"))
+        #expect(!withoutSchemas.contains("Reads stub records"))
+
+        // But must retain core identity, policy, and memory instructions
+        #expect(withoutSchemas.contains("Rune Weaver"))
+        #expect(withoutSchemas.contains("Tool-use policy:"))
+        #expect(withoutSchemas.contains("recall_memories"))
+        #expect(withoutSchemas.contains("remember_fact"))
+
+        // With schemas should retain tool listings
+        #expect(withSchemas.contains("Available tools:"))
+        #expect(withSchemas.contains("stub.read"))
+        #expect(withSchemas.contains("stub.write"))
+    }
+
+    @Test
+    func `Scheduled prompt honors tool schema omission`() {
+        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
+        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, includeToolSchemas: false)
+        #expect(!scheduled.contains("Available tools:"))
+        #expect(!scheduled.contains("stub.read"))
+        #expect(scheduled.contains("Scheduled task guidance:"))
+        #expect(scheduled.contains("Rune Weaver"))
+    }
+
+    @Test
+    func `Tool schema omission reduces prompt byte audit and empties perTool list`() {
+        let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
+        let fullAudit = SystemPromptComposer.byteAudit(tools: tools, supportsVision: true, includeToolSchemas: true)
+        let slimAudit = SystemPromptComposer.byteAudit(tools: tools, supportsVision: true, includeToolSchemas: false)
+
+        #expect(slimAudit.totalBytes < fullAudit.totalBytes)
+        #expect(slimAudit.perTool.isEmpty)
+        #expect(fullAudit.perTool.count == 2)
+    }
 }
