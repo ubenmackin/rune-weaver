@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   cancelChat,
+  concurrentTurnsBusyMessage,
   createJob,
   decideApproval,
   DEFAULT_FILES_ALLOW_ROOTS,
@@ -21,11 +22,20 @@ import {
   listJobs,
   listRuns,
   listTrustGrants,
+  MAX_CONCURRENT_CHAT_TURNS,
+  MAX_CONCURRENT_CHAT_TURNS_HEADER,
+  parseMaxConcurrentChatTurns,
+  parsePlaceholderCallID,
+  placeholderCallIDsInText,
   postChat,
+  resolveMaxConcurrentChatTurns,
   revokeTrustGrant,
   runJobNow,
+  RUN_LOG_POLL_LIMIT,
+  RUN_POLL_INTERVAL_MS,
   searchMemory,
   storeFact,
+  textContainsPlaceholderForCall,
   updateJob,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
@@ -467,5 +477,227 @@ describe("dashboard api client", () => {
       ".aws/*",
       ".runeweaver/memory/vectors/*",
     ]);
+  });
+
+  it("keeps the concurrent-turn cap and busy copy pinned to the engine contract", () => {
+    // The dashboard cannot import the engine tracker, so the cap stays pinned
+    // here; the busy copy shares the engine refusal wording so every layer
+    // reads as one outcome.
+    expect(MAX_CONCURRENT_CHAT_TURNS).toBe(3);
+    expect(concurrentTurnsBusyMessage()).toBe(
+      "Already running 3 chat turns — wait for one to finish or cancel it, then retry.",
+    );
+    expect(concurrentTurnsBusyMessage(2)).toContain("Already running 2 chat turns");
+  });
+
+  it("resolves the turn cap from the health advertisement with fallback", () => {
+    // Admit and reject agree on one server-owned number: a valid advertisement
+    // wins, while absent or drifted shapes degrade to the fallback so older
+    // engines never block the dashboard.
+    expect(
+      resolveMaxConcurrentChatTurns({
+        status: "ok",
+        engine: "Rune Weaver",
+        version: "0.1.0",
+        maxConcurrentChatTurns: 5,
+      }),
+    ).toBe(5);
+    expect(resolveMaxConcurrentChatTurns(null)).toBe(
+      MAX_CONCURRENT_CHAT_TURNS,
+    );
+    expect(resolveMaxConcurrentChatTurns(undefined)).toBe(
+      MAX_CONCURRENT_CHAT_TURNS,
+    );
+    expect(
+      resolveMaxConcurrentChatTurns({
+        status: "ok",
+        engine: "Rune Weaver",
+        version: "0.1.0",
+      }),
+    ).toBe(MAX_CONCURRENT_CHAT_TURNS);
+    expect(
+      resolveMaxConcurrentChatTurns({
+        status: "ok",
+        engine: "Rune Weaver",
+        version: "0.1.0",
+        maxConcurrentChatTurns: null,
+      }),
+    ).toBe(MAX_CONCURRENT_CHAT_TURNS);
+    expect(
+      resolveMaxConcurrentChatTurns({
+        status: "ok",
+        engine: "Rune Weaver",
+        version: "0.1.0",
+        maxConcurrentChatTurns: 0,
+      }),
+    ).toBe(MAX_CONCURRENT_CHAT_TURNS);
+    // The busy copy renders the resolved number so client refusal reads as
+    // the same outcome the server enforces.
+    expect(
+      concurrentTurnsBusyMessage(
+        resolveMaxConcurrentChatTurns({
+          status: "ok",
+          engine: "Rune Weaver",
+          version: "0.1.0",
+          maxConcurrentChatTurns: 2,
+        }),
+      ),
+    ).toContain("Already running 2 chat turns");
+  });
+
+  it("validates advertised turn caps into usable limits", () => {
+    // Only finite numbers at least 1 become a cap; fractional values floor so
+    // a drifted shape never admits unbounded turns or refuses everything.
+    expect(parseMaxConcurrentChatTurns(3)).toBe(3);
+    expect(parseMaxConcurrentChatTurns(3.9)).toBe(3);
+    expect(parseMaxConcurrentChatTurns("2")).toBe(2);
+    expect(parseMaxConcurrentChatTurns(" 4 ")).toBe(4);
+    expect(parseMaxConcurrentChatTurns(0)).toBeNull();
+    expect(parseMaxConcurrentChatTurns(-1)).toBeNull();
+    expect(parseMaxConcurrentChatTurns("")).toBeNull();
+    expect(parseMaxConcurrentChatTurns("many")).toBeNull();
+    expect(parseMaxConcurrentChatTurns(null)).toBeNull();
+    expect(parseMaxConcurrentChatTurns(undefined)).toBeNull();
+    expect(parseMaxConcurrentChatTurns(Number.NaN)).toBeNull();
+  });
+
+  it("prefers the health body cap, then the probe header, then the fallback", async () => {
+    // The JSON field wins when valid so future body-carried caps agree with
+    // the header path; the header fills older bodies that carry none, and a
+    // probe with neither degrades through the resolver instead of blocking.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              status: "ok",
+              engine: "Rune Weaver",
+              version: "0.1.0",
+              maxConcurrentChatTurns: 5,
+            }),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                [MAX_CONCURRENT_CHAT_TURNS_HEADER]: "7",
+              },
+            },
+          ),
+      ),
+    );
+    expect((await getHealth()).maxConcurrentChatTurns).toBe(5);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              status: "ok",
+              engine: "Rune Weaver",
+              version: "0.1.0",
+            }),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                [MAX_CONCURRENT_CHAT_TURNS_HEADER]: "4",
+              },
+            },
+          ),
+      ),
+    );
+    expect((await getHealth()).maxConcurrentChatTurns).toBe(4);
+
+    // A drifted body never masks a valid header; the header keeps admit and
+    // reject agreeing on one server-owned number.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              status: "ok",
+              engine: "Rune Weaver",
+              version: "0.1.0",
+              maxConcurrentChatTurns: 0,
+            }),
+            {
+              status: 200,
+              headers: {
+                "Content-Type": "application/json",
+                [MAX_CONCURRENT_CHAT_TURNS_HEADER]: "6",
+              },
+            },
+          ),
+      ),
+    );
+    expect((await getHealth()).maxConcurrentChatTurns).toBe(6);
+
+    // Neither advertisement degrades to the fallback through the resolver so
+    // older engines stay usable instead of refusing everything.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              status: "ok",
+              engine: "Rune Weaver",
+              version: "0.1.0",
+            }),
+            {
+              status: 200,
+              headers: { "Content-Type": "application/json" },
+            },
+          ),
+      ),
+    );
+    const legacy = await getHealth();
+    expect(resolveMaxConcurrentChatTurns(legacy)).toBe(
+      MAX_CONCURRENT_CHAT_TURNS,
+    );
+  });
+
+  it("shares one run-log poll page and cadence across views", () => {
+    // One source for polling keeps badges and history from drifting per call site.
+    expect(RUN_LOG_POLL_LIMIT).toBe(50);
+    expect(RUN_POLL_INTERVAL_MS).toBe(2500);
+  });
+
+  it("parses placeholder lines by shape instead of bracket substrings", () => {
+    // Only the persisted narration shape counts as an execution record; prose
+    // that merely mentions an identifier must never hide or evict.
+    expect(parsePlaceholderCallID("Calling email.search {\"limit\":1} [call_1]")).toBe(
+      "call_1",
+    );
+    expect(parsePlaceholderCallID("Calling email.search [call_2]")).toBe("call_2");
+    expect(parsePlaceholderCallID("  Calling email.search {} [call_3]  ")).toBe(
+      "call_3",
+    );
+    expect(parsePlaceholderCallID("You mentioned [call_1] in prose")).toBeNull();
+    expect(parsePlaceholderCallID("Calling email.search [bad id]")).toBeNull();
+    expect(parsePlaceholderCallID("Not a placeholder [call_1]")).toBeNull();
+    expect(parsePlaceholderCallID("")).toBeNull();
+  });
+
+  it("matches placeholder coverage by parsed identity", () => {
+    const text = [
+      "Calling email.search {\"limit\":1} [call_9]",
+      "Prose mentioning [call_9] without the narration shape",
+      "Calling calendar.list {} [call_10]",
+    ].join("\n");
+    expect(textContainsPlaceholderForCall(text, "call_9")).toBe(true);
+    expect(textContainsPlaceholderForCall(text, "call_10")).toBe(true);
+    expect(textContainsPlaceholderForCall(text, "call_missing")).toBe(false);
+    expect(textContainsPlaceholderForCall("Prose [call_9] only", "call_9")).toBe(
+      false,
+    );
+    const ids = placeholderCallIDsInText(text);
+    expect(ids.has("call_9")).toBe(true);
+    expect(ids.has("call_10")).toBe(true);
+    expect(ids.has("call_missing")).toBe(false);
+    expect(placeholderCallIDsInText("Prose [call_9] only").size).toBe(0);
   });
 });

@@ -243,6 +243,37 @@ public enum BrowserBounds: Sendable {
 public enum BrowserValidation: Sendable {
     /// Validates a navigation or act URL, rejecting control bytes, non-web schemes, and SSRF targets.
     public static func validateURL(_ url: String) throws -> String {
+        let trimmed = try validatedURLLiteral(url)
+        // Browser flows never dial local origins, so the empty exemption holds
+        // the fail-closed line for every loopback and LAN spelling with no
+        // config to forge; shares the single SSRF range table with the web
+        // and API tools.
+        if let refusal = ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: []) {
+            throw BrowserError.invalidURL("Invalid URL: \(refusal)")
+        }
+        return trimmed
+    }
+
+    /// Async URL validation keeping blocking DNS off the cooperative pool.
+    /// Suspendable tool and gateway paths prefer this over the synchronous
+    /// shape so a wedged resolver cannot stall shared tasks; the verdict stays
+    /// point-in-time, so callers pin the address at dial time. The synchronous
+    /// shape stays for callers that cannot suspend.
+    public static func validateURLAsync(_ url: String) async throws -> String {
+        let trimmed = try validatedURLLiteral(url)
+        // Same empty exemption as the synchronous shape: browser flows never
+        // dial local origins, so every loopback and LAN spelling fails closed.
+        if let refusal = await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: []) {
+            throw BrowserError.invalidURL("Invalid URL: \(refusal)")
+        }
+        return trimmed
+    }
+
+    /// Shared literal URL checks without any resolver use.
+    /// Centralized so the synchronous and async SSRF stages cannot drift on
+    /// length, control-byte, or scheme policy; each caller adds only its own
+    /// DNS stage after this returns the trimmed candidate.
+    private static func validatedURLLiteral(_ url: String) throws -> String {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw BrowserError.invalidURL("Invalid URL: URL must not be empty")
@@ -259,13 +290,6 @@ public enum BrowserValidation: Sendable {
               let host = parsed.host, !host.isEmpty
         else {
             throw BrowserError.invalidURL("Invalid URL: URL must be an http(s) URL with a host")
-        }
-        // Browser flows never dial local origins, so the empty exemption holds
-        // the fail-closed line for every loopback and LAN spelling with no
-        // config to forge; shares the single SSRF range table with the web
-        // and API tools.
-        if let refusal = ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: []) {
-            throw BrowserError.invalidURL("Invalid URL: \(refusal)")
         }
         return trimmed
     }
@@ -348,7 +372,8 @@ public enum BrowserValidation: Sendable {
             if trimmed.unicodeScalars.contains(where: { $0.value == 0 || $0.value == 13 || $0.value == 10 }) {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: press key must be a single key name like Enter")
             }
-            return trimmed.isEmpty ? nil : trimmed
+            // Whitespace-only press text counts as absent so an empty key press stays uniform with omitted text.
+            return NormalizedText.value(trimmed)
         case .click, .scroll:
             guard trimmed.isEmpty else {
                 throw BrowserError.invalidAction("Invalid browser.act arguments: '\(action.rawValue)' takes no 'text'")
@@ -381,6 +406,11 @@ public protocol BrowserPlaywrightGateway: Sendable {
 
     /// Re-navigates to `url` in a fresh isolated context and performs one action.
     func act(action: BrowserActAction, ref: String, text: String?, url: String) async throws -> BrowserActResult
+
+    /// Navigates without provisioning for dry-run previews.
+    /// Dry runs resolve the interpreter from the fast path only so validation
+    /// never pays the venv, pip, or browser budgets.
+    func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot
 }
 
 public extension BrowserPlaywrightGateway {
@@ -390,12 +420,24 @@ public extension BrowserPlaywrightGateway {
     func navigate(url: String) async throws -> BrowserSnapshot {
         try await navigate(url: url, includeScreenshot: false)
     }
+
+    /// Default dry-run navigate falling back to the provisioning path.
+    /// Concrete gateways that shell out override this to use the fast path
+    /// only, so existing test doubles keep working without changes.
+    func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
+        _ = dryRun
+        return try await navigate(url: url, includeScreenshot: includeScreenshot)
+    }
 }
 
-/// Subprocess gateway shelling out to the `python3` Playwright helper.
+/// Subprocess gateway shelling out to the Playwright helper.
 public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// Environment variable overriding the Python executable.
-    public static let pythonEnvVar = "RUNEWEAVER_PYTHON_BIN"
+    /// Single-sourced through `BrowserConfig` so the gateway and the managed
+    /// venv ensurer never drift on the override name.
+    public static var pythonEnvVar: String {
+        BrowserConfig.pythonBinEnvVar
+    }
 
     /// Explicit Python executable path, if any.
     public let pythonExecutable: String?
@@ -410,14 +452,10 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
         maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes
     ) {
-        if let pythonExecutable, !pythonExecutable.isEmpty {
-            self.pythonExecutable = pythonExecutable
-        } else if let configured = ProcessInfo.processInfo.environment[Self.pythonEnvVar] {
-            if configured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                self.pythonExecutable = nil
-            } else {
-                self.pythonExecutable = configured
-            }
+        if let trimmed = NormalizedText.value(pythonExecutable) {
+            self.pythonExecutable = trimmed
+        } else if let configured = NormalizedText.value(ProcessInfo.processInfo.environment[Self.pythonEnvVar]) {
+            self.pythonExecutable = configured
         } else {
             self.pythonExecutable = nil
         }
@@ -427,18 +465,28 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
 
     /// Navigates in a fresh isolated context and returns a bounded snapshot.
     public func navigate(url: String, includeScreenshot: Bool = false) async throws -> BrowserSnapshot {
-        let validated = try BrowserValidation.validateURL(url)
+        try await navigate(url: url, includeScreenshot: includeScreenshot, dryRun: false)
+    }
+
+    /// Navigates resolving the interpreter from the fast path only when dry-running.
+    public func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
+        let validated = try await BrowserValidation.validateURLAsync(url)
         var payload: [String: Any] = ["op": "navigate", "url": validated]
         if includeScreenshot {
             payload["includeScreenshot"] = true
         }
-        let data = try await run(payload: payload)
+        let data = try await run(payload: payload, dryRun: dryRun)
         return try BrowserBridgeParsing.parseSnapshotPayload(data, fallbackURL: validated)
     }
 
     /// Re-navigates in a fresh isolated context and performs one action.
+    /// Act previews never reach this gateway: the tool returns its would-act
+    /// envelope locally under `context.dryRun`, so no dry-run overload exists
+    /// here and every call below touches the browser. Navigate keeps its
+    /// dry-run path because read-only opens still validate through the fast
+    /// interpreter without provisioning.
     public func act(action: BrowserActAction, ref: String, text: String?, url: String) async throws -> BrowserActResult {
-        let validatedURL = try BrowserValidation.validateURL(url)
+        let validatedURL = try await BrowserValidation.validateURLAsync(url)
         let validatedRef = try BrowserValidation.validateRef(ref)
         let validatedText = try BrowserValidation.validateActText(action: action, text: text)
         var payload: [String: Any] = [
@@ -450,22 +498,51 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         if let validatedText {
             payload["text"] = validatedText
         }
-        let data = try await run(payload: payload)
+        let data = try await run(payload: payload, dryRun: false)
         return try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
     }
 
     /// Runs the helper once with the given request document.
-    func run(payload: [String: Any]) async throws -> Data {
+    func run(payload: [String: Any], dryRun: Bool = false) async throws -> Data {
         let body: Data
         do {
             body = try JSONSerialization.data(withJSONObject: payload)
         } catch {
             throw BrowserError.bridgeFailed("Could not encode browser request: \(error.localizedDescription)")
         }
+        // First navigate or act provisions the managed venv inline so Homebrew
+        // system pythons never hit externally-managed-environment: the ensurer
+        // collapses concurrent callers onto one flight and publishes staged
+        // progress for health polls, while explicit and env overrides skip
+        // provisioning entirely. Dry-run previews resolve from the fast path
+        // only so validation never pays the venv, pip, or browser budgets.
+        // Timeout plus output caps stay on the bridge call below, never on
+        // provisioning budgets above.
+        if dryRun {
+            try Task.checkCancellation()
+            let effectivePython = PlaywrightPythonEnsurer.resolveDryRunPythonBin(explicit: pythonExecutable)
+            return try await BrowserSubprocessIO.runBridgeIO(
+                scriptSource: BrowserPlaywrightScript.source,
+                payload: body,
+                pythonExecutable: effectivePython,
+                timeoutSeconds: timeoutSeconds,
+                maxOutputBytes: maxOutputBytes
+            )
+        }
+        let effectivePython: String?
+        do {
+            effectivePython = try await PlaywrightPythonEnsurer.shared.ensure(explicitPythonBin: pythonExecutable)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as BrowserError {
+            throw error
+        } catch {
+            throw BrowserError.bridgeFailed(error.localizedDescription)
+        }
         return try await BrowserSubprocessIO.runBridgeIO(
             scriptSource: BrowserPlaywrightScript.source,
             payload: body,
-            pythonExecutable: pythonExecutable,
+            pythonExecutable: effectivePython,
             timeoutSeconds: timeoutSeconds,
             maxOutputBytes: maxOutputBytes
         )
@@ -478,9 +555,13 @@ public struct StubBrowserGateway: BrowserPlaywrightGateway, Sendable {
     public let message: String
 
     /// Creates a stub gateway.
-    /// - Parameter message: Explicit missing-dependency message.
-    public init(message: String = "Playwright is not installed (python3 -m pip install playwright && python3 -m playwright install chromium)") {
-        self.message = message
+    /// - Parameter message: Explicit missing-dependency message, defaulting to
+    ///   the managed-venv copy naming the venv path plus manual fallback.
+    public init(message: String? = nil) {
+        self.message = message ?? PlaywrightPythonEnsurer.missingMessage(
+            stage: nil,
+            detail: "Playwright is not installed"
+        )
     }
 
     /// Always throws the explicit missing-dependency error.
@@ -649,7 +730,7 @@ public enum BrowserBridgeParsing: Sendable {
         guard response.ok else {
             throw classifiedBridgeError(response.error ?? "Browser navigation failed")
         }
-        let url = (response.url?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackURL
+        let url = NormalizedText.value(response.url, fallback: fallbackURL)
         let title = response.title ?? ""
         let rawText = response.text ?? ""
         let bounded = BrowserValidation.boundedText(rawText)
@@ -687,14 +768,13 @@ public enum BrowserBridgeParsing: Sendable {
         raw: String?,
         fallbackHash: String?
     ) -> (dataURL: String?, hash: String?) {
-        let candidate = (direct?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
-            ?? normalizedDataURL(raw)
+        let candidate = NormalizedText.value(direct) ?? normalizedDataURL(raw)
         guard let candidate, !candidate.isEmpty else { return (nil, nil) }
         guard let bytes = screenshotBytes(from: candidate) else { return (nil, nil) }
         // Over-budget captures stay text-only: pixels never enter history
         // past the persistence budget.
         guard BrowserScreenshotPolicy.isWithinBudget(byteCount: bytes.count) else { return (nil, nil) }
-        let hash = (fallbackHash?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+        let hash = NormalizedText.value(fallbackHash)
             ?? BrowserScreenshotPolicy.auditHash(for: bytes)
         return (candidate, hash)
     }
@@ -729,17 +809,32 @@ public enum BrowserBridgeParsing: Sendable {
         guard response.ok else {
             throw classifiedBridgeError(response.error ?? "Browser action failed")
         }
-        let url = (response.url?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackURL
+        let url = NormalizedText.value(response.url, fallback: fallbackURL)
         return BrowserActResult(url: url, action: action, ref: ref, downloads: response.downloads ?? [])
     }
 
     /// Maps helper stderr text to the explicit missing-dependency error when Playwright is absent.
-    public static func classifiedBridgeError(_ detail: String) -> BrowserError {
+    /// The managed-copy flag travels typed from the caller instead of matching
+    /// banner wording, so a copy edit never re-nests the venv path twice.
+    /// - Parameters:
+    ///   - detail: Raw helper stderr or response error text.
+    ///   - isManagedCopy: True when `detail` already carries the managed venv
+    ///     path plus manual fallback and must pass through unwrapped.
+    /// - Returns: Typed bridge error sharing the missing classification.
+    public static func classifiedBridgeError(_ detail: String, isManagedCopy: Bool = false) -> BrowserError {
         if detail.contains("Playwright is not installed") || detail.contains("No module named playwright") {
-            return .playwrightMissing(detail)
+            // Already actionable when the caller threaded the managed copy,
+            // so pass it through instead of nesting the venv path twice.
+            if isManagedCopy {
+                return .playwrightMissing(detail)
+            }
+            return .playwrightMissing(PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: detail))
         }
         if detail.contains("Could not launch python3") {
-            return .playwrightMissing(detail)
+            if isManagedCopy {
+                return .playwrightMissing(detail)
+            }
+            return .playwrightMissing(PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: detail))
         }
         if detail.contains("SSRF denied") {
             return .invalidURL(detail)
@@ -836,8 +931,13 @@ enum BrowserSubprocessIO {
                     "Browser output exceeded the \(stdoutLimit)-byte limit and was terminated."
                 )
             case let .launchFailed(detail):
+                // Launch failures stay in the missing classification so the
+                // dashboard renders the venv path plus manual fallback instead
+                // of a bare spawn error; timeout plus output caps above stay
+                // on the bridge call, never on provisioning budgets.
+                let launchDetail = "Could not launch python3 for browser automation: \(detail)"
                 throw BrowserError.playwrightMissing(
-                    "Could not launch python3 for browser automation: \(detail)"
+                    PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: launchDetail, pythonPath: pythonExecutable)
                 )
             }
         } catch {
@@ -859,8 +959,11 @@ enum BrowserSubprocessIO {
         if exitCode != 0, output.isEmpty {
             let detail = bridgeStderrDetail(stderr)
             if detail.contains("No module named playwright") || detail.contains("Playwright is not installed") {
+                // Stays in the missing classification but names the managed
+                // venv plus manual fallback instead of the old generic pip
+                // hint that Homebrew now refuses outside a venv.
                 throw BrowserError.playwrightMissing(
-                    "Playwright is not installed (python3 -m pip install playwright && python3 -m playwright install chromium)"
+                    PlaywrightPythonEnsurer.missingMessage(stage: nil, detail: detail.isEmpty ? "Playwright is not installed" : detail)
                 )
             }
             if detail.isEmpty {

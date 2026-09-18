@@ -244,10 +244,9 @@ public enum SystemPromptComposer {
     /// merely quotes or pastes the marker elsewhere keeps its override instead of
     /// being mistaken for a snapshot and silently recomposed.
     public static func isComposedPrompt(_ prompt: String) -> Bool {
-        let normalized = prompt
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized.components(separatedBy: "\n")
+        // Shared split keeps the position-anchored marker check on the same line
+        // boundaries as narration and history parsing; a trailing newline stays a terminator.
+        let lines = NormalizedText.splitLines(prompt)
         guard lines.count >= 2 else {
             return false
         }

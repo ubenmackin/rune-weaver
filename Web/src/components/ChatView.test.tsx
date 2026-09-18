@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView from "./ChatView";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
+import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
 import {
   createMockWebSocket,
@@ -19,6 +20,9 @@ describe("ChatView", () => {
     // shared singleton's lingering OPEN handle; otherwise a later test
     // would reuse the earlier socket and never attach its own onmessage.
     resetSharedSocket();
+    // Drop the shared poller's timer and cache for the same reason so one
+    // test's interval never leaks into the next suite.
+    resetSharedRunsForTesting();
     localStorage.clear();
   });
 
@@ -930,6 +934,7 @@ describe("Inline session approval banner", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+    resetSharedRunsForTesting();
     localStorage.clear();
     localStorage.setItem("rw_active_session_id", sessionID);
   });
@@ -1023,6 +1028,7 @@ describe("Degraded tool warnings and fatal errors", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+    resetSharedRunsForTesting();
     localStorage.clear();
   });
 
@@ -1130,6 +1136,311 @@ describe("Degraded tool warnings and fatal errors", () => {
       screen.queryByTestId("turn-warnings-banner"),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+});
+
+describe("Background turns across sessions", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("parks a running turn on switch, badges it, and restores without duplicating done", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+
+    // Pin the starting session so the sidebar history can name it; the fresh
+    // draft after New Session mints its own identifier.
+    const sessionA = "park-session-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionA,
+                title: "Session A",
+                messageCount: 1,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionA, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionA,
+            title: "Session A",
+            messages: [],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "background task");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "partial progress ",
+      sessionID: sessionA,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/partial progress/)).toBeInTheDocument();
+    });
+
+    // Leaving parks the live timeline but keeps the server turn alive; the
+    // input unlocks for the fresh draft while the badge marks the old row.
+    await user.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+    });
+    expect(screen.queryByText(/partial progress/)).not.toBeInTheDocument();
+    expect(await screen.findByTestId("session-running-badge")).toBeInTheDocument();
+
+    // Frames for the hidden session grow only its parked timeline.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "more while away",
+      sessionID: sessionA,
+    });
+
+    // Returning restores the combined live timeline without a reload.
+    const sessionRow = screen.getByText("Session A").closest(".session-item");
+    if (!sessionRow) throw new Error("Expected parked session row");
+    await user.click(sessionRow);
+
+    await waitFor(() => {
+      expect(screen.getByText(/partial progress/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/more while away/)).toBeInTheDocument();
+
+    // The terminal frame finalizes exactly one message.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "partial progress more while away",
+      sessionID: sessionA,
+      toolActions: [],
+      totalTokens: 10,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(
+      screen.getAllByText(/partial progress more while away/),
+    ).toHaveLength(1);
+  });
+});
+
+describe("Tool end attribution without call identity", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("attributes one unmatched end frame to at most the first pending same-tool call", async () => {
+    // Two executions of one tool pend at once; an end frame with no call
+    // identity must complete only the first pending row so one result never
+    // fans out across sibling executions.
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "search twice");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-fanout-1",
+      argumentsJSON: '{"limit": 1}',
+      sessionID: turnSID,
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-fanout-2",
+      argumentsJSON: '{"limit": 1}',
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Running")).toHaveLength(2);
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "email.search",
+      callID: "call-unknown-no-identity",
+      result: {
+        toolCallID: "call-unknown-no-identity",
+        content: "single result",
+        isError: false,
+      },
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText("Done")).toHaveLength(1);
+    });
+    expect(screen.getAllByText("Running")).toHaveLength(1);
+  });
+});
+
+describe("Concurrent turn cap follows the health advertisement", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("refuses a new send once parked plus active turns reach the advertised cap", async () => {
+    // The dashboard refuses through the server advertisement, never a local
+    // constant: with a cap of one, a parked background turn already fills the
+    // single slot so the next send explains the busy house instead of
+    // dialing a turn the engine would immediately reject.
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    const sessionA = "cap-session-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionA,
+                title: "Session A",
+                messageCount: 1,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID: sessionA, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionA,
+            title: "Session A",
+            messages: [],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(
+      <ChatView
+        health={{
+          status: "ok",
+          engine: "Rune Weaver",
+          version: "0.1.0",
+          maxConcurrentChatTurns: 1,
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "first turn");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "working ",
+      sessionID: sessionA,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/working/)).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "New session" }));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "second turn");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Already running 1 chat turns/)).toBeInTheDocument();
+    });
+    expect(capture.sentFrames).toHaveLength(1);
   });
 });
 

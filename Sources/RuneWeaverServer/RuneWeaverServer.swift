@@ -51,6 +51,21 @@ public actor ActiveTurnTracker {
     /// How long a pending cancel survives before it expires.
     private static let pendingCancelTTL: TimeInterval = 2
 
+    /// Bounds how many interactive turns may run at once across sessions.
+    /// Local inference degrades past a couple of concurrent evaluations, so a
+    /// fresh session past the cap fails with an honest busy notice instead of
+    /// stacking turns that would all look hung. Kept namespaced here (not as
+    /// a module global) so REST and WebSocket share one cap. This is the
+    /// authoritative single source: every health probe advertises it so the
+    /// dashboard prefers the server value and only falls back to its mirrored
+    /// constant for older engines, keeping admit and reject in agreement.
+    public static let maxConcurrentTurns = 3
+
+    /// Response header carrying the authoritative turn cap on every health probe.
+    /// A header keeps the JSON contract stable while still giving the dashboard
+    /// one server-owned value to prefer over its fallback constant.
+    public static let turnCapHeaderName = "X-RuneWeaver-Max-Concurrent-Turns"
+
     public init() {}
 
     /// Registers an active turn task for a session.
@@ -63,6 +78,27 @@ public actor ActiveTurnTracker {
     @discardableResult
     public func register(sessionID: UUID, onCancel: @Sendable @escaping () -> Void) -> TurnRegistration {
         store(sessionID: sessionID, cancel: onCancel)
+    }
+
+    /// Atomically acquires a turn slot when capacity allows.
+    /// A replacement turn for the same session always fits (it supersedes the
+    /// prior slot); a fresh session past the cap returns nil instead of
+    /// registering. The check and the store run in one actor hop so concurrent
+    /// fresh sessions cannot both slip past the cap between a separate
+    /// contains/count probe and a later register. The cap stays fixed here so
+    /// no caller can widen it and silently stack slow inference turns.
+    /// - Parameters:
+    ///   - sessionID: Owning session.
+    ///   - onCancel: Cooperative cancel action for the turn.
+    /// - Returns: Registration receipt, or nil when a fresh session is over cap.
+    public func tryAcquire(
+        sessionID: UUID,
+        onCancel: @Sendable @escaping () -> Void
+    ) -> TurnRegistration? {
+        if entries[sessionID] == nil, entries.count >= Self.maxConcurrentTurns {
+            return nil
+        }
+        return store(sessionID: sessionID, cancel: onCancel)
     }
 
     /// Stores one entry, cancelling any prior turn for the session first.
@@ -497,6 +533,41 @@ struct SandboxCleanupLifecycle: LifecycleHandler {
     }
 }
 
+/// Lifecycle hook warming the managed browser Python venv on serve boot.
+/// Best-effort child so first navigates stay warm without ever delaying or
+/// failing boot: the venv, pip, and browser budgets run in the background
+/// while the live stage plus health payload carries state to the dashboard.
+/// Failures stay in the server log so a down network never flips a healthy
+/// boot into a failure.
+final class BrowserWarmupLifecycle: LifecycleHandler {
+    /// Retained warmup flight so shutdown can cancel it instead of leaving an
+    /// ensure running after the server exits, mirroring the menu bar
+    /// quit-cancel. Guarded by a lock because boot and shutdown arrive on
+    /// different executors.
+    private let warmupState: OSAllocatedUnfairLock<Task<Void, Never>?> = OSAllocatedUnfairLock(initialState: nil)
+
+    func didBootAsync(_: Application) async throws {
+        // Structured child inheriting task-locals and priority so logging plus
+        // tracing flow from boot; never awaited here so a minutes-budget first
+        // provision cannot hold the bind. The ensurer owns single-flight plus
+        // staged progress, so a concurrent first navigate simply joins this
+        // flight. Retained for shutdown cancel.
+        warmupState.withLock { current in
+            current?.cancel()
+            current = Task(priority: .background) {
+                await PlaywrightPythonEnsurer.shared.warmup()
+            }
+        }
+    }
+
+    func shutdownAsync(_: Application) async {
+        warmupState.withLock { current in
+            current?.cancel()
+            current = nil
+        }
+    }
+}
+
 /// Configures loopback binding plus every engine route.
 public func configureRuneWeaver(_ app: Application, context: ServerContext) throws {
     try context.config.requireLoopback()
@@ -506,6 +577,7 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
     app.lifecycle.use(WSHubShutdownLifecycle(hub: context.hub))
     app.lifecycle.use(ServerSchedulerLifecycle(worker: context.schedulerWorker))
     app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.sandboxConfig))
+    app.lifecycle.use(BrowserWarmupLifecycle())
     app.runeWeaver = context
     registerRuneWeaverRoutes(app)
 }
@@ -523,6 +595,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSchedulerRunRoute(app)
     registerRunRoutes(app)
     registerSearchRoutes(app)
+    registerBrowserRoutes(app)
     registerSettingsRoutes(app)
     registerWebSocketRoute(app)
     registerDashboardRoutes(app)
@@ -573,14 +646,14 @@ func parseQueryLimit(
 /// Registers the health probe route.
 /// - Parameter app: Application receiving the route.
 private func registerHealthRoute(_ app: Application) {
-    app.get(PathComponent.constant(ServerPaths.health)) { req async throws -> HealthResponse in
+    app.get(PathComponent.constant(ServerPaths.health)) { req async throws -> Response in
         let modelInfo = await req.application.runeWeaver.orchestrator.modelInfo
         let searchURL = req.application.runeWeaver.browserConfig.searxngURL
         let searchReachable = await SearXNGEnsurer.isReachable(baseURL: searchURL)
         // Live Start stage rides along so the profile menu polls one endpoint
         // for both the dot and the Starting line; nil when idle.
         let searchProgress = await SearXNGEnsurer.shared.currentStartProgress(for: searchURL)
-        return HealthResponse(
+        let health = HealthResponse(
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
             provider: modelInfo.provider,
@@ -591,6 +664,15 @@ private func registerHealthRoute(_ app: Application) {
             searchStage: searchProgress?.stage.rawValue,
             searchStartedAt: searchProgress.map(\.startedAt.timeIntervalSince1970)
         )
+        // Advertise the authoritative turn cap alongside the JSON body so the
+        // dashboard prefers the server value over its fallback constant; a
+        // header keeps the JSON contract stable while still collapsing
+        // admit/reject drift to one server-owned number. Encoding through the
+        // request's configured encoder keeps date and key strategies aligned
+        // with every other Content route instead of freezing JSONEncoder defaults.
+        let response = try await health.encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: ActiveTurnTracker.turnCapHeaderName, value: "\(ActiveTurnTracker.maxConcurrentTurns)")
+        return response
     }
 }
 
@@ -628,11 +710,33 @@ private func registerChatRoute(_ app: Application) {
         let sessionID = body.resolvedSessionID
         let startTime = Date()
 
-        // Register before spawning so a fast turn can never finish before its slot exists; the box
-        // bridges a cancel arriving in that gap to the task created just below, matching
-        // `handleWebSocketChat`.
+        // Bound parallel turns the same way as the WebSocket path so the REST
+        // fallback cannot stack unbounded: the acquire and the registration
+        // happen in one tracker hop, so concurrent fresh sessions cannot both
+        // slip past the cap. A replacement turn for the same session always
+        // fits (it supersedes the prior slot). Register before spawning so a
+        // fast turn can never finish before its slot exists; the box bridges
+        // a cancel arriving in that gap to the task created just below,
+        // matching `handleWebSocketChat`.
         let taskBox = TurnTaskBox()
-        let registration = await context.activeTurns.register(sessionID: sessionID, onCancel: { taskBox.cancel() })
+        guard let registration = await context.activeTurns.tryAcquire(sessionID: sessionID, onCancel: { taskBox.cancel() }) else {
+            throw Abort(
+                .tooManyRequests,
+                reason: "Already running \(ActiveTurnTracker.maxConcurrentTurns) chat turns — wait for one to finish or cancel it, then retry."
+            )
+        }
+        // Publish the running row immediately so dashboards badge the session
+        // from the run log even before inference streams; every terminal path
+        // below updates this same row instead of appending a second, keeping
+        // one audit entry per turn like the WebSocket path.
+        let initialEntry = await context.runs.append(
+            kind: "chat",
+            status: "running",
+            message: text,
+            sessionID: sessionID,
+            durationMs: 0
+        )
+        await context.hub.broadcastRun(initialEntry)
         let chatTask: Task<OrchestratorResponse, Error> = Task {
             try await context.orchestrator.process(
                 input: UserInput(
@@ -657,31 +761,9 @@ private func registerChatRoute(_ app: Application) {
             )
         }
         taskBox.set(chatTask)
-        // REST has no stream of its own, but WebSocket dashboards watching the
-        // same session still need liveness while prompt evaluation is silent.
-        // Unlike the WebSocket turn's targeted send to its owning socket, REST has
-        // no owning socket for multi-viewer turns so it must broadcast the same
-        // session-tagged heartbeat; every socket wakes but only viewers of this
-        // session re-arm while others ignore it by sessionID. Exactly one 20s timer
-        // runs per in-flight REST turn and the defer below cancels it on every
-        // terminal path, bounding concurrent heartbeats to one per REST turn;
-        // the request-lifetime binding below stays the sole cancellation path
-        // for the turn itself.
-        let heartbeat = Task { [context, sessionID] in
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(nanoseconds: WSTurnAlive.intervalNanoseconds)
-                } catch {
-                    break
-                }
-                if Task.isCancelled {
-                    break
-                }
-                if let alive = WSTurnAlive.frameText(sessionID: sessionID) {
-                    await context.hub.broadcast(text: alive)
-                }
-            }
-        }
+        // REST keeps one broadcast heartbeat per turn so multi-viewer dashboards
+        // stay live while prompt evaluation is silent; the helper owns the why.
+        let heartbeat = startRESTChatHeartbeat(context: context, sessionID: sessionID)
         defer { heartbeat.cancel() }
 
         do {
@@ -694,40 +776,40 @@ private func registerChatRoute(_ app: Application) {
                 chatTask.cancel()
             }
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
             // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
             // decision can transition the same session entry. The per-turn parked flag keeps a
             // stale prior park in this session from mis-marking a fresh normal turn.
             await broadcastParkedApprovals(for: response, context: context)
-            let parked = response.isParked
-            let parkedStatus = if parked {
+            let parkedStatus = if response.isParked {
                 "awaiting_approval"
             } else {
                 "ok"
             }
-            let entry = await context.runs.append(
-                kind: "chat",
+            await updateRESTChatRunAndBroadcast(
+                context: context,
+                initialEntry: initialEntry,
+                startTime: startTime,
                 status: parkedStatus,
-                message: text,
-                sessionID: sessionID,
-                response: response.text,
-                toolActions: response.toolActions,
-                totalTokens: response.totalTokens,
-                durationMs: durationMs
+                response: response
             )
-            if parked {
-                await context.hub.broadcastRun(entry)
-            }
             return response
         } catch is CancellationError {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "cancelled", message: text, sessionID: sessionID, durationMs: durationMs)
+            await updateRESTChatRunAndBroadcast(
+                context: context,
+                initialEntry: initialEntry,
+                startTime: startTime,
+                status: "cancelled"
+            )
             throw Abort(.gone, reason: "Turn was cancelled by user")
         } catch let error as OrchestratorError {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            await context.runs.append(kind: "chat", status: "error", message: text, sessionID: sessionID, durationMs: durationMs)
+            await updateRESTChatRunAndBroadcast(
+                context: context,
+                initialEntry: initialEntry,
+                startTime: startTime,
+                status: "error"
+            )
             switch error {
             case .emptyInput:
                 throw Abort(.badRequest, reason: "text must not be empty")
@@ -738,14 +820,82 @@ private func registerChatRoute(_ app: Application) {
             }
         } catch {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            await updateRESTChatRunAndBroadcast(
+                context: context,
+                initialEntry: initialEntry,
+                startTime: startTime,
+                status: "error"
+            )
             throw error
         }
     }
 
+    registerChatCancelRoute(app)
+}
+
+/// Moves one REST turn's running audit row to its terminal state and broadcasts it.
+/// Every terminal path funnels through this single update so the run log keeps
+/// one entry per turn and REST stays in parity with the WebSocket path, which
+/// updates the same initial row instead of appending a second.
+/// - Parameters:
+///   - context: Server context owning the run store and broadcast hub.
+///   - initialEntry: Running row published before inference started.
+///   - startTime: Turn start for duration accounting.
+///   - status: Terminal status (`ok`, `awaiting_approval`, `cancelled`, or `error`).
+///   - response: Successful turn output, when the turn produced one.
+private func updateRESTChatRunAndBroadcast(
+    context: ServerContext,
+    initialEntry: RunLogEntry,
+    startTime: Date,
+    status: String,
+    response: OrchestratorResponse? = nil
+) async {
+    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    let entry = await context.runs.update(
+        id: initialEntry.id,
+        status: status,
+        response: response?.text,
+        toolActions: response?.toolActions,
+        totalTokens: response?.totalTokens,
+        durationMs: durationMs
+    ) ?? initialEntry
+    await context.hub.broadcastRun(entry)
+}
+
+/// Registers the REST cancellation endpoint sharing the same turn tracker.
+/// - Parameter app: Application receiving the route.
+private func registerChatCancelRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat), PathComponent.constant("cancel")) { req async throws -> CancelChatResponse in
         let body = try req.content.decode(CancelChatRequest.self)
         let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
         return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
+    }
+}
+
+/// Spawns the REST liveness heartbeat broadcast for one in-flight turn.
+/// - Parameters:
+///   - context: Server context owning the WebSocket hub.
+///   - sessionID: Session tagging the heartbeat frames.
+/// - Returns: Heartbeat task cancelling with the turn.
+private func startRESTChatHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Void, Never> {
+    Task { [context, sessionID] in
+        // REST has no owning socket for multi-viewer turns so it broadcasts the
+        // session-tagged heartbeat while the WebSocket path targets one socket.
+        // Exactly one timer runs per REST turn; the caller cancels it on every
+        // terminal path so concurrent heartbeats stay bounded to one per turn.
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(nanoseconds: WSTurnAlive.intervalNanoseconds)
+            } catch {
+                break
+            }
+            if Task.isCancelled {
+                break
+            }
+            if let alive = WSTurnAlive.frameText(sessionID: sessionID) {
+                await context.hub.broadcast(text: alive)
+            }
+        }
     }
 }
 
@@ -909,6 +1059,66 @@ private func registerRunRoutes(_ app: Application) {
     }
 }
 
+/// Registers the managed browser Python lifecycle routes backing browser settings.
+/// Thin HTTP adapters over `PlaywrightPythonEnsurer`: health reports the
+/// effective interpreter plus the live provision stage so the dashboard can
+/// poll one endpoint about 1s for the amber Preparing line, and ensure
+/// collapses onto the single-flight resolving, creating, installing, browsers
+/// cascade. Provisioning policy (managed venv path, pinned Playwright release,
+/// per-stage budgets) stays single-sourced in the ensurer so boot warmup,
+/// first navigate, and these routes cannot drift; the routes only translate
+/// outcomes to HTTP shapes.
+/// - Parameter app: Application receiving the routes.
+func registerBrowserRoutes(_ app: Application) {
+    let browser = app.grouped(PathComponent.constant(ServerPaths.browser))
+
+    browser.get(PathComponent.constant(ServerPaths.browserHealth)) { _ async -> BrowserPythonHealthResponse in
+        // Side-effect free by design: the probe never provisions, so opening
+        // Settings or polling mid-flight cannot start a second cascade. The
+        // live stage rides along so a provision in flight renders its current
+        // step plus elapsed time, nil when idle.
+        let progress = await PlaywrightPythonEnsurer.shared.currentProgress()
+        let probe = await PlaywrightPythonEnsurer.probeReadiness()
+        return BrowserPythonHealthResponse(
+            ready: probe.ready,
+            pythonPath: probe.pythonPath,
+            stage: progress?.stage.rawValue,
+            startedAt: progress.map(\.startedAt.timeIntervalSince1970),
+            message: probe.ready ? nil : PlaywrightPythonEnsurer.missingMessage(
+                stage: progress?.stage,
+                detail: "Browser Python is not ready",
+                pythonPath: probe.pythonPath
+            )
+        )
+    }
+
+    browser.post(PathComponent.constant(ServerPaths.browserEnsure)) { req async -> BrowserPythonEnsureResponse in
+        // Single-sourced through the shared ensurer so boot warmup, first
+        // navigate, and this route collapse onto one in-flight provision
+        // instead of racing venv plus pip installs. The trimmed banner threads
+        // through for the inline slot while capped diagnostics thread through
+        // for logs plus collapsed UI, so each failure renders once.
+        let report = await PlaywrightPythonEnsurer.shared.ensureReport()
+        if !report.ready {
+            let banner = report.message ?? "none"
+            let chained = report.diagnostics ?? "none"
+            let warningMessage =
+                "Browser ensure ready=\(report.ready) started=\(report.started) "
+                    + "python=\(report.pythonPath) message=\(banner) diagnostics=\(chained)"
+            req.logger.warning("\(warningMessage)")
+            RuneWeaverLog.server.warning("\(warningMessage)")
+        }
+        return BrowserPythonEnsureResponse(
+            ready: report.ready,
+            started: report.started,
+            pythonPath: report.pythonPath,
+            venvPath: report.venvPath,
+            message: report.message,
+            diagnostics: report.diagnostics
+        )
+    }
+}
+
 /// Registers settings routes for reading and persisting configuration.
 private func registerSettingsRoutes(_ app: Application) {
     let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
@@ -1045,12 +1255,12 @@ private func registerWebSocketRoute(_ app: Application) {
 /// Registers the static dashboard bundle routes.
 public func registerDashboardRoutes(_ app: Application) {
     let bundle = DashboardBundle.resolve()
-    app.get { _ async throws -> Response in
-        bundle.response(for: "")
+    app.get { req async throws -> Response in
+        try await bundle.response(for: req, requestPath: "")
     }
     app.get("**") { req async throws -> Response in
         let remainder = req.parameters.getCatchall().joined(separator: "/")
-        return bundle.response(for: remainder)
+        return try await bundle.response(for: req, requestPath: remainder)
     }
 }
 

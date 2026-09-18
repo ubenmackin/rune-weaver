@@ -448,8 +448,8 @@ public struct EmailAccount: Sendable, Equatable {
         self.host = host
         self.port = port
         self.username = username
-        let trimmedHost = smtpHost?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.smtpHost = (trimmedHost?.isEmpty == false) ? trimmedHost : nil
+        // Shares the single blank agreement so whitespace-only overrides read as absent everywhere.
+        self.smtpHost = NormalizedText.value(smtpHost)
         self.smtpPort = smtpPort
         self.smtpSecurity = smtpSecurity
     }
@@ -489,8 +489,8 @@ extension EmailAccount: Codable {
         port = try container.decodeIfPresent(Int.self, forKey: .port) ?? 993
         username = try container.decode(String.self, forKey: .username)
         let rawHost = try container.decodeIfPresent(String.self, forKey: .smtpHost)
-        let trimmedHost = rawHost?.trimmingCharacters(in: .whitespacesAndNewlines)
-        smtpHost = (trimmedHost?.isEmpty == false) ? trimmedHost : nil
+        // Shares the single blank agreement so whitespace-only overrides read as absent everywhere.
+        smtpHost = NormalizedText.value(rawHost)
         smtpPort = try container.decodeIfPresent(Int.self, forKey: .smtpPort)
         smtpSecurity = try container.decodeIfPresent(EmailSMTPSecurity.self, forKey: .smtpSecurity) ?? .auto
     }
@@ -646,6 +646,43 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
     /// Hard upper bound for `max_results`, mirroring mail search caps.
     public static let maxAllowedResults = 50
 
+    /// Environment variable overriding the browser Python executable.
+    /// Single source for the override name so the gateway, the managed venv
+    /// ensurer, and health copy never drift; pipx and Homebrew installs do not
+    /// satisfy `import playwright` for the server python, so an explicit path
+    /// here always wins over the managed venv and the PATH fallback.
+    public static let pythonBinEnvVar = "RUNEWEAVER_PYTHON_BIN"
+    /// Managed virtual-environment directory for browser automation.
+    /// Kept under `~/.runeweaver` so provisioning never touches a user-owned
+    /// venv elsewhere and an existing managed entry is reused, never clobbered.
+    public static let managedPythonVenvDir = "~/.runeweaver/python"
+    /// Relative path of the interpreter inside the managed venv.
+    public static let managedPythonRelativeBin = "bin/python"
+
+    /// Managed venv directory with `~` expanded to the home directory.
+    /// - Returns: Directory hosting the managed `bin/python`.
+    public static func managedPythonVenvDirURL() -> URL {
+        URL(fileURLWithPath: (managedPythonVenvDir as NSString).expandingTildeInPath)
+    }
+
+    /// Interpreter path inside the managed venv.
+    /// - Returns: `~/.runeweaver/python/bin/python` expanded for the current user.
+    public static func managedPythonExecutableURL() -> URL {
+        managedPythonVenvDirURL().appendingPathComponent(managedPythonRelativeBin)
+    }
+
+    /// Display path for the managed venv directory (unexpanded, for copy).
+    /// - Returns: `~/.runeweaver/python` as configured.
+    public static func managedPythonVenvDisplayPath() -> String {
+        managedPythonVenvDir
+    }
+
+    /// Display path for the managed interpreter (unexpanded, for copy).
+    /// - Returns: `~/.runeweaver/python/bin/python` as configured.
+    public static func managedPythonDisplayPath() -> String {
+        (managedPythonVenvDir as NSString).appendingPathComponent(managedPythonRelativeBin)
+    }
+
     /// Creates a browser config.
     public init(
         searxngURL: String = defaultSearxngURL,
@@ -663,6 +700,8 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         case maxResults = "max_results"
     }
 }
+
+// MARK: - NormalizedText lives in NormalizedText.swift
 
 // MARK: - Root config
 

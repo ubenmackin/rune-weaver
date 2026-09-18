@@ -6,9 +6,12 @@ import {
   ApiError,
   clearRuns,
   deleteRun,
+  isActiveRunStatus,
   listApprovals,
   listRuns,
   parseRunTimestamp,
+  RUN_LOG_POLL_LIMIT,
+  RUN_POLL_INTERVAL_MS,
   type PermissionRequest,
   type RunLogEntry,
 } from "../api";
@@ -194,7 +197,7 @@ export default function RunLogViewer() {
     setLoading(true);
     setError(null);
     try {
-      const response = await listRuns(100);
+      const response = await listRuns(RUN_LOG_POLL_LIMIT);
       setRuns(response.runs);
       await refreshApprovals();
     } catch (failure) {
@@ -208,7 +211,7 @@ export default function RunLogViewer() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    Promise.all([listRuns(100), listApprovals().catch(() => null)])
+    Promise.all([listRuns(RUN_LOG_POLL_LIMIT), listApprovals().catch(() => null)])
       .then(([runsResponse, approvalsResponse]) => {
         if (cancelled) return;
         setRuns(runsResponse.runs);
@@ -229,28 +232,30 @@ export default function RunLogViewer() {
     };
   }, []);
 
-  // Poll while any run is in progress or parked awaiting approval, so blocked turns refresh without
-  // a manual reload. Both runs and approvals refresh together so pending-approval badges never go
-  // stale during poll.
-  const hasRunning = runs.some(
-    (r) => r.status === "running" || r.status === "awaiting_approval",
-  );
+  // Live badges track only in-flight turns while parked approvals surface
+  // through the approvals badge, so the poller separates the two: running
+  // rows keep history fresh and parked rows keep approvals fresh without
+  // double-badging one blocked turn.
+  const hasRunning = runs.some((r) => isActiveRunStatus(r.status));
+  const hasParked = runs.some((r) => r.status === "awaiting_approval");
   useEffect(() => {
-    if (!hasRunning) return;
+    if (!hasRunning && !hasParked) return;
 
     const interval = setInterval(() => {
-      void Promise.all([
-        listRuns(100)
+      // Parked turns settle through the approvals inbox, so a parked-only
+      // tick refreshes approvals without refetching settled history.
+      if (hasRunning) {
+        void listRuns(RUN_LOG_POLL_LIMIT)
           .then((response) => setRuns(response.runs))
           .catch(() => {
             // Poll is best-effort; the next interval retries while a run stays active.
-          }),
-        refreshApprovals(),
-      ]);
-    }, 2500);
+          });
+      }
+      void refreshApprovals();
+    }, RUN_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [hasRunning, refreshApprovals]);
+  }, [hasRunning, hasParked, refreshApprovals]);
 
   // Keep selected modal updated if its run changes while viewing
   useEffect(() => {

@@ -10,7 +10,46 @@
 // contracts.
 
 import Foundation
+import RuneWeaverCore
 import Vapor
+
+/// One agreement point for search and browser DTO defaults.
+/// Health pills and error banners poll these DTOs independently; without shared
+/// absence and reachability defaults, one endpoint would show an empty banner
+/// while another collapses it and staged progress would read as idle in one
+/// view but starting in another.
+private enum SearchDTOFields {
+    /// In-flight stage worth rendering, so idle reads as absent everywhere.
+    /// Shares the banner absence agreement rather than repeating it, so staged
+    /// progress cannot drift from banner collapsing.
+    static func normalizedStage(_ value: String?) -> String? {
+        NormalizedText.value(value)
+    }
+
+    /// Validates a Unix-seconds Start time, dropping non-positive or non-finite values.
+    /// A number (not a Date) keeps every dashboard decoding without a shared date strategy.
+    static func normalizedStartedAt(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    /// Resolves the canonical base URL plus its dashboard alias.
+    /// - Parameters:
+    ///   - base: Canonical `baseURL` value, if present.
+    ///   - alias: Dashboard `url` alias, if present.
+    /// - Returns: Pair where the alias falls back to the resolved base.
+    static func resolvedBaseURL(base: String?, alias: String?) -> (baseURL: String, url: String) {
+        let resolved = base ?? alias ?? ""
+        return (resolved, alias ?? resolved)
+    }
+
+    /// Resolves the collapsed status, defaulting to reachability when absent.
+    /// Whitespace-only counts as absent like banners and stages, so a blank
+    /// status cannot leak through while message and stage collapse to nil.
+    static func resolvedStatus(_ status: String?, reachable: Bool) -> String {
+        NormalizedText.value(status) ?? (reachable ? "running" : "stopped")
+    }
+}
 
 /// Search engine health response for `GET /search/health`.
 /// Encodes both `baseURL` (canonical) and `url` plus `status` so dashboard
@@ -43,14 +82,9 @@ public struct SearchHealthResponse: Content, Equatable {
         self.baseURL = baseURL
         self.containerName = containerName
         self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmedStage = (stage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.stage = trimmedStage.isEmpty ? nil : trimmedStage
-        if let startedAt, startedAt.isFinite, startedAt > 0 {
-            self.startedAt = startedAt
-        } else {
-            self.startedAt = nil
-        }
+        self.status = SearchDTOFields.resolvedStatus(status, reachable: reachable)
+        self.stage = SearchDTOFields.normalizedStage(stage)
+        self.startedAt = SearchDTOFields.normalizedStartedAt(startedAt)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -67,22 +101,19 @@ public struct SearchHealthResponse: Content, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         reachable = try container.decode(Bool.self, forKey: .reachable)
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
+        let resolved = try SearchDTOFields.resolvedBaseURL(
+            base: container.decodeIfPresent(String.self, forKey: .baseURL),
+            alias: container.decodeIfPresent(String.self, forKey: .url)
+        )
+        baseURL = resolved.baseURL
+        url = resolved.url
         containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawStage = try container.decodeIfPresent(String.self, forKey: .stage)
-        let trimmedStage = (rawStage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        stage = trimmedStage.isEmpty ? nil : trimmedStage
-        let rawStartedAt = try container.decodeIfPresent(Double.self, forKey: .startedAt)
-        if let rawStartedAt, rawStartedAt.isFinite, rawStartedAt > 0 {
-            startedAt = rawStartedAt
-        } else {
-            startedAt = nil
-        }
+        status = try SearchDTOFields.resolvedStatus(
+            container.decodeIfPresent(String.self, forKey: .status),
+            reachable: reachable
+        )
+        stage = try SearchDTOFields.normalizedStage(container.decodeIfPresent(String.self, forKey: .stage))
+        startedAt = try SearchDTOFields.normalizedStartedAt(container.decodeIfPresent(Double.self, forKey: .startedAt))
     }
 
     /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
@@ -128,11 +159,9 @@ public struct SearchEnsureResponse: Content, Equatable {
         self.baseURL = baseURL
         self.started = started
         self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.message = trimmed.isEmpty ? nil : trimmed
-        let trimmedDiagnostics = (diagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
+        self.status = SearchDTOFields.resolvedStatus(status, reachable: reachable)
+        self.message = NormalizedText.value(message)
+        self.diagnostics = NormalizedText.value(diagnostics)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -149,19 +178,19 @@ public struct SearchEnsureResponse: Content, Equatable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         reachable = try container.decode(Bool.self, forKey: .reachable)
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
+        let resolved = try SearchDTOFields.resolvedBaseURL(
+            base: container.decodeIfPresent(String.self, forKey: .baseURL),
+            alias: container.decodeIfPresent(String.self, forKey: .url)
+        )
+        baseURL = resolved.baseURL
+        url = resolved.url
         started = try container.decodeIfPresent(Bool.self, forKey: .started) ?? false
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
-        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? nil : trimmed
-        let rawDiagnostics = try container.decodeIfPresent(String.self, forKey: .diagnostics)
-        let trimmedDiagnostics = (rawDiagnostics ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        diagnostics = trimmedDiagnostics.isEmpty ? nil : trimmedDiagnostics
+        status = try SearchDTOFields.resolvedStatus(
+            container.decodeIfPresent(String.self, forKey: .status),
+            reachable: reachable
+        )
+        message = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .message))
+        diagnostics = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .diagnostics))
     }
 
     /// Encodes both `baseURL` and `url` plus `status` for dual-contract reads.
@@ -204,9 +233,8 @@ public struct SearchStopResponse: Content, Equatable {
         self.reachable = reachable
         self.baseURL = baseURL
         self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.message = trimmed.isEmpty ? nil : trimmed
+        self.status = SearchDTOFields.resolvedStatus(status, reachable: reachable)
+        self.message = NormalizedText.value(message)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -227,15 +255,17 @@ public struct SearchStopResponse: Content, Equatable {
         reachable = try container.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
         stopped = try container.decodeIfPresent(Bool.self, forKey: .stopped) ?? !reachable
         containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
-        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? nil : trimmed
+        let resolved = try SearchDTOFields.resolvedBaseURL(
+            base: container.decodeIfPresent(String.self, forKey: .baseURL),
+            alias: container.decodeIfPresent(String.self, forKey: .url)
+        )
+        baseURL = resolved.baseURL
+        url = resolved.url
+        status = try SearchDTOFields.resolvedStatus(
+            container.decodeIfPresent(String.self, forKey: .status),
+            reachable: reachable
+        )
+        message = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .message))
     }
 
     /// Encodes the full shape so health-style readers keep working.
@@ -282,9 +312,8 @@ public struct SearchRemoveResponse: Content, Equatable {
         self.reachable = reachable
         self.baseURL = baseURL
         self.url = url ?? baseURL
-        self.status = status ?? (reachable ? "running" : "stopped")
-        let trimmed = (message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        self.message = trimmed.isEmpty ? nil : trimmed
+        self.status = SearchDTOFields.resolvedStatus(status, reachable: reachable)
+        self.message = NormalizedText.value(message)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -305,15 +334,17 @@ public struct SearchRemoveResponse: Content, Equatable {
         reachable = try container.decodeIfPresent(Bool.self, forKey: .reachable) ?? false
         removed = try container.decodeIfPresent(Bool.self, forKey: .removed) ?? !reachable
         containerName = try container.decodeIfPresent(String.self, forKey: .containerName) ?? ""
-        let base = try container.decodeIfPresent(String.self, forKey: .baseURL)
-        let alias = try container.decodeIfPresent(String.self, forKey: .url)
-        let resolved = base ?? alias ?? ""
-        baseURL = resolved
-        url = alias ?? resolved
-        status = try container.decodeIfPresent(String.self, forKey: .status) ?? (reachable ? "running" : "stopped")
-        let rawMessage = try container.decodeIfPresent(String.self, forKey: .message)
-        let trimmed = (rawMessage ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        message = trimmed.isEmpty ? nil : trimmed
+        let resolved = try SearchDTOFields.resolvedBaseURL(
+            base: container.decodeIfPresent(String.self, forKey: .baseURL),
+            alias: container.decodeIfPresent(String.self, forKey: .url)
+        )
+        baseURL = resolved.baseURL
+        url = resolved.url
+        status = try SearchDTOFields.resolvedStatus(
+            container.decodeIfPresent(String.self, forKey: .status),
+            reachable: reachable
+        )
+        message = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .message))
     }
 
     /// Encodes the full shape so health-style readers keep working.
@@ -326,5 +357,151 @@ public struct SearchRemoveResponse: Content, Equatable {
         try container.encode(url, forKey: .url)
         try container.encode(status, forKey: .status)
         try container.encodeIfPresent(message, forKey: .message)
+    }
+}
+
+/// Browser Python health response for `GET /browser/health`.
+/// Carries readiness of the managed `~/.runeweaver/python` venv plus the live
+/// provision stage so the dashboard can poll one contract about 1s for the
+/// amber Preparing line, mirroring the search health shape. `stage` holds one
+/// of `resolving`, `creating`, `installing`, `browsers` while a provision
+/// flight runs and clears to nil when idle; `startedAt` carries Unix seconds
+/// when the flight began, nil when idle. `message` holds the actionable
+/// banner naming the venv path plus manual fallback when not ready.
+public struct BrowserPythonHealthResponse: Content, Equatable {
+    /// Whether the effective interpreter can `import playwright`.
+    public let ready: Bool
+    /// Effective interpreter path (`RUNEWEAVER_PYTHON_BIN` override, managed
+    /// venv, or PATH fallback probe result).
+    public let pythonPath: String
+    /// Managed venv directory display path (`~/.runeweaver/python`).
+    public let venvPath: String
+    /// In-flight provision stage, nil when no provision is running.
+    public let stage: String?
+    /// Unix seconds when the in-flight provision began, nil when idle.
+    /// A number (not a Date) so every dashboard decodes it without sharing a
+    /// date strategy with the engine.
+    public let startedAt: Double?
+    /// Actionable banner (venv path plus manual fallback) when not ready.
+    public let message: String?
+
+    /// Creates a browser health response.
+    /// The venv display path defaults to the single-sourced managed location
+    /// so health copy never drifts from provisioning.
+    public init(
+        ready: Bool,
+        pythonPath: String = "",
+        venvPath: String = BrowserConfig.managedPythonVenvDisplayPath(),
+        stage: String? = nil,
+        startedAt: Double? = nil,
+        message: String? = nil
+    ) {
+        self.ready = ready
+        self.pythonPath = pythonPath
+        self.venvPath = venvPath
+        self.stage = SearchDTOFields.normalizedStage(stage)
+        self.startedAt = SearchDTOFields.normalizedStartedAt(startedAt)
+        self.message = NormalizedText.value(message)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ready
+        case pythonPath
+        case venvPath
+        case stage
+        case startedAt
+        case message
+    }
+
+    /// Decodes tolerantly so older engines omitting staged keys still parse.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ready = try container.decodeIfPresent(Bool.self, forKey: .ready) ?? false
+        pythonPath = try container.decodeIfPresent(String.self, forKey: .pythonPath) ?? ""
+        venvPath = try container.decodeIfPresent(String.self, forKey: .venvPath) ?? BrowserConfig.managedPythonVenvDisplayPath()
+        stage = try SearchDTOFields.normalizedStage(container.decodeIfPresent(String.self, forKey: .stage))
+        startedAt = try SearchDTOFields.normalizedStartedAt(container.decodeIfPresent(Double.self, forKey: .startedAt))
+        message = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .message))
+    }
+
+    /// Encodes the full shape, omitting staged keys when idle.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(ready, forKey: .ready)
+        try container.encode(pythonPath, forKey: .pythonPath)
+        try container.encode(venvPath, forKey: .venvPath)
+        try container.encodeIfPresent(stage, forKey: .stage)
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
+        try container.encodeIfPresent(message, forKey: .message)
+    }
+}
+
+/// Browser Python ensure response for `POST /browser/ensure`.
+/// `message` carries the single trimmed banner (cause plus venv path plus
+/// manual fallback) for inline error slots, while `diagnostics` carries the
+/// capped pip or browser-install tail for warn logs plus collapsed UI.
+/// Older engines omit `diagnostics`, which decodes to nil.
+public struct BrowserPythonEnsureResponse: Content, Equatable {
+    /// Whether the interpreter can `import playwright` after the attempt.
+    public let ready: Bool
+    /// Whether this call actually provisioned the managed venv.
+    public let started: Bool
+    /// Effective interpreter path after the attempt.
+    public let pythonPath: String
+    /// Managed venv directory display path.
+    public let venvPath: String
+    /// Trimmed banner (cause plus venv path plus fallback) when not ready.
+    public let message: String?
+    /// Capped per-stage detail for logs plus collapsed diagnostics.
+    public let diagnostics: String?
+
+    /// Creates a browser ensure response.
+    /// The venv display path defaults to the single-sourced managed location
+    /// so ensure copy never drifts from provisioning.
+    public init(
+        ready: Bool,
+        started: Bool,
+        pythonPath: String = "",
+        venvPath: String = BrowserConfig.managedPythonVenvDisplayPath(),
+        message: String? = nil,
+        diagnostics: String? = nil
+    ) {
+        self.ready = ready
+        self.started = started
+        self.pythonPath = pythonPath
+        self.venvPath = venvPath
+        self.message = NormalizedText.value(message)
+        self.diagnostics = NormalizedText.value(diagnostics)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case ready
+        case started
+        case pythonPath
+        case venvPath
+        case message
+        case diagnostics
+    }
+
+    /// Decodes tolerantly across staged shapes plus optional diagnostics.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ready = try container.decodeIfPresent(Bool.self, forKey: .ready) ?? false
+        started = try container.decodeIfPresent(Bool.self, forKey: .started) ?? false
+        pythonPath = try container.decodeIfPresent(String.self, forKey: .pythonPath) ?? ""
+        venvPath = try container.decodeIfPresent(String.self, forKey: .venvPath) ?? BrowserConfig.managedPythonVenvDisplayPath()
+        message = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .message))
+        diagnostics = try NormalizedText.value(container.decodeIfPresent(String.self, forKey: .diagnostics))
+    }
+
+    /// Encodes the full shape so either reader keeps working.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(ready, forKey: .ready)
+        try container.encode(started, forKey: .started)
+        try container.encode(pythonPath, forKey: .pythonPath)
+        try container.encode(venvPath, forKey: .venvPath)
+        try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(diagnostics, forKey: .diagnostics)
     }
 }

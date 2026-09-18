@@ -911,7 +911,7 @@ struct OpenAICompatibleHTTPClient: Sendable {
     /// - Returns: One vector per input text, in order.
     func requestEmbeddings(texts: [String]) async throws -> [[Float]] {
         let payload: [String: Any] = ["model": model, "input": texts]
-        let body = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+        let body = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         guard let request = makeRequest(path: "/embeddings", body: body, timeout: 60) else {
             throw LLMProviderError.invalidResponse("Malformed embeddings URL: \(baseURL)")
         }

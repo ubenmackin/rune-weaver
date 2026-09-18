@@ -460,9 +460,15 @@ public actor SchedulerStore {
             return
         }
         #if canImport(SQLite3)
-            let existing: [SchedulerJob] = await (try? SQLiteSerialIO.run {
-                SQLiteSchedulerJobStore.read(dbPath: dbPath)
-            }) ?? []
+            let existing: [SchedulerJob]
+            do {
+                existing = try await SQLiteSerialIO.run {
+                    SQLiteSchedulerJobStore.read(dbPath: dbPath)
+                }
+            } catch {
+                RuneWeaverLog.stores.error("SchedulerStore: failed reading jobs from SQLite: \(error.localizedDescription)")
+                existing = []
+            }
             if !existing.isEmpty {
                 // Durable state wins over the config seed: replace the registry
                 // so a store seeded in memory plus a later bootstrap never
@@ -499,9 +505,14 @@ public actor SchedulerStore {
     /// Loads persisted jobs from the given SQLite database path.
     public static func persistedJobs(from dbPath: String) async -> [SchedulerJob] {
         #if canImport(SQLite3)
-            await (try? SQLiteSerialIO.run {
-                SQLiteSchedulerJobStore.read(dbPath: dbPath)
-            }) ?? []
+            do {
+                return try await SQLiteSerialIO.run {
+                    SQLiteSchedulerJobStore.read(dbPath: dbPath)
+                }
+            } catch {
+                RuneWeaverLog.stores.error("SchedulerStore: persistedJobs failed reading from SQLite: \(error.localizedDescription)")
+                return []
+            }
         #else
             return []
         #endif
@@ -618,7 +629,14 @@ public extension SchedulerJobConfig {
         }
 
         static func read(dbPath: String) -> [SchedulerJob] {
-            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteSchedulerJobStore",
+                fallbackNote: "read returning in-memory state only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
+                return []
+            }
             defer { sqlite3_close(handle) }
 
             let sql = """
@@ -661,16 +679,14 @@ public extension SchedulerJobConfig {
         }
 
         static func write(job: SchedulerJob, dbPath: String) {
-            let handle: OpaquePointer?
-            do {
-                handle = try open(dbPath: dbPath)
-            } catch {
-                RuneWeaverLog.stores.error(
-                    "SQLiteSchedulerJobStore: failed opening store at \(dbPath): \(error); job \(job.id) kept in memory only and will not survive restart."
-                )
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteSchedulerJobStore",
+                fallbackNote: "job \(job.id) kept in memory only and will not survive restart",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
-            guard let handle else { return }
             defer { sqlite3_close(handle) }
 
             let sql = """
@@ -720,8 +736,12 @@ public extension SchedulerJobConfig {
         }
 
         static func delete(id: UUID, dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else {
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed opening store at \(dbPath); delete of \(id) kept in memory only.")
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteSchedulerJobStore",
+                fallbackNote: "delete of \(id) kept in memory only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
             defer { sqlite3_close(handle) }
@@ -744,8 +764,12 @@ public extension SchedulerJobConfig {
         }
 
         static func clear(dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else {
-                RuneWeaverLog.stores.error("SQLiteSchedulerJobStore: failed opening store at \(dbPath); clear kept in memory only.")
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteSchedulerJobStore",
+                fallbackNote: "clear kept in memory only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
             defer { sqlite3_close(handle) }

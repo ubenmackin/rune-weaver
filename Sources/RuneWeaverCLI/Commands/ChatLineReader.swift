@@ -5,6 +5,7 @@
 #endif
 import Foundation
 import os
+import RuneWeaverCore
 
 // MARK: - ChatHistoryStore
 
@@ -46,8 +47,9 @@ struct ChatHistoryStore: Sendable {
     /// Parses raw history file text into entries.
     static func parseHistoryLines(_ text: String, maxEntries: Int) -> [String] {
         let clamped = max(1, maxEntries)
-        let lines = text.components(separatedBy: .newlines)
-            .map { $0.replacingOccurrences(of: "\r", with: "") }
+        // Shared fold keeps history boundaries identical to TOML and archive
+        // parsing, so CRLF/CR files recall the same prompts as LF files.
+        let lines = NormalizedText.splitLines(text)
             .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         return Array(lines.suffix(clamped))
     }
@@ -131,10 +133,9 @@ struct ChatHistoryStore: Sendable {
     /// Records one submitted prompt.
     @discardableResult
     mutating func record(_ line: String) -> Bool {
-        let folded = line
-            .replacingOccurrences(of: "\r\n", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-            .replacingOccurrences(of: "\r", with: " ")
+        // Single fold source keeps history recording on the same line boundaries
+        // as parsing; folded to one line so multi-line pastes recall as one prompt.
+        let folded = NormalizedText.normalizedLineEndings(line).replacingOccurrences(of: "\n", with: " ")
         guard !folded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return false
         }
@@ -191,6 +192,7 @@ final class CLIExactlyOnceReadState: Sendable {
 // MARK: - Blocking line reads
 
 /// Serial queue for all line-editor blocking reads.
+/// Reads must serialize so concurrent callers cannot race on stdin and steal each other's lines.
 private let chatLineReadQueue = DispatchQueue(label: "com.runeweaver.chat-line-read", qos: .userInitiated)
 
 /// Reads one line via a blocking reader without blocking the cooperative pool.

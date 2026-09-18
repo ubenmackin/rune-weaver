@@ -6,16 +6,22 @@ import {
   ApiError,
   cancelChat,
   compareToolActionsByRound,
+  concurrentTurnsBusyMessage,
   decideApproval,
   getSession,
   getSessionToolActions,
   groupToolActionsByRound,
+  isActiveRunStatus,
   listApprovals,
   newSessionId,
+  normalizeLineEndings,
   normalizeRoundIndex,
   parseRunTimestamp,
+  placeholderCallIDsInText,
   postChat,
+  resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
+  textContainsPlaceholderForCall,
   updateSessionTitle,
   type ChatSegment,
   type HealthResponse,
@@ -31,6 +37,7 @@ import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
 import { WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useRunningRuns, type FrozenRunLogEntry } from "../hooks/useRunningRuns";
 import type {
   WSIncomingFrame,
   WSToolEndFrame,
@@ -42,9 +49,11 @@ import {
   isSameSession,
   mergeApprovalFrame,
   normalizeSessionID,
+  runSessionID,
 } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
 import { formatRelativeAgo } from "../relativeTime";
+import { logWarn } from "../logger";
 
 interface MessageItem {
   id: string;
@@ -69,6 +78,178 @@ interface InFlightTurn {
   // closes when a tool starts and a fresh text segment opens on the next delta
   // after tools, mirroring the persisted per-round note boundaries for reloads.
   segments: ChatSegment[];
+}
+
+// One background turn parked while the user browses another session. The map
+// below keys these by normalized session so rapid switches never interleave
+// deltas and a return restores the exact live timeline instead of restarting.
+// Warnings and token progress travel with the turn for the same reason: one
+// session's skipped tools or running sum must never leak into another view.
+interface ParkedFlight {
+  turn: InFlightTurn | null;
+  pending: boolean;
+  warnings: string[];
+  turnTokens: number | null;
+  base: number;
+  cancelled: boolean;
+  // Last live activity for this flight. Drives least-recently-used eviction and
+  // expiry so hidden sessions cannot accumulate without bound while the user
+  // keeps browsing; refreshed on every parked frame and on park.
+  updatedAt: number;
+}
+
+// Normalizes a flight-map key so engine-uppercase and dashboard-lowercase
+// spellings of one session share a single parked entry. An empty result means
+// the caller lost the owning session, so report through the centralized
+// logger instead of letting the turn vanish silently into an unkeyed bucket.
+function parkedFlightKey(id: string | null | undefined): string {
+  const normalized = normalizeSessionID(id);
+  if (!normalized) {
+    logWarn(
+      "[ChatView] parked flight key missing session id; background turn has no owner",
+    );
+  }
+  return normalized;
+}
+
+// Bounds the per-session flight map so hidden sessions cannot accumulate
+// without bound while the user keeps browsing. Completed shells evict first
+// because dropping a finished timeline loses nothing, with the stalest live
+// flight as the hard-cap fallback so the size never exceeds the bound,
+// while the expiry outlives the longest healthy inference budget so a slow
+// local evaluation never ages out mid-turn. The settle grace keeps a freshly
+// parked turn alive until its running row persists, so polling a stale settled
+// row never evicts a live turn on a slow persist.
+const MAX_PARKED_FLIGHTS = 10;
+const PARKED_FLIGHT_TTL_MS = 30 * 60 * 1000;
+const PARKED_SETTLE_GRACE_MS = 10 * 1000;
+
+// Outcome of a capped store so callers can surface lossy evictions through
+// component state. Completed-shell evictions lose nothing and stay quiet;
+// live evictions and refusals drop runnable timelines and must reach visible
+// state instead of a production-silent log.
+interface ParkedFlightStoreOutcome {
+  evictedKey: string | null;
+  evictedLive: boolean;
+  refused: boolean;
+}
+
+// Stores one flight under a least-recently-used cap: touching moves the entry
+// to the fresh end and an overfull map evicts the stalest completed shell,
+// falling back to the stalest entry overall so the size never exceeds the cap.
+// Completed shells go first because dropping a finished timeline loses nothing;
+// the fallback drops the stalest live flight whose next frame rebuilds it,
+// while expiry still reclaims idle shells and the settle grace keeps a freshly
+// parked turn alive until its running row persists.
+function storeParkedFlight(
+  flights: Map<string, ParkedFlight>,
+  key: string,
+  flight: ParkedFlight,
+): ParkedFlightStoreOutcome {
+  // An empty key would silently discard the background turn, so refuse through
+  // the centralized logger and report refusal so the caller surfaces it in
+  // state instead of dropping streamed progress quietly.
+  if (!key) {
+    logWarn(
+      "[ChatView] dropping parked flight for empty session key; background turn not preserved",
+    );
+    return { evictedKey: null, evictedLive: false, refused: true };
+  }
+  if (flights.has(key)) flights.delete(key);
+  flights.set(key, flight);
+  if (flights.size <= MAX_PARKED_FLIGHTS)
+    return { evictedKey: null, evictedLive: false, refused: false };
+  let oldestCompletedKey: string | null = null;
+  let oldestCompletedAt = Number.POSITIVE_INFINITY;
+  for (const [candidateKey, candidate] of flights) {
+    if (candidateKey === key) continue;
+    if (!candidate.pending && candidate.updatedAt < oldestCompletedAt) {
+      oldestCompletedAt = candidate.updatedAt;
+      oldestCompletedKey = candidateKey;
+    }
+  }
+  if (oldestCompletedKey) {
+    flights.delete(oldestCompletedKey);
+    return { evictedKey: oldestCompletedKey, evictedLive: false, refused: false };
+  }
+  // Every remaining entry is still live, so evict the stalest entry overall to
+  // keep the atomic cap instead of growing past it. The evicted flight rebuilds
+  // from its next frame while the badge stays lit, so no running turn goes dark.
+  // The outcome reports the live drop so the caller surfaces it in state; the
+  // dev log stays as the loud local mirror, never the sole prod signal.
+  for (const candidateKey of flights.keys()) {
+    if (candidateKey === key) continue;
+    const evictedLive = flights.get(candidateKey)?.pending ?? false;
+    flights.delete(candidateKey);
+    logWarn(
+      "[ChatView] parked flight map full with live turns; evicted oldest flight to keep cap",
+    );
+    // Defensive refusal keeps the invariant when the new key alone overflows:
+    // dropping the just-parked flight is louder than silently exceeding the cap.
+    if (flights.size > MAX_PARKED_FLIGHTS) {
+      flights.delete(key);
+      logWarn(
+        "[ChatView] refusing parked flight; map still over cap after eviction",
+      );
+      return { evictedKey: candidateKey, evictedLive, refused: true };
+    }
+    return { evictedKey: candidateKey, evictedLive, refused: false };
+  }
+  // Defensive refusal keeps the invariant when the new key alone overflows:
+  // dropping the just-parked flight is louder than silently exceeding the cap.
+  if (flights.size > MAX_PARKED_FLIGHTS) {
+    flights.delete(key);
+    logWarn(
+      "[ChatView] refusing parked flight; map still over cap after eviction",
+    );
+    return { evictedKey: null, evictedLive: false, refused: true };
+  }
+  return { evictedKey: null, evictedLive: false, refused: false };
+}
+
+// Expired-flight reclaim result so callers can clear badges and surface live
+// drops through state. Idle shells of either kind age identically because both
+// stop receiving frames once settled; the grace for freshly parked turns lives
+// with the caller, not here.
+interface PrunedParkedFlights {
+  prunedKeys: string[];
+  prunedLiveKeys: string[];
+}
+
+// Drops flights whose last activity predates the expiry so a missed terminal
+// frame cannot pin a shell forever; live and completed shells age identically
+// because both stop receiving frames once settled.
+function pruneExpiredParkedFlights(
+  flights: Map<string, ParkedFlight>,
+  nowMs: number = Date.now(),
+): PrunedParkedFlights {
+  const prunedKeys: string[] = [];
+  const prunedLiveKeys: string[] = [];
+  for (const [key, flight] of [...flights]) {
+    if (nowMs - flight.updatedAt > PARKED_FLIGHT_TTL_MS) {
+      const wasLive = flight.pending;
+      flights.delete(key);
+      prunedKeys.push(key);
+      if (wasLive) prunedLiveKeys.push(key);
+    }
+  }
+  return { prunedKeys, prunedLiveKeys };
+}
+
+// Marks one parked flight settled without replaying its reply: clears the live
+// timeline and flips pending so the concurrency cap frees and a later return
+// reloads persisted history instead of a stale bubble.
+function settleParkedFlight(flights: Map<string, ParkedFlight>, key: string): void {
+  const flight = flights.get(key);
+  if (!flight) return;
+  flight.pending = false;
+  flight.turn = null;
+  flight.updatedAt = Date.now();
+  // Re-insert to refresh LRU order like ensureFlight so the settled shell sorts
+  // by its settle time instead of its park time and eviction keeps picking the
+  // true stalest shell.
+  flights.delete(key);
+  flights.set(key, flight);
 }
 
 // Folds flat summaries from an ordered timeline so legacy readers that only know
@@ -112,8 +293,10 @@ function appendToolStartToSegments(
 
 // Merges one completed result into the matching live batch by call identity so
 // resumed batches rejoin the same timeline instead of forking a duplicate row.
-// Falls back to pending same-tool rows only when no call identity matches, so
-// batches with multiple same-tool calls never misattribute one result to all rows.
+// Without a call-identity match the result attributes to at most the first
+// pending same-tool row in timeline order, so batches with multiple same-tool
+// calls never fan one result out to every pending sibling; when no pending
+// same-tool row exists the frame drops instead of guessing an owner.
 function updateToolEndInSegments(
   segments: ChatSegment[],
   callID: string,
@@ -126,22 +309,43 @@ function updateToolEndInSegments(
       segment.kind === "tools" &&
       segment.actions.some((action) => action.callID === callID),
   );
+  if (hasCallIDMatch) {
+    return segments.map((segment) => {
+      if (segment.kind !== "tools") return segment;
+      return {
+        kind: "tools" as const,
+        actions: segment.actions.map((action) =>
+          action.callID === callID
+            ? {
+                ...action,
+                result,
+                ...(roundIndex !== undefined ? { roundIndex } : {}),
+              }
+            : action,
+        ),
+      };
+    });
+  }
+  let claimed = false;
   return segments.map((segment) => {
-    if (segment.kind !== "tools") return segment;
+    if (segment.kind !== "tools" || claimed) return segment;
+    let updatedInSegment = false;
+    const actions = segment.actions.map((action) => {
+      if (!claimed && !action.result && action.toolName === toolName) {
+        claimed = true;
+        updatedInSegment = true;
+        return {
+          ...action,
+          result,
+          ...(roundIndex !== undefined ? { roundIndex } : {}),
+        };
+      }
+      return action;
+    });
+    if (!updatedInSegment) return segment;
     return {
       kind: "tools" as const,
-      actions: segment.actions.map((action) => {
-        const isMatch = hasCallIDMatch
-          ? action.callID === callID
-          : !action.result && action.toolName === toolName;
-        return isMatch
-          ? {
-              ...action,
-              result,
-              ...(roundIndex !== undefined ? { roundIndex } : {}),
-            }
-          : action;
-      }),
+      actions,
     };
   });
 }
@@ -172,17 +376,82 @@ function appendDeltaToSegments(
 // by the authoritative call identifier, so narration fallback lines never
 // double-count with structured actions while unrelated prose stays visible.
 function filterUncoveredText(text: string, coveredCallIDs: Set<string>): string {
-  return text
+  // Single line-ending and placeholder sources keep history coverage identical
+  // to the shared helpers: carriage returns fold like the engine before
+  // matching, and the set grammar decides cover so prose that merely mentions
+  // an identifier never hides and future grammar changes land in one place.
+  const normalized = normalizeLineEndings(text);
+  return normalized
     .split("\n")
     .filter((line) => {
       if (!line.trim()) return false;
-      for (const callID of coveredCallIDs) {
-        if (callID && line.includes(`[${callID}]`)) return false;
+      const ids = placeholderCallIDsInText(line);
+      if (ids.size === 0) return true;
+      for (const id of ids) {
+        if (coveredCallIDs.has(id)) return false;
       }
       return true;
     })
     .join("\n")
     .trim();
+}
+
+// Collapses repeats of one execution to a single row, keeping the
+// execution-backed record over a pending twin so a narrated line plus its
+// persisted placeholder never renders as two boxes for one call.
+function deduplicateToolActionsByCallID(actions: ToolAction[]): ToolAction[] {
+  const best = new Map<string, ToolAction>();
+  const order: string[] = [];
+  const unidentified: ToolAction[] = [];
+  for (const action of actions) {
+    if (!action.callID) {
+      unidentified.push(action);
+      continue;
+    }
+    const existing = best.get(action.callID);
+    if (!existing) {
+      best.set(action.callID, action);
+      order.push(action.callID);
+      continue;
+    }
+    const existingHasResult = existing.result != null;
+    const candidateHasResult = action.result != null;
+    if (candidateHasResult && !existingHasResult) {
+      best.set(action.callID, action);
+    }
+  }
+  return [...order.map((id) => best.get(id) as ToolAction), ...unidentified];
+}
+
+// Shared cold builder for terminal timelines without a live skeleton: dedups by
+// preserved call identity, orders oldest-first, groups one tools segment per
+// round, then trails uncovered prose. Done and REST paths share it so polling
+// and streaming clients interleave identically instead of drifting.
+function buildSegmentsFromActionsAndText(
+  actions: ToolAction[],
+  text: string,
+): ChatSegment[] {
+  const deduped = deduplicateToolActionsByCallID(actions);
+  const ordered = [...deduped].sort(compareToolActionsByRound);
+  const built: ChatSegment[] = [];
+  for (const group of groupToolActionsByRound(ordered)) {
+    built.push({ kind: "tools" as const, actions: group });
+  }
+  const trailing = text.trim();
+  // Avoid duplicating narration fallback lines already covered by structured
+  // actions: only uncovered prose becomes a text segment. Without a structured
+  // record every line stays visible, so fall back to the full text when all
+  // lines filter but no tool segment exists.
+  if (trailing.length > 0) {
+    const covered = new Set(ordered.map((a) => a.callID).filter(Boolean));
+    const uncovered = filterUncoveredText(trailing, covered);
+    if (uncovered.length > 0) {
+      built.push({ kind: "text" as const, text: uncovered });
+    } else if (built.length === 0) {
+      built.push({ kind: "text" as const, text: trailing });
+    }
+  }
+  return built;
 }
 
 // Builds a terminal timeline from the streamed skeleton plus authoritative done
@@ -194,21 +463,25 @@ function buildDoneSegments(
   doneText: string | undefined,
   snapshotText: string,
 ): ChatSegment[] {
+  const dedupedDone = deduplicateToolActionsByCallID(doneToolActions);
   const byCallID = new Map<string, ToolAction>();
-  for (const action of doneToolActions) {
+  for (const action of dedupedDone) {
     if (action.callID) byCallID.set(action.callID, action);
   }
   if (snapshotSegments.length > 0) {
     const merged = snapshotSegments.map((segment) => {
       if (segment.kind !== "tools") return segment;
+      const refreshed = segment.actions.map((action) => {
+        const authoritative = action.callID
+          ? byCallID.get(action.callID)
+          : undefined;
+        return authoritative ? { ...authoritative } : { ...action };
+      });
+      // A narrated line plus its persisted twin share one identifier after the
+      // backend preserves call IDs, so collapse repeats here as well.
       return {
         kind: "tools" as const,
-        actions: segment.actions.map((action) => {
-          const authoritative = action.callID
-            ? byCallID.get(action.callID)
-            : undefined;
-          return authoritative ? { ...authoritative } : { ...action };
-        }),
+        actions: deduplicateToolActionsByCallID(refreshed),
       };
     });
     // Done actions for calls never streamed (parked resumes) append as their own
@@ -220,7 +493,7 @@ function buildDoneSegments(
           : [],
       ),
     );
-    const missing = doneToolActions.filter(
+    const missing = dedupedDone.filter(
       (action) => action.callID && !streamedCallIDs.has(action.callID),
     );
     if (missing.length > 0) {
@@ -248,52 +521,18 @@ function buildDoneSegments(
     }
     return merged;
   }
-  // No live skeleton (cold done): group authoritative actions by round oldest-first
-  // then trail the terminal text, matching the history reconstruction order.
-  const ordered = [...doneToolActions].sort(compareToolActionsByRound);
-  const built: ChatSegment[] = [];
-  for (const group of groupToolActionsByRound(ordered)) {
-    built.push({ kind: "tools" as const, actions: group });
-  }
-  const trailing = (doneText ?? snapshotText ?? "").trim();
-  // Avoid duplicating narration fallback lines already covered by structured
-  // actions: only uncovered prose becomes a text segment.
-  if (trailing.length > 0) {
-    const covered = new Set(
-      ordered.map((action) => action.callID).filter(Boolean),
-    );
-    const uncovered = filterUncoveredText(trailing, covered);
-    if (uncovered.length > 0) {
-      built.push({ kind: "text" as const, text: uncovered });
-    } else if (built.length === 0) {
-      built.push({ kind: "text" as const, text: trailing });
-    }
-  }
-  return built;
+  // No live skeleton (cold done): share the grouped builder with the REST path
+  // so both order and cover-filter identically.
+  return buildSegmentsFromActionsAndText(
+    dedupedDone,
+    doneText ?? snapshotText ?? "",
+  );
 }
 
 // Builds REST fallback timelines without a live skeleton: round groups in order
 // then the terminal text, so polling clients agree with streaming ones.
 function buildRestSegments(actions: ToolAction[], text: string): ChatSegment[] {
-  const ordered = [...actions].sort(compareToolActionsByRound);
-  const built: ChatSegment[] = [];
-  for (const group of groupToolActionsByRound(ordered)) {
-    built.push({ kind: "tools" as const, actions: group });
-  }
-  if (text.trim().length > 0) {
-    const covered = new Set(ordered.map((a) => a.callID).filter(Boolean));
-    const uncovered = filterUncoveredText(text, covered);
-    // Without a structured record every line stays visible as prose instead of
-    // guessing its shape, so fall back to the full text when all lines filter.
-    if (uncovered.length > 0) {
-      built.push({ kind: "text" as const, text: uncovered });
-    } else if (built.length === 0) {
-      built.push({ kind: "text" as const, text: text.trim() });
-    } else if (ordered.length === 0) {
-      built.push({ kind: "text" as const, text: text.trim() });
-    }
-  }
-  return built;
+  return buildSegmentsFromActionsAndText(actions, text);
 }
 
 const MAX_MESSAGES = 200;
@@ -413,14 +652,16 @@ interface ChatViewProps {
 }
 
 // Indexes server-derived per-message groups by parent message ID, oldest message
-// first. Each group's actions sort chronologically by round so reloads interleave
-// identically to live turns; untracked rounds keep stored order at their stored slot.
+// first. Each group's actions dedup by preserved call identity with results winning
+// then sort chronologically by round so reloads interleave identically to live turns;
+// untracked rounds keep stored order at their stored slot.
 export function toolActionMap(
   groups: SessionMessageToolActions[] | undefined,
 ): Map<string, ToolAction[]> {
   const map = new Map<string, ToolAction[]>();
   for (const group of groups ?? []) {
-    map.set(group.messageID, sortToolActionsByRound([...(group.actions ?? [])]));
+    const deduped = deduplicateToolActionsByCallID([...(group.actions ?? [])]);
+    map.set(group.messageID, sortToolActionsByRound(deduped));
   }
   return map;
 }
@@ -575,38 +816,33 @@ export function reconstructMessages(
       pendingCompletedAt = mergeCompletedAt(pendingCompletedAt, noteCompletedAt);
       const structured = getStructured(m.id);
       if (structured && structured.length > 0) {
+        // A narrated line plus its persisted twin share one preserved identifier,
+        // so collapse repeats before covering text to leave a single Done box.
+        const dedupedStructured = deduplicateToolActionsByCallID(structured);
         const coveredCallIDs = new Set(
-          structured.map((action) => action.callID).filter(Boolean),
+          dedupedStructured.map((action) => action.callID).filter(Boolean),
         );
-        const leftoverLines: string[] = [];
-        for (const rawLine of m.content.split("\n")) {
-          if (!rawLine.trim()) continue;
-          // Hide only lines the server record covers, identified by the
-          // authoritative call identifier, so unrelated prose stays visible and
-          // narration fallback lines never double-count with structured actions.
-          let isCovered = false;
-          for (const callID of coveredCallIDs) {
-            if (rawLine.includes(`[${callID}]`)) {
-              isCovered = true;
-              break;
-            }
-          }
-          if (isCovered) continue;
-          leftoverLines.push(rawLine);
-        }
+        // Single coverage path keeps history grouping identical to live turns:
+        // the shared filter folds line endings and matches the placeholder set
+        // grammar, so narration lines collapse with their record while
+        // mention-only prose stays visible.
+        const uncovered = filterUncoveredText(m.content, coveredCallIDs);
         // Preserve live order per round: this note's prose precedes its tools, and
         // successive notes append as successive segments instead of one bucket.
-        if (leftoverLines.length > 0) {
+        if (uncovered.length > 0) {
           pendingSegments.push({
             kind: "text",
-            text: leftoverLines.join("\n").trim(),
+            text: uncovered,
           });
         }
-        pendingSegments.push(...toolsSegmentsForMessage(structured));
+        pendingSegments.push(...toolsSegmentsForMessage(dedupedStructured));
         continue;
       }
       const leftoverLines: string[] = [];
-      for (const rawLine of m.content.split("\n")) {
+      // Single line-ending source keeps bare prose joining identically to the
+      // covered path above instead of leaving stray carriage returns.
+      const normalizedBareContent = normalizeLineEndings(m.content);
+      for (const rawLine of normalizedBareContent.split("\n")) {
         if (!rawLine.trim()) continue;
         // Without a server record tool activity stays unknown, so every
         // line stays visible as prose instead of guessing its shape.
@@ -699,6 +935,27 @@ export default function ChatView({ health }: ChatViewProps) {
   const [decidingApprovalIDs, setDecidingApprovalIDs] = useState<Set<string>>(
     () => new Set<string>(),
   );
+  // Per-session flights for turns left running while the user browses another
+  // session. The active view keeps its own pending/in-flight state for
+  // rendering while this map preserves every parked session's timeline,
+  // warnings, and token progress so switching never cancels the server turn
+  // and returning restores the live bubble instead of restarting.
+  const parkedFlightsRef = useRef<Map<string, ParkedFlight>>(new Map());
+  // Sessions with a parked running turn, mirrored to state so the sidebar can
+  // badge them. The ref stays the source of truth for handlers while state
+  // drives rendering; both hold normalized lowercase identifiers.
+  const [backgroundRunningIDs, setBackgroundRunningIDs] = useState<string[]>([]);
+  const backgroundRunningRef = useRef<Set<string>>(new Set());
+  // True while the shared socket is down. The input stays usable for drafts
+  // and running turns keep their server slot; recovery clears the notice on
+  // reconnect instead of cancelling anything.
+  const [reconnecting, setReconnecting] = useState(false);
+  // Visible record of lossy flight trims (live evictions, refusals, expired
+  // live reclaims). The dev log stays loud locally but is silent in
+  // production, so this state is the shipped signal that a background timeline
+  // was dropped and will rebuild from its next frame; completed-shell trims
+  // lose nothing and never land here.
+  const [trimmedLiveFlights, setTrimmedLiveFlights] = useState<string[]>([]);
 
   // Status bar metrics
   const [lastTurnTokens, setLastTurnTokens] = useState<number | null>(null);
@@ -731,6 +988,10 @@ export default function ChatView({ health }: ChatViewProps) {
   // so the done handler reads this ref instead of nesting a message append
   // inside a turn updater, which would duplicate under double-invoke.
   const inFlightTurnRef = useRef<InFlightTurn | null>(null);
+  // Mirrors for parking: switching sessions must carry the active banner and
+  // running token sum into the parked flight so returning restores them.
+  const turnWarningsRef = useRef<string[]>([]);
+  const lastTurnTokensRef = useRef<number | null>(null);
   // Live mirror of the session total so the turn handler reads the latest base
   // without re-creating its callback on every token update.
   const sessionTokensRef = useRef(sessionTokens);
@@ -746,6 +1007,18 @@ export default function ChatView({ health }: ChatViewProps) {
   const knownDraftIDRef = useRef<string | null>(
     localStorage.getItem("rw_active_session_id") ? null : sessionID,
   );
+  // Wall-clock instant the active turn started or resumed. Guards the
+  // missed-terminal reconcile so a just-sent turn never settles before its
+  // running row persists; live frames prove liveness while this stamp proves
+  // recency after a socket outage.
+  const activeTurnStartMsRef = useRef<number | null>(null);
+  // Latest polled run-log snapshot mirrored for socket handlers that cannot
+  // depend on state closures. Lets reconnect revalidate the active turn
+  // against the same authoritative rows the poller uses instead of blindly
+  // re-arming the timer. Read-only because the shared poller hands out a
+  // frozen snapshot that callers iterate without mutating.
+  const sharedRunsRef = useRef<ReadonlyArray<FrozenRunLogEntry>>([]);
+  const sharedRunningIDsRef = useRef<string[]>([]);
 
   // Mirror latest values after commit so concurrent rendering never observes
   // a torn ref written during render.
@@ -758,6 +1031,12 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     inFlightTurnRef.current = inFlightTurn;
   }, [inFlightTurn]);
+  useEffect(() => {
+    turnWarningsRef.current = turnWarnings;
+  }, [turnWarnings]);
+  useEffect(() => {
+    lastTurnTokensRef.current = lastTurnTokens;
+  }, [lastTurnTokens]);
   useEffect(() => {
     sessionTokensRef.current = sessionTokens;
   }, [sessionTokens]);
@@ -792,6 +1071,7 @@ export default function ChatView({ health }: ChatViewProps) {
         // Cancel is best-effort; timeout recovery proceeds even when it fails.
       });
       turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
       setPending(false);
       // Honest liveness copy: with heartbeats re-arming healthy evals, reaching
@@ -805,26 +1085,574 @@ export default function ChatView({ health }: ChatViewProps) {
     }, budgetMs);
   }, []);
 
-  // Release a stranded turn when the socket drops mid-turn.
+  // Marks one normalized session as running or idle in the background set,
+  // mirroring to state so the sidebar badge re-renders. The ref stays the
+  // source of truth for socket handlers that cannot depend on state closures.
+  const markBackgroundRunning = useCallback((normalized: string, running: boolean) => {
+    if (!normalized) return;
+    const current = backgroundRunningRef.current;
+    if (running) {
+      if (current.has(normalized)) return;
+      current.add(normalized);
+    } else {
+      if (!current.has(normalized)) return;
+      current.delete(normalized);
+    }
+    setBackgroundRunningIDs([...current]);
+  }, []);
+
+  // Reaps expired parked flights and surfaces live drops through visible state.
+  // Every entry point that can observe a settled shell funnels here so expiry
+  // cannot pin idle flights between parks: badges clear for each pruned key
+  // while live reclaims join the eviction banner instead of the dev-only log.
+  const reapExpiredFlightsAndSurface = useCallback(() => {
+    const expired = pruneExpiredParkedFlights(parkedFlightsRef.current);
+    for (const prunedKey of expired.prunedKeys) {
+      markBackgroundRunning(prunedKey, false);
+    }
+    if (expired.prunedLiveKeys.length > 0) {
+      setTrimmedLiveFlights((previous) => [
+        ...previous,
+        ...expired.prunedLiveKeys.filter((k) => !previous.includes(k)),
+      ]);
+    }
+  }, [markBackgroundRunning]);
+
+  // Reloads persisted history for one session after its terminal frame was
+  // missed. Live timelines cannot reconstruct a finished turn, so the server
+  // record wins here; a deleted session recovers the same way as the initial
+  // load instead of resurrecting a stale identifier on the next send.
+  const reloadActiveHistory = useCallback((activeID: string) => {
+    if (!activeID) return;
+    if (knownDraftIDRef.current === activeID) return;
+    const snapshotID = activeID;
+    Promise.all([
+      getSession(snapshotID),
+      getSessionToolActions(snapshotID).catch(() => null),
+    ])
+      .then(([res, structured]) => {
+        if (
+          normalizeSessionID(sessionIDRef.current) !==
+          normalizeSessionID(snapshotID)
+        ) {
+          return;
+        }
+        if (res && Array.isArray(res.messages)) {
+          const mapped = reconstructMessages(
+            res.messages,
+            structured ? toolActionMap(structured.actions) : undefined,
+            structured
+              ? toolActionCompletedAtMap(structured.actions)
+              : undefined,
+          );
+          setMessages(mapped);
+        }
+      })
+      .catch((failure) => {
+        if (
+          normalizeSessionID(sessionIDRef.current) !==
+          normalizeSessionID(snapshotID)
+        ) {
+          return;
+        }
+        if (
+          failure instanceof ApiError &&
+          failure.status === 404 &&
+          !didRecoverSessionRef.current
+        ) {
+          didRecoverSessionRef.current = true;
+          const next = newSessionId();
+          knownDraftIDRef.current = next;
+          localStorage.setItem("rw_active_session_id", next);
+          setSessionID(next);
+        }
+      });
+  }, []);
+
+  // A dropped socket must never cancel server turns: the engine keeps
+  // evaluating while the shared client reconnects, and heartbeats re-arm the
+  // active timer on recovery. Only surface a reconnecting notice so the user
+  // knows live updates are paused; explicit Cancel stays the sole path that
+  // aborts a turn. The liveness timer suspends across the outage so it cannot
+  // fire while hidden and cancel a turn the server still owns.
   const handleWSClose = useCallback(() => {
-    if (!pendingRef.current) return;
-    // Cancel the turn's owning session, not whatever session is active now,
-    // so switching sessions mid-turn never cancels the new session.
-    const turnSID = turnSessionIDRef.current ?? sessionIDRef.current;
-    void cancelChat(turnSID).catch(() => {
-      // Cancel is best-effort; close recovery releases the input even when it fails.
-    });
+    setReconnecting(true);
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
       turnTimeoutRef.current = null;
     }
-    turnSessionIDRef.current = null;
-    setInFlightTurn(null);
-    setPending(false);
-    setError(
-      "Connection lost during the turn. Retry your message — the interrupted turn was cancelled.",
-    );
   }, []);
+
+  // Clears the reconnecting notice once the shared socket recovers. A turn
+  // that finished while the socket was down misses both its terminal frame
+  // and its run broadcast, so revalidating against the polled run log keeps
+  // a completed turn from waiting out the full liveness budget and then
+  // surfacing a misleading timeout plus a no-op cancel. Persisted history
+  // wins when no running row remains; live turns resume from their next
+  // frame with a re-armed budget because nothing was cancelled outright.
+  const handleWSOpen = useCallback(() => {
+    setReconnecting(false);
+    // Reconnect reaps expired shells on the same tick that reconciles the
+    // active turn, so a socket outage cannot pin idle flights until the next
+    // park. Live reaps surface through state rather than the dev-only log.
+    reapExpiredFlightsAndSurface();
+    if (!pendingRef.current || cancelledRef.current) {
+      return;
+    }
+    const activeNorm = normalizeSessionID(sessionIDRef.current);
+    if (!activeNorm) {
+      armTurnTimeout();
+      return;
+    }
+    const turnSID = turnSessionIDRef.current;
+    if (turnSID != null && normalizeSessionID(turnSID) !== activeNorm) {
+      return;
+    }
+    if (sharedRunningIDsRef.current.includes(activeNorm)) {
+      armTurnTimeout();
+      return;
+    }
+    const startedAt = activeTurnStartMsRef.current;
+    if (startedAt == null || Date.now() - startedAt < PARKED_SETTLE_GRACE_MS) {
+      armTurnTimeout();
+      return;
+    }
+    let hasSettledEvidence = false;
+    let stillRunning = false;
+    for (const run of sharedRunsRef.current) {
+      const raw = (run as { sessionID?: unknown }).sessionID;
+      if (typeof raw !== "string" || !raw.trim()) continue;
+      if (raw.trim().toLowerCase() !== activeNorm) continue;
+      const status = (run as { status?: unknown }).status;
+      if (
+        isActiveRunStatus(typeof status === "string" ? status : undefined)
+      ) {
+        stillRunning = true;
+        break;
+      }
+      const ts = parseRunTimestamp(
+        (run as { timestamp?: unknown }).timestamp as string | number,
+      ).getTime();
+      // Corrupt rows prove nothing: a missing or epoch stamp means a legacy
+      // row, so skip it instead of settling a fresh turn on bad evidence.
+      if (!Number.isFinite(ts) || ts <= 0) {
+        continue;
+      }
+      if (ts >= startedAt - 5000) {
+        hasSettledEvidence = true;
+        break;
+      }
+    }
+    if (stillRunning || !hasSettledEvidence) {
+      armTurnTimeout();
+      return;
+    }
+    // The active turn settled while the socket was away: release the input
+    // without issuing a cancel for a turn the server no longer owns, then
+    // reload the persisted reply instead of replaying a stale bubble.
+    clearTurnTimeout();
+    turnSessionIDRef.current = null;
+    activeTurnStartMsRef.current = null;
+    pendingRef.current = false;
+    setInFlightTurn(null);
+    inFlightTurnRef.current = null;
+    setPending(false);
+    markBackgroundRunning(activeNorm, false);
+    reloadActiveHistory(sessionIDRef.current);
+  }, [armTurnTimeout, clearTurnTimeout, markBackgroundRunning, reloadActiveHistory, reapExpiredFlightsAndSurface]);
+
+  // Parks the active turn into the per-session map before leaving it, keeping
+  // the server turn alive. The inactivity timer is cleared because the parked
+  // view no longer locks the input; liveness resumes from the next frame
+  // after returning instead of firing a spurious timeout while hidden.
+  const parkActiveFlight = useCallback(() => {
+    const activeID = sessionIDRef.current;
+    const key = parkedFlightKey(activeID);
+    // The park site owns the session invariant: without a key the live turn
+    // would be abandoned with the server still running it, so report through
+    // the centralized logger while keeping the live view.
+    if (!key) {
+      logWarn(
+        "[ChatView] cannot park active turn without a session id; keeping live view",
+      );
+      return;
+    }
+    if (!pendingRef.current) {
+      return;
+    }
+    // Enforce the expiry before capping so idle shells never pin the map until
+    // the next store; reclaimed live timelines surface through state because
+    // the dev log alone stays silent in production.
+    reapExpiredFlightsAndSurface();
+    const snapshot = inFlightTurnRef.current;
+    const outcome = storeParkedFlight(parkedFlightsRef.current, key, {
+      turn: snapshot
+        ? {
+            toolActions: [...snapshot.toolActions],
+            text: snapshot.text,
+            segments: snapshot.segments.map((segment) =>
+              segment.kind === "tools"
+                ? { kind: "tools" as const, actions: [...segment.actions] }
+                : { ...segment },
+            ),
+          }
+        : { toolActions: [], text: "", segments: [] },
+      pending: true,
+      // Carry the banner and running sum so returning restores the exact live
+      // footer instead of resetting to zero mid-turn.
+      warnings: [...turnWarningsRef.current],
+      turnTokens: lastTurnTokensRef.current,
+      base: sessionBaseRef.current,
+      cancelled: cancelledRef.current,
+      updatedAt: Date.now(),
+    });
+    // A live eviction or refusal drops a runnable timeline: keep the badge lit
+    // so the turn never goes dark, but record the trim in visible state; the
+    // evicted timeline rebuilds from its next frame.
+    if (outcome.evictedKey) {
+      markBackgroundRunning(outcome.evictedKey, false);
+    }
+    if (outcome.evictedLive || outcome.refused) {
+      const trimmedKey = outcome.evictedKey ?? key;
+      setTrimmedLiveFlights((previous) =>
+        previous.includes(trimmedKey) ? previous : [...previous, trimmedKey],
+      );
+    }
+    markBackgroundRunning(key, true);
+    if (turnTimeoutRef.current != null) {
+      clearTimeout(turnTimeoutRef.current);
+      turnTimeoutRef.current = null;
+    }
+  }, [markBackgroundRunning, reapExpiredFlightsAndSurface]);
+
+  // Restores a parked turn when returning to its session, re-arming the
+  // liveness timer so a silent socket still releases the input. Sessions with
+  // no parked flight return to an idle view; their history reloads from the
+  // persisted messages below instead of a stale live snapshot. Completed
+  // background turns (terminal arrived while hidden) still restore their
+  // warning banner so the return shows the same skipped-tool notice the live
+  // view would have, without replaying the done message itself.
+  const restoreParkedFlight = useCallback(
+    (id: string) => {
+      const key = parkedFlightKey(id);
+      if (!key) return;
+      // Reattach reaps expired shells first so returning never resurrects a
+      // stale timeline pinned since the last park; live reaps surface through
+      // state for the same production-visibility reason as the park path.
+      reapExpiredFlightsAndSurface();
+      const parked = parkedFlightsRef.current.get(key);
+      if (!parked) {
+        return;
+      }
+      if (!parked.pending) {
+        if (parked.warnings.length > 0) {
+          setTurnWarnings([...parked.warnings]);
+        }
+        if (parked.turnTokens != null) {
+          setLastTurnTokens(parked.turnTokens);
+        }
+        parkedFlightsRef.current.delete(key);
+        markBackgroundRunning(key, false);
+        return;
+      }
+      parkedFlightsRef.current.delete(key);
+      markBackgroundRunning(key, false);
+      cancelledRef.current = parked.cancelled;
+      sessionBaseRef.current = parked.base;
+      if (parked.turnTokens != null) {
+        setLastTurnTokens(parked.turnTokens);
+        lastTurnTokensRef.current = parked.turnTokens;
+        // Show the live session estimate immediately instead of flashing the
+        // pre-turn base until the next token frame arrives.
+        setSessionTokens(parked.base + parked.turnTokens);
+      }
+      if (parked.warnings.length > 0) {
+        setTurnWarnings([...parked.warnings]);
+      }
+      if (parked.turn) {
+        setInFlightTurn(parked.turn);
+      }
+      setPending(true);
+      pendingRef.current = true;
+      turnSessionIDRef.current = id;
+      activeTurnStartMsRef.current = Date.now();
+      // Re-arm the liveness budget for the restored turn so a silent socket
+      // still releases the input instead of stranding it after the switch.
+      armTurnTimeout();
+    },
+    [markBackgroundRunning, armTurnTimeout, reapExpiredFlightsAndSurface],
+  );
+
+  // Applies one background frame to its owning parked flight without touching
+  // the active view. Rapid switches stay safe because deltas for a hidden
+  // session only grow that session's parked timeline; the visible messages
+  // never interleave. Terminal frames clear the parked pending flag and
+  // persist token totals so returning reloads the completed history instead
+  // of replaying a stale bubble or duplicating the done message.
+  const updateParkedFlightFromFrame = useCallback(
+    (frameSessionID: string, data: WSIncomingFrame) => {
+      const key = parkedFlightKey(frameSessionID);
+      // Untagged background frames have no owner to attribute progress to, so
+      // drop them instead of merging one session's deltas into another. The
+      // drop is lossy, so it surfaces through visible state like live
+      // evictions: the dev log stays silent in production and cannot be the
+      // only signal that streamed progress was discarded.
+      if (!key) {
+        logWarn(
+          "[ChatView] dropping background frame for empty session key",
+        );
+        setTrimmedLiveFlights((previous) =>
+          previous.includes("unknown") ? previous : [...previous, "unknown"],
+        );
+        return;
+      }
+      const frameType =
+        typeof (data as unknown as Record<string, unknown>).type === "string"
+          ? (data as unknown as Record<string, unknown>).type
+          : undefined;
+      const ensureFlight = (): ParkedFlight => {
+        const existing = parkedFlightsRef.current.get(key);
+        if (existing) {
+          existing.updatedAt = Date.now();
+          parkedFlightsRef.current.delete(key);
+          parkedFlightsRef.current.set(key, existing);
+          return existing;
+        }
+        const base = loadSessionTokens(frameSessionID);
+        const created: ParkedFlight = {
+          turn: { toolActions: [], text: "", segments: [] },
+          pending: true,
+          warnings: [],
+          turnTokens: null,
+          base,
+          cancelled: false,
+          updatedAt: Date.now(),
+        };
+        // A background frame for an unknown session reaps expiry before
+        // capping so one missed terminal cannot pin shells across reconnects.
+        reapExpiredFlightsAndSurface();
+        const outcome = storeParkedFlight(parkedFlightsRef.current, key, created);
+        if (outcome.evictedKey) {
+          markBackgroundRunning(outcome.evictedKey, false);
+        }
+        if (outcome.evictedLive || outcome.refused) {
+          const trimmedKey = outcome.evictedKey ?? key;
+          setTrimmedLiveFlights((previous) =>
+            previous.includes(trimmedKey) ? previous : [...previous, trimmedKey],
+          );
+        }
+        markBackgroundRunning(key, true);
+        return created;
+      };
+      if (
+        frameType === "delta" ||
+        frameType === "tool_start" ||
+        frameType === "tool_end" ||
+        frameType === "warning" ||
+        frameType === "turn_alive" ||
+        frameType === "turn_tokens"
+      ) {
+        const flight = ensureFlight();
+        if (!flight.turn) {
+          flight.turn = { toolActions: [], text: "", segments: [] };
+        }
+        flight.pending = true;
+        flight.updatedAt = Date.now();
+        parkedFlightsRef.current.delete(key);
+        parkedFlightsRef.current.set(key, flight);
+        markBackgroundRunning(key, true);
+        if (frameType === "delta") {
+          const rawDelta: unknown = (data as unknown as Record<string, unknown>).delta;
+          const deltaText = typeof rawDelta === "string" ? rawDelta : "";
+          if (deltaText) {
+            flight.turn.text += deltaText;
+            flight.turn.segments = appendDeltaToSegments(
+              flight.turn.segments,
+              deltaText,
+            );
+          }
+        } else if (frameType === "tool_start") {
+          const rawToolName: unknown = (data as unknown as Record<string, unknown>).toolName;
+          const rawCallID: unknown = (data as unknown as Record<string, unknown>).callID;
+          const rawArgs: unknown = (data as unknown as Record<string, unknown>).argumentsJSON;
+          if (
+            typeof rawToolName !== "string" ||
+            typeof rawCallID !== "string" ||
+            typeof rawArgs !== "string"
+          ) {
+            return;
+          }
+          const started: ToolAction = {
+            toolName: rawToolName,
+            callID: rawCallID,
+            argumentsJSON: rawArgs,
+            result: null,
+            ...(normalizeRoundIndex(
+              (data as WSToolStartFrame).roundIndex,
+            ) !== undefined
+              ? {
+                  roundIndex: normalizeRoundIndex(
+                    (data as WSToolStartFrame).roundIndex,
+                  ),
+                }
+              : {}),
+          };
+          flight.turn.toolActions.push(started);
+          flight.turn.segments = appendToolStartToSegments(
+            flight.turn.segments,
+            started,
+          );
+        } else if (frameType === "tool_end") {
+          const rawCallID: unknown = (data as unknown as Record<string, unknown>).callID;
+          const rawToolName: unknown = (data as unknown as Record<string, unknown>).toolName;
+          const rawResult: unknown = (data as unknown as Record<string, unknown>).result;
+          if (
+            typeof rawCallID !== "string" ||
+            typeof rawToolName !== "string"
+          ) {
+            return;
+          }
+          if (rawResult != null && !isToolResult(rawResult)) return;
+          const result = isToolResult(rawResult) ? rawResult : null;
+          const round = normalizeRoundIndex(
+            (data as WSToolEndFrame).roundIndex,
+          );
+          const hasMatch = flight.turn.toolActions.some(
+            (action) => action.callID === rawCallID,
+          );
+          // One end frame belongs to one execution: call identity wins, and
+          // without it only the first pending same-tool row completes so one
+          // result never fans out across sibling executions; with no pending
+          // same-tool row the frame drops instead of guessing an owner.
+          if (hasMatch) {
+            flight.turn.toolActions = flight.turn.toolActions.map((action) =>
+              action.callID === rawCallID
+                ? {
+                    ...action,
+                    result,
+                    ...(round !== undefined ? { roundIndex: round } : {}),
+                  }
+                : action,
+            );
+          } else {
+            const fallbackIndex = flight.turn.toolActions.findIndex(
+              (action) => !action.result && action.toolName === rawToolName,
+            );
+            if (fallbackIndex !== -1) {
+              flight.turn.toolActions = flight.turn.toolActions.map(
+                (action, index) =>
+                  index === fallbackIndex
+                    ? {
+                        ...action,
+                        result,
+                        ...(round !== undefined ? { roundIndex: round } : {}),
+                      }
+                    : action,
+              );
+            }
+          }
+          flight.turn.segments = updateToolEndInSegments(
+            flight.turn.segments,
+            rawCallID,
+            rawToolName,
+            result,
+            round,
+          );
+        } else if (frameType === "warning") {
+          const rawWarning: unknown = (data as unknown as Record<string, unknown>).message;
+          if (typeof rawWarning !== "string" || !rawWarning.trim()) return;
+          if (!flight.warnings.includes(rawWarning)) {
+            flight.warnings.push(rawWarning);
+          }
+        } else if (frameType === "turn_tokens") {
+          const rawTotal: unknown = (data as unknown as Record<string, unknown>)
+            .turnTotalTokens;
+          if (
+            typeof rawTotal === "number" &&
+            Number.isFinite(rawTotal) &&
+            Number.isInteger(rawTotal) &&
+            rawTotal >= 0
+          ) {
+            flight.turnTokens = rawTotal;
+          }
+        }
+        // Heartbeats carry no payload while hidden; the parked turn simply
+        // stays alive with no timer because it locks no input.
+        return;
+      }
+      if (
+        frameType === "done" ||
+        frameType === "cancelled" ||
+        frameType === "error"
+      ) {
+        const flight = parkedFlightsRef.current.get(key);
+        // Terminal warnings repeat mid-turn notices for polling clients, so
+        // merge them into the parked banner even when the reply itself stays
+        // hidden until the user returns.
+        if (frameType === "done") {
+          const terminalWarnings = sanitizeWarnings(
+            (data as unknown as Record<string, unknown>).warnings,
+          );
+          if (terminalWarnings.length > 0 && flight) {
+            flight.warnings = mergeWarningLists(
+              flight.warnings,
+              terminalWarnings,
+            );
+          }
+          // Persist the authoritative total so returning hydrates the footer
+          // instead of resetting to zero mid-history.
+          const rawSessionTokens: unknown = (data as unknown as Record<string, unknown>)
+            .sessionTokens;
+          const rawTotal: unknown = (data as unknown as Record<string, unknown>).totalTokens;
+          const authoritative =
+            typeof rawSessionTokens === "number" &&
+            Number.isFinite(rawSessionTokens) &&
+            Number.isInteger(rawSessionTokens) &&
+            rawSessionTokens >= 0
+              ? rawSessionTokens
+              : undefined;
+          const turnTotal =
+            typeof rawTotal === "number" &&
+            Number.isFinite(rawTotal) &&
+            Number.isInteger(rawTotal) &&
+            rawTotal >= 0
+              ? rawTotal
+              : undefined;
+          try {
+            if (authoritative != null) {
+              localStorage.setItem(
+                sessionTokensKey(frameSessionID),
+                String(authoritative),
+              );
+            } else if (flight && turnTotal != null) {
+              localStorage.setItem(
+                sessionTokensKey(frameSessionID),
+                String(flight.base + turnTotal),
+              );
+            }
+          } catch {
+            // Storage stays best-effort.
+          }
+        }
+        if (flight) {
+          flight.pending = false;
+          flight.turn = null;
+          flight.updatedAt = Date.now();
+          // Refresh LRU order like settleParkedFlight so the settled shell sorts
+          // by its terminal time and eviction keeps picking the true stalest.
+          parkedFlightsRef.current.delete(key);
+          parkedFlightsRef.current.set(key, flight);
+        } else {
+          // A terminal for an untracked session still evicts any badge that
+          // polling or a prior broadcast lit.
+          parkedFlightsRef.current.delete(key);
+        }
+        markBackgroundRunning(key, false);
+        return;
+      }
+    },
+    [markBackgroundRunning, reapExpiredFlightsAndSurface],
+  );
 
   // Reconciles the badge with the authoritative inbox so approvals decided in another tab do not
   // linger as stale amber badges. Terminal turn frames and run lifecycle broadcasts trigger it;
@@ -887,11 +1715,28 @@ export default function ChatView({ health }: ChatViewProps) {
       typeof data.sessionID === "string" ? data.sessionID : undefined;
     const frameType = typeof data.type === "string" ? data.type : undefined;
 
-    // Ignore frames intended for another session to prevent cross-session pollution
+    // Frames for a hidden session must never leak into the active view, but
+    // they still grow that session's parked flight so returning restores the
+    // live timeline. Only turn-scoped frames route to the map; global
+    // broadcasts (approvals, runs) continue below so badges stay fresh.
     if (
       frameSessionID &&
       normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
     ) {
+      if (
+        frameType === "delta" ||
+        frameType === "tool_start" ||
+        frameType === "tool_end" ||
+        frameType === "done" ||
+        frameType === "warning" ||
+        frameType === "turn_alive" ||
+        frameType === "turn_tokens" ||
+        frameType === "cancelled" ||
+        frameType === "error"
+      ) {
+        updateParkedFlightFromFrame(frameSessionID, data);
+        return;
+      }
       return;
     }
     // Untagged session frames carry no owner, so they must never touch the
@@ -922,7 +1767,7 @@ export default function ChatView({ health }: ChatViewProps) {
       // to no update, cancelled turns keep partials without persisting, and
       // done stays authoritative so multi-tab viewers converge on the next
       // terminal frame.
-      const record = data as Record<string, unknown>;
+      const record = data as unknown as Record<string, unknown>;
       const rawTurnTotal = record.turnTotalTokens;
       const rawRoundIndex = record.roundIndex;
       const rawRoundTokens = record.roundTokens;
@@ -1045,14 +1890,22 @@ export default function ChatView({ health }: ChatViewProps) {
       );
       setPending(true);
       pendingRef.current = true;
-      // Evict only this batch's waiting placeholder (same callID) or uncorrelated waiting with no
+      // Passive viewers of the same session learn the turn start from its
+      // first frame so the missed-terminal grace below applies to them as
+      // well; sender turns already stamped their start on send.
+      if (activeTurnStartMsRef.current == null) {
+        activeTurnStartMsRef.current = Date.now();
+      }
+      // Evict only this batch's waiting placeholder (same preserved callID in actions
+      // or in the persisted narration text) or uncorrelated waiting with no
       // tool actions; other parked batches in the same session keep their placeholders so resuming
       // one never wipes the other. Non-waiting duplicates still evict by callID overlap.
       setMessages((prev) =>
         prev.filter((m) => {
           if (m.role !== "assistant") return true;
           const overlapsCall =
-            m.toolActions?.some((a) => a.callID === callID) ?? false;
+            (m.toolActions?.some((a) => a.callID === callID) ?? false) ||
+            (callID ? textContainsPlaceholderForCall(m.text, callID) : false);
           if (overlapsCall) return false;
           if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
           if (!m.toolActions || m.toolActions.length === 0) return false;
@@ -1101,34 +1954,65 @@ export default function ChatView({ health }: ChatViewProps) {
       const endRound = normalizeRoundIndex(
         (data as WSToolEndFrame).roundIndex,
       );
-      setMessages((prev) =>
-        prev.map((msg) => {
+      setMessages((prev) => {
+        // One end frame belongs to one execution globally: call identity wins
+        // everywhere, and without any identity match only the first pending
+        // same-tool row across messages completes so one result never fans out
+        // to sibling executions or sibling messages; later pendings drop it.
+        const hasGlobalCallIDMatch = prev.some(
+          (msg) =>
+            msg.toolActions?.some((a) => a.callID === endCallID) ?? false,
+        );
+        let fallbackClaimed = false;
+        return prev.map((msg) => {
           if (!msg.toolActions || msg.toolActions.length === 0) return msg;
-          // Match by call identity first so batches with multiple same-tool
-          // calls never stamp one result onto every pending sibling; the
-          // pending same-tool fallback only applies when no call identity
-          // matches in this message.
-          const hasCallIDMatch = msg.toolActions.some(
-            (a) => a.callID === endCallID,
+          if (hasGlobalCallIDMatch) {
+            // Match by call identity so batches with multiple same-tool calls
+            // never stamp one result onto pending siblings.
+            if (!msg.toolActions.some((a) => a.callID === endCallID)) {
+              return msg;
+            }
+            const nextActions = msg.toolActions.map((a) =>
+              a.callID === endCallID
+                ? {
+                    ...a,
+                    result: endResult,
+                    ...(endRound !== undefined ? { roundIndex: endRound } : {}),
+                  }
+                : a,
+            );
+            // Keep segmented timelines in sync with the flat bucket so history
+            // reloads and live updates agree on the same chronological rows.
+            const nextSegments = msg.segments
+              ? updateToolEndInSegments(
+                  msg.segments,
+                  endCallID,
+                  endToolName,
+                  endResult,
+                  endRound,
+                )
+              : undefined;
+            return {
+              ...msg,
+              toolActions: nextActions,
+              ...(nextSegments ? { segments: nextSegments } : {}),
+            };
+          }
+          if (fallbackClaimed) return msg;
+          const fallbackIndex = msg.toolActions.findIndex(
+            (a) => !a.result && a.toolName === endToolName,
           );
-          const hasMatch = hasCallIDMatch
-            ? true
-            : msg.toolActions.some(
-                (a) => !a.result && a.toolName === endToolName,
-              );
-          if (!hasMatch) return msg;
-          const nextActions = msg.toolActions.map((a) => {
-            const isMatch = hasCallIDMatch
-              ? a.callID === endCallID
-              : !a.result && a.toolName === endToolName;
-            return isMatch
+          if (fallbackIndex === -1) return msg;
+          fallbackClaimed = true;
+          const nextActions = msg.toolActions.map((a, index) =>
+            index === fallbackIndex
               ? {
                   ...a,
                   result: endResult,
                   ...(endRound !== undefined ? { roundIndex: endRound } : {}),
                 }
-              : a;
-          });
+              : a,
+          );
           // Keep segmented timelines in sync with the flat bucket so history
           // reloads and live updates agree on the same chronological rows.
           const nextSegments = msg.segments
@@ -1145,29 +2029,46 @@ export default function ChatView({ health }: ChatViewProps) {
             toolActions: nextActions,
             ...(nextSegments ? { segments: nextSegments } : {}),
           };
-        })
-      );
+        });
+      });
       setInFlightTurn((prev) => {
         if (!prev) return prev;
-        // Same call-identity-first rule as the message bucket above: one end
-        // frame updates only its own call, with the pending same-tool fallback
-        // reserved for frames that match nothing by identity.
+        // Same single-execution rule as the message bucket above: call identity
+        // wins, and without it only the first pending same-tool row completes
+        // so one result never fans out across sibling executions.
         const hasTurnCallIDMatch = prev.toolActions.some(
           (action) => action.callID === endCallID,
         );
-        const updated = prev.toolActions.map((action) => {
-          const isMatch = hasTurnCallIDMatch
-            ? action.callID === endCallID
-            : !action.result && action.toolName === endToolName;
-          if (isMatch) {
-            return {
-              ...action,
-              result: endResult,
-              ...(endRound !== undefined ? { roundIndex: endRound } : {}),
-            };
+        let updated: ToolAction[];
+        if (hasTurnCallIDMatch) {
+          updated = prev.toolActions.map((action) =>
+            action.callID === endCallID
+              ? {
+                  ...action,
+                  result: endResult,
+                  ...(endRound !== undefined ? { roundIndex: endRound } : {}),
+                }
+              : action,
+          );
+        } else {
+          const fallbackIndex = prev.toolActions.findIndex(
+            (action) => !action.result && action.toolName === endToolName,
+          );
+          // No identity and no pending same-tool row means no owner: drop the
+          // frame instead of guessing so unrelated executions stay pending.
+          if (fallbackIndex === -1) {
+            return prev;
           }
-          return action;
-        });
+          updated = prev.toolActions.map((action, index) =>
+            index === fallbackIndex
+              ? {
+                  ...action,
+                  result: endResult,
+                  ...(endRound !== undefined ? { roundIndex: endRound } : {}),
+                }
+              : action,
+          );
+        }
         return {
           ...prev,
           toolActions: updated,
@@ -1185,6 +2086,9 @@ export default function ChatView({ health }: ChatViewProps) {
       if (cancelledRef.current) return;
       setPending(true);
       pendingRef.current = true;
+      if (activeTurnStartMsRef.current == null) {
+        activeTurnStartMsRef.current = Date.now();
+      }
       const rawDelta: unknown = data.delta;
       const deltaText = typeof rawDelta === "string" ? rawDelta : "";
       // Deltas carry no batch correlation, so they must not evict parked batches' waiting
@@ -1245,11 +2149,12 @@ export default function ChatView({ health }: ChatViewProps) {
     } else if (frameType === "done") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       // Terminal warnings repeat every mid-turn notice for polling clients,
       // so merge them even on a cancelled turn: the banner is informational
       // and must not depend on the reply surviving cancellation.
       const earlyWarnings = sanitizeWarnings(
-        (data as Record<string, unknown>).warnings,
+        (data as unknown as Record<string, unknown>).warnings,
       );
       if (earlyWarnings.length > 0) {
         setTurnWarnings((previous) => mergeWarningLists(previous, earlyWarnings));
@@ -1365,13 +2270,15 @@ export default function ChatView({ health }: ChatViewProps) {
       // stays pure; nesting a message append inside a turn updater would
       // run twice under double-invoke and duplicate the assistant message.
       const snapshot = inFlightTurnRef.current;
-      const orderedDoneActions = [...(doneToolActions ?? [])].sort(
-        compareToolActionsByRound,
-      );
+      const orderedDoneActions = deduplicateToolActionsByCallID([
+        ...(doneToolActions ?? []),
+      ]).sort(compareToolActionsByRound);
       const finalActions =
         orderedDoneActions.length > 0
           ? orderedDoneActions
-          : [...(snapshot?.toolActions ?? [])].sort(compareToolActionsByRound);
+          : deduplicateToolActionsByCallID([
+              ...(snapshot?.toolActions ?? []),
+            ]).sort(compareToolActionsByRound);
       // Chronological terminal timeline: merge authoritative results into the
       // streamed skeleton so multi-round turns keep text/tools interleaved and
       // parked resumes append to the same turn instead of a lumped bucket.
@@ -1390,7 +2297,7 @@ export default function ChatView({ health }: ChatViewProps) {
       // agree with history reloads: an omitted stamp renders no footer rather
       // than sampling client receipt time.
       const doneCompletedAt = normalizeCompletedAtMs(
-        (data as Record<string, unknown>).completedAt,
+        (data as unknown as Record<string, unknown>).completedAt,
       );
       const finalMsg: MessageItem = {
         id: newSessionId(),
@@ -1402,19 +2309,25 @@ export default function ChatView({ health }: ChatViewProps) {
       };
       setMessages((prev) => {
         // Terminal dedup stays batch-scoped: evict only placeholders whose batch overlaps this
-        // turn's actions, plus generic waiting with no correlation. Other parked batches in the
-        // same session keep their placeholders so completing one resume never wipes the other.
+        // turn's preserved callIDs in actions or in narration text, plus generic waiting
+        // with no correlation. Other parked batches in the same session keep their
+        // placeholders so completing one resume never wipes the other.
         const base = !isParked
           ? prev.filter((m) => {
               if (m.role !== "assistant") return true;
               const overlaps =
                 finalActions.length > 0 &&
-                (m.toolActions?.some((a) =>
+                ((m.toolActions?.some((a) =>
                   finalActions.some(
                     (fa) => fa.callID && fa.callID === a.callID,
                   ),
                 ) ??
-                  false);
+                  false) ||
+                  finalActions.some(
+                    (fa) =>
+                      fa.callID &&
+                      textContainsPlaceholderForCall(m.text, fa.callID),
+                  ));
               if (overlaps) return false;
               if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
               if (!m.toolActions || m.toolActions.length === 0) return false;
@@ -1439,11 +2352,13 @@ export default function ChatView({ health }: ChatViewProps) {
     } else if (frameType === "cancelled") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
       setPending(false);
     } else if (frameType === "error") {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       if (!cancelledRef.current) {
         const rawMessage: unknown = data.message;
         const message =
@@ -1454,10 +2369,47 @@ export default function ChatView({ health }: ChatViewProps) {
       }
       setInFlightTurn(null);
       setPending(false);
-    } else if (frameType === "run_completed") {
-      // A parked run resuming in any tab means its approvals were decided;
-      // reconcile with the authoritative inbox so the badge evicts without
-      // waiting for a session switch.
+    } else if (frameType === "run_started" || frameType === "run_completed") {
+      // Run lifecycle broadcasts keep the background badge honest across tabs
+      // and reloads. The nested run carries the owning session while the
+      // envelope stays untagged, so extract it here instead of the top-level
+      // filter above. Completion also reconciles approvals because a parked
+      // resume means its inbox rows were decided elsewhere.
+      const nestedRun: unknown = (data as unknown as Record<string, unknown>).run;
+      const owner = runSessionID(
+        nestedRun as Parameters<typeof runSessionID>[0],
+      );
+      const normalizedOwner = normalizeSessionID(owner);
+      // Single active contract with the polled run log: only a live running
+      // status keeps the badge lit. Parked approvals arrive as completed and
+      // surface through the approvals badge instead of double-badging.
+      const nestedStatus =
+        typeof (nestedRun as Record<string, unknown> | null)?.status ===
+        "string"
+          ? ((nestedRun as Record<string, unknown>).status as string)
+          : undefined;
+      if (normalizedOwner) {
+        if (
+          frameType === "run_started" &&
+          isActiveRunStatus(nestedStatus)
+        ) {
+          markBackgroundRunning(normalizedOwner, true);
+        } else {
+          markBackgroundRunning(normalizedOwner, false);
+          // A finished background turn may have completed while hidden; drop
+          // its parked shell so returning reloads the persisted history
+          // instead of replaying a stale live bubble.
+          const parked = parkedFlightsRef.current.get(normalizedOwner);
+          if (parked && !parked.pending) {
+            parkedFlightsRef.current.delete(normalizedOwner);
+          } else if (parked && parked.pending) {
+            // The run record settled but the stream terminal has not arrived
+            // (reloaded socket); keep the parked shell until its done frame
+            // or the next poll reconciles, but stop badging it as running.
+            markBackgroundRunning(normalizedOwner, false);
+          }
+        }
+      }
       refreshApprovals();
     } else if (
       frameType === "approval_decided" ||
@@ -1512,15 +2464,16 @@ export default function ChatView({ health }: ChatViewProps) {
       ) {
         setPending(true);
         pendingRef.current = true;
+        activeTurnStartMsRef.current = Date.now();
         // The resume synthesis re-reports the parked tokens inside its running
         // total, so the base stays at its pre-park value; moving it to the parked
         // cumulative would count the initial park twice in the live footer.
       }
       refreshApprovals();
     }
-  }, [armTurnTimeout, clearTurnTimeout, refreshApprovals]);
+  }, [armTurnTimeout, clearTurnTimeout, refreshApprovals, updateParkedFlightFromFrame, markBackgroundRunning]);
 
-  const { sendMessage, isOpen } = useSharedWebSocket(handleWSMessage, handleWSClose);
+  const { sendMessage, isOpen } = useSharedWebSocket(handleWSMessage, handleWSClose, handleWSOpen);
 
   // Load active session messages on initial mount if existing
   useEffect(() => {
@@ -1611,6 +2564,137 @@ export default function ChatView({ health }: ChatViewProps) {
     };
   }, [sessionID]);
 
+  // Shared run-log poller feeding background badges and parked-settle reconcile.
+  // One module-level interval serves both this view and the sidebar so two
+  // mounted pollers never double the run-log QPS; live broadcasts above stay
+  // the immediate path while these polled rows cover reloads, missed sockets,
+  // and cross-tab turns. Parked flights remain the source for live timelines.
+  const { runs: sharedRuns, runningIDs: sharedRunningIDs } = useRunningRuns();
+
+  // Reconciles background badges with the authoritative run log so reloads
+  // and turns started in another tab still badge without a live socket.
+  // Parked flights stay the source for live timelines while polled runs cover
+  // missed broadcasts; settled runs evict only when no parked pending remains
+  // so a stream terminal that arrives just after the poll never flashes.
+  // The active turn revalidates here as well so a terminal missed during a
+  // socket outage releases the input via persisted history instead of waiting
+  // out the liveness budget and then reporting a misleading timeout.
+  useEffect(() => {
+    sharedRunsRef.current = sharedRuns;
+    sharedRunningIDsRef.current = sharedRunningIDs;
+    // The shared poll tick doubles as the scheduled expiry sweep so TTL
+    // enforces even when no park or frame arrives; live reaps surface through
+    // state instead of the production-silent log.
+    reapExpiredFlightsAndSurface();
+    const running = sharedRunningIDs;
+    const activeNorm = normalizeSessionID(sessionIDRef.current);
+    for (const norm of running) {
+      if (norm && norm !== activeNorm) {
+        markBackgroundRunning(norm, true);
+      }
+    }
+    // Sessions with a settled row but no running row finished while the
+    // socket was away; settle the parked shell so the concurrency cap
+    // frees and a return reloads history instead of a stale bubble. A
+    // fresh flight keeps its grace until its running row persists, and a
+    // stream terminal arriving just after the poll still wins via the
+    // pending check below.
+    const settled = new Set<string>();
+    for (const run of sharedRuns) {
+      const raw = (run as { sessionID?: unknown }).sessionID;
+      if (typeof raw !== "string" || !raw.trim()) continue;
+      const norm = raw.trim().toLowerCase();
+      if (!norm || running.includes(norm)) continue;
+      settled.add(norm);
+    }
+    const nowMs = Date.now();
+    for (const [key, flight] of [...parkedFlightsRef.current]) {
+      if (!flight.pending || key === activeNorm) continue;
+      if (running.includes(key)) continue;
+      if (!settled.has(key)) continue;
+      if (nowMs - flight.updatedAt < PARKED_SETTLE_GRACE_MS) continue;
+      settleParkedFlight(parkedFlightsRef.current, key);
+      markBackgroundRunning(key, false);
+    }
+    for (const norm of [...backgroundRunningRef.current]) {
+      if (!norm || norm === activeNorm) continue;
+      const stillPolled = running.includes(norm);
+      const stillParked = parkedFlightsRef.current.get(norm)?.pending;
+      if (!stillPolled && !stillParked) {
+        markBackgroundRunning(norm, false);
+      }
+    }
+    // Active-session missed terminal: the socket can drop after send but
+    // before done while the engine keeps evaluating, so both the targeted
+    // terminal and its run broadcast are missed. Polling stays authoritative
+    // here because it runs over REST even while the socket is down. An
+    // explicit cancel never lands here since it already releases the input,
+    // and a just-sent turn keeps its grace until its running row persists so
+    // a slow persist never evicts a live turn. Only a settled row newer than
+    // the turn start settles, so stale rows from prior turns never clear a
+    // fresh prompt and session filtering keeps background turns untouched.
+    if (pendingRef.current && !cancelledRef.current && activeNorm) {
+      const liveTurnSID = turnSessionIDRef.current;
+      const ownsActive =
+        liveTurnSID == null ||
+        normalizeSessionID(liveTurnSID) === activeNorm;
+      if (ownsActive && !running.includes(activeNorm)) {
+        const startedAt = activeTurnStartMsRef.current;
+        if (
+          startedAt != null &&
+          Date.now() - startedAt >= PARKED_SETTLE_GRACE_MS
+        ) {
+          let hasSettledEvidence = false;
+          let stillRunning = false;
+          for (const run of sharedRuns) {
+            const raw = (run as { sessionID?: unknown }).sessionID;
+            if (typeof raw !== "string" || !raw.trim()) continue;
+            if (raw.trim().toLowerCase() !== activeNorm) continue;
+            const status = (run as { status?: unknown }).status;
+            if (
+              isActiveRunStatus(
+                typeof status === "string" ? status : undefined,
+              )
+            ) {
+              stillRunning = true;
+              break;
+            }
+            const ts = parseRunTimestamp(
+              (run as { timestamp?: unknown }).timestamp as
+                | string
+                | number,
+            ).getTime();
+            // Corrupt rows prove nothing: a missing or epoch stamp means a
+            // legacy row, so skip it instead of settling a fresh turn on bad
+            // evidence.
+            if (!Number.isFinite(ts) || ts <= 0) {
+              continue;
+            }
+            if (ts >= startedAt - 5000) {
+              hasSettledEvidence = true;
+              break;
+            }
+          }
+          if (!stillRunning && hasSettledEvidence) {
+            // The server no longer owns this turn, so releasing locally
+            // issues no cancel; the persisted reply replaces the stale live
+            // bubble instead of replaying it.
+            clearTurnTimeout();
+            turnSessionIDRef.current = null;
+            activeTurnStartMsRef.current = null;
+            pendingRef.current = false;
+            setInFlightTurn(null);
+            inFlightTurnRef.current = null;
+            setPending(false);
+            markBackgroundRunning(activeNorm, false);
+            reloadActiveHistory(sessionIDRef.current);
+            refreshApprovals();
+          }
+        }
+      }
+    }
+  }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface]);
+
   useEffect(() => {
     messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
   }, [messages, pending, inFlightTurn]);
@@ -1631,21 +2715,26 @@ export default function ChatView({ health }: ChatViewProps) {
   };
 
   // Manual cancel stays immediate even with the longer liveness budget: the
-  // user action clears the timer and aborts the server turn without waiting
-  // for the inactivity window to expire.
+  // user action clears the timer and aborts only its own session's turn
+  // without touching background sessions, which keep their server slots.
   async function handleCancel() {
     if (!pending) return;
+    const cancelSID = sessionID;
     cancelledRef.current = true;
     clearTurnTimeout();
     turnSessionIDRef.current = null;
+    activeTurnStartMsRef.current = null;
+    // A cancelled active turn must never resurrect as a background badge.
+    parkedFlightsRef.current.delete(parkedFlightKey(cancelSID));
+    markBackgroundRunning(parkedFlightKey(cancelSID), false);
     try {
       if (isOpen()) {
         sendMessage({
           type: "cancel",
-          sessionID,
+          sessionID: cancelSID,
         });
       }
-      await cancelChat(sessionID);
+      await cancelChat(cancelSID);
     } catch {
       // Best-effort cancellation
     } finally {
@@ -1657,6 +2746,23 @@ export default function ChatView({ health }: ChatViewProps) {
   async function send() {
     const text = input.trim();
     if (!text || pending) return;
+    // Bound parallel turns so slow local inference never stacks silently:
+    // the active turn plus every parked background turn counts toward the
+    // server-advertised cap, and a full house refuses with an honest busy
+    // notice. The active slot counts even though the input lock usually
+    // guards it, so a state commit that lags behind the ref never admits a
+    // turn past the shared limit. The cap resolves through the health
+    // advertisement so client refusal agrees with server enforcement instead
+    // of drifting on a local constant.
+    const parkedPendingCount = [...parkedFlightsRef.current.values()].filter(
+      (flight) => flight.pending,
+    ).length;
+    const activeTurnCount = pendingRef.current || pending ? 1 : 0;
+    const turnCap = resolveMaxConcurrentChatTurns(health);
+    if (activeTurnCount + parkedPendingCount + 1 > turnCap) {
+      setError(concurrentTurnsBusyMessage(turnCap));
+      return;
+    }
     cancelledRef.current = false;
     knownDraftIDRef.current = null;
     setPending(true);
@@ -1685,6 +2791,7 @@ export default function ChatView({ health }: ChatViewProps) {
     // Remember the owning session so timeout/close cancels this turn even
     // when the user switches sessions before the terminal frame arrives.
     turnSessionIDRef.current = sessionID;
+    activeTurnStartMsRef.current = Date.now();
     // Freeze the prior session base so live token frames add the running turn
     // total onto a stable starting point instead of compounding onto themselves.
     // The live ref holds the latest committed total even when a prior turn's
@@ -1839,25 +2946,34 @@ export default function ChatView({ health }: ChatViewProps) {
       // outlive the REST turn and fire a spurious cancel after completion.
       clearTurnTimeout();
       turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
       setPending(false);
     }
   }
 
   function handleNewSession() {
-    if (pending) {
-      void handleCancel();
-    }
+    // Switching never cancels: the active turn parks into the per-session map
+    // and keeps its server slot while the fresh draft starts idle.
+    parkActiveFlight();
     const nextID = newSessionId();
     knownDraftIDRef.current = nextID;
     setSessionID(nextID);
     setMessages([]);
     setInFlightTurn(null);
+    inFlightTurnRef.current = null;
+    setPending(false);
+    pendingRef.current = false;
+    turnSessionIDRef.current = null;
+    activeTurnStartMsRef.current = null;
+    cancelledRef.current = false;
     setError(null);
     // Banners belong to their session, so switching drafts never carries
     // another conversation's skipped-tool lines into the fresh view.
     setTurnWarnings([]);
+    turnWarningsRef.current = [];
     setLastTurnTokens(null);
+    lastTurnTokensRef.current = null;
     const fresh = loadSessionTokens(nextID);
     setSessionTokens(fresh);
     sessionBaseRef.current = fresh;
@@ -1865,18 +2981,31 @@ export default function ChatView({ health }: ChatViewProps) {
 
   function handleSelectSession(id: string) {
     if (normalizeSessionID(id) === normalizeSessionID(sessionID)) return;
-    if (pending) {
-      void handleCancel();
-    }
+    // Keep the prior server turn alive in the background instead of
+    // cancelling it; its frames accumulate in the parked map and the return
+    // restores the live bubble without duplicating completed history.
+    parkActiveFlight();
     knownDraftIDRef.current = null;
     setSessionID(id);
+    // Clear the visible live state before the history reload so a rapid
+    // switch never interleaves the prior session's deltas into the new view;
+    // the parked restore below re-applies the target's own live bubble.
     setInFlightTurn(null);
+    inFlightTurnRef.current = null;
+    setPending(false);
+    pendingRef.current = false;
+    turnSessionIDRef.current = null;
+    activeTurnStartMsRef.current = null;
+    cancelledRef.current = false;
     setError(null);
     setTurnWarnings([]);
+    turnWarningsRef.current = [];
     setLastTurnTokens(null);
+    lastTurnTokensRef.current = null;
     const hydrated = loadSessionTokens(id);
     setSessionTokens(hydrated);
     sessionBaseRef.current = hydrated;
+    restoreParkedFlight(id);
   }
 
   const usedPercent =
@@ -1906,6 +3035,7 @@ export default function ChatView({ health }: ChatViewProps) {
         onToggleOpen={() => setSidebarOpen(!sidebarOpen)}
         refreshTrigger={sessionRefreshKey}
         pendingApprovals={pendingApprovals}
+        runningSessionIDs={backgroundRunningIDs}
       />
 
       {/* Main Chat Area */}
@@ -2152,6 +3282,45 @@ export default function ChatView({ health }: ChatViewProps) {
         </div>
 
         {error ? <p className="error chat-error">{error}</p> : null}
+
+        {/* Reconnecting notice stays informational while the socket recovers:
+            running turns keep their server slots, so the input never locks and
+            no retry copy appears here. */}
+        {reconnecting ? (
+          <p
+            className="muted chat-reconnecting"
+            role="status"
+            aria-label="Reconnecting to server"
+            data-testid="chat-reconnecting"
+          >
+            Reconnecting… background turns keep running.
+          </p>
+        ) : null}
+
+        {/* Trimmed-flight notice surfaces lossy LRU/TTL evictions through
+            visible state: the dev log stays silent in production, so without
+            this banner a shipped bundle would drop a live background timeline
+            with no signal. The badge stays lit and the next frame rebuilds
+            the timeline, so this informs without locking input. */}
+        {trimmedLiveFlights.length > 0 ? (
+          <p
+            className="muted flight-eviction-notice"
+            role="status"
+            aria-label="Background turn trimmed"
+            data-testid="flight-eviction-notice"
+          >
+            A background turn view was trimmed to stay within memory bounds; it
+            rebuilds from the next live update.
+            <button
+              type="button"
+              className="ghost flight-eviction-dismiss"
+              aria-label="Dismiss trim notice"
+              onClick={() => setTrimmedLiveFlights([])}
+            >
+              Dismiss
+            </button>
+          </p>
+        ) : null}
 
         {/* Degraded-tool banner sits above the input like the fatal error, but
             stays amber and dismissible: skipped tools never fail the turn, so

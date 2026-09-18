@@ -234,11 +234,18 @@ class SharedWebSocketClient {
   private ws: WebSocket | null = null;
   private listeners: Set<MessageHandler> = new Set();
   private closeListeners: Set<() => void> = new Set();
+  // Open subscribers learn when the socket recovers so views waiting on a
+  // dropped connection can clear their reconnecting notice without polling.
+  // Kept beside the close set so open/close stay symmetric for every viewer.
+  private openListeners: Set<() => void> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isConnecting = false;
 
   public connect() {
     if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
+    // Never dial for an idle client: a direct connect with no subscribers
+    // would resurrect a socket the last unsubscribe just released.
+    if (!this.hasSubscribers()) return;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
     }
@@ -258,6 +265,15 @@ class SharedWebSocketClient {
         if (this.reconnectTimer) {
           clearTimeout(this.reconnectTimer);
           this.reconnectTimer = null;
+        }
+        // Notify after clearing the timer so a view that just recovered
+        // never observes a stale reconnect schedule alongside the open event.
+        for (const onOpen of this.openListeners) {
+          try {
+            onOpen();
+          } catch {
+            // A failing open listener must not break the rest.
+          }
         }
       };
 
@@ -279,7 +295,12 @@ class SharedWebSocketClient {
 
       ws.onclose = () => {
         this.isConnecting = false;
-        this.ws = null;
+        // Only release when the closing handle is still current: an idle close
+        // followed by an immediate resubscribe replaces the handle first, and
+        // the stale close must not null the fresh socket behind its owner.
+        if (this.ws === ws) {
+          this.ws = null;
+        }
         // Notify subscribers (e.g. a chat view with a turn in flight)
         // before scheduling the reconnect so they can recover.
         for (const onClose of this.closeListeners) {
@@ -302,35 +323,115 @@ class SharedWebSocketClient {
     }
   }
 
+  // Reports whether any view still needs the shared socket. Message, close,
+  // and open subscribers all count so a liveness-only viewer keeps the
+  // connection while a fully detached dashboard releases it.
+  private hasSubscribers(): boolean {
+    return (
+      this.listeners.size > 0 ||
+      this.closeListeners.size > 0 ||
+      this.openListeners.size > 0
+    );
+  }
+
+  // Releases the idle loopback socket once the last subscriber leaves. An
+  // unclosed idle socket would pin the connection forever after every view
+  // unmounts, so teardown cancels a pending reconnect and closes the handle;
+  // the close callback sees no subscribers and schedules nothing further.
+  private closeIdleConnection(): void {
+    if (this.hasSubscribers()) return;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try {
+        // Closing an OPEN socket fires onclose, which re-checks subscribers
+        // before scheduling, so an idle close never resurrects itself. A
+        // CONNECTING socket aborts the same way instead of lingering. The
+        // reference drops immediately so isOpen flips without waiting for the
+        // async close event; the stale onclose is identity-guarded and cannot
+        // null a fresh socket dialed by the next subscriber.
+        if (
+          this.ws.readyState === WebSocket.OPEN ||
+          this.ws.readyState === WebSocket.CONNECTING
+        ) {
+          const closing = this.ws;
+          closing.close();
+        }
+        // CLOSED/CLOSING and unknown states need no close call; dropping the
+        // reference lets the next subscriber dial fresh instead of joining a
+        // stale close.
+        // Single release point for every state above: re-check subscribers
+        // after the close because a view may have resubscribed while the
+        // close was in flight, and that fresh interest must keep the handle.
+        if (!this.hasSubscribers()) {
+          this.ws = null;
+        }
+      } catch {
+        // Teardown is best-effort; a stubbed socket may throw on close.
+        this.ws = null;
+      }
+    }
+    this.isConnecting = false;
+  }
+
   private scheduleReconnect() {
     if (this.reconnectTimer) return;
+    // An idle close must stay closed: only a live subscriber justifies the
+    // next dial, so an unsubscribed shutdown never re-arms itself here.
+    if (!this.hasSubscribers()) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.listeners.size > 0) {
+      if (this.hasSubscribers()) {
         this.connect();
       }
     }, 3000);
   }
 
-  public subscribe(handler: MessageHandler, onClose?: () => void): () => void {
-    this.listeners.add(handler);
+  public subscribe(
+    handler?: MessageHandler,
+    onClose?: () => void,
+    onOpen?: () => void,
+  ): () => void {
+    // A registration with no callback holds no interest in the socket, so it
+    // adds nothing and dials nothing; without this guard a mounted view with
+    // no handler yet would pin the loopback connection forever.
+    if (handler) {
+      this.listeners.add(handler);
+    }
     if (onClose) {
       this.closeListeners.add(onClose);
     }
+    if (onOpen) {
+      this.openListeners.add(onOpen);
+    }
     // A new subscriber arriving while the socket is closing must not wait
     // for the stale 3s reconnect: reconnect immediately so it joins live.
-    if (
-      !this.ws ||
-      this.ws.readyState === WebSocket.CLOSED ||
-      this.ws.readyState === WebSocket.CLOSING
-    ) {
-      this.connect();
+    // Idle callers with no callbacks skip the dial so they never resurrect a
+    // released socket.
+    if (this.hasSubscribers()) {
+      if (
+        !this.ws ||
+        this.ws.readyState === WebSocket.CLOSED ||
+        this.ws.readyState === WebSocket.CLOSING
+      ) {
+        this.connect();
+      }
     }
     return () => {
-      this.listeners.delete(handler);
+      if (handler) {
+        this.listeners.delete(handler);
+      }
       if (onClose) {
         this.closeListeners.delete(onClose);
       }
+      if (onOpen) {
+        this.openListeners.delete(onOpen);
+      }
+      // The last unsubscribe releases the loopback handle instead of leaving
+      // an idle OPEN socket pinned after every view unmounts.
+      this.closeIdleConnection();
     };
   }
 
@@ -354,6 +455,7 @@ class SharedWebSocketClient {
     if (import.meta.env.MODE !== "test") return;
     this.listeners.clear();
     this.closeListeners.clear();
+    this.openListeners.clear();
     try {
       this.ws?.close?.();
     } catch {
@@ -378,9 +480,10 @@ export function resetSharedSocket(): void {
   sharedWebSocket.resetForTesting();
 }
 
-export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => void) {
+export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => void, onOpen?: () => void) {
   const handlerRef = useRef<MessageHandler | undefined>(onMessage);
   const closeRef = useRef<(() => void) | undefined>(onClose);
+  const openRef = useRef<(() => void) | undefined>(onOpen);
 
   // Keep refs behind effects so render stays pure; the subscription below
   // always reads the latest callbacks without mutating during render.
@@ -392,19 +495,38 @@ export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => v
     closeRef.current = onClose;
   }, [onClose]);
 
-  // Always subscribe through ref indirection: a mount with no handler yet
-  // still registers a listener (keeping reconnects alive), and a later
-  // handler attaches without resubscribing.
   useEffect(() => {
+    openRef.current = onOpen;
+  }, [onOpen]);
+
+  // Subscribes only the callbacks the caller actually wants so a mounted view
+  // with no handler holds no socket interest and never pins an idle loopback
+  // connection. Presence (not identity) drives resubscription: ref indirection
+  // keeps forwarding the latest callbacks without churning the shared socket,
+  // while a handler that arrives after mount still dials instead of waiting
+  // for a stale reconnect. Unmount releases the last hold via the client's
+  // idle close instead of leaving an OPEN socket behind.
+  const wantsMessage = onMessage != null;
+  const wantsClose = onClose != null;
+  const wantsOpen = onOpen != null;
+  useEffect(() => {
+    if (!wantsMessage && !wantsClose && !wantsOpen) return;
     const listener: MessageHandler = (data) => {
       handlerRef.current?.(data);
     };
     const closeListener = () => {
       closeRef.current?.();
     };
-    const unsubscribe = sharedWebSocket.subscribe(listener, closeListener);
+    const openListener = () => {
+      openRef.current?.();
+    };
+    const unsubscribe = sharedWebSocket.subscribe(
+      wantsMessage ? listener : undefined,
+      wantsClose ? closeListener : undefined,
+      wantsOpen ? openListener : undefined,
+    );
     return unsubscribe;
-  }, []);
+  }, [wantsMessage, wantsClose, wantsOpen]);
 
   return {
     sendMessage: (payload: unknown) => sharedWebSocket.send(payload),

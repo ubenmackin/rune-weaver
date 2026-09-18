@@ -180,7 +180,11 @@ private func registerMarketplaceRoutes(_ app: Application) {
             try manifestData.write(to: manifestFile, options: .atomic)
             try scriptContent.write(to: scriptFile, atomically: true, encoding: .utf8)
         } catch {
-            try? fileManager.removeItem(at: targetDir)
+            do {
+                try fileManager.removeItem(at: targetDir)
+            } catch {
+                RuneWeaverLog.server.warning("Failed cleaning up aborted plugin scaffold at \(targetDir.path): \(error.localizedDescription)")
+            }
             throw Abort(.internalServerError, reason: "Failed to scaffold plugin '\(pluginID)'.")
         }
 

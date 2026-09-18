@@ -153,9 +153,15 @@ public actor RunLogStore {
         guard let dbPath else { return }
         #if canImport(SQLite3)
             let pruneCap = capacity
-            var loaded: [RunLogEntry] = await (try? SQLiteSerialIO.run {
-                SQLiteRunLogStore.read(dbPath: dbPath, limit: pruneCap)
-            }) ?? []
+            var loaded: [RunLogEntry]
+            do {
+                loaded = try await SQLiteSerialIO.run {
+                    SQLiteRunLogStore.read(dbPath: dbPath, limit: pruneCap)
+                }
+            } catch {
+                RuneWeaverLog.stores.error("RunLogStore: failed reading entries from SQLite: \(error.localizedDescription)")
+                loaded = []
+            }
             for index in loaded.indices where loaded[index].status == "running" {
                 let reconciled = RunLogEntry(
                     id: loaded[index].id,
@@ -342,6 +348,38 @@ public actor RunLogStore {
     }
 }
 
+/// Shared SQLite open helper for the server stores.
+/// Centralizes the open-plus-log fallback so every read/write/clear/delete
+/// degrades to in-memory state with one consistent log line instead of each
+/// call site repeating its own do/catch; callers keep their domain fallback
+/// note so the log still says what was preserved.
+enum SQLiteOpenHelper {
+    /// Opens a handle, logging once when the database is unavailable.
+    /// - Parameters:
+    ///   - dbPath: SQLite file path being opened.
+    ///   - storeName: Owning store for the log prefix.
+    ///   - fallbackNote: What the caller preserves in memory when open fails.
+    ///   - open: Database-specific open plus migrate closure.
+    /// - Returns: Open handle, or nil when unavailable (already logged).
+    static func openLogged(
+        dbPath: String,
+        storeName: String,
+        fallbackNote: String,
+        open: () throws -> OpaquePointer?
+    ) -> OpaquePointer? {
+        do {
+            guard let handle = try open() else {
+                RuneWeaverLog.stores.error("\(storeName): failed opening store at \(dbPath): nil handle; \(fallbackNote).")
+                return nil
+            }
+            return handle
+        } catch {
+            RuneWeaverLog.stores.error("\(storeName): failed opening store at \(dbPath): \(error.localizedDescription); \(fallbackNote).")
+            return nil
+        }
+    }
+}
+
 #if canImport(SQLite3)
     /// Internal SQLite helper for durable run-log persistence.
     enum SQLiteRunLogStore {
@@ -375,34 +413,62 @@ public actor RunLogStore {
             )
             // Best-effort migration for databases created before session linkage:
             // existing tables gain the column once, later opens no-op on duplicate.
-            try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "ALTER TABLE run_logs ADD COLUMN session_id TEXT;",
-                failure: { RunLogError(message: $0) }
-            )
-            try? SQLiteHelpers.exec(
-                handle: handle,
-                sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);",
-                failure: { RunLogError(message: $0) }
-            )
+            do {
+                try SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: "ALTER TABLE run_logs ADD COLUMN session_id TEXT;",
+                    failure: { RunLogError(message: $0) }
+                )
+            } catch {
+                RuneWeaverLog.stores.debug("SQLiteRunLogStore: session_id column migration note: \(error.localizedDescription)")
+            }
+            do {
+                try SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_session_id ON run_logs(session_id);",
+                    failure: { RunLogError(message: $0) }
+                )
+            } catch {
+                RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating session_id index: \(error.localizedDescription)")
+            }
             return handle
         }
 
         static func read(dbPath: String, limit: Int) -> [RunLogEntry] {
             guard limit > 0 else { return [] }
-            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteRunLogStore",
+                fallbackNote: "read returning in-memory state only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
+                return []
+            }
             defer { sqlite3_close(handle) }
 
             let sql = """
             SELECT id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
-            FROM run_logs
-            ORDER BY timestamp ASC, rowid ASC;
+            FROM (
+                SELECT rowid, id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
+                FROM run_logs
+                ORDER BY timestamp DESC, rowid DESC
+                LIMIT ?
+            ) ORDER BY timestamp ASC, rowid ASC;
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 return []
             }
             defer { sqlite3_finalize(statement) }
+
+            // Clamp to the 32-bit bind range and fail closed when the bind
+            // itself is rejected, so an oversized caller limit can never wrap
+            // into a negative LIMIT and silently return the wrong rows.
+            guard sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(limit)) == SQLITE_OK else {
+                let code = sqlite3_errcode(handle)
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed binding run read limit (code \(code)).")
+                return []
+            }
 
             var loaded: [RunLogEntry] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -438,23 +504,18 @@ public actor RunLogStore {
                     durationMs: durationMs
                 ))
             }
-            if loaded.count > limit {
-                return Array(loaded.suffix(limit))
-            }
             return loaded
         }
 
         static func write(entry: RunLogEntry, dbPath: String, pruneCapacity: Int) {
-            let handle: OpaquePointer?
-            do {
-                handle = try open(dbPath: dbPath)
-            } catch {
-                RuneWeaverLog.stores.error(
-                    "SQLiteRunLogStore: failed opening store at \(dbPath): \(error); run \(entry.id) kept in memory only and will not survive restart."
-                )
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteRunLogStore",
+                fallbackNote: "run \(entry.id) kept in memory only and will not survive restart",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
-            guard let handle else { return }
             defer { sqlite3_close(handle) }
 
             let sql = """
@@ -513,8 +574,12 @@ public actor RunLogStore {
         }
 
         static func clear(dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else {
-                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed opening store at \(dbPath); clear kept in memory only.")
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteRunLogStore",
+                fallbackNote: "clear kept in memory only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
             defer { sqlite3_close(handle) }
@@ -534,8 +599,12 @@ public actor RunLogStore {
         }
 
         static func delete(id: UUID, dbPath: String) {
-            guard let handle = try? open(dbPath: dbPath) else {
-                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed opening store at \(dbPath); delete kept in memory only.")
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteRunLogStore",
+                fallbackNote: "delete of \(id) kept in memory only",
+                open: { try open(dbPath: dbPath) }
+            ) else {
                 return
             }
             defer { sqlite3_close(handle) }

@@ -30,7 +30,8 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
             return title
         }
         if let firstUser = messages.first(where: { $0.role == .user }) {
-            let firstLine = firstUser.content.split(separator: "\n").first.map(String.init) ?? firstUser.content
+            // Shared split treats a trailing newline as a terminator, so titles match history line boundaries.
+            let firstLine = NormalizedText.splitLines(firstUser.content).first ?? firstUser.content
             let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
             if trimmed.count > 40 {
                 return String(trimmed.prefix(40)) + "…"
@@ -107,7 +108,8 @@ public typealias SessionSummarizer = @Sendable ([Message]) -> String
 /// Default extractive summarizer used when no LLM is wired in.
 public func defaultSessionSummarizer(_ messages: [Message]) -> String {
     let parts = messages.map { message -> String in
-        let firstLine = message.content.split(separator: "\n").first.map(String.init) ?? ""
+        // Shared split keeps summarizer first lines on the same boundaries as history coverage.
+        let firstLine = NormalizedText.splitLines(message.content).first ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         return "[\(message.role.rawValue)] \(trimmed)"
     }
@@ -241,10 +243,17 @@ public actor ConversationManager {
             }
             return diskSession
         }
+        // Durable bound: memory eviction alone would let the next list or read rehydrate
+        // the same persisted row, so the bound would never hold on disk. The evicted
+        // identifier is captured first so the in-memory insert stays suspension-free;
+        // the persisted row is deleted afterwards, keeping both views converged.
+        // Missing rows (never-persisted ghosts) stay a no-op.
+        var evictedID: UUID?
         if sessions.count >= Self.maxSessions {
             if let oldest = sessions.values.min(by: { $0.updatedAt < $1.updatedAt }) {
                 sessions.removeValue(forKey: oldest.id)
                 unpersistedIDs.remove(oldest.id)
+                evictedID = oldest.id
             }
         }
         // New sessions defer disk persistence until the first message append so empty/ghost
@@ -253,6 +262,9 @@ public actor ConversationManager {
         let session = ConversationSession(id: id, title: title, source: source)
         sessions[id] = session
         unpersistedIDs.insert(id)
+        if let evictedID {
+            await deletePersistedSessionUncancellable(id: evictedID)
+        }
         return session
     }
 
@@ -437,55 +449,10 @@ public actor ConversationManager {
     /// identically to live turns even for payloads written before round tracking.
     public func toolActionsByMessage(for sessionID: UUID) async -> [UUID: [ToolAction]] {
         guard let session = await readSingleMerged(id: sessionID) else { return [:] }
-        var resultsByCallID: [String: ToolResult] = [:]
-        for message in session.messages where message.role == .tool {
-            guard let callID = message.toolCallID else { continue }
-            // Persisted error flags distinguish failures from successes;
-            // rows written before the flag default to success.
-            resultsByCallID[callID] = ToolResult(toolCallID: callID, content: message.content, isError: message.isError ?? false)
-        }
-        var grouped: [UUID: [ToolAction]] = [:]
-        // Round boundaries persist as per-round assistant notes: one note per LLM round in
-        // stored order, so enumerate them oldest-first and tag every action with its round.
-        var roundIndex = 0
-        for message in session.messages where message.role == .assistant {
-            var actions: [ToolAction] = []
-            for line in message.content.components(separatedBy: "\n") {
-                guard let parsed = ToolInput.parsePlaceholderLine(line) else { continue }
-                actions.append(ToolAction(
-                    toolName: parsed.toolName,
-                    callID: parsed.callID,
-                    argumentsJSON: parsed.argumentsJSON,
-                    result: resultsByCallID[parsed.callID],
-                    roundIndex: roundIndex
-                ))
-            }
-            if !actions.isEmpty {
-                grouped[message.id] = actions
-                roundIndex += 1
-            }
-        }
-        return grouped
-    }
-
-    // MARK: - Truncation
-
-    /// Summarizes a session's oldest turns on demand.
-    @discardableResult
-    public func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
-        guard var session = sessions[sessionID] else { return nil }
-        let keep = max(1, keeping ?? maxMessages)
-        guard session.messages.count > keep else { return session.summary }
-        let evicted = Array(session.messages.prefix(session.messages.count - keep))
-        let summary = summarizer(evicted)
-        session.summary = [session.summary, summary]
-            .compactMap { $0?.isEmpty == false ? $0 : nil }
-            .joined(separator: "\n")
-        session.messages = Array(session.messages.suffix(keep))
-        session.updatedAt = Date()
-        sessions[sessionID] = session
-        await persist(session)
-        return session.summary
+        let resultsByCallID = collectToolResults(from: session.messages)
+        let perNote = collectAssistantNotes(from: session.messages, resultsByCallID: resultsByCallID)
+        let winners = selectBestOwners(perNote: perNote)
+        return rebuildGroupedActions(perNote: perNote, winners: winners)
     }
 
     // MARK: - Persistence (SQLite with JSON fallback)
@@ -552,11 +519,174 @@ public actor ConversationManager {
     }
 }
 
+// MARK: - Tool action history rebuild
+
+/// One assistant note plus its parsed actions in stored order.
+private typealias AssistantNoteActions = (id: UUID, actions: [ToolAction])
+
+/// Winning record per call identifier plus the owning note.
+/// A single owner keeps reloads interleaved identically to live turns.
+private typealias ToolActionWinners = (bestByCallID: [String: ToolAction], ownerByCallID: [String: UUID])
+
+/// Trims an identifier, returning nil when blank.
+/// Blank identifiers never share one collapse bucket; each unidentified record stays
+/// distinct so two blanks cannot overwrite each other.
+private func nonEmptyCallID(_ raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+}
+
+/// Indexes tool results by trimmed call identifier.
+/// Persisted error flags distinguish failures from successes; rows written before the
+/// flag default to success.
+private func collectToolResults(from messages: [Message]) -> [String: ToolResult] {
+    var resultsByCallID: [String: ToolResult] = [:]
+    for message in messages where message.role == .tool {
+        guard let rawCallID = message.toolCallID, let callID = nonEmptyCallID(rawCallID) else { continue }
+        resultsByCallID[callID] = ToolResult(toolCallID: callID, content: message.content, isError: message.isError ?? false)
+    }
+    return resultsByCallID
+}
+
+/// Parses one assistant note into actions with per-note deduplication.
+/// The same identifier twice in one note is the narration plus its persisted twin,
+/// so the first occurrence wins and the repeat collapses away.
+private func assistantNoteActions(for message: Message, roundIndex: Int, resultsByCallID: [String: ToolResult]) -> [ToolAction] {
+    var seenInNote = Set<String>()
+    var actions: [ToolAction] = []
+    // Shared split treats a trailing newline as a terminator rather than an
+    // extra blank, so history coverage and TOML parsing share line boundaries.
+    for line in NormalizedText.splitLines(message.content) {
+        guard let parsed = ToolInput.parsePlaceholderLine(line) else { continue }
+        guard let callID = nonEmptyCallID(parsed.callID) else {
+            actions.append(ToolAction(
+                toolName: parsed.toolName,
+                callID: parsed.callID,
+                argumentsJSON: parsed.argumentsJSON,
+                result: nil,
+                roundIndex: roundIndex
+            ))
+            continue
+        }
+        guard seenInNote.insert(callID).inserted else { continue }
+        actions.append(ToolAction(
+            toolName: parsed.toolName,
+            callID: callID,
+            argumentsJSON: parsed.argumentsJSON,
+            result: resultsByCallID[callID],
+            roundIndex: roundIndex
+        ))
+    }
+    return actions
+}
+
+/// Collects per-note actions oldest-first, tagging round boundaries.
+/// Round boundaries persist as one note per LLM round in stored order, so only notes
+/// bearing placeholders advance the round and reloads interleave like live turns.
+private func collectAssistantNotes(from messages: [Message], resultsByCallID: [String: ToolResult]) -> [AssistantNoteActions] {
+    var perNote: [AssistantNoteActions] = []
+    var roundIndex = 0
+    for message in messages where message.role == .assistant {
+        let actions = assistantNoteActions(for: message, roundIndex: roundIndex, resultsByCallID: resultsByCallID)
+        guard !actions.isEmpty else { continue }
+        perNote.append((id: message.id, actions: actions))
+        roundIndex += 1
+    }
+    return perNote
+}
+
+/// Selects the winning record per identifier with a single owning note.
+/// A narrated line plus its persisted twin share one identifier, so the
+/// execution-backed record wins over a pending ghost and the earliest wins ties
+/// to hold chronological order.
+private func selectBestOwners(perNote: [AssistantNoteActions]) -> ToolActionWinners {
+    var bestByCallID: [String: ToolAction] = [:]
+    var ownerByCallID: [String: UUID] = [:]
+    for entry in perNote {
+        for action in entry.actions {
+            guard let key = nonEmptyCallID(action.callID) else { continue }
+            if let existing = bestByCallID[key] {
+                if action.result != nil, existing.result == nil {
+                    bestByCallID[key] = action
+                    ownerByCallID[key] = entry.id
+                }
+                continue
+            }
+            bestByCallID[key] = action
+            ownerByCallID[key] = entry.id
+        }
+    }
+    return (bestByCallID, ownerByCallID)
+}
+
+/// Rebuilds grouped actions in stored order from the winning records.
+/// The surviving record is the execution-backed best — never the local pending ghost —
+/// and blanks skip the owner map to stay with their owning note.
+private func rebuildGroupedActions(perNote: [AssistantNoteActions], winners: ToolActionWinners) -> [UUID: [ToolAction]] {
+    var grouped: [UUID: [ToolAction]] = [:]
+    for entry in perNote {
+        var kept: [ToolAction] = []
+        for action in entry.actions {
+            guard let key = nonEmptyCallID(action.callID) else {
+                kept.append(action)
+                continue
+            }
+            guard winners.ownerByCallID[key] == entry.id, let best = winners.bestByCallID[key] else { continue }
+            kept.append(best)
+        }
+        if !kept.isEmpty {
+            grouped[entry.id] = kept
+        }
+    }
+    return grouped
+}
+
 // MARK: - ConversationManager truncation
 
 /// Holds the history-eviction helper so the main actor body stays within the
 /// length budget while sharing file-private state.
 extension ConversationManager {
+    /// Summarizes a session's oldest turns on demand.
+    @discardableResult
+    public func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
+        guard var session = sessions[sessionID] else { return nil }
+        let keep = max(1, keeping ?? maxMessages)
+        guard session.messages.count > keep else { return session.summary }
+
+        let hasSystemPrompt = session.messages.first?.role == .system
+        let systemPrompt = hasSystemPrompt ? session.messages.first : nil
+        let startIndex = hasSystemPrompt ? 1 : 0
+        let dropCount = session.messages.count - keep
+
+        let evicted = Array(session.messages[startIndex ..< (startIndex + dropCount)])
+        let summary = summarizer(evicted)
+
+        let joinedSummary = [session.summary, summary]
+            .compactMap { $0?.isEmpty == false ? $0 : nil }
+            .joined(separator: "\n")
+        // The rolling summary feeds every prompt's budget and the persisted
+        // row, so it keeps the same bound as eviction instead of growing
+        // without limit across repeated on-demand summarizes. The leading
+        // ellipsis marks truncation, so it occupies one slot of the budget
+        // and the retained tail keeps the total within the bound.
+        session.summary = if joinedSummary.count > Self.maxSummaryLength {
+            "…" + String(joinedSummary.suffix(Self.maxSummaryLength - 1))
+        } else {
+            joinedSummary
+        }
+
+        var kept = Array(session.messages.suffix(keep - (hasSystemPrompt ? 1 : 0)))
+        if let systemPrompt {
+            kept.insert(systemPrompt, at: 0)
+        }
+        session.messages = kept
+
+        session.updatedAt = Date()
+        sessions[sessionID] = session
+        await persist(session)
+        return session.summary
+    }
+
     /// Evicts oldest non-system turns when over `maxMessages`.
     private func truncateIfNeeded(messages: inout [Message], summary: inout String?) {
         guard messages.count > maxMessages else { return }
@@ -593,7 +723,9 @@ extension ConversationManager {
             chunk
         }
         summary = if combinedSummary.count > Self.maxSummaryLength {
-            "…" + String(combinedSummary.suffix(Self.maxSummaryLength))
+            // The ellipsis marks truncation, so it occupies one slot of the
+            // budget and the retained tail keeps the total within the bound.
+            "…" + String(combinedSummary.suffix(Self.maxSummaryLength - 1))
         } else {
             combinedSummary
         }

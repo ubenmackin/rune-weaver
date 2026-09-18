@@ -130,17 +130,34 @@ public final class AppModel {
     /// Best-effort by design: failures stay in the server log so a down engine
     /// never flips a healthy boot into a failure, while the health endpoint's
     /// live stage plus reachability carries state to the dashboard dot and
-    /// message. Detached so boot never waits on the minutes-scale pull, with
-    /// the handle retained so quit can cancel the flight.
+    /// message. Hops off the main actor via a nonisolated factory (a plain
+    /// Task here would inherit MainActor isolation from this class), with the
+    /// handle retained so quit can cancel the flight.
     private func startSearchWarmup(browserConfig: BrowserConfig) {
         searchWarmupTask?.cancel()
         let captured = browserConfig
-        searchWarmupTask = Task.detached(priority: .background) {
-            let searxngURL = captured.searxngURL
-            // Same shape as the serve command's boot lines: poll the owner's
-            // live stage snapshot so a long pull stays visible instead of
-            // hanging silently, ticking only when stage or elapsed moves.
-            let stageWatcher = Task {
+        searchWarmupTask = Self.makeSearchWarmupTask(browserConfig: captured)
+    }
+
+    /// Creates the warmup flight off MainActor isolation.
+    /// Nonisolated so the minutes-budget ensure never blocks the menu bar while
+    /// still inheriting task-locals and priority (unlike a detached task);
+    /// the caller retains the handle for quit cancel.
+    private nonisolated static func makeSearchWarmupTask(browserConfig: BrowserConfig) -> Task<Void, Never> {
+        Task(priority: .background) {
+            await Self.runSearchWarmup(browserConfig: browserConfig)
+        }
+    }
+
+    /// Background search engine warmup execution running off @MainActor.
+    private nonisolated static func runSearchWarmup(browserConfig: BrowserConfig) async {
+        let searxngURL = browserConfig.searxngURL
+        // Structured group ties the stage ticker to the ensure flight so parent
+        // cancel or scope exit always reaps the watcher; no unstructured
+        // watcher can leak past settle. Ticks only when stage or elapsed moves,
+        // matching the serve boot lines for long pulls.
+        await withDiscardingTaskGroup { group in
+            group.addTask {
                 var lastStage: SearXNGEnsurer.StartStage?
                 var lastElapsed: Int?
                 while !Task.isCancelled {
@@ -158,19 +175,14 @@ public final class AppModel {
                 }
             }
             do {
-                try await withTaskCancellationHandler {
-                    try await SearXNGEnsurer.shared.ensure(browser: captured)
-                } onCancel: {
-                    stageWatcher.cancel()
-                }
-                stageWatcher.cancel()
-                RuneWeaverLog.server.info("SearXNG ready at \(captured.searxngURL).")
+                try await SearXNGEnsurer.shared.ensure(browser: browserConfig)
+                RuneWeaverLog.server.info("SearXNG ready at \(browserConfig.searxngURL).")
             } catch is CancellationError {
-                stageWatcher.cancel()
+                // Best-effort warmup swallows cancel so quit stays silent.
             } catch {
-                stageWatcher.cancel()
                 RuneWeaverLog.server.warning("Search engine unavailable: \(error.localizedDescription)")
             }
+            group.cancelAll()
         }
     }
 

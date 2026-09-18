@@ -129,7 +129,7 @@ public struct SubprocessToolBridge: Tool, Sendable {
         )
     }
 
-    private struct SubprocessInvocation {
+    private struct SubprocessInvocation: Sendable {
         let executableURL: URL
         let arguments: [String]
         let workingDirectory: URL
@@ -143,10 +143,11 @@ public struct SubprocessToolBridge: Tool, Sendable {
         requestData: Data,
         input: ToolInput
     ) async throws -> ToolOutput {
-        // Track the child in a Sendable box so cancellation reaches it even when the Process is
-        // created on a background queue inside runSubprocess. Without this box a cancelled turn
+        // Track the child in a Sendable box so cancellation reaches the exact
+        // process even though the child is spawned on this executor and the
+        // cancel handler runs elsewhere. Without the box a cancelled turn
         // would leak the subprocess until the timeout fires.
-        let processBox = ProcessBox()
+        let processBox = BoundedProcessRunner.ProcessBox()
         let invocation = SubprocessInvocation(
             executableURL: executableURL,
             arguments: arguments,
@@ -154,15 +155,31 @@ public struct SubprocessToolBridge: Tool, Sendable {
             inputData: requestData,
             callID: input.callID
         )
-        return try await withTaskCancellationHandler {
-            try await runSubprocess(
-                invocation: invocation,
-                processBox: processBox,
-                maxOutputBytes: maxOutputBytes,
-                timeoutSeconds: timeoutSeconds
-            )
-        } onCancel: {
-            processBox.terminate()
+        do {
+            let output = try await withTaskCancellationHandler {
+                let inner = try await runSubprocess(
+                    invocation: invocation,
+                    processBox: processBox,
+                    maxOutputBytes: maxOutputBytes,
+                    timeoutSeconds: timeoutSeconds
+                )
+                // A cancelled turn terminates the child, which resumes as a
+                // timeout or exit-code failure; report cancel as cancellation
+                // so callers distinguish abort from budget failure.
+                try Task.checkCancellation()
+                return inner
+            } onCancel: {
+                processBox.terminateIfRunning()
+            }
+            try Task.checkCancellation()
+            return output
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if Task.isCancelled {
+                throw CancellationError()
+            }
+            throw error
         }
     }
 
@@ -198,118 +215,120 @@ public struct SubprocessToolBridge: Tool, Sendable {
         return process
     }
 
+    private func subprocessSandboxFailure(
+        isSandboxAvailable: Bool,
+        callID: String
+    ) -> ToolOutput? {
+        // Refuse before spawning so a missing sandbox never runs unsandboxed
+        // by accident; explicit opt-in alone permits the fallback path.
+        guard !isSandboxAvailable, !allowUnsandboxedExecution else { return nil }
+        RuneWeaverLog.tools.error("SubprocessToolBridge: sandbox-exec unavailable, refusing to execute plugin '\(name)' without sandbox confinement.")
+        return .failure("Plugin sandbox unavailable (sandbox-exec missing); execution refused.", callID: callID)
+    }
+
     private func runSubprocess(
         invocation: SubprocessInvocation,
-        processBox: ProcessBox,
+        processBox: BoundedProcessRunner.ProcessBox,
         maxOutputBytes: Int,
         timeoutSeconds: TimeInterval
     ) async throws -> ToolOutput {
-        let allowUnsandboxed = allowUnsandboxedExecution
-        let toolName = name
         let sandboxExecPath = "/usr/bin/sandbox-exec"
         let isSandboxAvailable = FileManager.default.isExecutableFile(atPath: sandboxExecPath)
-        if !isSandboxAvailable, !allowUnsandboxed {
-            RuneWeaverLog.tools.error("SubprocessToolBridge: sandbox-exec unavailable, refusing to execute plugin '\(toolName)' without sandbox confinement.")
-            return .failure("Plugin sandbox unavailable (sandbox-exec missing); execution refused.", callID: invocation.callID)
+        if let refusal = subprocessSandboxFailure(
+            isSandboxAvailable: isSandboxAvailable,
+            callID: invocation.callID
+        ) {
+            return refusal
         }
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = prepareProcess(
-                    invocation: invocation,
-                    isSandboxAvailable: isSandboxAvailable,
-                    sandboxExecPath: sandboxExecPath
+        // Sendable buffers isolate pipe bytes off the spawning executor so the
+        // readability handlers stay @Sendable under strict concurrency. Caps
+        // terminate via the shared box without moving the child across
+        // executors, preserving budgets without raw GCD.
+        let buffers = CappedPipeBuffers()
+        let timedOut = OSAllocatedUnfairLock(initialState: false)
+        let timeoutTaskStore = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+        let limits = ProcessDrainLimits(stdout: max(1, maxOutputBytes), stderr: 32768)
+        let clampedTimeout = max(0.1, timeoutSeconds)
+        let budgets = ProcessBudgets(
+            timeoutSeconds: timeoutSeconds,
+            maxOutputBytes: maxOutputBytes
+        )
+        let process = prepareProcess(
+            invocation: invocation,
+            isSandboxAvailable: isSandboxAvailable,
+            sandboxExecPath: sandboxExecPath
+        )
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        attachSubprocessDrains(
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            buffers: buffers,
+            limits: limits,
+            processBox: processBox
+        )
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<ToolOutput, Error>) in
+            // Termination is the single resumer; the timeout only latches the
+            // flag and terminates so timeout versus cancel stays
+            // distinguishable via the outer cancellation check.
+            let resumeOnceBox = CheckedOnce<ToolOutput>(continuation)
+            process.terminationHandler = { proc in
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                let timeoutTask = timeoutTaskStore.withLock { $0 }
+                if let timeoutTask {
+                    timeoutTask.cancel()
+                }
+                self.drainSubprocessTail(
+                    stdoutPipe: stdoutPipe,
+                    stderrPipe: stderrPipe,
+                    buffers: buffers,
+                    limits: limits
                 )
-
-                let stdinPipe = Pipe()
-                let stdoutPipe = Pipe()
-                let stderrPipe = Pipe()
-
-                process.standardInput = stdinPipe
-                process.standardOutput = stdoutPipe
-                process.standardError = stderrPipe
+                let output = self.mapSubprocessTermination(
+                    terminationStatus: proc.terminationStatus,
+                    buffers: buffers,
+                    didTimeOut: timedOut.withLock { $0 },
+                    budgets: budgets,
+                    callID: invocation.callID
+                )
+                resumeOnceBox.resume(with: .success(output))
+            }
+            do {
+                try process.run()
+                // Publish only after a successful spawn so a launch failure
+                // never leaves a dead child for cancellation to chase. A cancel
+                // racing the spawn still terminates via the latched box instead
+                // of leaking until the budget fires.
                 processBox.set(process)
-
-                let resumeOnceBox = SubprocessResumeOnce(continuation)
-
-                // Timeout timer
-                let timeoutItem = DispatchWorkItem {
-                    if process.isRunning {
-                        process.terminate()
-                    }
-                    resumeOnceBox.resume(with: .success(.failure(
-                        "Tool execution timed out after \(Int(timeoutSeconds))s.",
-                        callID: invocation.callID
-                    )))
-                }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: timeoutItem)
-
-                do {
-                    try process.run()
-
-                    let drainGroup = DispatchGroup()
-                    let stdoutDrain = BoundedDrain()
-                    let stderrDrain = BoundedDrain()
-                    let outFD = stdoutPipe.fileHandleForReading.fileDescriptor
-                    let errFD = stderrPipe.fileHandleForReading.fileDescriptor
-
-                    // Concurrently drain stdout and stderr so a child producing large
-                    // stderr output does not fill the OS pipe buffer and deadlock while
-                    // Swift blocks waiting for stdout EOF.
-                    drainGroup.enter()
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let res = boundedRead(fileDescriptor: outFD, limit: maxOutputBytes, process: process)
-                        stdoutDrain.set(res)
-                        drainGroup.leave()
-                    }
-
-                    drainGroup.enter()
-                    DispatchQueue.global(qos: .userInitiated).async {
-                        let res = boundedRead(fileDescriptor: errFD, limit: 32768, process: process)
-                        stderrDrain.set(res)
-                        drainGroup.leave()
-                    }
-
-                    do {
-                        try stdinPipe.fileHandleForWriting.write(contentsOf: invocation.inputData)
-                        try stdinPipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
-                    } catch {
-                        RuneWeaverLog.tools.warning("SubprocessToolBridge: stdin write terminated early: \(error)")
-                        // The child may have exited or closed stdin prematurely; handle reading handles EOF cleanly.
-                    }
-                    try? stdinPipe.fileHandleForWriting.close()
-
-                    process.waitUntilExit()
-                    drainGroup.wait()
-                    timeoutItem.cancel()
-
-                    let stdoutResult = stdoutDrain.get()
-                    let stderrResult = stderrDrain.get()
-
-                    if stdoutResult.didExceed {
-                        resumeOnceBox.resume(with: .success(.failure(
-                            "Tool output exceeded the \(maxOutputBytes)-byte limit and was terminated.",
-                            callID: invocation.callID
-                        )))
-                        return
-                    }
-
-                    let output = parseSubprocessResponse(
-                        stdoutData: stdoutResult.data,
-                        stderrData: stderrResult.data,
-                        terminationStatus: process.terminationStatus,
-                        maxOutputBytes: maxOutputBytes,
-                        callID: invocation.callID
-                    )
-                    resumeOnceBox.resume(with: .success(output))
-                } catch {
-                    timeoutItem.cancel()
-                    resumeOnceBox.resume(with: .failure(error))
-                }
+            } catch {
+                stdoutPipe.fileHandleForReading.readabilityHandler = nil
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
+                resumeOnceBox.resume(with: .failure(error))
+                return
+            }
+            self.writeSubprocessInput(stdinPipe: stdinPipe, inputData: invocation.inputData)
+            try? stdinPipe.fileHandleForWriting.close()
+            let timeoutTask = self.startSubprocessTimeout(
+                clampedTimeout: clampedTimeout,
+                timedOut: timedOut,
+                processBox: processBox
+            )
+            timeoutTaskStore.withLock { $0 = timeoutTask }
+            // The child may have exited before the timeout stored; the handler
+            // already cancelled nil, so cancel the stray sleeper now instead of
+            // leaving it ticking past settle.
+            if !process.isRunning {
+                timeoutTask.cancel()
             }
         }
     }
 
-    private func parseSubprocessResponse(
+    func parseSubprocessResponse(
         stdoutData: Data,
         stderrData: Data,
         terminationStatus: Int32,
@@ -351,105 +370,5 @@ public struct SubprocessToolBridge: Tool, Sendable {
 
         // Fallback to raw stdout if not structured JSON-RPC
         return .success(stdoutStr.trimmingCharacters(in: .whitespacesAndNewlines), callID: callID)
-    }
-}
-
-/// One-shot gate ensuring a subprocess continuation resumes exactly once.
-private final class SubprocessResumeOnce: Sendable {
-    private struct State: Sendable {
-        var continuation: CheckedContinuation<ToolOutput, Error>?
-        var didResume = false
-    }
-
-    private let state = OSAllocatedUnfairLock(initialState: State())
-
-    /// Creates a gate holding a continuation.
-    /// - Parameter continuation: Continuation to resume once.
-    init(_ continuation: CheckedContinuation<ToolOutput, Error>) {
-        state.withLock { $0.continuation = continuation }
-    }
-
-    /// Resumes the held continuation unless already resumed.
-    /// - Parameter result: Result to resume with.
-    func resume(with result: Result<ToolOutput, Error>) {
-        let continuation = state.withLock { lockState -> CheckedContinuation<ToolOutput, Error>? in
-            guard !lockState.didResume else { return nil }
-            lockState.didResume = true
-            let held = lockState.continuation
-            lockState.continuation = nil
-            return held
-        }
-        continuation?.resume(with: result)
-    }
-}
-
-/// Shares the live child across the cancellation handler and the worker queue
-/// so a cancelled turn can terminate the exact process that is producing output.
-private final class ProcessBox: Sendable {
-    private let boxed = OSAllocatedUnfairLock<Process?>(initialState: nil)
-
-    func set(_ process: Process) {
-        boxed.withLock { $0 = process }
-    }
-
-    func terminate() {
-        let process = boxed.withLock { $0 }
-        if let process, process.isRunning {
-            process.terminate()
-        }
-    }
-}
-
-/// Outcome of an incremental capped read.
-private struct BoundedReadResult: Sendable {
-    let data: Data
-    let didExceed: Bool
-}
-
-/// Reads a pipe in small chunks and kills the child as soon as the cap is
-/// passed, keeping a malicious rune from forcing a multi-gigabyte allocation
-/// before any truncation could run.
-private func boundedRead(fileDescriptor: Int32, limit: Int, process: Process) -> BoundedReadResult {
-    let handle = FileHandle(fileDescriptor: fileDescriptor, closeOnDealloc: false)
-    var accumulated = Data()
-    let chunkSize = 16384
-
-    while true {
-        let chunk: Data
-        do {
-            if let readData = try handle.read(upToCount: chunkSize) {
-                chunk = readData
-            } else {
-                break
-            }
-        } catch {
-            break
-        }
-
-        if chunk.isEmpty {
-            break
-        }
-
-        accumulated.append(chunk)
-        if accumulated.count > limit {
-            if process.isRunning {
-                process.terminate()
-            }
-            return BoundedReadResult(data: accumulated, didExceed: true)
-        }
-    }
-    return BoundedReadResult(data: accumulated, didExceed: false)
-}
-
-/// Thread-safe accumulator for concurrent pipe draining.
-private final class BoundedDrain: Sendable {
-    private let result = OSAllocatedUnfairLock(initialState: BoundedReadResult(data: Data(), didExceed: false))
-
-    func set(_ newResult: BoundedReadResult) {
-        result.withLock { $0 = newResult }
-    }
-
-    func get() -> BoundedReadResult {
-        result.withLock { $0 }
     }
 }

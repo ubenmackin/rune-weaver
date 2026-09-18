@@ -206,63 +206,175 @@ public struct DashboardBundle: Sendable, Equatable {
         return (last as NSString).pathExtension.isEmpty
     }
 
-    /// Builds the HTTP response for one dashboard request path.
-    public func response(for requestPath: String, fileManager: FileManager = .default) -> Response {
-        guard bundleAvailable(using: fileManager) else {
-            let trimmed = requestPath.trimmingCharacters(in: .whitespacesAndNewlines)
-            let bare = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            if bare.isEmpty || bare == "index.html" {
-                return Response(
-                    status: .ok,
-                    headers: HTTPHeaders([
-                        ("Content-Type", "text/html; charset=utf-8"),
-                        (Self.bundleHeader, "stub")
-                    ]),
-                    body: .init(string: Self.stubHTML)
-                )
-            }
-            let payload: Data
-            do {
-                payload = try JSONSerialization.data(
-                    withJSONObject: [
-                        "error": "dashboard-not-built",
-                        "hint": Self.stubHint
-                    ],
-                    options: []
-                )
-            } catch {
-                payload = Data(#"{"error":"dashboard-not-built","hint":"ok"}"#.utf8)
-            }
-            return Response(
-                status: .serviceUnavailable,
-                headers: HTTPHeaders([
-                    ("Content-Type", "application/json; charset=utf-8"),
-                    (Self.bundleHeader, "stub")
-                ]),
-                body: .init(data: payload)
+    /// Builds the HTTP response for one dashboard request path (streaming via Vapor Request).
+    /// Sole entry point wired into routes so bundle bytes stream without blocking the event loop.
+    public func response(for req: Request, requestPath: String, fileManager: FileManager = .default) async throws -> Response {
+        switch route(for: requestPath, fileManager: fileManager) {
+        case .stubIndex:
+            Self.stubIndexResponse()
+        case .stubMissing:
+            Self.stubMissingResponse()
+        case .invalidPath:
+            jsonError(status: .badRequest, message: "Invalid dashboard path", fileManager: fileManager)
+        case .index:
+            try await fileResponse(
+                req: req,
+                at: indexFileURL(fileManager: fileManager),
+                bundleState: "bundle",
+                fileManager: fileManager
             )
+        case let .file(url, cacheControl):
+            try await fileResponse(
+                req: req,
+                at: url,
+                bundleState: "bundle",
+                cacheControl: cacheControl,
+                fileManager: fileManager
+            )
+        case .clientFallback:
+            try await fileResponse(
+                req: req,
+                at: indexFileURL(fileManager: fileManager),
+                bundleState: "bundle",
+                cacheControl: "no-cache",
+                fileManager: fileManager
+            )
+        case .notFound:
+            jsonError(status: .notFound, message: "Not found", fileManager: fileManager)
         }
-        if Self.sanitizedComponents(for: requestPath) == nil {
-            return jsonError(status: .badRequest, message: "Invalid dashboard path", fileManager: fileManager)
+    }
+
+    /// Builds the HTTP response for one dashboard request path (synchronous test-only fallback).
+    /// Production routes must use `response(for:req:requestPath:)` above so bundle bytes stream
+    /// without blocking the event loop; this entry point exists only for unit tests that have no
+    /// `Request` and must never be wired into routes.
+    public func response(for requestPath: String, fileManager: FileManager = .default) -> Response {
+        switch route(for: requestPath, fileManager: fileManager) {
+        case .stubIndex:
+            Self.stubIndexResponse()
+        case .stubMissing:
+            Self.stubMissingResponse()
+        case .invalidPath:
+            jsonError(status: .badRequest, message: "Invalid dashboard path", fileManager: fileManager)
+        case .index:
+            fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", fileManager: fileManager)
+        case let .file(url, cacheControl):
+            fileResponse(at: url, bundleState: "bundle", cacheControl: cacheControl, fileManager: fileManager)
+        case .clientFallback:
+            fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", cacheControl: "no-cache", fileManager: fileManager)
+        case .notFound:
+            jsonError(status: .notFound, message: "Not found", fileManager: fileManager)
         }
+    }
+
+    /// Single routing decision shared by both response entry points.
+    /// Centralizing stub, validation, and cache policy here keeps the
+    /// streaming and synchronous deliveries from drifting on edge cases.
+    private enum DashboardRoute: Equatable {
+        case stubIndex
+        case stubMissing
+        case invalidPath
+        case index
+        case file(URL, cacheControl: String)
+        case clientFallback
+        case notFound
+    }
+
+    /// Classifies one request path into a routing decision.
+    /// - Parameters:
+    ///   - requestPath: Raw request path.
+    ///   - fileManager: Filesystem accessor.
+    /// - Returns: Routing decision covering stub and bundle states.
+    private func route(for requestPath: String, fileManager: FileManager = .default) -> DashboardRoute {
+        guard bundleAvailable(using: fileManager) else {
+            return Self.isStubIndexPath(requestPath) ? .stubIndex : .stubMissing
+        }
+        guard let components = Self.sanitizedComponents(for: requestPath) else {
+            return .invalidPath
+        }
+        // Slash-trimmed comparison keeps `/`, ``, and `index.html` on the entry point.
         let trimmed = requestPath.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         if trimmed.isEmpty || trimmed == "index.html" {
-            return fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", fileManager: fileManager)
+            return .index
         }
         if let file = localFileURL(for: requestPath, fileManager: fileManager) {
-            let lastComponent = Self.sanitizedComponents(for: requestPath)?.last ?? ""
+            let lastComponent = components.last ?? ""
             let hasExtension = !(lastComponent as NSString).pathExtension.isEmpty
+            // Hashed assets carry fingerprints so they can cache immutably;
+            // extensionless hits fall through to no-cache or the SPA fallback.
             let cacheControl = hasExtension ? "public, max-age=31536000, immutable" : "no-cache"
-            return fileResponse(at: file, bundleState: "bundle", cacheControl: cacheControl, fileManager: fileManager)
+            return .file(file, cacheControl: cacheControl)
         }
         if Self.isClientRoute(requestPath) {
-            return fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", cacheControl: "no-cache", fileManager: fileManager)
+            return .clientFallback
         }
-        return jsonError(status: .notFound, message: "Not found", fileManager: fileManager)
+        return .notFound
     }
 
-    /// Reads a file URL into a 200 response.
+    /// Whether a request path targets the stub entry page when no bundle exists.
+    private static func isStubIndexPath(_ requestPath: String) -> Bool {
+        let trimmed = requestPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bare = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return bare.isEmpty || bare == "index.html"
+    }
+
+    /// Placeholder page for `GET /` when the bundle was never built.
+    private static func stubIndexResponse() -> Response {
+        Response(
+            status: .ok,
+            headers: HTTPHeaders([
+                ("Content-Type", "text/html; charset=utf-8"),
+                (bundleHeader, "stub")
+            ]),
+            body: .init(string: stubHTML)
+        )
+    }
+
+    /// Machine-readable stub error for asset paths when the bundle was never built.
+    private static func stubMissingResponse() -> Response {
+        let payload: Data
+        do {
+            payload = try JSONSerialization.data(
+                withJSONObject: [
+                    "error": "dashboard-not-built",
+                    "hint": Self.stubHint
+                ],
+                options: []
+            )
+        } catch {
+            payload = Data(#"{"error":"dashboard-not-built","hint":"ok"}"#.utf8)
+        }
+        return Response(
+            status: .serviceUnavailable,
+            headers: HTTPHeaders([
+                ("Content-Type", "application/json; charset=utf-8"),
+                (Self.bundleHeader, "stub")
+            ]),
+            body: .init(data: payload)
+        )
+    }
+
+    private func fileResponse(
+        req: Request,
+        at url: URL?,
+        bundleState: String,
+        cacheControl: String = "no-cache",
+        fileManager: FileManager = .default
+    ) async throws -> Response {
+        guard let url else {
+            return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
+        }
+        let res = try await req.fileio.asyncStreamFile(at: url.path)
+        res.headers.replaceOrAdd(name: "Content-Type", value: Self.contentType(for: url.lastPathComponent))
+        res.headers.replaceOrAdd(name: "Cache-Control", value: cacheControl)
+        res.headers.replaceOrAdd(name: Self.bundleHeader, value: bundleState)
+        return res
+    }
+
+    /// Reads a file URL into a 200 response (synchronous test-only fallback).
+    /// Blocking file I/O stays confined to unit tests here; production routes use the streaming
+    /// `fileResponse(req:at:bundleState:cacheControl:fileManager:)` above so the event loop never blocks.
     private func fileResponse(at url: URL?, bundleState: String, cacheControl: String = "no-cache", fileManager: FileManager = .default) -> Response {
         guard let url, let data = try? Data(contentsOf: url) else {
             return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)

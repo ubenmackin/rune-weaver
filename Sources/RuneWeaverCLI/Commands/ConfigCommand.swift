@@ -605,7 +605,13 @@ private func tomlQuoted(_ value: String) -> String {
 /// Inserts or replaces one key inside a TOML document, preserving every
 /// other line, comment, and section.
 private func upsertTOMLValue(_ text: String, section: String, key: String, rendered: String) -> String {
-    var lines = text.components(separatedBy: "\n")
+    // Fold through the shared line-ending normalization so CRLF/CR configs edit
+    // on the same boundaries as TOML decoding and history parsing. The split
+    // intentionally preserves the trailing-newline slot (unlike the terminator-
+    // dropping line split) so the later join round-trips the file byte-for-byte
+    // outside the edited line.
+    let normalized = NormalizedText.normalizedLineEndings(text)
+    var lines = normalized.components(separatedBy: "\n")
     let header = "[\(section)]"
     var headerIndex: Int?
     var keyIndex: Int?
@@ -660,7 +666,7 @@ private func upsertTOMLValue(_ text: String, section: String, key: String, rende
     result += "\(header)\n\(key) = \(rendered)"
     if !suffix.isEmpty {
         result += "\n" + suffix
-    } else if !text.hasSuffix("\n") {
+    } else if !normalized.hasSuffix("\n") {
         result += "\n"
     }
     return result

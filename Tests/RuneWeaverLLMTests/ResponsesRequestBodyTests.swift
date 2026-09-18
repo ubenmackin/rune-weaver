@@ -248,6 +248,46 @@ struct ResponsesRequestBodyTests {
         #expect(parameters["additionalProperties"] as? Bool == false)
     }
 
+    @Test
+    func `Sorted keys serialization is byte identical and deterministic`() throws {
+        let messages = [
+            Message(role: .system, content: "System instructions"),
+            Message(role: .user, content: "Hello world")
+        ]
+        let tool = ToolDefinition(
+            name: "sample.tool",
+            description: "Sample tool for deterministic sorting check",
+            parameters: JSONSchema(rawValue: """
+            {
+                "type": "object",
+                "properties": {
+                    "zebra": { "type": "string", "description": "Zebra param" },
+                    "alpha": { "type": "number", "description": "Alpha param" },
+                    "beta": { "type": "boolean", "description": "Beta param" }
+                },
+                "required": ["alpha", "beta"],
+                "additionalProperties": false
+            }
+            """)
+        )
+        // Repeat multiple times to ensure Swift hash randomization across invocations never changes wire bytes
+        let chatBytes1 = try openAIChatRequestBody(model: "local-model", messages: messages, tools: [tool], stream: true, cachePrompt: true, slotID: 2)
+        let chatBytes2 = try openAIChatRequestBody(model: "local-model", messages: messages, tools: [tool], stream: true, cachePrompt: true, slotID: 2)
+        #expect(chatBytes1 == chatBytes2)
+
+        let chatString = try #require(String(data: chatBytes1, encoding: .utf8))
+        // Verify key ordering in wire JSON: "alpha" must appear before "beta", which must appear before "zebra"
+        let alphaRange = try #require(chatString.range(of: "\"alpha\""))
+        let betaRange = try #require(chatString.range(of: "\"beta\""))
+        let zebraRange = try #require(chatString.range(of: "\"zebra\""))
+        #expect(alphaRange.lowerBound < betaRange.lowerBound)
+        #expect(betaRange.lowerBound < zebraRange.lowerBound)
+
+        let responsesBytes1 = try openAIResponsesRequestBody(model: "local-model", messages: messages, tools: [tool], stream: true)
+        let responsesBytes2 = try openAIResponsesRequestBody(model: "local-model", messages: messages, tools: [tool], stream: true)
+        #expect(responsesBytes1 == responsesBytes2)
+    }
+
     private func responsesInputItems(from body: Data) throws -> [[String: Any]] {
         let object = try JSONSerialization.jsonObject(with: body)
         let json = try #require(object as? [String: Any])

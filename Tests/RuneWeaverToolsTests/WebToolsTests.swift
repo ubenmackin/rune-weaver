@@ -97,6 +97,17 @@ private enum WebTestSupport {
         ]}
         """.utf8)
     }
+
+    /// Publishes canned public proof so fetch guards stay hermetic without touching the network.
+    /// Production still fails closed on real DNS; the stub clears after each test so proof never leaks.
+    static func stubPublicDNS() {
+        ApiSSRFGuard.testDNSResolver = { _ in ["93.184.216.34"] }
+    }
+
+    /// Restores system resolution after a stubbed test.
+    static func clearDNS() {
+        ApiSSRFGuard.testDNSResolver = nil
+    }
 }
 
 @Suite("Web Search Parsing and Caps")
@@ -154,7 +165,9 @@ struct WebSearchParsingTests {
     }
 }
 
-@Suite("Web Fetch Safety and Outcomes")
+/// Serialized plus per-test DNS stub: `testDNSResolver` is process-global canned proof, so parallel
+/// fetch tests would publish and clear under each other mid-chain and fail closed on real DNS.
+@Suite("Web Fetch Safety and Outcomes", .serialized)
 struct WebFetchSafetyTests {
     @Test
     func `Allowlist passes http and rejects smuggled schemes`() {
@@ -174,6 +187,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Redirect to unsafe target denies with finalUrl`() async throws {
+        // Canned public proof keeps the stubbed redirect hermetic without a production bypass.
+        WebTestSupport.stubPublicDNS()
+        defer { WebTestSupport.clearDNS() }
         let start = try #require(URL(string: "https://example.com/start"))
         let transport = WebTestSupport.RoutingFetchTransport { request in
             if request.url?.absoluteString == start.absoluteString {
@@ -194,6 +210,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Redirect chain resolves relative locations and reports finalUrl`() async throws {
+        // Canned public proof keeps the stubbed chain hermetic without a production bypass.
+        WebTestSupport.stubPublicDNS()
+        defer { WebTestSupport.clearDNS() }
         let first = try #require(URL(string: "https://example.com/a"))
         let second = try #require(URL(string: "https://example.com/b"))
         let transport = WebTestSupport.RoutingFetchTransport { request in
@@ -221,6 +240,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Auth statuses return auth_required with browser hint`() async throws {
+        // Canned public proof keeps stubbed auth responses hermetic without a production bypass.
+        WebTestSupport.stubPublicDNS()
+        defer { WebTestSupport.clearDNS() }
         for code in [401, 403] {
             let page = try #require(URL(string: "https://example.com/private"))
             let transport = WebTestSupport.RoutingFetchTransport { _ in
@@ -241,6 +263,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Non-text payloads are unsupported with finalUrl`() async throws {
+        // Canned public proof keeps the stubbed payload hermetic without a production bypass.
+        WebTestSupport.stubPublicDNS()
+        defer { WebTestSupport.clearDNS() }
         let page = try #require(URL(string: "https://example.com/photo.png"))
         let transport = WebTestSupport.RoutingFetchTransport { _ in
             (Data(repeating: 0x89, count: 16), WebTestSupport.okResponse(for: page, contentType: "image/png"))
@@ -258,6 +283,9 @@ struct WebFetchSafetyTests {
 
     @Test
     func `Too many redirects fail as unsupported`() async throws {
+        // Canned public proof keeps the looping chain hermetic without a production bypass.
+        WebTestSupport.stubPublicDNS()
+        defer { WebTestSupport.clearDNS() }
         let transport = WebTestSupport.RoutingFetchTransport { request in
             let fallback = try #require(URL(string: "https://example.com/0"))
             let url = request.url ?? fallback

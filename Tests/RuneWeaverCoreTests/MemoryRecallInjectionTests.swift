@@ -70,4 +70,44 @@ struct MemoryRecallInjectionTests {
         let unrelated = try await engine.recall(query: "quantum entanglement calibration", embedding: nil, limit: 5)
         #expect(MemoryEngine.automaticRecallContext(for: unrelated) == nil)
     }
+
+    @Test
+    func `historyWithRecall anchors recall before active user turn preserving prefix`() {
+        let recall = Message(role: .system, content: "Relevant memories: user likes tea")
+
+        // 1. Multi-turn conversation: recall must sit before User 2, leaving (System, User 1, Assistant 1) intact
+        let system = Message(role: .system, content: "You are an assistant")
+        let user1 = Message(role: .user, content: "Hi")
+        let assistant1 = Message(role: .assistant, content: "Hello! How can I help you?")
+        let user2 = Message(role: .user, content: "What do I like?")
+        let multiTurn = [system, user1, assistant1, user2]
+
+        let spliced = MemoryEngine.historyWithRecall(multiTurn, recall: recall)
+        #expect(spliced.count == 5)
+        #expect(spliced[0] == system)
+        #expect(spliced[1] == user1)
+        #expect(spliced[2] == assistant1)
+        #expect(spliced[3] == recall)
+        #expect(spliced[4] == user2)
+
+        // 2. Single turn (System, User 1)
+        let singleTurn = [system, user1]
+        let singleSpliced = MemoryEngine.historyWithRecall(singleTurn, recall: recall)
+        #expect(singleSpliced == [system, recall, user1])
+
+        // 3. Tool round in active turn: recall stays before User 2
+        let toolCallNote = Message(role: .assistant, content: "Calling tool")
+        let toolResult = Message(role: .tool, content: "result", toolCallID: "call_1")
+        let toolTurn = [system, user1, assistant1, user2, toolCallNote, toolResult]
+        let toolSpliced = MemoryEngine.historyWithRecall(toolTurn, recall: recall)
+        #expect(toolSpliced == [system, user1, assistant1, recall, user2, toolCallNote, toolResult])
+
+        // 4. System-only history fallback
+        let systemOnly = [system]
+        let systemSpliced = MemoryEngine.historyWithRecall(systemOnly, recall: recall)
+        #expect(systemSpliced == [system, recall])
+
+        // 5. Nil recall returns identical history
+        #expect(MemoryEngine.historyWithRecall(multiTurn, recall: nil) == multiTurn)
+    }
 }

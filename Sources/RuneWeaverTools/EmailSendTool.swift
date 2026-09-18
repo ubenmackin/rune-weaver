@@ -417,7 +417,9 @@ public enum EmailSendValidation: Sendable {
 
     /// Quotes an original text body for a reply.
     public static func quotedOriginal(_ body: String) -> String {
-        body.components(separatedBy: .newlines).map { line in
+        // Shared split keeps reply quoting on the same CRLF/CR/LF boundaries as
+        // narration and history parsing; a trailing newline stays a terminator.
+        NormalizedText.splitLines(body).map { line in
             line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "> \(line)"
         }.joined(separator: "\n")
     }

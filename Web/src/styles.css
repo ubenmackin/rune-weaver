@@ -645,6 +645,20 @@ a {
   color: #fbbf24;
 }
 
+/* Background-turn badge for sessions with a live turn parked elsewhere.
+ * Colors live here instead of inline so the running token stays in one place
+ * with the other session icons above. */
+.session-running-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 6px;
+  white-space: nowrap;
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.45);
+}
+
 .session-title {
   flex: 1;
   overflow: hidden;

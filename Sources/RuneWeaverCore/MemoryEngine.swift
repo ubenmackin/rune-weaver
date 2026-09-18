@@ -887,11 +887,9 @@ public extension MemoryEngine {
 
     /// Removes tool-call plumbing lines from text.
     static func strippingToolPlumbing(from text: String) -> String {
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let lines = normalized.components(separatedBy: "\n")
-        let kept = lines.filter { !isToolPlumbingLine($0) }
+        // Shared split keeps memory stripping on the same line boundaries as
+        // narration parsing; a trailing newline stays a terminator, not a blank.
+        let kept = NormalizedText.splitLines(text).filter { !isToolPlumbingLine($0) }
         return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -1014,13 +1012,17 @@ public extension MemoryEngine {
     }
 
     /// Inserts injected recall at a stable slot keeping the prefix identical across rounds.
-    /// Order is always (systems..., recall, history): recall sits after every leading
-    /// system message so a rolling summary arriving alongside the prompt never wedges
-    /// between them mid-turn. Keeping recall past the full system prefix preserves
-    /// prefix-cache hits and keeps CLI and service turns identical.
+    /// In multi-turn history, recall is inserted directly before the active user turn so
+    /// all prior (system, user, assistant) turns preserve their prefix-cache tokens.
+    /// If no user message is present, recall sits after leading system messages.
     static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         guard let recall else { return history }
         guard !history.isEmpty else { return [recall] }
+        if let lastUserIndex = history.lastIndex(where: { $0.role == .user }) {
+            var spliced = history
+            spliced.insert(recall, at: lastUserIndex)
+            return spliced
+        }
         var insertAt = 0
         while insertAt < history.count, history[insertAt].role == .system {
             insertAt += 1

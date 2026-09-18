@@ -40,6 +40,10 @@ export interface HealthResponse {
   // keys are absent when idle; absent means no Start is in flight.
   searchStage?: string | null;
   searchStartedAt?: number | null;
+  // Authoritative turn cap advertised by the engine on GET /health. Optional because older
+  // engines predate the advertisement and because getHealth injects it from the response
+  // header when the JSON body carries none; absent degrades to MAX_CONCURRENT_CHAT_TURNS.
+  maxConcurrentChatTurns?: number | null;
 }
 
 export interface ToolResult {
@@ -303,6 +307,293 @@ export interface RunLogsResponse {
   count: number;
 }
 
+// Fallback for how many interactive turns may run at once across sessions. The engine owns the
+// authoritative cap (ActiveTurnTracker.maxConcurrentTurns) and advertises it on every GET /health
+// probe; the dashboard prefers that server value via resolveMaxConcurrentChatTurns and only uses
+// this constant for older engines that predate the advertisement. Kept equal to the engine cap so
+// client-side refusal agrees with server enforcement instead of admitting turns the engine would
+// immediately reject. Local inference degrades sharply past a couple of concurrent evaluations,
+// so the dashboard refuses new sends with an honest busy notice instead of stacking turns that
+// would starve each other and look hung.
+export const MAX_CONCURRENT_CHAT_TURNS = 3;
+
+// Response header carrying the authoritative turn cap on GET /health, mirroring
+// ActiveTurnTracker.turnCapHeaderName on the engine. Read case-insensitively through Headers.get;
+// the JSON field stays the shared hand-off so header and future body shapes resolve identically.
+export const MAX_CONCURRENT_CHAT_TURNS_HEADER = "x-runeweaver-max-concurrent-turns";
+
+// Validates a server-advertised turn cap into a usable limit: finite numbers at least 1 floor to an
+// integer cap, while absent, non-numeric, or non-positive shapes degrade to null so callers fall
+// back to MAX_CONCURRENT_CHAT_TURNS instead of admitting unbounded turns or refusing everything.
+export function parseMaxConcurrentChatTurns(value: unknown): number | null {
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 1) return null;
+    return Math.floor(value);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const numeric = Number(trimmed);
+    if (!Number.isFinite(numeric) || numeric < 1) return null;
+    return Math.floor(numeric);
+  }
+  return null;
+}
+
+// Resolves the effective turn cap preferring the server advertisement over the fallback constant:
+// a valid health value wins so admit and reject agree on one server-owned number, while absent or
+// drifted shapes degrade to the fallback instead of blocking the dashboard against older engines.
+export function resolveMaxConcurrentChatTurns(
+  health: HealthResponse | null | undefined,
+): number {
+  const parsed = parseMaxConcurrentChatTurns(health?.maxConcurrentChatTurns);
+  return parsed ?? MAX_CONCURRENT_CHAT_TURNS;
+}
+
+// Honest busy copy shown when every turn slot is occupied. Shares the engine
+// refusal wording so client-side, REST, and socket refusals read as one
+// outcome regardless of which layer enforced the cap.
+export function concurrentTurnsBusyMessage(limit: number = MAX_CONCURRENT_CHAT_TURNS): string {
+  return `Already running ${limit} chat turns — wait for one to finish or cancel it, then retry.`;
+}
+
+// Single source for run-log polling so live badges and history views agree on
+// page size and cadence instead of drifting per call site. The shared
+// `useRunningRuns` hook owns the one interval at this cadence for the chat
+// view plus the sidebar, so two mounted views never double the run-log QPS;
+// live `run_started`/`run_completed` broadcasts stay the immediate path while
+// this poll covers reloads, missed sockets, and cross-tab turns.
+export const RUN_LOG_POLL_LIMIT = 50;
+export const RUN_POLL_INTERVAL_MS = 2500;
+
+// Reports whether a run row represents an in-flight turn that should keep a
+// session badge lit. Single active contract shared by live broadcasts and
+// polled runs: only `running` counts. Parked `awaiting_approval` turns arrive
+// as completed on the hub and surface through the approvals badge, so counting
+// them here would double-badge one blocked turn and flicker after reload.
+export function isActiveRunStatus(status: string | null | undefined): boolean {
+  return status === "running";
+}
+
+// Collects the owning sessions behind in-flight runs, normalized for
+// case-insensitive comparison since the engine formats UUIDs uppercase while
+// the dashboard mints lowercase. Unattributed rows carry no owner and stay out
+// so one untagged scheduler run never lights every session. Accepts a frozen
+// snapshot because the shared poller hands out read-only rows it never mutates.
+export function runningSessionIDsFromRuns(
+  runs:
+    | ReadonlyArray<Readonly<Pick<RunLogEntry, "status" | "sessionID">>>
+    | undefined
+    | null,
+): string[] {
+  if (!Array.isArray(runs)) return [];
+  const seen = new Set<string>();
+  for (const run of runs) {
+    if (!run || !isActiveRunStatus(run.status)) continue;
+    const raw = run.sessionID;
+    if (typeof raw !== "string" || raw.trim().length === 0) continue;
+    seen.add(raw.trim().toLowerCase());
+  }
+  return [...seen];
+}
+
+// Narration placeholder shape persisted by the engine for tool rounds
+// ("Calling <tool> <args> [callID]"). Substring checks for "[callID]" elsewhere
+// in prose over-match identifiers merely mentioned in passing, so coverage and
+// eviction parse the line shape instead of searching for the bracketed token.
+
+// Structured placeholder record mirroring the engine ToolInput triple. The
+// arguments keep the engine empty-to-"{}" normalization so coverage and
+// history filters agree on which lines count as plumbing even when the model
+// narrates a bare tool with no arguments.
+export interface PlaceholderCall {
+  toolName: string;
+  argumentsJSON: string;
+  callID: string;
+}
+
+// Trims only spaces and tabs, mirroring the engine remainder/argument trim
+// (`.whitespaces`) rather than the full Unicode trim used for outer lines and
+// identifiers. Wire lines are single-line after ending normalization, so the
+// narrower trim keeps engine and dashboard agreement on interior spacing.
+function trimPlaceholderSpaces(value: string): string {
+  return value.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+// Parses one persisted placeholder line exactly like the engine
+// (`ToolInput.parsePlaceholderLine`): last "[" wins, the char before it must
+// be a space or tab, the bracketed identifier trims and must hold no
+// space/tab/bracket, and the head splits into tool plus optional arguments
+// with empty arguments normalizing to "{}". Returns null for prose, code, or
+// drifted shapes so callers never treat a passing mention as an execution
+// record. This manual walk is the sole classifier because a greedy capture
+// cannot express inside-bracket trimming or the double-space head the engine
+// accepts.
+export function parsePlaceholderLine(line: string): PlaceholderCall | null {
+  if (typeof line !== "string") return null;
+  const trimmed = line.trim();
+  const prefix = "Calling ";
+  if (!trimmed.startsWith(prefix)) return null;
+  if (!trimmed.endsWith("]")) return null;
+  const bracketStart = trimmed.lastIndexOf("[");
+  if (bracketStart === -1) return null;
+  if (!(bracketStart > prefix.length)) return null;
+  const beforeBracket = trimmed[bracketStart - 1];
+  if (beforeBracket !== " " && beforeBracket !== "\t") return null;
+  const afterBracket = bracketStart + 1;
+  const endIndex = trimmed.length - 1;
+  if (!(afterBracket <= endIndex)) return null;
+  const callID = trimmed.slice(afterBracket, endIndex).trim();
+  if (!callID) return null;
+  if (/[ \t\[\]]/.test(callID)) return null;
+  const remainderStart = prefix.length;
+  const remainderEnd = bracketStart - 1;
+  if (!(remainderStart < remainderEnd)) return null;
+  const remainder = trimPlaceholderSpaces(
+    trimmed.slice(remainderStart, remainderEnd),
+  );
+  if (!remainder) return null;
+  const firstSpace = remainder.search(/[ \t]/);
+  if (firstSpace !== -1) {
+    const name = remainder.slice(0, firstSpace);
+    const args = trimPlaceholderSpaces(remainder.slice(firstSpace + 1));
+    if (!name || /[ \t]/.test(name)) return null;
+    return { toolName: name, argumentsJSON: args ? args : "{}", callID };
+  }
+  if (/[ \t]/.test(remainder)) return null;
+  return { toolName: remainder, argumentsJSON: "{}", callID };
+}
+
+// Extracts the call identifier from one persisted placeholder line, mirroring
+// the engine placeholder grammar. Returns null for prose, code, or drifted
+// shapes so callers never treat a passing mention as an execution record.
+export function parsePlaceholderCallID(line: string): string | null {
+  const parsed = parsePlaceholderLine(line);
+  return parsed ? parsed.callID : null;
+}
+
+// Shared wire-grammar vectors pinning the engine and dashboard parsers to one
+// shape. Each entry pairs a raw line with its expected triple (or null for
+// non-plumbing); the engine doc comment carries the same table so a grammar
+// change must update both sides together instead of drifting silently. Cases
+// cover the historic divergences: double-space heads, tab separators,
+// slash/bracket arguments via last-bracket wins, inside-bracket trimming, and
+// trailing-space tolerance.
+export const PLACEHOLDER_GRAMMAR_VECTORS: Array<{
+  line: string;
+  expected: PlaceholderCall | null;
+}> = [
+  {
+    line: 'Calling email.search {"limit":1} [call_1]',
+    expected: {
+      toolName: "email.search",
+      argumentsJSON: '{"limit":1}',
+      callID: "call_1",
+    },
+  },
+  {
+    line: "Calling email.search [call_2]",
+    expected: { toolName: "email.search", argumentsJSON: "{}", callID: "call_2" },
+  },
+  {
+    line: "  Calling email.search {} [call_3]  ",
+    expected: {
+      toolName: "email.search",
+      argumentsJSON: "{}",
+      callID: "call_3",
+    },
+  },
+  {
+    line: "Calling email.search  [call_4]",
+    expected: { toolName: "email.search", argumentsJSON: "{}", callID: "call_4" },
+  },
+  {
+    line: "Calling  email.search {} [call_5]",
+    expected: {
+      toolName: "email.search",
+      argumentsJSON: "{}",
+      callID: "call_5",
+    },
+  },
+  {
+    line: "Calling web.search query/with/slashes [call_6]",
+    expected: {
+      toolName: "web.search",
+      argumentsJSON: "query/with/slashes",
+      callID: "call_6",
+    },
+  },
+  {
+    line: "Calling web.fetch {\"url\":\"https://example.com/a/b\"} [call_7]",
+    expected: {
+      toolName: "web.fetch",
+      argumentsJSON: '{"url":"https://example.com/a/b"}',
+      callID: "call_7",
+    },
+  },
+  {
+    line: "Calling tool arg [inner] [call_8]",
+    expected: {
+      toolName: "tool",
+      argumentsJSON: "arg [inner]",
+      callID: "call_8",
+    },
+  },
+  {
+    line: "Calling tool args [  call_9  ]",
+    expected: { toolName: "tool", argumentsJSON: "args", callID: "call_9" },
+  },
+  {
+    line: "Calling tool args   [call_10]   ",
+    expected: { toolName: "tool", argumentsJSON: "args", callID: "call_10" },
+  },
+  { line: "You mentioned [call_1] in prose", expected: null },
+  { line: "Calling email.search [bad id]", expected: null },
+  { line: "Calling tool[x]", expected: null },
+  { line: "Not a placeholder [call_1]", expected: null },
+  { line: "", expected: null },
+];
+
+// Folds CRLF and legacy CR line endings to LF so placeholder coverage matches the engine,
+// which strips those shapes before comparing plumbing lines. Single source for every
+// placeholder and history path so carriage returns never hide a covered line.
+export function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+// Collects every placeholder identifier carried in a block of text, one parse
+// per line so callers test membership instead of scanning per identifier.
+export function placeholderCallIDsInText(text: string): Set<string> {
+  const ids = new Set<string>();
+  if (typeof text !== "string" || text.length === 0) return ids;
+  const normalized = normalizeLineEndings(text);
+  for (const rawLine of normalized.split("\n")) {
+    const parsed = parsePlaceholderCallID(rawLine);
+    if (parsed) ids.add(parsed);
+  }
+  return ids;
+}
+
+// Reports whether a block of text carries the placeholder line for one call,
+// identified by the parsed line shape rather than a substring of the bracketed
+// token.
+export function textContainsPlaceholderForCall(
+  text: string,
+  callID: string,
+): boolean {
+  if (typeof text !== "string" || typeof callID !== "string" || !callID)
+    return false;
+  const trimmedCallID = callID.trim();
+  // Same identifier bar as the engine parser (space/tab/bracket): a drifted
+  // identifier never matches a parsed line, so mention-only prose stays visible.
+  if (!trimmedCallID || /[ \t\[\]]/.test(trimmedCallID)) return false;
+  const normalized = normalizeLineEndings(text);
+  for (const rawLine of normalized.split("\n")) {
+    if (parsePlaceholderCallID(rawLine) === trimmedCallID) return true;
+  }
+  return false;
+}
+
 export interface ChatMessage {
   id?: string;
   role: "system" | "user" | "assistant" | "tool";
@@ -432,7 +723,27 @@ function isOrchestratorResponse(value: unknown): value is OrchestratorResponse {
   return true;
 }
 
-async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+// Validates one orchestrator turn before it enters typed state so a malformed
+// engine payload surfaces as an error instead of rendering a partial reply.
+// Warning shapes normalize through the shared sanitizer on the same pass so
+// chat and scheduler paths degrade drifted notices to absent identically.
+function validateTurnResponse(
+  response: unknown,
+  invalidMessage: string,
+): OrchestratorResponse {
+  if (!isOrchestratorResponse(response)) {
+    throw new ApiError(invalidMessage, 0);
+  }
+  if (response.warnings !== undefined && response.warnings !== null) {
+    response.warnings = sanitizeWarnings(response.warnings);
+  }
+  return response;
+}
+
+async function fetchJsonWithHeaders<T>(
+  path: string,
+  init?: RequestInit,
+): Promise<{ data: T; headers: Headers }> {
   const hasBody = init?.body != null;
   let response: Response;
   try {
@@ -479,7 +790,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(detail || `Request failed: ${path}`, response.status);
   }
   if (response.status === 204) {
-    return undefined as T;
+    return { data: undefined as T, headers: response.headers };
   }
   const contentType = response.headers?.get("content-type") ?? "";
   if (contentType && !contentType.includes("application/json")) {
@@ -495,13 +806,20 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
     if (!isRecord(data)) {
       throw new Error("Non-record response body");
     }
-    return data as T;
+    return { data: data as T, headers: response.headers };
   } catch (err) {
     throw new ApiError(
       err instanceof ApiError ? err.message : `Invalid JSON response: ${path}`,
       response.status,
     );
   }
+}
+
+async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
+  // Single JSON path shared with the header-aware variant so error wording,
+  // content-type checks, and record validation cannot drift per call site.
+  const { data } = await fetchJsonWithHeaders<T>(path, init);
+  return data;
 }
 
 export function newSessionId(): string {
@@ -515,8 +833,23 @@ export function newSessionId(): string {
   });
 }
 
-export function getHealth(): Promise<HealthResponse> {
-  return fetchJson<HealthResponse>("/health");
+export async function getHealth(): Promise<HealthResponse> {
+  // Single health path prefers the server-advertised cap so admit and reject agree: the JSON
+  // field wins when valid for future body-carried caps, otherwise the probe header fills it in,
+  // and older engines with neither degrade to the fallback constant via the resolver.
+  const { data, headers } = await fetchJsonWithHeaders<HealthResponse>("/health");
+  const fromBody = parseMaxConcurrentChatTurns(data.maxConcurrentChatTurns as unknown);
+  if (fromBody != null) {
+    data.maxConcurrentChatTurns = fromBody;
+    return data;
+  }
+  const fromHeader = parseMaxConcurrentChatTurns(
+    headers?.get(MAX_CONCURRENT_CHAT_TURNS_HEADER),
+  );
+  if (fromHeader != null) {
+    data.maxConcurrentChatTurns = fromHeader;
+  }
+  return data;
 }
 
 export function postChat(
@@ -527,20 +860,7 @@ export function postChat(
   return fetchJson<OrchestratorResponse>("/chat", {
     method: "POST",
     body: JSON.stringify({ text, sessionID, source }),
-  }).then((response) => {
-    // Validate required turn fields before typed state so a malformed engine
-    // payload surfaces as an error instead of rendering a partial reply.
-    if (!isOrchestratorResponse(response)) {
-      throw new ApiError("Invalid chat response", 0);
-    }
-    // Normalize warnings through the shared sanitizer so drifted shapes degrade to absent
-    // identically across REST and streaming paths.
-    if (response.warnings !== undefined && response.warnings !== null) {
-      const cleaned = sanitizeWarnings(response.warnings);
-      response.warnings = cleaned;
-    }
-    return response;
-  });
+  }).then((response) => validateTurnResponse(response, "Invalid chat response"));
 }
 
 export function cancelChat(sessionID: string): Promise<CancelChatResponse> {
@@ -626,7 +946,7 @@ export function deleteFact(id: string): Promise<void> {
   });
 }
 
-export function listRuns(limit = 50, jobID?: string, sessionID?: string): Promise<RunLogsResponse> {
+export function listRuns(limit = RUN_LOG_POLL_LIMIT, jobID?: string, sessionID?: string): Promise<RunLogsResponse> {
   const params = new URLSearchParams({ limit: String(limit) });
   if (jobID) params.set("jobID", jobID);
   if (sessionID) params.set("sessionID", sessionID);
@@ -714,19 +1034,7 @@ export function runJobNow(id: string): Promise<OrchestratorResponse> {
   return fetchJson<OrchestratorResponse>(
     `/scheduler/jobs/${encodeURIComponent(id)}/run`,
     { method: "POST", body: JSON.stringify({}) },
-  ).then((response) => {
-    // Same turn contract as interactive chat: reject partial payloads before
-    // run history renders them as completed executions.
-    if (!isOrchestratorResponse(response)) {
-      throw new ApiError("Invalid job run response", 0);
-    }
-    // Shared sanitizer keeps job-run warnings degrading to absent like chat turns.
-    if (response.warnings !== undefined && response.warnings !== null) {
-      const cleaned = sanitizeWarnings(response.warnings);
-      response.warnings = cleaned;
-    }
-    return response;
-  });
+  ).then((response) => validateTurnResponse(response, "Invalid job run response"));
 }
 
 export interface ProviderConfigData {
