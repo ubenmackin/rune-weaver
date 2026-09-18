@@ -54,6 +54,7 @@ extension RuneWeaverConfig {
             "[engine]",
             "name = \(Self.tomlQuoted(engine.name))",
             "log_level = \(Self.tomlQuoted(engine.logLevel))",
+            "compaction_threshold_percent = \(engine.compactionThresholdPercent)",
             ""
         ]
     }

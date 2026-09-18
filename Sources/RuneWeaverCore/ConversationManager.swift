@@ -645,10 +645,10 @@ private func rebuildGroupedActions(perNote: [AssistantNoteActions], winners: Too
 
 /// Holds the history-eviction helper so the main actor body stays within the
 /// length budget while sharing file-private state.
-extension ConversationManager {
+public extension ConversationManager {
     /// Summarizes a session's oldest turns on demand.
     @discardableResult
-    public func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
+    func summarize(sessionID: UUID, keeping: Int? = nil) async -> String? {
         guard var session = sessions[sessionID] else { return nil }
         let keep = max(1, keeping ?? maxMessages)
         guard session.messages.count > keep else { return session.summary }
@@ -730,6 +730,104 @@ extension ConversationManager {
             combinedSummary
         }
         messages = kept
+    }
+
+    /// Estimated character-to-token ratio (standard rule of thumb: ~4 characters per token).
+    static let charactersPerToken: Double = 4.0
+
+    /// Estimates token count for a list of messages.
+    static func estimateTokens(in messages: [Message]) -> Int {
+        let totalChars = messages.reduce(0) { $0 + $1.content.count }
+        return Int(ceil(Double(totalChars) / charactersPerToken))
+    }
+
+    /// Compacts conversation history when estimated tokens exceed the threshold of the model's context window.
+    /// Phase 1: Truncates oversized tool results in older turns.
+    /// Phase 2: Summarizes oldest turns if still over budget.
+    @discardableResult
+    func compactHistoryIfNeeded(
+        for sessionID: UUID,
+        contextLength: Int,
+        thresholdPercent: Int
+    ) async -> Bool {
+        guard contextLength > 0, thresholdPercent > 0 else { return false }
+        guard var session = await readSingleMerged(id: sessionID) else { return false }
+        let maxAllowedTokens = max(100, (contextLength * min(100, thresholdPercent)) / 100)
+
+        func currentEstimatedTokens() -> Int {
+            var msgs = session.messages
+            if let sum = session.summary, !sum.isEmpty {
+                msgs.append(Message(role: .system, content: sum))
+            }
+            return Self.estimateTokens(in: msgs)
+        }
+
+        var tokens = currentEstimatedTokens()
+        guard tokens > maxAllowedTokens else { return false }
+
+        // Phase 1: Prune oversized tool results (longer than 500 chars)
+        // Keep the most recent 2 messages untouched so immediate context is preserved.
+        let safeTrailingCount = 2
+        let pruneCandidateEnd = max(0, session.messages.count - safeTrailingCount)
+        var modified = false
+
+        for index in 0 ..< pruneCandidateEnd {
+            if session.messages[index].role == .tool, session.messages[index].content.count > 500 {
+                let original = session.messages[index].content
+                let truncatedSnippet = String(original.prefix(250)) + "\n... [Output truncated for context budget]"
+                session.messages[index] = session.messages[index].withContent(truncatedSnippet)
+                modified = true
+            }
+        }
+
+        if modified {
+            tokens = currentEstimatedTokens()
+        }
+
+        // Phase 2: If still over budget, summarize oldest turns
+        if tokens > maxAllowedTokens {
+            var evicted: [Message] = []
+            var kept: [Message] = []
+            let preserveFirstSystem = session.messages.first?.role == .system
+            let startIndex = preserveFirstSystem ? 1 : 0
+            let maxEvictIndex = max(startIndex, session.messages.count - safeTrailingCount)
+
+            var messageIndex = 0
+            while messageIndex < session.messages.count {
+                if messageIndex >= startIndex, messageIndex < maxEvictIndex, tokens > maxAllowedTokens {
+                    let candidate = session.messages[messageIndex]
+                    evicted.append(candidate)
+                    tokens -= Self.estimateTokens(in: [candidate])
+                    messageIndex += 1
+                } else {
+                    kept.append(session.messages[messageIndex])
+                    messageIndex += 1
+                }
+            }
+
+            if !evicted.isEmpty {
+                let chunk = summarizer(evicted)
+                let combinedSummary = if let existing = session.summary, !existing.isEmpty {
+                    existing + "\n" + chunk
+                } else {
+                    chunk
+                }
+                session.summary = if combinedSummary.count > Self.maxSummaryLength {
+                    "…" + String(combinedSummary.suffix(Self.maxSummaryLength - 1))
+                } else {
+                    combinedSummary
+                }
+                session.messages = kept
+                modified = true
+            }
+        }
+
+        if modified {
+            session.updatedAt = Date()
+            sessions[session.id] = session
+            await persist(session)
+        }
+        return modified
     }
 }
 

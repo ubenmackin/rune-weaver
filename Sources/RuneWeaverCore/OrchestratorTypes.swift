@@ -292,6 +292,10 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
     /// Billed tokens accumulated before parking, so resumed synthesis can report a
     /// cumulative turn total instead of resetting to the synthesis round alone.
     public let billedTokens: Int?
+    /// Actions executed prior to parking in this turn.
+    public let priorActions: [ToolAction]
+    /// Tool round counter accumulated before parking.
+    public let toolRounds: Int
 
     /// Creates a parked approval.
     public init(
@@ -302,7 +306,9 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         batchID: UUID = UUID(),
         roundIndex: Int? = nil,
         billedTokens: Int? = nil,
-        synthesisRoundIndex: Int? = nil
+        synthesisRoundIndex: Int? = nil,
+        priorActions: [ToolAction] = [],
+        toolRounds: Int = 0
     ) {
         self.sessionID = sessionID
         self.toolCall = toolCall
@@ -314,6 +320,8 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         // gated round still resume chronologically; untracked history resumes at zero.
         self.synthesisRoundIndex = synthesisRoundIndex ?? (roundIndex ?? -1) + 1
         self.billedTokens = billedTokens
+        self.priorActions = priorActions
+        self.toolRounds = toolRounds
     }
 }
 
@@ -329,4 +337,69 @@ struct ParkedTurnSynthesis: Sendable {
     /// when suppressed text persisted no note so equality stays deterministic and
     /// clients fall back to receipt time.
     let completedAt: Double?
+}
+
+/// Context grouping the inputs for one parked-approval filing path.
+struct ParkGatedCallsContext {
+    let gated: [ToolInput]
+    let narratedText: String
+    let tools: [any Tool]
+    let sessionID: UUID
+    let priorActions: [ToolAction]
+    let billedTokens: Int?
+    let priorBilledTokens: Int?
+    let systemPrompt: String?
+    let recall: Message?
+    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    /// Chronological round for the gated batch: one past the structured batch in
+    /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
+    /// identically to live.
+    let gatedRoundIndex: Int
+}
+
+/// Inputs for one bounded tool-loop run.
+struct TurnLoopRequest {
+    let workingMessages: [Message]
+    let tools: [any Tool]
+    let recall: Message?
+    let sessionID: UUID
+    let systemPrompt: String?
+    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    var initialToolActions: [ToolAction] = []
+    var priorBilledTokens: Int?
+    var initialToolRounds: Int = 0
+    var initialLlmRoundIndex: Int = 0
+}
+
+/// Outcome of one bounded tool-loop run.
+enum TurnLoopOutcome {
+    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?)
+    case parked(OrchestratorResponse)
+}
+
+/// Inputs for building an ephemeral parked progress response when siblings are pending.
+struct PendingParkedContext {
+    let parked: ParkedNarratedApproval
+    let remaining: [ToolAction]
+    let newAction: ToolAction?
+    let baseText: String
+    let approved: Bool
+    let warnings: [String]
+    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+}
+
+/// Inputs for parking a turn on narrated gated calls.
+struct ParkTurnContext {
+    let gated: [ToolInput]
+    let narratedText: String
+    let toolActions: [ToolAction]
+    let billedTokens: Int?
+    let toolRounds: Int
+}
+
+/// Intermediate result of an LLM round.
+struct TurnDraft: Sendable {
+    let text: String
+    let billedTokens: Int?
+    let toolCalls: [ToolInput]
 }

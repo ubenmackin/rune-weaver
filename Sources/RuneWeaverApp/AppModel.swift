@@ -299,7 +299,8 @@ public final class AppModel {
                 },
                 sandboxConfig: config.sandbox,
                 browserConfig: config.browser,
-                llmServerURLs: appLLMOrigins
+                llmServerURLs: appLLMOrigins,
+                engineConfig: config.engine
             )
 
             for tool in plugins {

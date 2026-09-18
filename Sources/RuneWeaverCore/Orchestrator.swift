@@ -2,46 +2,6 @@
 
 import Foundation
 
-/// Context grouping the inputs for one parked-approval filing path.
-private struct ParkGatedCallsContext {
-    let gated: [ToolInput]
-    let narratedText: String
-    let tools: [any Tool]
-    let sessionID: UUID
-    let priorActions: [ToolAction]
-    let billedTokens: Int?
-    let systemPrompt: String?
-    let recall: Message?
-    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    /// Chronological round for the gated batch: one past the structured batch in
-    /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
-    /// identically to live.
-    let gatedRoundIndex: Int
-}
-
-/// Inputs for one bounded tool-loop run.
-private struct TurnLoopRequest {
-    let workingMessages: [Message]
-    let tools: [any Tool]
-    let recall: Message?
-    let sessionID: UUID
-    let systemPrompt: String?
-    let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-}
-
-/// Outcome of one bounded tool-loop run.
-private enum TurnLoopOutcome {
-    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?)
-    case parked(OrchestratorResponse)
-}
-
-/// Intermediate result of an LLM round.
-private struct TurnDraft: Sendable {
-    let text: String
-    let billedTokens: Int?
-    let toolCalls: [ToolInput]
-}
-
 /// Core orchestration loop: input, context, LLM, tools, response.
 public actor Orchestrator {
     /// Session and history owner.
@@ -60,6 +20,8 @@ public actor Orchestrator {
     private let memoryEngine: MemoryEngine?
     /// Optional embeddings producer for vector-ranked automatic recall.
     private let embedder: (any EmbeddingsBackend)?
+    /// Context window compaction threshold percentage (10-100).
+    private let compactionThresholdPercent: Int
     /// Queue receiving narrated gated calls, when configured.
     private let approvalQueue: ApprovalQueue?
     /// Parked gated narrations indexed by approval request identifier.
@@ -83,7 +45,8 @@ public actor Orchestrator {
         toolResolver: OrchestratorToolResolver? = nil,
         memoryEngine: MemoryEngine? = nil,
         approvalQueue: ApprovalQueue? = nil,
-        embedder: (any EmbeddingsBackend)? = nil
+        embedder: (any EmbeddingsBackend)? = nil,
+        compactionThresholdPercent: Int = 80
     ) {
         self.conversations = conversations
         self.toolBus = toolBus
@@ -94,6 +57,7 @@ public actor Orchestrator {
         self.memoryEngine = memoryEngine
         self.approvalQueue = approvalQueue
         self.embedder = embedder
+        self.compactionThresholdPercent = max(10, min(100, compactionThresholdPercent))
     }
 
     /// Processes one user input through the full loop.
@@ -163,6 +127,11 @@ public actor Orchestrator {
             } else {
                 nil
             }
+            await conversations.compactHistoryIfNeeded(
+                for: sessionID,
+                contextLength: llm.modelInfo.contextLength,
+                thresholdPercent: compactionThresholdPercent
+            )
             let workingMessages = await Self.stableHistoryWithRecall(
                 conversations.workingHistory(for: sessionID, systemPrompt: effectiveSystemPrompt),
                 recall: recall
@@ -326,51 +295,29 @@ extension Orchestrator {
         // Resumed turns advertise the current registry, so recompute degraded notices
         // here rather than reusing the parked turn's snapshot.
         let resumeWarnings = await OrchestratorToolLoop.degradedToolWarnings(for: toolBus.availableTools())
-        // Mirror the fresh-turn path so streaming and polling clients agree:
-        // surface each skip live before the terminal response repeats it.
         for warning in resumeWarnings {
             await onEvent?(.warning(warning))
         }
         let remaining = remainingPendingActions(inBatch: batchID)
         if !remaining.isEmpty {
-            let buffered = bufferedParkedActions(forBatch: batchID)
-            let noun = if remaining.count == 1 {
-                "approval"
-            } else {
-                "approvals"
-            }
-            let progress: String = if newAction != nil {
-                parkedBatchProgressMessage(
-                    toolName: parked.toolCall.toolName,
-                    remainingCount: remaining.count,
-                    approved: approved
+            return await pendingParkedResponse(
+                PendingParkedContext(
+                    parked: parked,
+                    remaining: remaining,
+                    newAction: newAction,
+                    baseText: baseText,
+                    approved: approved,
+                    warnings: resumeWarnings,
+                    onEvent: onEvent
                 )
-            } else {
-                "\(baseText) Waiting for \(remaining.count) more \(noun)."
-            }
-            await onEvent?(.textDelta(progress))
-            // Progress text is ephemeral with no persisted note, so leave the stamp absent
-            // and let clients fall back to receipt time instead of sampling the clock.
-            return OrchestratorResponse(
-                text: progress,
-                sessionID: sessionID,
-                toolActions: buffered + remaining,
-                modelName: llm.modelInfo.name,
-                contextLength: llm.modelInfo.contextLength,
-                sessionTokens: sessionTokensBySession[sessionID],
-                isParked: true,
-                warnings: resumeWarnings,
-                completedAt: nil
             )
         }
         let buffered = takeBufferedParkedActions(forBatch: batchID)
         if buffered.isEmpty {
-            // Nil when no denial or missing-tool note persisted so clients fall back
-            // to receipt time instead of a wall-clock sample.
             return OrchestratorResponse(
                 text: baseText,
                 sessionID: sessionID,
-                toolActions: [],
+                toolActions: parked.priorActions,
                 modelName: llm.modelInfo.name,
                 contextLength: llm.modelInfo.contextLength,
                 sessionTokens: sessionTokensBySession[sessionID],
@@ -380,26 +327,106 @@ extension Orchestrator {
             )
         }
         let prompt = await resolveParkedSynthesisPrompt(parked)
-        let synthesis = try await synthesizeParkedTurn(
-            sessionID: sessionID,
-            prompt: prompt,
-            recall: parked.recall,
-            priorBilledTokens: parked.billedTokens,
-            synthesisRoundIndex: parked.synthesisRoundIndex,
-            onEvent: onEvent
+        let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
+        await conversations.compactHistoryIfNeeded(
+            for: sessionID,
+            contextLength: llm.modelInfo.contextLength,
+            thresholdPercent: compactionThresholdPercent
         )
-        let cumulative = accumulateSessionTokens(synthesis.billedTokens, for: sessionID)
-        return OrchestratorResponse(
-            text: synthesis.text,
+        let workingMessages = await refreshedWorkingMessages(
             sessionID: sessionID,
-            toolActions: buffered,
-            totalTokens: Self.combinedTurnTokens(parked.billedTokens, synthesis.billedTokens),
+            recall: parked.recall,
+            systemPrompt: prompt
+        )
+        var pendingEpisodic: [(content: String, role: Message.Role)] = []
+        let combinedActions = parked.priorActions + buffered
+        let request = TurnLoopRequest(
+            workingMessages: workingMessages,
+            tools: tools,
+            recall: parked.recall,
+            sessionID: sessionID,
+            systemPrompt: prompt,
+            onEvent: onEvent,
+            initialToolActions: combinedActions,
+            priorBilledTokens: parked.billedTokens,
+            initialToolRounds: parked.toolRounds,
+            initialLlmRoundIndex: parked.synthesisRoundIndex
+        )
+        do {
+            let outcome = try await runTurnLoop(request, pendingEpisodic: &pendingEpisodic)
+            switch outcome {
+            case let .parked(parkedResponse):
+                return parkedResponse
+            case let .finished(finalText, toolActions, loopBilled):
+                return try await finishResumedTurn(
+                    finalText: finalText,
+                    toolActions: toolActions,
+                    loopBilled: loopBilled,
+                    parked: parked,
+                    resumeWarnings: resumeWarnings,
+                    pendingEpisodic: &pendingEpisodic
+                )
+            }
+        } catch let error as CancellationError {
+            await flushEpisodicUncancellable(pendingEpisodic, sessionID: sessionID)
+            throw error
+        } catch {
+            await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+            throw error
+        }
+    }
+
+    private func pendingParkedResponse(_ context: PendingParkedContext) async -> OrchestratorResponse {
+        let parked = context.parked
+        let buffered = bufferedParkedActions(forBatch: parked.batchID)
+        let noun = context.remaining.count == 1 ? "approval" : "approvals"
+        let progress: String = if context.newAction != nil {
+            parkedBatchProgressMessage(
+                toolName: parked.toolCall.toolName,
+                remainingCount: context.remaining.count,
+                approved: context.approved
+            )
+        } else {
+            "\(context.baseText) Waiting for \(context.remaining.count) more \(noun)."
+        }
+        await context.onEvent?(.textDelta(progress))
+        return OrchestratorResponse(
+            text: progress,
+            sessionID: parked.sessionID,
+            toolActions: buffered + context.remaining,
+            modelName: llm.modelInfo.name,
+            contextLength: llm.modelInfo.contextLength,
+            sessionTokens: sessionTokensBySession[parked.sessionID],
+            isParked: true,
+            warnings: context.warnings,
+            completedAt: nil
+        )
+    }
+
+    private func finishResumedTurn(
+        finalText: String,
+        toolActions: [ToolAction],
+        loopBilled: Int?,
+        parked: ParkedNarratedApproval,
+        resumeWarnings: [String],
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async throws -> OrchestratorResponse {
+        let sessionID = parked.sessionID
+        let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
+        try Task.checkCancellation()
+        await flushEpisodic(pendingEpisodic, sessionID: sessionID)
+        let cumulative = accumulateSessionTokens(loopBilled, for: sessionID)
+        return OrchestratorResponse(
+            text: finalText,
+            sessionID: sessionID,
+            toolActions: toolActions,
+            totalTokens: Self.combinedTurnTokens(parked.billedTokens, loopBilled),
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulative,
             isParked: false,
             warnings: resumeWarnings,
-            completedAt: synthesis.completedAt
+            completedAt: finalNote?.createdAt.timeIntervalSince1970
         )
     }
 
@@ -583,57 +610,6 @@ extension Orchestrator {
         return action
     }
 
-    /// Runs one synthesis turn for a parked batch in its session.
-    /// Carries the parked turn's recall at the stable slot so resumed synthesis keeps the same
-    /// prefix as the live loop, and returns the persisted note's creation instant for the
-    /// terminal completion stamp. The pre-park share stays out of the stored session total
-    /// (already folded at park time) but folds into the live turn total so one user message
-    /// reports one cumulative turn.
-    private func synthesizeParkedTurn(
-        sessionID: UUID,
-        prompt: String?,
-        recall: Message?,
-        priorBilledTokens: Int? = nil,
-        synthesisRoundIndex: Int,
-        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    ) async throws -> ParkedTurnSynthesis {
-        try Task.checkCancellation()
-        // Sorted snapshot mirrors the prompt order so the resumed synthesis keeps the same prefix.
-        let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
-        // Live degraded notices already streamed once by the resume caller, so synthesis stays
-        // quiet to keep one warning frame per skipped tool instead of doubling the bell badge.
-        // Invalid schemas still stay out of the model request via the provider filter.
-        let workingMessages = await Self.stableHistoryWithRecall(
-            conversations.workingHistory(for: sessionID, systemPrompt: prompt),
-            recall: recall
-        )
-        let collected = try await collectTurn(messages: workingMessages, tools: tools, sessionID: sessionID, onDelta: { delta in
-            await onEvent?(.textDelta(delta))
-        })
-        // Mirror the live loop's per-round accounting so the resume footer advances
-        // instead of stalling until the terminal done frame. The round share stays
-        // synthesis-only while the running turn total spans the whole user message, so
-        // fold the pre-park share in here; the stored session total below still takes
-        // only the synthesis delta because park time already folded the prior share.
-        // Negatives drop like the dashboard so a drifted backend cannot emit negative progress.
-        // The synthesis round sits one past the gated batch so resumed progress never
-        // reuses a pre-park round and stays chronological with the live turns.
-        if let billed = collected.billedTokens, billed >= 0 {
-            let validPrior: Int = if let priorBilledTokens, priorBilledTokens >= 0 {
-                priorBilledTokens
-            } else {
-                0
-            }
-            await onEvent?(.turnTokens(roundIndex: synthesisRoundIndex, roundTokens: billed, turnTotalTokens: validPrior + billed))
-        }
-        var pending: [(content: String, role: Message.Role)] = []
-        let note = await storeFinalAssistantText(collected.text, sessionID: sessionID, pendingEpisodic: &pending)
-        await flushEpisodic(pending, sessionID: sessionID)
-        // Nil when suppressed text persisted no note so equality stays deterministic
-        // and clients fall back to receipt time instead of a wall-clock sample.
-        return ParkedTurnSynthesis(text: collected.text, billedTokens: collected.billedTokens, completedAt: note?.createdAt.timeIntervalSince1970)
-    }
-
     // MARK: - Private helpers
 
     /// Runs the bounded tool loop for one turn until final text or parking.
@@ -646,16 +622,12 @@ extension Orchestrator {
         let recall = request.recall
         let sessionID = request.sessionID
         let onEvent = request.onEvent
-        var toolActions: [ToolAction] = []
+        var toolActions: [ToolAction] = request.initialToolActions
         var finalText = ""
-        var toolRounds = 0
+        var toolRounds = request.initialToolRounds
         var billedTokens: Int?
-        // Zero-based LLM round counter for live usage progress. Tracks every
-        // collection pass so per-round token frames stay chronological even when
-        // a round reports no usage and emits nothing.
-        var llmRoundIndex = 0
-        // Fail-closed names for structured calls: hallucinated names for omitted schemas never execute.
-        // Silent partition keeps the prompt and wire filters as the single logging sites per turn.
+        // Zero-based LLM round counter for live usage progress.
+        var llmRoundIndex = request.initialLlmRoundIndex
         let validToolNames = Set(VisionSchemaFilter.partitionValidSchemas(
             entries: tools,
             name: { $0.name },
@@ -667,34 +639,19 @@ extension Orchestrator {
             let collected = try await collectTurn(messages: workingMessages, tools: tools, sessionID: sessionID, onDelta: { delta in
                 await onEvent?(.textDelta(delta))
             })
-            // Drop malformed negative usage like the dashboard so session totals
-            // never decrement and progress frames never carry negative counters.
-            if let billed = collected.billedTokens, billed >= 0 {
-                billedTokens = (billedTokens ?? 0) + billed
-                // Live footer progress only: session totals still accumulate once at
-                // turn end or park time, so parked resumes never bill twice and
-                // cancelled turns keep partials without touching stored totals.
-                if let turnTotal = billedTokens {
-                    await onEvent?(.turnTokens(
-                        roundIndex: llmRoundIndex,
-                        roundTokens: billed,
-                        turnTotalTokens: turnTotal
-                    ))
-                }
-            }
+            await emitTurnTokens(
+                billed: collected.billedTokens,
+                billedTokens: &billedTokens,
+                roundIndex: llmRoundIndex,
+                request: request
+            )
             llmRoundIndex += 1
             finalText = collected.text
-            // Withheld schemas leave no executable call: fall through to the fail-closed narrated
-            // fallback rather than running hallucinated names.
             var calls = collected.toolCalls.filter { validToolNames.contains($0.toolName) }
             if calls.isEmpty {
                 calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
-                // Custom resolvers see the full registry, so withhold invalid schemas here as well.
                 calls = calls.filter { validToolNames.contains($0.toolName) }
             }
-            // Narrated gated calls are always collected so mixed turns that
-            // pair structured calls with gated narration file approvals
-            // instead of dropping them.
             let gated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: tools)
             if calls.isEmpty, gated.isEmpty {
                 break
@@ -704,9 +661,6 @@ extension Orchestrator {
                 if OrchestratorToolLoop.isLimitExceeded(rounds: toolRounds, max: maxToolIterations) {
                     throw OrchestratorError.toolLoopExceeded(iterations: maxToolIterations)
                 }
-                // Each tool batch is one chronological round: the persisted assistant note
-                // marks the boundary and the round index tags every action so live deltas
-                // and history reloads interleave text and tools in the same order.
                 let roundIndex = toolRounds - 1
                 let assistantNote = assistantNoteMessage(text: finalText, calls: calls)
                 await conversations.append(assistantNote, to: sessionID)
@@ -717,26 +671,19 @@ extension Orchestrator {
                     onEvent: onEvent,
                     pendingEpisodic: &pendingEpisodic
                 )
-                // Each gated batch is its own chronological round after the structured
-                // batch: the persisted assistant notes mark two boundaries and the round
-                // indices tag each batch distinctly so live deltas and history reloads
-                // interleave text and tools in the same order.
                 toolActions.append(contentsOf: executed)
                 if !gated.isEmpty, approvalQueue != nil {
-                    let context = ParkGatedCallsContext(
-                        gated: gated,
-                        narratedText: finalText,
-                        tools: tools,
-                        sessionID: sessionID,
-                        priorActions: toolActions,
-                        billedTokens: billedTokens,
-                        systemPrompt: request.systemPrompt,
-                        recall: recall,
-                        onEvent: onEvent,
-                        gatedRoundIndex: toolRounds
+                    return await parkTurn(
+                        ParkTurnContext(
+                            gated: gated,
+                            narratedText: finalText,
+                            toolActions: toolActions,
+                            billedTokens: billedTokens,
+                            toolRounds: toolRounds
+                        ),
+                        request: request,
+                        pendingEpisodic: &pendingEpisodic
                     )
-                    let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
-                    return .parked(parked)
                 }
                 workingMessages = await refreshedWorkingMessages(sessionID: sessionID, recall: recall, systemPrompt: request.systemPrompt)
                 finalText = ""
@@ -744,25 +691,66 @@ extension Orchestrator {
             }
             if !gated.isEmpty {
                 if approvalQueue != nil {
-                    let context = ParkGatedCallsContext(
-                        gated: gated,
-                        narratedText: finalText,
-                        tools: tools,
-                        sessionID: sessionID,
-                        priorActions: toolActions,
-                        billedTokens: billedTokens,
-                        systemPrompt: request.systemPrompt,
-                        recall: recall,
-                        onEvent: onEvent,
-                        gatedRoundIndex: toolRounds
+                    return await parkTurn(
+                        ParkTurnContext(
+                            gated: gated,
+                            narratedText: finalText,
+                            toolActions: toolActions,
+                            billedTokens: billedTokens,
+                            toolRounds: toolRounds
+                        ),
+                        request: request,
+                        pendingEpisodic: &pendingEpisodic
                     )
-                    let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
-                    return .parked(parked)
                 }
                 break
             }
         }
         return .finished(finalText: finalText, toolActions: toolActions, billedTokens: billedTokens)
+    }
+
+    private func emitTurnTokens(
+        billed: Int?,
+        billedTokens: inout Int?,
+        roundIndex: Int,
+        request: TurnLoopRequest
+    ) async {
+        guard let billed, billed >= 0 else { return }
+        billedTokens = (billedTokens ?? 0) + billed
+        if let turnTotal = billedTokens {
+            let cumulativeTurnTotal = if let prior = request.priorBilledTokens, prior >= 0 {
+                prior + turnTotal
+            } else {
+                turnTotal
+            }
+            await request.onEvent?(.turnTokens(
+                roundIndex: roundIndex,
+                roundTokens: billed,
+                turnTotalTokens: cumulativeTurnTotal
+            ))
+        }
+    }
+
+    private func parkTurn(
+        _ turn: ParkTurnContext,
+        request: TurnLoopRequest,
+        pendingEpisodic: inout [(content: String, role: Message.Role)]
+    ) async -> TurnLoopOutcome {
+        let context = ParkGatedCallsContext(
+            gated: turn.gated,
+            narratedText: turn.narratedText,
+            tools: request.tools,
+            sessionID: request.sessionID,
+            priorActions: turn.toolActions,
+            billedTokens: turn.billedTokens,
+            priorBilledTokens: request.priorBilledTokens,
+            systemPrompt: request.systemPrompt,
+            recall: request.recall,
+            onEvent: request.onEvent,
+            gatedRoundIndex: turn.toolRounds
+        )
+        let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
+        return .parked(parked)
     }
 
     /// Builds the working-memory note recording one tool round's intent.
@@ -871,6 +859,7 @@ extension Orchestrator {
         // batch in mixed turns, otherwise one past all prior tool rounds so reloads
         // interleave identically to live.
         let effectiveGatedRound = context.gatedRoundIndex
+        let turnTotalTokens = Self.combinedTurnTokens(context.priorBilledTokens, context.billedTokens)
         if let queue = approvalQueue {
             for call in context.gated {
                 guard let tool = byName[call.toolName] else { continue }
@@ -882,8 +871,10 @@ extension Orchestrator {
                     recall: context.recall,
                     batchID: batchID,
                     roundIndex: effectiveGatedRound,
-                    billedTokens: context.billedTokens,
-                    synthesisRoundIndex: effectiveGatedRound + 1
+                    billedTokens: turnTotalTokens,
+                    synthesisRoundIndex: effectiveGatedRound + 1,
+                    priorActions: context.priorActions,
+                    toolRounds: effectiveGatedRound
                 )
                 await context.onEvent?(.approval(request))
             }
@@ -910,7 +901,7 @@ extension Orchestrator {
             text: waiting,
             sessionID: context.sessionID,
             toolActions: context.priorActions + pendingGatedActions,
-            totalTokens: context.billedTokens,
+            totalTokens: turnTotalTokens,
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulativeTokens,

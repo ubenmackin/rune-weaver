@@ -424,6 +424,9 @@ extension RuneWeaverConfig {
         if let level = try engine.strictString("log_level", field: "engine.log_level") {
             config.engine.logLevel = level
         }
+        if let compaction = try engine.strictInt("compaction_threshold_percent", field: "engine.compaction_threshold_percent") {
+            config.engine.compactionThresholdPercent = compaction
+        }
     }
 
     private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

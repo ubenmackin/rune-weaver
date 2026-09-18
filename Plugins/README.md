@@ -12,9 +12,9 @@ Conform to `RuneWeaverCore.Tool`:
 - `permissionLevel` — `readOnly`, `requiresApproval`, or `trusted`
 - `execute(input:context:)` — the handler
 
-Register with `ToolBus.register(_:)`. File writes go to
-`~/.runeweaver/sandbox/` staging first; writes to the real
-filesystem require approval.
+Register with `ToolBus.register(tool:)`. File writes use
+Seatbelt-confined temp with an atomic move on approval; there is
+no host staging directory.
 
 ## Python plugins
 

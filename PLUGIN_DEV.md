@@ -5,7 +5,7 @@ Capabilities are plugins. A plugin ("rune") is a self-contained module that give
 There are two flavors:
 
 - **Swift plugins** — conform to `RuneWeaverCore.Tool`, register with `ToolBus`. Native speed, type safety, direct Apple framework access.
-- **Python plugins** — for Whisper, Playwright, email parsing, and anything where the ML/integration ecosystem is Python-first. They run in a sandboxed subprocess and talk JSON-RPC over stdin/stdout, so a bad Python plugin can't crash the Swift core.
+- **Python plugins** — for Playwright, email parsing, and anything where the ML/integration ecosystem is Python-first (Whisper runs as a local CLI binary instead). They run in a sandboxed subprocess and talk JSON-RPC over stdin/stdout, so a bad Python plugin can't crash the Swift core.
 
 ## The `Tool` Protocol
 
@@ -28,7 +28,7 @@ Supporting types (`Sources/RuneWeaverCore/ToolContext.swift`, `ToolOutput.swift`
 - `ToolContext` — `conversationID` (owning session) and `dryRun` (when true, do not mutate external state). Secrets are injected at execution time via the context path — never read keys from the prompt.
 - `ToolOutput` — `content`, `isError`, `callID`. Use `.success(_:callID:)` / `.failure(_:callID:)` conveniences; echo back `input.callID` so the orchestrator can correlate.
 
-Registration: create your tool and call `ToolBus.register(_:)`. Installed plugin checkouts live under `~/.runeweaver/plugins/<name>/`.
+Registration: create your tool and call `ToolBus.register(tool:)`. Installed plugin checkouts live under `~/.runeweaver/plugins/<name>/`.
 
 ## Minimal Example
 
@@ -52,7 +52,7 @@ struct ClockTool: Tool {
 
 // Somewhere at startup:
 let bus = ToolBus()
-await bus.register(ClockTool())
+await bus.register(tool: ClockTool())
 ```
 
 A tool with arguments declares them in the schema and parses `argumentsJSON`:
@@ -94,7 +94,7 @@ Declared per tool via `permissionLevel` (`Sources/RuneWeaverCore/PermissionLevel
 Rules of thumb:
 
 - When in doubt, pick `requiresApproval` for writes and `readOnly` for reads. Escalating later is easy; explaining an unapproved side effect is not.
-- File writes stage in `~/.runeweaver/sandbox/` (`pending/` → `approved/`) before touching the real filesystem.
+- File writes use Seatbelt-confined temp with an atomic move into the workspace only on approval; there is no host staging directory. Denied or failed writes never reach the filesystem.
 - Browser automation runs in an isolated Playwright context per task; submitting data or clicking real buttons always requires approval.
 - Never put secrets in `description`, `inputSchema`, logs, or errors — inject them at execution time via `SecretsManager` / `ToolContext`.
 

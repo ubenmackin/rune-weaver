@@ -1079,6 +1079,7 @@ export interface EmailAccountData {
 export interface SettingsResponse {
   engineName: string;
   logLevel: string;
+  compactionThresholdPercent?: number;
   defaultProvider: string;
   fallbackProvider?: string;
   providers: Record<string, ProviderConfigData>;
@@ -1119,6 +1120,7 @@ export interface SettingsResponse {
 export interface UpdateSettingsInput {
   engineName?: string;
   logLevel?: string;
+  compactionThresholdPercent?: number;
   defaultProvider?: string;
   fallbackProvider?: string;
   // Provider entries carry the prefix-reuse knobs (slot_count/slotCount/cache_prompt/cachePrompt)

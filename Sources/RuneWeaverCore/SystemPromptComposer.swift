@@ -253,11 +253,26 @@ public enum SystemPromptComposer {
         return lines[1] == composedMarker
     }
 
+    /// Formats a date as YYYY-MM-DD for cache-friendly system prompt injection.
+    public static func currentDateString(from date: Date = Date()) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = .current
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: date)
+    }
+
     /// Registry version fingerprint for one composition.
     /// Sorted by name so registry iteration order never affects the key; includes
-    /// description, schema, permission, vision, scheduled, and schema-inclusion branches
+    /// description, schema, permission, vision, scheduled, date, and schema-inclusion branches
     /// so any byte-affecting change misses the cache and recomposes.
-    private static func cacheKey(for tools: [any Tool], supportsVision: Bool, scheduled: Bool, includeToolSchemas: Bool = true) -> String {
+    private static func cacheKey(
+        for tools: [any Tool],
+        supportsVision: Bool,
+        scheduled: Bool,
+        includeToolSchemas: Bool = true,
+        currentDate: String = currentDateString()
+    ) -> String {
         let sorted = VisionSchemaFilter.sortedByName(tools, name: { $0.name })
         // Length-frame every field before hashing so a separator byte inside a
         // description or schema can never merge distinct registries into one key;
@@ -274,6 +289,7 @@ public enum SystemPromptComposer {
         appendFramed(scheduled ? "scheduled" : "base")
         appendFramed(supportsVision ? "vision" : "text")
         appendFramed(includeToolSchemas ? "with-schemas" : "no-schemas")
+        appendFramed(currentDate)
         if includeToolSchemas {
             for tool in sorted {
                 appendFramed(tool.name)
@@ -345,14 +361,19 @@ public enum SystemPromptComposer {
     /// Composes the default system prompt honoring vision capability and tool-schema inclusion.
     /// When native tool calling is supported on the wire, omitting raw schemas from the system prompt
     /// eliminates prompt bloat and keeps prefix tokens stable across multi-batch boundaries.
-    public static func compose(tools: [any Tool], supportsVision: Bool, includeToolSchemas: Bool) -> String {
-        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: false, includeToolSchemas: includeToolSchemas)
+    public static func compose(
+        tools: [any Tool],
+        supportsVision: Bool,
+        includeToolSchemas: Bool,
+        currentDate: String = currentDateString()
+    ) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: false, includeToolSchemas: includeToolSchemas, currentDate: currentDate)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
         // Logging path: invalid schemas warn once here so operators see the skip.
         let validEntries = includeToolSchemas ? sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: true) : []
-        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas, currentDate: currentDate)
         storeCachedPrompt(prompt, forKey: key)
         return prompt
     }
@@ -365,7 +386,12 @@ public enum SystemPromptComposer {
     ///   - supportsVision: Vision branch to render.
     ///   - includeToolSchemas: Whether to render the 'Available tools:' block.
     /// - Returns: Complete system prompt text.
-    private static func renderPrompt(from validEntries: [PromptToolEntry], supportsVision: Bool, includeToolSchemas: Bool = true) -> String {
+    private static func renderPrompt(
+        from validEntries: [PromptToolEntry],
+        supportsVision: Bool,
+        includeToolSchemas: Bool = true,
+        currentDate: String = currentDateString()
+    ) -> String {
         var lines: [String] = []
         lines.append("You are Rune Weaver, a helpful personal assistant.")
         // Provenance marker travels with the composed text so stored prompts can be
@@ -418,6 +444,8 @@ public enum SystemPromptComposer {
                     + "text snapshots carry the page content."
             )
         }
+        lines.append("")
+        lines.append("Current date: \(currentDate)")
         return lines.joined(separator: "\n")
     }
 
@@ -460,10 +488,15 @@ public enum SystemPromptComposer {
     ///   - supportsVision: Vision branch to measure.
     ///   - includeToolSchemas: Whether tool schemas are included in the prompt text.
     /// - Returns: Total UTF-8 bytes plus per-tool schema and entry sizes in prompt order.
-    public static func byteAudit(tools: [any Tool], supportsVision: Bool = true, includeToolSchemas: Bool = true) -> PromptByteAudit {
+    public static func byteAudit(
+        tools: [any Tool],
+        supportsVision: Bool = true,
+        includeToolSchemas: Bool = true,
+        currentDate: String = currentDateString()
+    ) -> PromptByteAudit {
         // Silent path: skips never log here, so audits stay quiet while compose above stays the single logging site.
         let validEntries = includeToolSchemas ? sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: false) : []
-        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas, currentDate: currentDate)
         var perTool: [PromptToolBytes] = []
         if includeToolSchemas {
             perTool.reserveCapacity(validEntries.count)
@@ -544,12 +577,17 @@ public enum SystemPromptComposer {
     }
 
     /// Composes the scheduled prompt honoring vision capability and tool-schema inclusion.
-    public static func composeScheduled(tools: [any Tool], supportsVision: Bool, includeToolSchemas: Bool) -> String {
-        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: true, includeToolSchemas: includeToolSchemas)
+    public static func composeScheduled(
+        tools: [any Tool],
+        supportsVision: Bool,
+        includeToolSchemas: Bool,
+        currentDate: String = currentDateString()
+    ) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: true, includeToolSchemas: includeToolSchemas, currentDate: currentDate)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
-        var base = compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+        var base = compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas, currentDate: currentDate)
         base += "\n\n"
         base += """
         Scheduled task guidance:

@@ -35,6 +35,12 @@ extension RuneWeaverConfig {
                 message: "must be one of \(allowedLevels.joined(separator: ", "))"
             )
         }
+        if engine.compactionThresholdPercent < 10 || engine.compactionThresholdPercent > 100 {
+            throw ConfigError.validationError(
+                field: "engine.compaction_threshold_percent",
+                message: "must be between 10 and 100 (got \(engine.compactionThresholdPercent))"
+            )
+        }
     }
 
     private func validateLLMSection() throws {

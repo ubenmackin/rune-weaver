@@ -211,7 +211,8 @@ struct ServeCommand: AsyncParsableCommand {
             pluginConfig: loaded.config.plugins,
             sandboxConfig: loaded.config.sandbox,
             browserConfig: loaded.config.browser,
-            llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm)
+            llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm),
+            engineConfig: loaded.config.engine
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)

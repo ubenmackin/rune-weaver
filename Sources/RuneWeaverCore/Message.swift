@@ -64,6 +64,18 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         copy.createdAt = createdAt
         return copy
     }
+
+    /// Returns a copy with updated content, preserving id, role, toolCallID, isError, and createdAt.
+    public func withContent(_ content: String) -> Message {
+        Message(
+            id: id,
+            role: role,
+            content: content,
+            toolCallID: toolCallID,
+            isError: isError,
+            createdAt: createdAt
+        )
+    }
 }
 
 public extension [Message] {

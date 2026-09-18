@@ -21,10 +21,11 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Semantic vector embeddings backend | 2 Memory | done-verified | Facts carry local embeddings and `memory search` ranks by vector similarity. |
 | Email read — self-hosted IMAP search/read (read-only) | 3 Email | done-verified | `email.search`/`email.read` list, read, and summarize self-hosted IMAP from chat; read-only via `BODY.PEEK`/`readonly=True`, verified TLS, injection-hardened, attachments listed with download deferred. |
 | Email read — iCloud IMAP search/read (read-only) | 3 Email | done-verified | `email.search`/`email.read` list, read, and summarize iCloud IMAP from chat; read-only via `BODY.PEEK`/`readonly=True`, verified TLS. |
-| Email attachment download | 3 Email | done-verified | `email.attachment` stages attachment bytes under `sandbox/attachments` with a 10 MB cap after an approval prompt; oversize parts skip with a note. |
+| Email attachment download | 3 Email | done-verified | `email.attachment` stages via Seatbelt-confined temp with atomic move on approval (no host staging dir); 10 MB per-file + 25 MB total caps; oversize parts skip with a note. |
 | Apple Mail native read | 3 Email | planned | List, read, and summarize Apple Mail native messages from chat. |
 | Email send with approval | 3 Email | done-verified | Compose and send email only after an explicit approval prompt; every send is logged. |
-| Playwright browser tool plus multi-step email-to-web flows | 4 Browser plus Multi-step | planned | Navigate, read, and fill pages in a sandboxed context; an email link to web confirm runs end to end. |
+| Browser tools (web.search/fetch, navigate/act, api.request) | 4 Browser plus Multi-step | done-verified | Navigate, read, and fill pages in a fresh isolated Playwright context per task. |
+| End-to-end email-to-web multi-step flows | 4 Browser plus Multi-step | planned | An email link opened in the browser and confirmed on the web runs end to end. |
 | HomeKit control | 5 Home plus Comms | planned | List and control HomeKit accessories and scenes from chat with approval. |
 | Home Assistant control | 5 Home plus Comms | planned | Query and control Home Assistant entities via URL plus token from chat with approval. |
 | Discord read | 5 Home plus Comms | planned | Read and summarize Discord channel messages and mentions from chat. |
@@ -33,6 +34,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Calendar integration | 5 Home plus Comms | planned | List upcoming events and answer availability questions from chat. |
 | Whisper STT plus system TTS plus push-to-talk | 6 Voice plus Polish | planned | Push-to-talk transcribes via local Whisper and speaks replies via system TTS. |
 | macOS menu bar app | 6 Voice plus Polish | done-verified | Menu bar chat window with approval notifications runs on macOS. |
+| Plugin discovery + disabled-by-default holding pen | 7 Self-Improvement | done-verified | External runes quarantine disabled; enable records SHA-256 tree hash with tamper detection; no trusted escalation |
 | Plugin marketplace | 7 Self-Improvement | planned | Install, update, and remove plugins from a registry without touching the core. |
 | iOS app | 8 Clients plus Runtime | planned | SwiftUI iOS client chats over VPN with push-to-talk and approval prompts. |
 | Local web dashboard | 8 Clients plus Runtime | done-verified | Dashboard chats, browses memory, and manages approvals/scheduler in a browser via the engine-served `Web/dist` bundle (`DashboardBundle`, `Web/src/*`, vitest + `DashboardBundleTests`). |
@@ -41,5 +43,5 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Engine API — Vapor localhost service | 8 Clients plus Runtime | done-verified | Vapor API serves chat, tools, memory, approvals, scheduler, and runs on loopback with JSON errors (`RuneWeaverServer`, `ServerTests`). |
 | Dashboard — static bundle served by engine | 8 Clients plus Runtime | done-verified | Static `Web/dist` bundle served by the engine on the same loopback origin with stub reporting when unbuilt (`DashboardBundle`, `DashboardBundleTests`). |
 | Approvals inbox — dashboard plus CLI | 8 Clients plus Runtime | done-verified | Pending `requiresApproval` actions list in the dashboard inbox and `GET /approvals`; approve-with-duration or deny flows through the permission gate (`ApprovalQueue`, `ApprovalsInbox`, `ApprovalQueueTests`). |
-| Scheduler engine — persistent cron plus event triggers | 8 Clients plus Runtime | done-verified | `config.toml [[scheduler.jobs]]` is the source of truth bridged into the REST registry; fires run headless and log every outcome (`SchedulerStore` + `SchedulerEngine`, `SchedulerTests` + `SchedulerStoreTests`). |
+| Scheduler engine — persistent cron plus event triggers | 8 Clients plus Runtime | done-verified | SQLite (episodes.db) is the source of truth; config [[scheduler.jobs]] is bootstrap seed only when 0 jobs exist; fires run headless and log every outcome (`SchedulerStore` + `SchedulerEngine`, `SchedulerTests` + `SchedulerStoreTests`). |
 | Scheduler UI — dashboard management | 8 Clients plus Runtime | done-verified | Dashboard lists, creates, enables, disables, and manually runs schedules against the engine API (`SchedulerManager`, scheduler job routes, `ServerTests`). |

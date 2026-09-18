@@ -577,8 +577,6 @@ export default function ToolActionRow({
           </div>
         </button>
 
-        {browser ? <BrowserSummary browser={browser} /> : null}
-
         {open ? (
           <div className="tool-action-body">
             <div className="tool-section">
@@ -589,6 +587,7 @@ export default function ToolActionRow({
               <div className="tool-label">Arguments</div>
               <pre className="code-block">{action.argumentsJSON}</pre>
             </div>
+            {browser ? <BrowserSummary browser={browser} /> : null}
             {browser ? <BrowserDetails browser={browser} /> : null}
             {result ? (
               <div className="tool-section">
@@ -649,8 +648,6 @@ export default function ToolActionRow({
         ) : null}
       </button>
 
-      {browser ? <BrowserSummary browser={browser} /> : null}
-
       {open ? (
         <div className="chat-tool-details">
           <div className="chat-tool-detail-section">
@@ -661,6 +658,7 @@ export default function ToolActionRow({
             <span className="chat-tool-detail-label">Arguments:</span>
             <pre className="chat-tool-code">{action.argumentsJSON}</pre>
           </div>
+          {browser ? <BrowserSummary browser={browser} /> : null}
           {browser ? <BrowserDetails browser={browser} /> : null}
           {result ? (
             <div className="chat-tool-detail-section">
