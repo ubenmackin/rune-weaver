@@ -255,9 +255,9 @@ public enum SystemPromptComposer {
 
     /// Registry version fingerprint for one composition.
     /// Sorted by name so registry iteration order never affects the key; includes
-    /// description, schema, permission, vision, and scheduled branches so any
-    /// byte-affecting change misses the cache and recomposes.
-    private static func cacheKey(for tools: [any Tool], supportsVision: Bool, scheduled: Bool) -> String {
+    /// description, schema, permission, vision, scheduled, and schema-inclusion branches
+    /// so any byte-affecting change misses the cache and recomposes.
+    private static func cacheKey(for tools: [any Tool], supportsVision: Bool, scheduled: Bool, includeToolSchemas: Bool = true) -> String {
         let sorted = VisionSchemaFilter.sortedByName(tools, name: { $0.name })
         // Length-frame every field before hashing so a separator byte inside a
         // description or schema can never merge distinct registries into one key;
@@ -273,11 +273,14 @@ public enum SystemPromptComposer {
         }
         appendFramed(scheduled ? "scheduled" : "base")
         appendFramed(supportsVision ? "vision" : "text")
-        for tool in sorted {
-            appendFramed(tool.name)
-            appendFramed(tool.description)
-            appendFramed(tool.inputSchema.rawValue)
-            appendFramed(tool.permissionLevel.rawValue)
+        appendFramed(includeToolSchemas ? "with-schemas" : "no-schemas")
+        if includeToolSchemas {
+            for tool in sorted {
+                appendFramed(tool.name)
+                appendFramed(tool.description)
+                appendFramed(tool.inputSchema.rawValue)
+                appendFramed(tool.permissionLevel.rawValue)
+            }
         }
         let digest = SHA256.hash(data: framed)
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -304,7 +307,7 @@ public enum SystemPromptComposer {
 
     /// Composes the default system prompt for the given tools.
     public static func compose(tools: [any Tool]) -> String {
-        compose(tools: tools, supportsVision: true)
+        compose(tools: tools, supportsVision: true, includeToolSchemas: true)
     }
 
     /// Sorted prompt-safe entries shared by composition and auditing.
@@ -336,13 +339,20 @@ public enum SystemPromptComposer {
     /// The rendered string is cached per registry version so repeated rounds with an
     /// unchanged registry reuse identical leading bytes for server KV-cache hits.
     public static func compose(tools: [any Tool], supportsVision: Bool) -> String {
-        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: false)
+        compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Composes the default system prompt honoring vision capability and tool-schema inclusion.
+    /// When native tool calling is supported on the wire, omitting raw schemas from the system prompt
+    /// eliminates prompt bloat and keeps prefix tokens stable across multi-batch boundaries.
+    public static func compose(tools: [any Tool], supportsVision: Bool, includeToolSchemas: Bool) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: false, includeToolSchemas: includeToolSchemas)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
         // Logging path: invalid schemas warn once here so operators see the skip.
-        let validEntries = sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: true)
-        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision)
+        let validEntries = includeToolSchemas ? sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: true) : []
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         storeCachedPrompt(prompt, forKey: key)
         return prompt
     }
@@ -353,8 +363,9 @@ public enum SystemPromptComposer {
     /// - Parameters:
     ///   - validEntries: Prompt-safe entries in prompt order.
     ///   - supportsVision: Vision branch to render.
+    ///   - includeToolSchemas: Whether to render the 'Available tools:' block.
     /// - Returns: Complete system prompt text.
-    private static func renderPrompt(from validEntries: [PromptToolEntry], supportsVision: Bool) -> String {
+    private static func renderPrompt(from validEntries: [PromptToolEntry], supportsVision: Bool, includeToolSchemas: Bool = true) -> String {
         var lines: [String] = []
         lines.append("You are Rune Weaver, a helpful personal assistant.")
         // Provenance marker travels with the composed text so stored prompts can be
@@ -366,13 +377,15 @@ public enum SystemPromptComposer {
                 + "Be concise, accurate, and proactive within your permissions. "
                 + "Use each tool's input schema to make proper calls."
         )
-        lines.append("")
-        lines.append("Available tools:")
-        if validEntries.isEmpty {
-            lines.append("No tools are currently registered.")
-        } else {
-            for entry in validEntries {
-                lines.append(promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission))
+        if includeToolSchemas {
+            lines.append("")
+            lines.append("Available tools:")
+            if validEntries.isEmpty {
+                lines.append("No tools are currently registered.")
+            } else {
+                for entry in validEntries {
+                    lines.append(promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission))
+                }
             }
         }
         lines.append("")
@@ -445,75 +458,98 @@ public enum SystemPromptComposer {
     /// - Parameters:
     ///   - tools: Candidate tools in any order; sorting mirrors compose.
     ///   - supportsVision: Vision branch to measure.
+    ///   - includeToolSchemas: Whether tool schemas are included in the prompt text.
     /// - Returns: Total UTF-8 bytes plus per-tool schema and entry sizes in prompt order.
-    public static func byteAudit(tools: [any Tool], supportsVision: Bool = true) -> PromptByteAudit {
+    public static func byteAudit(tools: [any Tool], supportsVision: Bool = true, includeToolSchemas: Bool = true) -> PromptByteAudit {
         // Silent path: skips never log here, so audits stay quiet while compose above stays the single logging site.
-        let validEntries = sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: false)
-        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision)
+        let validEntries = includeToolSchemas ? sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: false) : []
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         var perTool: [PromptToolBytes] = []
-        perTool.reserveCapacity(validEntries.count)
-        for entry in validEntries {
-            let compacted = compactSchemaJSON(entry.schema)
-            let rendered = promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission)
-            perTool.append(PromptToolBytes(
-                name: entry.name,
-                schemaBytes: compacted.utf8.count,
-                entryBytes: rendered.utf8.count
-            ))
+        if includeToolSchemas {
+            perTool.reserveCapacity(validEntries.count)
+            for entry in validEntries {
+                let compacted = compactSchemaJSON(entry.schema)
+                let rendered = promptEntry(name: entry.name, description: entry.description, schema: entry.schema, permission: entry.permission)
+                perTool.append(PromptToolBytes(
+                    name: entry.name,
+                    schemaBytes: compacted.utf8.count,
+                    entryBytes: rendered.utf8.count
+                ))
+            }
         }
         return PromptByteAudit(totalBytes: prompt.utf8.count, perTool: perTool)
     }
 
     /// Composes the default system prompt from the live tool registry.
     public static func compose(toolBus: ToolBus) async -> String {
-        await compose(tools: toolBus.availableTools())
+        await compose(tools: toolBus.availableTools(), supportsVision: true, includeToolSchemas: true)
     }
 
     /// Composes the default system prompt from the live registry with vision awareness.
     public static func compose(toolBus: ToolBus, supportsVision: Bool) async -> String {
-        await compose(tools: toolBus.availableTools(), supportsVision: supportsVision)
+        await compose(tools: toolBus.availableTools(), supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Composes the default system prompt from the live registry with vision and tool-schema control.
+    public static func compose(toolBus: ToolBus, supportsVision: Bool, includeToolSchemas: Bool) async -> String {
+        await compose(tools: toolBus.availableTools(), supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Resolves the effective system prompt, preserving the flag override.
     public static func resolve(flag: String?, tools: [any Tool]) -> String {
-        resolve(flag: flag, tools: tools, supportsVision: true)
+        resolve(flag: flag, tools: tools, supportsVision: true, includeToolSchemas: true)
     }
 
     /// Resolves the effective prompt honoring the model's vision capability.
     public static func resolve(flag: String?, tools: [any Tool], supportsVision: Bool) -> String {
+        resolve(flag: flag, tools: tools, supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Resolves the effective prompt honoring vision capability and tool-schema inclusion.
+    public static func resolve(flag: String?, tools: [any Tool], supportsVision: Bool, includeToolSchemas: Bool) -> String {
         if let flag, !flag.isEmpty {
             return flag
         }
-        return compose(tools: tools, supportsVision: supportsVision)
+        return compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Resolves the effective system prompt from the live tool registry.
     public static func resolve(flag: String?, toolBus: ToolBus) async -> String {
-        await resolve(flag: flag, toolBus: toolBus, supportsVision: true)
+        await resolve(flag: flag, toolBus: toolBus, supportsVision: true, includeToolSchemas: true)
     }
 
     /// Resolves the effective prompt from the live registry with vision awareness.
     public static func resolve(flag: String?, toolBus: ToolBus, supportsVision: Bool) async -> String {
+        await resolve(flag: flag, toolBus: toolBus, supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Resolves the effective prompt from the live registry with vision and tool-schema control.
+    public static func resolve(flag: String?, toolBus: ToolBus, supportsVision: Bool, includeToolSchemas: Bool) async -> String {
         if let flag, !flag.isEmpty {
             return flag
         }
-        return await compose(toolBus: toolBus, supportsVision: supportsVision)
+        return await compose(toolBus: toolBus, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Composes the system prompt customized for automated scheduled runs.
     public static func composeScheduled(tools: [any Tool]) -> String {
-        composeScheduled(tools: tools, supportsVision: true)
+        composeScheduled(tools: tools, supportsVision: true, includeToolSchemas: true)
     }
 
     /// Composes the scheduled prompt honoring the model's vision capability.
     /// Shares the base prompt cache so scheduled and interactive turns agree on the
     /// prefix; the scheduled suffix is static so the combined string stays stable.
     public static func composeScheduled(tools: [any Tool], supportsVision: Bool) -> String {
-        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: true)
+        composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Composes the scheduled prompt honoring vision capability and tool-schema inclusion.
+    public static func composeScheduled(tools: [any Tool], supportsVision: Bool, includeToolSchemas: Bool) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: true, includeToolSchemas: includeToolSchemas)
         if let cached = cachedPrompt(forKey: key) {
             return cached
         }
-        var base = compose(tools: tools, supportsVision: supportsVision)
+        var base = compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         base += "\n\n"
         base += """
         Scheduled task guidance:
@@ -529,12 +565,17 @@ public enum SystemPromptComposer {
     /// - Parameter toolBus: Live registry owning the session's tools.
     /// - Returns: Scheduled system prompt text.
     public static func composeScheduled(toolBus: ToolBus) async -> String {
-        await composeScheduled(tools: toolBus.availableTools())
+        await composeScheduled(tools: toolBus.availableTools(), supportsVision: true, includeToolSchemas: true)
     }
 
     /// Composes the scheduled prompt from the live registry with vision awareness.
     public static func composeScheduled(toolBus: ToolBus, supportsVision: Bool) async -> String {
-        await composeScheduled(tools: toolBus.availableTools(), supportsVision: supportsVision)
+        await composeScheduled(tools: toolBus.availableTools(), supportsVision: supportsVision, includeToolSchemas: true)
+    }
+
+    /// Composes the scheduled prompt from the live registry with vision and tool-schema control.
+    public static func composeScheduled(toolBus: ToolBus, supportsVision: Bool, includeToolSchemas: Bool) async -> String {
+        await composeScheduled(tools: toolBus.availableTools(), supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Validated schema for one tool, or nil when the schema must be omitted from the prompt.

@@ -192,7 +192,12 @@ struct ServeCommand: AsyncParsableCommand {
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm
         )
-        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: previewBus)
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(
+            flag: systemPrompt,
+            toolBus: previewBus,
+            supportsVision: selected.modelInfo.supportsVision,
+            includeToolSchemas: !selected.modelInfo.supportsTools
+        )
         let context = await ServerContext.make(
             config: serverConfig,
             conversations: conversations,
@@ -218,7 +223,12 @@ struct ServeCommand: AsyncParsableCommand {
         // Re-snapshot the live service registry so drift between the startup
         // preview and the serving bus surfaces instead of silently omitting
         // a rune from the prompt.
-        let livePrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: context.toolBus)
+        let livePrompt = await SystemPromptComposer.resolve(
+            flag: systemPrompt,
+            toolBus: context.toolBus,
+            supportsVision: selected.modelInfo.supportsVision,
+            includeToolSchemas: !selected.modelInfo.supportsTools
+        )
         if livePrompt != effectiveSystemPrompt {
             print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
         }

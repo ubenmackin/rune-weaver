@@ -255,36 +255,8 @@ struct ChatCommand: AsyncParsableCommand {
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm
         )
-        await toolBus.setApprovalHandler { tool, call in
-            print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
-            print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
-            // Approval reads go through the line editor like the main
-            // prompt so arrow keys edit instead of echoing escape codes.
-            let answer = await ChatLineEditing.readLine(prompt: TerminalStyle.tool("  Allow? "))
-            guard let duration = chatTrustDuration(for: answer) else {
-                return false
-            }
-            if duration != .thisTime {
-                let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
-                await permissionGate.grantTrust(for: descriptor, duration: duration)
-            }
-            return true
-        }
-        let startupTools = await toolBus.toolNames().sorted()
-        if startupTools.isEmpty {
-            print(TerminalStyle.dim("No plugin tools registered; continuing without tool calls."))
-        } else {
-            print(TerminalStyle.dim("Tools: \(startupTools.joined(separator: ", "))."))
-        }
-        // Verified-live email accounts print here so the user knows which
-        // nickname to name in prompts (e.g. "on volcrypt" or "on icloud"). Only
-        // non-sensitive fields print; passwords never appear.
-        let startupEmailAccounts = loaded.config.email.accounts.sorted(by: { $0.name < $1.name })
-        if !startupEmailAccounts.isEmpty {
-            let summary = startupEmailAccounts.map { "\($0.name) (\($0.username)@\($0.host):\($0.port))" }
-                .joined(separator: ", ")
-            print(TerminalStyle.dim("Email accounts: \(summary)."))
-        }
+        await configureApprovalHandler(on: toolBus, permissionGate: permissionGate)
+        await printStartupBanners(toolBus: toolBus, emailConfig: loaded.config.email)
 
         print(TerminalStyle.dim("Connected to \(active.name) (\(active.modelInfo.name)). Session \(sessionID.uuidString)."))
         print(TerminalStyle.dim("Type /help for commands, /exit to quit. Ctrl+C shuts down gracefully."))
@@ -292,7 +264,12 @@ struct ChatCommand: AsyncParsableCommand {
         // Default system prompt is composed from the live registry so the
         // model sees every registered tool; an explicit --system-prompt
         // still overrides it verbatim via SystemPromptComposer.resolve.
-        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: systemPrompt, toolBus: toolBus)
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(
+            flag: systemPrompt,
+            toolBus: toolBus,
+            supportsVision: active.modelInfo.supportsVision,
+            includeToolSchemas: !active.modelInfo.supportsTools
+        )
         let context = ChatTurnContext(
             conversations: conversations,
             toolBus: toolBus,
@@ -308,6 +285,44 @@ struct ChatCommand: AsyncParsableCommand {
             context: context
         )
         await permissionGate.stopPeriodicCleanup()
+    }
+
+    /// Wires the interactive approval handler to the permission gate.
+    private func configureApprovalHandler(on toolBus: ToolBus, permissionGate: PermissionGate) async {
+        await toolBus.setApprovalHandler { tool, call in
+            print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
+            print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
+            // Approval reads go through the line editor like the main
+            // prompt so arrow keys edit instead of echoing escape codes.
+            let answer = await ChatLineEditing.readLine(prompt: TerminalStyle.tool("  Allow? "))
+            guard let duration = chatTrustDuration(for: answer) else {
+                return false
+            }
+            if duration != .thisTime {
+                let descriptor = ActionDescriptor.descriptor(for: call, tool: tool)
+                await permissionGate.grantTrust(for: descriptor, duration: duration)
+            }
+            return true
+        }
+    }
+
+    /// Prints tool and email account summaries on startup.
+    private func printStartupBanners(toolBus: ToolBus, emailConfig: EmailConfig) async {
+        let startupTools = await toolBus.toolNames().sorted()
+        if startupTools.isEmpty {
+            print(TerminalStyle.dim("No plugin tools registered; continuing without tool calls."))
+        } else {
+            print(TerminalStyle.dim("Tools: \(startupTools.joined(separator: ", "))."))
+        }
+        // Verified-live email accounts print here so the user knows which
+        // nickname to name in prompts (e.g. "on volcrypt" or "on icloud"). Only
+        // non-sensitive fields print; passwords never appear.
+        let startupEmailAccounts = emailConfig.accounts.sorted(by: { $0.name < $1.name })
+        if !startupEmailAccounts.isEmpty {
+            let summary = startupEmailAccounts.map { "\($0.name) (\($0.username)@\($0.host):\($0.port))" }
+                .joined(separator: ", ")
+            print(TerminalStyle.dim("Email accounts: \(summary)."))
+        }
     }
 
     /// Warms the local search engine on boot so first searches stay fast.

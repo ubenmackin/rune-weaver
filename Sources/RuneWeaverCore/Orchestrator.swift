@@ -145,6 +145,7 @@ public actor Orchestrator {
             // the next user message. An explicit operator override bypasses composition verbatim.
             let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
             let supportsVision = llm.modelInfo.supportsVision
+            let includeToolSchemas = !llm.modelInfo.supportsTools
             let effectiveSystemPrompt: String? = if let custom = input.systemPrompt, !custom.isEmpty {
                 // Custom override bypasses composition and its cache verbatim.
                 custom
@@ -153,9 +154,9 @@ public actor Orchestrator {
                 // and parked resumes honor the same custom prompt instead of diverging.
                 stored
             } else if input.source == "scheduler" {
-                SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision)
+                SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
             } else {
-                SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision)
+                SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
             }
             let recall: Message? = if let memoryEngine {
                 try await memoryEngine.recallMessage(for: text, sessionID: sessionID, embedder: embedder)
@@ -420,10 +421,12 @@ extension Orchestrator {
         // while parked reach synthesis; scheduler sessions keep the background template.
         let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
         let source = await conversations.session(id: parked.sessionID)?.source
+        let supportsVision = llm.modelInfo.supportsVision
+        let includeToolSchemas = !llm.modelInfo.supportsTools
         if source == "scheduler" {
-            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: llm.modelInfo.supportsVision)
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         }
-        return SystemPromptComposer.compose(tools: tools, supportsVision: llm.modelInfo.supportsVision)
+        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Pending actions for siblings still awaiting inbox decisions.
