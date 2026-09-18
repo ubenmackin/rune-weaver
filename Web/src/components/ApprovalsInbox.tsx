@@ -10,6 +10,7 @@ import {
   parseTrustGrantExpiry,
   revokeTrustGrant,
   trustDurationOptions,
+  widenTrustGrant,
   type PermissionRequest,
   type TrustDuration,
   type TrustGrant,
@@ -123,6 +124,8 @@ export default function ApprovalsInbox() {
     action: "allowing" | "denying";
   } | null>(null);
   const [grants, setGrants] = useState<TrustGrant[]>([]);
+  const [wideningId, setWideningId] = useState<string | null>(null);
+  const [widenSelections, setWidenSelections] = useState<Record<string, boolean>>({});
   const [revokingId, setRevokingId] = useState<string | null>(null);
   // Staged revoke target renders the shared confirmation modal; the destructive request only
   // fires from the modal so list-row clicks stay non-destructive by default.
@@ -255,11 +258,23 @@ export default function ApprovalsInbox() {
     return durations[id] ?? "thisTime";
   }
 
+  // "Only this time" records no grant at all, so widen must read as unavailable
+  // for that tier; otherwise the checkbox implies tool-wide one-shot trust the
+  // engine would silently ignore (thisTime never widens).
+  function widenEnabledFor(id: string): boolean {
+    return durationFor(id) !== "thisTime";
+  }
+
   async function decide(id: string, approved: boolean) {
     setDecidingState({ id, action: approved ? "allowing" : "denying" });
     setError(null);
+    // Enforce the thisTime guard client-side too: a widen intent that was
+    // checked before the tier changed must never ship alongside a one-shot
+    // grant, so the request can only widen when the duration supports it.
+    const duration = durationFor(id);
+    const widen = approved && widenEnabledFor(id) && Boolean(widenSelections[id]);
     try {
-      await decideApproval(id, approved, durationFor(id));
+      await decideApproval(id, approved, duration, widen);
       setApprovals((previous) => previous.filter((item) => item.id !== id));
       // Duration decisions mint a grant server-side; refetch so the Active
       // section reflects it. One-time decisions record nothing, so the
@@ -271,6 +286,27 @@ export default function ApprovalsInbox() {
       );
     } finally {
       setDecidingState(null);
+    }
+  }
+
+  // Widen holds one global in-flight lock rather than per-row latches: a
+  // single `wideningId` is the only source of progress, so a second widen
+  // starting while one is pending would overwrite it, re-enable the first
+  // row mid-flight, and let the first completion clear the second's spinner.
+  // Guarding the click keeps the lock honest even if a stale handler fires.
+  async function handleWiden(grant: TrustGrant) {
+    if (wideningId !== null) return;
+    setWideningId(grant.id);
+    setError(null);
+    try {
+      await widenTrustGrant(grant.id);
+      await refreshGrants();
+    } catch (failure) {
+      setError(
+        failure instanceof ApiError ? failure.message : "Failed to widen grant",
+      );
+    } finally {
+      setWideningId(null);
     }
   }
 
@@ -380,6 +416,30 @@ export default function ApprovalsInbox() {
                     </option>
                   ))}
                 </select>
+              </label>
+
+              <label className="approval-widen-toggle">
+                <input
+                  type="checkbox"
+                  aria-label={`Allow for all targets for ${request.toolName}`}
+                  checked={
+                    widenEnabledFor(request.id) &&
+                    Boolean(widenSelections[request.id])
+                  }
+                  disabled={!widenEnabledFor(request.id)}
+                  onChange={(event) => {
+                    const checked = event.target.checked;
+                    setWidenSelections((previous) => ({
+                      ...previous,
+                      [request.id]: checked,
+                    }));
+                  }}
+                />
+                <span className="text-sm muted">
+                  {widenEnabledFor(request.id)
+                    ? "Allow for all targets (any target)"
+                    : "Allow for all targets (pick a duration other than \u201cOnly this time\u201d)"}
+                </span>
               </label>
 
               <div className="approval-decision-buttons">
@@ -495,6 +555,31 @@ export default function ApprovalsInbox() {
 
                 <div className="approval-actions-bar">
                   <div className="approval-decision-buttons">
+                    {/* Whole-list widen lock: every widen disables while one is
+                        in flight so overlapping requests cannot corrupt the
+                        shared in-flight id; only the active row shows the
+                        spinner, mirroring the revoke staging lock. */}
+                    {(grant.target ?? "").trim().length > 0 ? (
+                      <button
+                        type="button"
+                        className="secondary"
+                        disabled={
+                          wideningId !== null ||
+                          revokingId !== null ||
+                          pendingRevoke !== null
+                        }
+                        onClick={() => void handleWiden(grant)}
+                      >
+                        {wideningId === grant.id ? (
+                          <>
+                            <RefreshIcon size={12} className="spin" />
+                            <span>Widening…</span>
+                          </>
+                        ) : (
+                          "Widen to all targets"
+                        )}
+                      </button>
+                    ) : null}
                     {revokingId === grant.id ? (
                       // Disabled in-flight control keeps the row locked while
                       // surfacing progress, mirroring the pending inbox

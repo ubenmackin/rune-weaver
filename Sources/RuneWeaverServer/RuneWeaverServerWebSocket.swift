@@ -440,7 +440,8 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
     let resolved = await context.approvals.decide(
         id: message.id,
         approved: message.approved,
-        duration: message.resolvedDuration
+        duration: message.resolvedDuration,
+        widen: message.resolvedWiden
     )
     guard resolved else {
         await sendWSError("Unknown approval \(message.id.uuidString)", connectionID: connectionID, context: context)

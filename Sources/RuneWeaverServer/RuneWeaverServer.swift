@@ -411,11 +411,11 @@ public final class ServerContext: Sendable {
         FileSandboxAuditLog.append(bootSummary)
         let handlerApprovals = context.approvals
         let handlerHub = context.hub
-        await bus.setApprovalHandler { tool, call in
+        await bus.setApprovalHandler { tool, call, toolContext in
             // Decorates the shared filing path: file through
-            // `fileRequest(tool:call:)` (same as the headless handler),
+            // `fileRequest(tool:call:sessionID:)` tagging the owning session,
             // then broadcast and wait with a timeout.
-            let request = await handlerApprovals.fileRequest(tool: tool, call: call)
+            let request = await handlerApprovals.fileRequest(tool: tool, call: call, sessionID: toolContext.conversationID)
             await handlerHub.broadcastApproval(request)
             if let onApprovalRequested {
                 await onApprovalRequested(request)
@@ -1002,7 +1002,12 @@ private func registerApprovalRoutes(_ app: Application) {
             // the pending entry, so the resume path would otherwise lose
             // which conversation to continue.
             let pending = await context.approvals.request(id: id)
-            let resolved = await context.approvals.decide(id: id, approved: body.approved, duration: body.resolvedDuration)
+            let resolved = await context.approvals.decide(
+                id: id,
+                approved: body.approved,
+                duration: body.resolvedDuration,
+                widen: body.resolvedWiden
+            )
             guard resolved else {
                 throw Abort(.notFound, reason: "Unknown approval \(raw)")
             }

@@ -27,18 +27,30 @@ public struct WSDecisionMessage: Codable, Sendable, Equatable {
     public let approved: Bool
     /// Graduated-trust tier recorded on approval.
     public var duration: TrustDuration?
+    /// Whether to grant tool-wide trust matching any target.
+    public var widen: Bool?
 
     /// Creates a WebSocket decision message.
-    public init(id: UUID, approved: Bool, duration: TrustDuration? = nil) {
+    public init(id: UUID, approved: Bool, duration: TrustDuration? = nil, widen: Bool? = nil) {
         self.id = id
         self.approved = approved
         self.duration = duration
+        self.widen = widen
     }
 
     /// Trust tier, defaulting to `thisTime` (one-shot).
     /// - Returns: Resolved duration.
     public var resolvedDuration: TrustDuration {
         duration ?? .thisTime
+    }
+
+    /// Whether to grant tool-wide trust matching any target, defaulting to
+    /// `false` so an omitted flag never silently widens a grant. Clients may
+    /// omit the key, so the narrow default lives here instead of at each call
+    /// site where it could drift.
+    /// - Returns: Resolved widen flag.
+    public var resolvedWiden: Bool {
+        widen ?? false
     }
 }
 

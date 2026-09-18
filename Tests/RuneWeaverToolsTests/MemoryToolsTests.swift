@@ -140,7 +140,7 @@ struct MemoryToolsTests {
         for tool in MemoryTools.makeTools(engine: engine, audit: { _ in }) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in false }
+        await bus.setLegacyApprovalHandler { _, _ in false }
         try await engine.storeEpisodic(content: "Sailed past the lighthouse at dawn", sessionID: UUID())
         let remembered = await bus.execute(
             toolCall: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"My favorite lighthouse is brass"}"#),

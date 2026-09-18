@@ -1753,7 +1753,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         let listInput = ToolInput(toolName: "email.listMailboxes", argumentsJSON: #"{"account":"missing"}"#)
         let listResult = await bus.execute(toolCall: listInput, context: ToolContext(conversationID: UUID()))
         #expect(listResult.isError == true)
@@ -1784,7 +1784,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let aliased = ToolInput(
                 toolName: "email.move",
@@ -1814,7 +1814,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         let payloads = [
             #"{"account":"personal","id":"1;DROP","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
             #"{"account":"personal","id":"abc","mailbox":"INBOX","destinationMailbox":"Archive"}"#,
@@ -1839,7 +1839,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",
@@ -1868,7 +1868,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",
@@ -1900,7 +1900,7 @@ struct EmailToolsTests {
         for tool in EmailTools.makeTools(emailConfig: config, gateway: gateway) {
             await bus.register(tool: tool)
         }
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         await ToolsTestSupport.withTestPassword {
             let input = ToolInput(
                 toolName: "email.move",

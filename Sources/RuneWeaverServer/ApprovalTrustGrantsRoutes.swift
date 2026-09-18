@@ -2,8 +2,9 @@
 //
 // Owns the trust-grants HTTP surface plus the lightweight change signal for
 // grant/revoke broadcast (usage via poll/manual refresh): listing pruned active
-// grants newest-first and revoking by identifier, with a hub broadcast notifying
-// every connected client after durable changes that alter the grants list.
+// grants newest-first, revoking by identifier, and widening an existing grant to
+// all targets by identifier, with a hub broadcast notifying every connected
+// client after durable changes that alter the grants list.
 
 import Foundation
 import RuneWeaverCore
@@ -24,7 +25,8 @@ public extension WSHub {
     }
 }
 
-/// Registers the durable trust-grants list plus revoke routes.
+/// Registers the durable trust-grants list, revoke, and widen-to-all-targets
+/// routes.
 /// - Parameter app: Application receiving the routes.
 func registerTrustGrantsRoutes(_ app: Application) {
     app.get(
@@ -57,6 +59,24 @@ func registerTrustGrantsRoutes(_ app: Application) {
         // happened and stay in history, so dashboards must treat the delete
         // as future-only and not imply prior uses are undone.
         // Notify dashboards so a revoked grant disappears without a manual refresh.
+        await context.hub.broadcastTrustGrantsChanged()
+        return .noContent
+    }
+
+    app.post(
+        PathComponent.constant(ServerPaths.approvals),
+        PathComponent.constant(ServerPaths.grants),
+        PathComponent.parameter("id"),
+        PathComponent.constant(ServerPaths.widen)
+    ) { req async throws -> HTTPStatus in
+        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
+            throw Abort(.badRequest, reason: "id must be a UUID")
+        }
+        let context = req.application.runeWeaver
+        let widened = await context.permissionGate.widenGrant(id: id)
+        guard widened else {
+            throw Abort(.notFound, reason: "Unknown grant \(raw)")
+        }
         await context.hub.broadcastTrustGrantsChanged()
         return .noContent
     }

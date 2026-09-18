@@ -721,5 +721,289 @@ describe("ApprovalsInbox", () => {
       screen.getByText("email sends to alice@example.com are approved"),
     ).toBeInTheDocument();
   });
+
+  it("passes widen: true when Allow for all targets checkbox is checked", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/approvals") {
+          return jsonResponse(pending);
+        }
+        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        calls.push({ path: input, body: String(init?.body ?? "") });
+        return jsonResponse({
+          id: pending.approvals[0].id,
+          approved: true,
+          duration: "oneHour",
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.selectOptions(
+      screen.getByLabelText("Duration for email.send"),
+      "oneHour",
+    );
+    await user.click(
+      screen.getByLabelText("Allow for all targets for email.send"),
+    );
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(calls[0].path).toContain("/decide");
+    expect(JSON.parse(calls[0].body)).toMatchObject({
+      approved: true,
+      duration: "oneHour",
+      widen: true,
+    });
+  });
+
+  it("widens an active grant to all targets when clicking Widen to all targets", async () => {
+    const user = userEvent.setup();
+    const grantId = "22222222-2222-2222-2222-222222222222";
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 3600;
+    const widenCalls: string[] = [];
+    let grantTarget = "alice@example.com";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.includes("/widen")) {
+          widenCalls.push(input);
+          grantTarget = "";
+          return new Response(null, { status: 204 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({
+            grants: [
+              {
+                id: grantId,
+                toolName: "email.send",
+                target: grantTarget,
+                grantedAt: now,
+                expiresAt: future,
+                duration: "oneHour",
+                useCount: 0,
+                lastUsedAt: null,
+              },
+            ],
+            count: 1,
+          });
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(
+        screen.getByText("email sends to alice@example.com are approved"),
+      ).toBeInTheDocument();
+    });
+    const widenBtn = screen.getByRole("button", {
+      name: "Widen to all targets",
+    });
+    expect(widenBtn).toBeInTheDocument();
+    await user.click(widenBtn);
+    await waitFor(() => {
+      expect(
+        screen.getByText("email sends to all targets are approved"),
+      ).toBeInTheDocument();
+    });
+    expect(widenCalls).toHaveLength(1);
+    expect(widenCalls[0]).toContain(`/approvals/grants/${grantId}/widen`);
+  });
+
+  it("locks every widen button while one widen is in flight", async () => {
+    const user = userEvent.setup();
+    const firstId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+    const secondId = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+    const now = Math.floor(Date.now() / 1000);
+    const future = now + 3600;
+    const widenCalls: string[] = [];
+    let resolveFirstWiden: ((value: Response) => void) | null = null;
+    const firstWidenPromise = new Promise<Response>((resolve) => {
+      resolveFirstWiden = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (
+          typeof input === "string" &&
+          input.includes(`/approvals/grants/${firstId}/widen`)
+        ) {
+          widenCalls.push(input);
+          return firstWidenPromise;
+        }
+        if (typeof input === "string" && input.includes("/widen")) {
+          widenCalls.push(input);
+          return new Response(null, { status: 204 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({
+            grants: [
+              {
+                id: firstId,
+                toolName: "email.send",
+                target: "alice@example.com",
+                grantedAt: now,
+                expiresAt: future,
+                duration: "oneHour",
+                useCount: 0,
+                lastUsedAt: null,
+              },
+              {
+                id: secondId,
+                toolName: "file.write",
+                target: "bob@example.com",
+                grantedAt: now,
+                expiresAt: future,
+                duration: "oneHour",
+                useCount: 0,
+                lastUsedAt: null,
+              },
+            ],
+            count: 2,
+          });
+        }
+        return jsonResponse({ approvals: [], count: 0 });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("2 active")).toBeInTheDocument();
+    });
+    const widenButtons = screen.getAllByRole("button", {
+      name: "Widen to all targets",
+    });
+    expect(widenButtons).toHaveLength(2);
+    await user.click(widenButtons[0]);
+    // The active row reports progress while every sibling widen locks, so a
+    // second request cannot overwrite the shared in-flight id.
+    await waitFor(() => {
+      expect(screen.getByText("Widening…")).toBeInTheDocument();
+    });
+    const siblingWiden = screen.getByRole("button", {
+      name: "Widen to all targets",
+    });
+    expect(siblingWiden).toBeDisabled();
+    await user.click(siblingWiden);
+    expect(widenCalls).toHaveLength(1);
+    // Completing the held widen clears the spinner and releases the lock so a
+    // later widen on the previously blocked row still fires exactly once.
+    resolveFirstWiden!(new Response(null, { status: 204 }));
+    await waitFor(() => {
+      expect(screen.queryByText("Widening…")).not.toBeInTheDocument();
+    });
+    await user.click(
+      screen.getAllByRole("button", { name: "Widen to all targets" })[1],
+    );
+    await waitFor(() => {
+      expect(
+        widenCalls.filter((path) => path.includes(secondId)),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("disables the widen checkbox and never widens for Only this time", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/approvals") {
+          return jsonResponse(pending);
+        }
+        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        calls.push({ path: input, body: String(init?.body ?? "") });
+        return jsonResponse({
+          id: pending.approvals[0].id,
+          approved: true,
+          duration: "thisTime",
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    // Default duration is one-shot, so widening is unavailable and must not
+    // imply tool-wide trust the server would ignore.
+    const widenCheckbox = screen.getByLabelText(
+      "Allow for all targets for email.send",
+    );
+    expect(widenCheckbox).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(calls[0].path).toContain("/decide");
+    expect(JSON.parse(calls[0].body)).toMatchObject({
+      approved: true,
+      duration: "thisTime",
+      widen: false,
+    });
+  });
+
+  it("forces widen off when the duration switches back to Only this time", async () => {
+    const user = userEvent.setup();
+    const calls: Array<{ path: string; body: string }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, init?: RequestInit) => {
+        if (input === "/approvals") {
+          return jsonResponse(pending);
+        }
+        if (input.startsWith("/approvals/grants") && init?.method !== "DELETE") {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        calls.push({ path: input, body: String(init?.body ?? "") });
+        return jsonResponse({
+          id: pending.approvals[0].id,
+          approved: true,
+          duration: "thisTime",
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.selectOptions(
+      screen.getByLabelText("Duration for email.send"),
+      "oneHour",
+    );
+    const widenCheckbox = screen.getByLabelText(
+      "Allow for all targets for email.send",
+    );
+    expect(widenCheckbox).toBeEnabled();
+    await user.click(widenCheckbox);
+    expect(widenCheckbox).toBeChecked();
+    // Switching back to the one-shot tier clears the stale widen intent in the
+    // UI and in the request body instead of shipping a contradictory decision.
+    await user.selectOptions(
+      screen.getByLabelText("Duration for email.send"),
+      "thisTime",
+    );
+    expect(widenCheckbox).toBeDisabled();
+    expect(widenCheckbox).not.toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Allow" }));
+    await waitFor(() => {
+      expect(screen.getByText("No pending approvals.")).toBeInTheDocument();
+    });
+    expect(JSON.parse(calls[0].body)).toMatchObject({
+      approved: true,
+      duration: "thisTime",
+      widen: false,
+    });
+  });
 });
 

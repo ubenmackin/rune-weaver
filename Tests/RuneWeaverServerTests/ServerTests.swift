@@ -517,6 +517,12 @@ struct ServerDTOTests {
         #expect(ApprovalDecisionRequest(approved: true).resolvedDuration == .thisTime)
         #expect(ApprovalDecisionRequest(approved: true, duration: .forever).resolvedDuration == .forever)
         #expect(WSDecisionMessage(id: UUID(), approved: true).resolvedDuration == .thisTime)
+        // Widen must default to the narrow scope on both wire paths so an
+        // omitted flag never silently mints tool-wide trust.
+        #expect(ApprovalDecisionRequest(approved: true).resolvedWiden == false)
+        #expect(ApprovalDecisionRequest(approved: true, widen: true).resolvedWiden == true)
+        #expect(WSDecisionMessage(id: UUID(), approved: true).resolvedWiden == false)
+        #expect(WSDecisionMessage(id: UUID(), approved: true, widen: true).resolvedWiden == true)
     }
 
     @Test
@@ -565,6 +571,17 @@ struct ServerDTOTests {
             return
         }
         #expect(cancelMsg.sessionID == cancelID)
+        // A payload carrying both chat text and an approval decision must
+        // classify as a decision; preferring chat would drop the decision and
+        // leave the request pending forever.
+        let overlappedID = UUID()
+        let overlappedText = "{\"text\":\"please allow this\",\"id\":\"\(overlappedID.uuidString)\",\"approved\":true}"
+        guard case let .decision(overlapped) = WSInboundKind.classify(overlappedText) else {
+            Issue.record("Expected decision kind for overlapped payload")
+            return
+        }
+        #expect(overlapped.id == overlappedID)
+        #expect(overlapped.approved == true)
         #expect(WSInboundKind.classify("not json {{{") == .unknown)
         #expect(WSInboundKind.classify("{}") == .unknown)
     }
@@ -1120,6 +1137,16 @@ struct TrustGrantsRouteTests {
         return .noContent
     }
 
+    /// Mirrors the POST /approvals/grants/:id/widen handler mapping so the 404
+    /// contract stays pinned to the widen result.
+    private func widenGrantStatus(id: UUID, gate: PermissionGate) async throws -> HTTPStatus {
+        let widened = await gate.widenGrant(id: id)
+        guard widened else {
+            throw Abort(.notFound, reason: "Unknown grant \(id.uuidString)")
+        }
+        return .noContent
+    }
+
     @Test
     func `Grants list returns oneHour and forever with correct fields`() async {
         let gate = PermissionGate()
@@ -1379,5 +1406,51 @@ struct TrustGrantsRouteTests {
         } catch {
             Issue.record("Unexpected error: \(error)")
         }
+    }
+
+    @Test
+    func `Widen grant route widens target and unknown returns 404`() async throws {
+        let gate = PermissionGate()
+        let descriptor = ActionDescriptor(toolName: "email.send", target: "specific@example.com")
+        await gate.grantTrust(for: descriptor, duration: .oneHour)
+
+        guard let id = await gate.activeGrants().first(where: { $0.actionDescriptor == descriptor })?.id else {
+            Issue.record("Expected grant")
+            return
+        }
+
+        #expect(try await widenGrantStatus(id: id, gate: gate).code == 204)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+
+        let unknown = UUID()
+        do {
+            _ = try await widenGrantStatus(id: unknown, gate: gate)
+            Issue.record("Expected notFound for unknown grant")
+        } catch let abort as Abort {
+            #expect(abort.status == .notFound)
+        }
+    }
+
+    @Test
+    func `ApprovalQueue decide with widen creates widened grant and reflects in grants list`() async {
+        let gate = PermissionGate()
+        let store = ApprovalQueue(permissionGate: gate)
+        let request = await store.enqueue(
+            toolName: "api.request",
+            description: "API call",
+            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/items"}"#)
+        )
+
+        let decided = await store.decide(id: request.id, approved: true, duration: .oneHour, widen: true)
+        #expect(decided == true)
+
+        let response = await grantsResponse(for: gate)
+        #expect(response.count == 1)
+        #expect(response.grants.first?.toolName == "api.request")
+        #expect(response.grants.first?.target.isEmpty == true)
+        #expect(await gate.isTrusted(ActionDescriptor(toolName: "api.request", target: "https://other.com/items")) == true)
     }
 }

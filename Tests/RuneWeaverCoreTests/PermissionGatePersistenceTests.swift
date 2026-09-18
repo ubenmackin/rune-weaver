@@ -398,4 +398,320 @@ struct PermissionGatePersistenceTests {
         #expect(await gate.activeGrants().isEmpty == true)
         #expect(await gate.revokeGrant(id: expired.id) == false)
     }
+
+    @Test
+    func `widenGrant promotes target-specific grant to tool-wide grant`() async {
+        let gate = PermissionGate()
+        let targetDescriptor = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        await gate.grantTrust(for: targetDescriptor, duration: .oneHour)
+        await gate.recordUse(for: targetDescriptor)
+
+        guard let grant = await gate.activeGrants().first(where: { $0.actionDescriptor == targetDescriptor }) else {
+            Issue.record("Expected active grant")
+            return
+        }
+        #expect(grant.actionDescriptor.target == "alice@example.com")
+        #expect(grant.useCount == 1)
+
+        // Widening promotes target to empty while preserving ID and useCount
+        let widened = await gate.widenGrant(id: grant.id)
+        #expect(widened == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        let widenedGrant = active[0]
+        #expect(widenedGrant.id == grant.id)
+        #expect(widenedGrant.actionDescriptor.target.isEmpty == true)
+        #expect(widenedGrant.duration == .oneHour)
+        #expect(widenedGrant.useCount == 1)
+
+        // Tool-wide grant now matches other targets for email.send
+        let bobDescriptor = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
+        #expect(await gate.isTrusted(bobDescriptor) == true)
+
+        // Repeat widen on already empty target returns true (idempotent)
+        #expect(await gate.widenGrant(id: grant.id) == true)
+
+        // Widening non-existent ID returns false
+        #expect(await gate.widenGrant(id: UUID()) == false)
+    }
+
+    @Test
+    func `widenGrant after a prior widen re-resolves the target and preserves other grants`() async {
+        let gate = PermissionGate()
+        let first = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let second = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
+        let unrelated = ActionDescriptor(toolName: "file.write", target: "/tmp/report.txt")
+        // The first grant is deliberately short-lived and the second forever, so
+        // the second promotion strictly outlives the first and takes the
+        // promote path rather than the keep-covering early return.
+        await gate.grantTrust(for: first, duration: .fiveMinutes)
+        await gate.grantTrust(for: second, duration: .forever)
+        await gate.grantTrust(for: unrelated, duration: .forever)
+        await gate.recordUse(for: first)
+        await gate.recordUse(for: second)
+        await gate.recordUse(for: second)
+
+        let staged = await gate.activeGrants()
+        guard let firstID = staged.first(where: { $0.actionDescriptor == first })?.id,
+              let secondID = staged.first(where: { $0.actionDescriptor == second })?.id
+        else {
+            Issue.record("Expected both narrow grants before widening")
+            return
+        }
+
+        // Widening the first grant drops a tool-wide row that sits ahead of the
+        // second grant, so the second widen must find its slot again by
+        // identity. Reusing the stale index would overwrite the unrelated grant
+        // that follows instead of the intended one.
+        #expect(await gate.widenGrant(id: firstID) == true)
+        #expect(await gate.widenGrant(id: secondID) == true)
+
+        let active = await gate.activeGrants()
+        let emailGrants = active.filter { $0.actionDescriptor.toolName == "email.send" }
+        #expect(emailGrants.count == 1)
+        #expect(emailGrants[0].id == secondID)
+        #expect(emailGrants[0].actionDescriptor.target.isEmpty == true)
+        #expect(emailGrants[0].useCount == 2)
+
+        guard let fileGrant = active.first(where: { $0.actionDescriptor.toolName == "file.write" }) else {
+            Issue.record("Unrelated grant was corrupted or dropped")
+            return
+        }
+        #expect(fileGrant.actionDescriptor == unrelated)
+        #expect(fileGrant.useCount == 0)
+    }
+
+    @Test
+    func `widenGrant with the target last does not read past the end`() async {
+        let gate = PermissionGate()
+        let first = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let second = ActionDescriptor(toolName: "email.send", target: "bob@example.com")
+        await gate.grantTrust(for: first, duration: .oneHour)
+        await gate.grantTrust(for: second, duration: .oneHour)
+
+        let staged = await gate.activeGrants()
+        guard let firstID = staged.first(where: { $0.actionDescriptor == first })?.id,
+              let secondID = staged.first(where: { $0.actionDescriptor == second })?.id
+        else {
+            Issue.record("Expected both narrow grants before widening")
+            return
+        }
+
+        #expect(await gate.widenGrant(id: firstID) == true)
+        // The target now sits last, and the dedupe removes the widened grant
+        // ahead of it; resolving by identity keeps the write in range rather
+        // than trapping on the stale slot.
+        #expect(await gate.widenGrant(id: secondID) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == secondID)
+        #expect(active[0].actionDescriptor.toolName == "email.send")
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(await gate.isTrusted(first) == true)
+    }
+
+    @Test
+    func `widenGrant dedupes a pre-existing tool-wide grant for the same tool`() async {
+        let gate = PermissionGate()
+        let narrow = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        let toolWide = ActionDescriptor(toolName: "email.send", target: "")
+        // The narrow grant is granted last with a longer tier, so it strictly
+        // outlives the tool-wide row. Dedupe must keep the promoted row's
+        // identity and counters instead of collapsing them into the shorter
+        // tool-wide grant, which would enshrine a trust reduction.
+        await gate.grantTrust(for: toolWide, duration: .fiveMinutes)
+        await gate.grantTrust(for: narrow, duration: .oneHour)
+        await gate.recordUse(for: narrow)
+
+        let staged = await gate.activeGrants()
+        guard let narrowID = staged.first(where: { $0.actionDescriptor == narrow })?.id else {
+            Issue.record("Expected the narrow grant")
+            return
+        }
+        #expect(staged.contains { $0.actionDescriptor == toolWide } == true)
+
+        // Promoting the narrow grant must collapse the overlapping tool-wide
+        // row rather than leave two rows covering the same tool, while keeping
+        // the narrow grant's identity and usage counters.
+        #expect(await gate.widenGrant(id: narrowID) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == narrowID)
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].useCount == 1)
+    }
+
+    @Test
+    func `widenGrant never shortens a longer-lived tool-wide grant`() async {
+        let gate = PermissionGate()
+        let toolWide = ActionDescriptor(toolName: "email.send", target: "")
+        let narrow = ActionDescriptor(toolName: "email.send", target: "alice@example.com")
+        // The durable forever grant must survive a widen of the short-lived
+        // narrow grant: promoting the narrow row would replace forever with
+        // five minutes and re-prompt every email after the window, dropping
+        // trust the user already granted.
+        await gate.grantTrust(for: toolWide, duration: .forever)
+        await gate.recordUse(for: toolWide)
+        await gate.grantTrust(for: narrow, duration: .fiveMinutes)
+
+        let staged = await gate.activeGrants()
+        guard let narrowID = staged.first(where: { $0.actionDescriptor == narrow })?.id,
+              let toolWideGrant = staged.first(where: { $0.actionDescriptor == toolWide })
+        else {
+            Issue.record("Expected both the narrow and tool-wide grants")
+            return
+        }
+
+        #expect(await gate.widenGrant(id: narrowID) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == toolWideGrant.id)
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].duration == .forever)
+        #expect(active[0].expiresAt == nil)
+        #expect(active[0].useCount == 1)
+        #expect(active.contains { $0.id == narrowID } == false)
+    }
+
+    @Test
+    func `widenGrant keeps an equal-tier tool-wide grant that expires later`() async {
+        let now = Date()
+        // Equal nominal tiers still diverge on effective expiry when the
+        // tool-wide grant was installed later. The longer-lived tool-wide grant
+        // must survive so the promote does not truncate trust to the narrow
+        // grant's earlier expiry.
+        let narrow = TrustGrant(
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
+            grantedAt: now.addingTimeInterval(-240),
+            expiresAt: now.addingTimeInterval(120),
+            duration: .oneHour
+        )
+        let toolWide = TrustGrant(
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: ""),
+            grantedAt: now.addingTimeInterval(-60),
+            expiresAt: now.addingTimeInterval(300),
+            duration: .oneHour
+        )
+        let store = InMemoryTrustStore(grants: [narrow, toolWide])
+        let gate = await PermissionGate.load(store: store)
+
+        #expect(await gate.widenGrant(id: narrow.id) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == toolWide.id)
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].expiresAt == toolWide.expiresAt)
+        #expect(active.contains { $0.id == narrow.id } == false)
+    }
+
+    @Test
+    func `widenGrant keeps a lower-tier tool-wide grant that expires later`() async {
+        let now = Date()
+        // The covering tool-wide grant carries a lower nominal tier yet expires
+        // later because the narrow grant sits near the end of its longer tier.
+        // Effective expiry alone must decide the survivor so the wider grant is
+        // not truncated to the narrow grant's earlier expiry.
+        let narrow = TrustGrant(
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: "alice@example.com"),
+            grantedAt: now.addingTimeInterval(-86280),
+            expiresAt: now.addingTimeInterval(120),
+            duration: .oneDay
+        )
+        let toolWide = TrustGrant(
+            actionDescriptor: ActionDescriptor(toolName: "email.send", target: ""),
+            grantedAt: now,
+            expiresAt: now.addingTimeInterval(300),
+            duration: .fiveMinutes
+        )
+        let store = InMemoryTrustStore(grants: [narrow, toolWide])
+        let gate = await PermissionGate.load(store: store)
+
+        #expect(await gate.widenGrant(id: narrow.id) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == toolWide.id)
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+        #expect(active[0].expiresAt == toolWide.expiresAt)
+    }
+
+    @Test
+    func `ApprovalQueue widen decision never replaces a longer-lived tool-wide grant`() async {
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let toolWide = ActionDescriptor(toolName: "api.request", target: "")
+        // A durable forever grant must survive a widen decision that asks for a
+        // shorter tier: the decision path shares the gate's never-shorten
+        // invariant, so choosing "allow for all targets" for five minutes
+        // cannot collapse the tool-wide forever trust to a five-minute window.
+        await gate.grantTrust(for: toolWide, duration: .forever)
+        await gate.recordUse(for: toolWide)
+        guard let foreverID = await gate.activeGrants().first(where: { $0.actionDescriptor == toolWide })?.id else {
+            Issue.record("Expected a tool-wide forever grant")
+            return
+        }
+
+        let request = await queue.enqueue(
+            toolName: "api.request",
+            description: "API call",
+            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
+        )
+        #expect(await queue.decide(id: request.id, approved: true, duration: .fiveMinutes, widen: true) == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].id == foreverID)
+        #expect(active[0].duration == .forever)
+        #expect(active[0].expiresAt == nil)
+        #expect(active[0].useCount == 1)
+    }
+
+    @Test
+    func `ApprovalQueue decide with widen creates tool-wide grant`() async {
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let request = await queue.enqueue(
+            toolName: "api.request",
+            description: "API call",
+            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
+        )
+
+        let decided = await queue.decide(id: request.id, approved: true, duration: .oneHour, widen: true)
+        #expect(decided == true)
+
+        let active = await gate.activeGrants()
+        #expect(active.count == 1)
+        #expect(active[0].actionDescriptor.toolName == "api.request")
+        #expect(active[0].actionDescriptor.target.isEmpty == true)
+
+        // Another URL for api.request is now trusted
+        let otherDescriptor = ActionDescriptor(toolName: "api.request", target: "https://other.com/api")
+        #expect(await gate.isTrusted(otherDescriptor) == true)
+    }
+
+    @Test
+    func `ApprovalQueue this-time widen never persists a grant`() async {
+        // A this-time decision is one-shot by definition: even a caller that
+        // mistakenly passes widen must not convert it into a tool-wide durable
+        // grant, or a single approval would silently widen trust forever.
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let request = await queue.enqueue(
+            toolName: "api.request",
+            description: "API call",
+            input: ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://api.example.com/data"}"#)
+        )
+
+        let decided = await queue.decide(id: request.id, approved: true, duration: .thisTime, widen: true)
+        #expect(decided == true)
+
+        #expect(await gate.activeGrants().isEmpty == true)
+        let otherDescriptor = ActionDescriptor(toolName: "api.request", target: "https://other.com/api")
+        #expect(await gate.isTrusted(otherDescriptor) == false)
+    }
 }
