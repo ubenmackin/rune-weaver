@@ -26,6 +26,8 @@ public enum ServerPaths {
     public static let decide = "decide"
     /// Durable trust grants subpath under `/approvals`.
     public static let grants = "grants"
+    /// Widen grant subpath under `/approvals/grants/:id`.
+    public static let widen = "widen"
     /// Scheduler group.
     public static let scheduler = "scheduler"
     /// Scheduler jobs subpath under `/scheduler`.
@@ -619,17 +621,29 @@ public struct ApprovalDecisionRequest: Content, Equatable {
     public let approved: Bool
     /// Graduated-trust tier recorded on approval. Defaults to `thisTime`.
     public var duration: TrustDuration?
+    /// Whether to grant tool-wide trust matching any target.
+    public var widen: Bool?
 
     /// Creates a decision request.
-    public init(approved: Bool, duration: TrustDuration? = nil) {
+    public init(approved: Bool, duration: TrustDuration? = nil, widen: Bool? = nil) {
         self.approved = approved
         self.duration = duration
+        self.widen = widen
     }
 
     /// Trust tier, defaulting to `thisTime` (one-shot).
     /// - Returns: Resolved duration.
     public var resolvedDuration: TrustDuration {
         DTODefaults.duration(duration)
+    }
+
+    /// Whether to grant tool-wide trust matching any target, defaulting to
+    /// `false` so an omitted flag never silently widens a grant. Kept beside
+    /// `resolvedDuration` so the decision defaults stay single-sourced across
+    /// the REST and WebSocket paths.
+    /// - Returns: Resolved widen flag.
+    public var resolvedWiden: Bool {
+        widen ?? false
     }
 }
 
@@ -730,22 +744,24 @@ public extension WSInboundKind {
         guard let data = text.data(using: .utf8) else { return .unknown }
         let peek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data)
         let hasText = !(peek?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        // A decision is identified by its required `id` plus `approved` pair and
+        // is classified before chat content sniffing: a payload can carry both
+        // a stray text field and an approval decision, and preferring chat
+        // would drop the decision so the request stays pending forever.
+        if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
+            return .decision(decision)
+        }
         if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data),
            !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         {
             return .chat(chat)
         }
-        if peek?.type == "cancel", !hasText {
-            return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
-        }
-        if hasText, peek?.type == "cancel" {
-            return .unknown
-        }
-        if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
-            return .decision(decision)
-        }
+        // A cancel frame is only honored without text: chat sniffing already ran
+        // above, so text surviving to here is either a stray field on a cancel
+        // frame or a malformed body, and canceling the active turn on that
+        // ambiguity would abort a turn the user never asked to stop.
         if peek?.type == "cancel" {
-            return .cancel(WSCancelMessage(sessionID: peek?.sessionID))
+            return hasText ? .unknown : .cancel(WSCancelMessage(sessionID: peek?.sessionID))
         }
         return .unknown
     }

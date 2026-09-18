@@ -305,7 +305,7 @@ struct NarrationFallbackTests {
         ))
         // An allowing handler proves the fallback filter, not the bus denial,
         // is what keeps the approval-gated narration unexecuted.
-        await bus.setApprovalHandler { _, _ in true }
+        await bus.setLegacyApprovalHandler { _, _ in true }
         let narrated = ToolInput.placeholderContent(for: [
             ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hi"}"#, callID: "call_narrated_gated")
         ])

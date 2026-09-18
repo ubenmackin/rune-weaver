@@ -879,12 +879,13 @@ export function decideApproval(
   id: string,
   approved: boolean,
   duration: TrustDuration = "thisTime",
+  widen?: boolean,
 ): Promise<ApprovalDecisionResponse> {
   return fetchJson<ApprovalDecisionResponse>(
     `/approvals/${encodeURIComponent(id)}/decide`,
     {
       method: "POST",
-      body: JSON.stringify({ approved, duration }),
+      body: JSON.stringify({ approved, duration, widen }),
     },
   );
 }
@@ -904,6 +905,16 @@ export function parseTrustGrantExpiry(
 // without re-deriving it from the pending approvals inbox.
 export function listTrustGrants(): Promise<TrustGrantsResponse> {
   return fetchJson<TrustGrantsResponse>("/approvals/grants");
+}
+
+// Widens an active grant to all targets (empty target).
+export function widenTrustGrant(id: string): Promise<void> {
+  return fetchJson<void>(
+    `/approvals/grants/${encodeURIComponent(id)}/widen`,
+    {
+      method: "POST",
+    },
+  );
 }
 
 // Revokes one grant by id. A 404 surfaces as ApiError through the shared fetchJson reason

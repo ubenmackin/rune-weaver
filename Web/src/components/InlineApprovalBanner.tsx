@@ -10,8 +10,41 @@ import {
 export interface InlineApprovalBannerProps {
   request: PermissionRequest;
   deciding: boolean;
-  onDecide: (id: string, approved: boolean, duration: TrustDuration) => void;
+  onDecide: (
+    id: string,
+    approved: boolean,
+    duration: TrustDuration,
+    widen?: boolean,
+  ) => void;
 }
+
+interface SplitAllowOption {
+  value: TrustDuration;
+  label: string;
+  widen: boolean;
+}
+
+// Single-sourced from the shared trust-duration tiers. Exported so tests can
+// pin the banner's rendered options to those tiers and catch a newly added or
+// renamed duration drifting out of the inline chat flow.
+export const splitAllowOptions: SplitAllowOption[] = [
+  ...trustDurationOptions.map((option) => ({
+    value: option.value,
+    label: option.label,
+    widen: false,
+  })),
+  // Widening is offered for every tier except the one-shot `thisTime` grant,
+  // which persists nothing and so can never widen. Deriving both lists from
+  // the shared tiers keeps the inline banner in lockstep with the inbox and
+  // the engine instead of re-declaring duration values and labels here.
+  ...trustDurationOptions
+    .filter((option) => option.value !== "thisTime")
+    .map((option) => ({
+      value: option.value,
+      label: `${option.label} (all targets)`,
+      widen: true,
+    })),
+];
 
 // Keep inline rows compact: full arguments stay on `title` while the visible
 // line truncates, so a large tool payload cannot stretch the chat footer.
@@ -79,7 +112,7 @@ export default function InlineApprovalBanner({
     }
     if (event.key === "ArrowDown") {
       event.preventDefault();
-      const next = (focusedIndex + 1) % trustDurationOptions.length;
+      const next = (focusedIndex + 1) % splitAllowOptions.length;
       setFocusedIndex(next);
       itemRefs.current[next]?.focus();
       return;
@@ -87,8 +120,8 @@ export default function InlineApprovalBanner({
     if (event.key === "ArrowUp") {
       event.preventDefault();
       const next =
-        (focusedIndex - 1 + trustDurationOptions.length) %
-        trustDurationOptions.length;
+        (focusedIndex - 1 + splitAllowOptions.length) %
+        splitAllowOptions.length;
       setFocusedIndex(next);
       itemRefs.current[next]?.focus();
       return;
@@ -101,16 +134,16 @@ export default function InlineApprovalBanner({
     }
     if (event.key === "End") {
       event.preventDefault();
-      const last = trustDurationOptions.length - 1;
+      const last = splitAllowOptions.length - 1;
       setFocusedIndex(last);
       itemRefs.current[last]?.focus();
     }
   }
 
-  function handlePickDuration(duration: TrustDuration) {
+  function handlePickOption(option: SplitAllowOption) {
     // Chevron picks are Allow-only grants; Deny always records nothing.
     setMenuOpen(false);
-    onDecide(request.id, true, duration);
+    onDecide(request.id, true, option.value, option.widen);
   }
 
   return (
@@ -148,7 +181,7 @@ export default function InlineApprovalBanner({
             type="button"
             className="primary split-allow-main"
             disabled={deciding}
-            onClick={() => onDecide(request.id, true, "thisTime")}
+            onClick={() => onDecide(request.id, true, "thisTime", false)}
           >
             Allow
           </button>
@@ -166,8 +199,8 @@ export default function InlineApprovalBanner({
           </button>
           {menuOpen && !deciding ? (
             <ul className="split-allow-menu" role="menu">
-              {trustDurationOptions.map((option, index) => (
-                <li key={option.value} role="none">
+              {splitAllowOptions.map((option, index) => (
+                <li key={`${option.value}-${option.widen}`} role="none">
                   <button
                     ref={(node) => {
                       itemRefs.current[index] = node;
@@ -175,7 +208,7 @@ export default function InlineApprovalBanner({
                     type="button"
                     role="menuitem"
                     className="split-allow-menu-item"
-                    onClick={() => handlePickDuration(option.value)}
+                    onClick={() => handlePickOption(option)}
                     onFocus={() => setFocusedIndex(index)}
                   >
                     {option.label}
@@ -192,7 +225,7 @@ export default function InlineApprovalBanner({
           type="button"
           className="danger"
           disabled={deciding}
-          onClick={() => onDecide(request.id, false, "thisTime")}
+          onClick={() => onDecide(request.id, false, "thisTime", false)}
         >
           Deny
         </button>

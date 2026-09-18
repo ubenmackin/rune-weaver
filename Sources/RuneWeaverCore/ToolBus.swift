@@ -47,8 +47,8 @@ public struct ToolResult: Sendable, Codable, Equatable {
     }
 }
 
-/// Decides whether a gated tool call may run.
-public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput) async -> Bool
+/// Decides whether a gated tool call may run in its invocation context.
+public typealias ToolApprovalHandler = @Sendable (any Tool, ToolInput, ToolContext) async -> Bool
 
 /// Central registry dispatching LLM-requested tool calls to plugins.
 public actor ToolBus {
@@ -68,10 +68,25 @@ public actor ToolBus {
     }
 
     /// Sets or clears the approval hook.
-    /// - Parameter handler: New handler, or nil to deny all
-    ///   `requiresApproval` calls.
+    /// - Parameter handler: New handler, or nil to deny all `requiresApproval` calls.
     public func setApprovalHandler(_ handler: ToolApprovalHandler?) {
         approvalHandler = handler
+    }
+
+    /// Sets or clears the approval hook with a handler that ignores invocation context.
+    ///
+    /// This lives under its own name because two same-named overloads both accepting
+    /// optionals made a bare `setApprovalHandler(nil)` ambiguous, so callers could not
+    /// clear the context-aware hook without an explicit cast. Handlers registered here
+    /// bridge into the context-aware hook and discard the context they never receive;
+    /// `nil` clears the hook exactly as the context-aware setter does.
+    /// - Parameter handler: New handler ignoring ToolContext.
+    public func setLegacyApprovalHandler(_ handler: (@Sendable (any Tool, ToolInput) async -> Bool)?) {
+        if let handler {
+            approvalHandler = { tool, call, _ in await handler(tool, call) }
+        } else {
+            approvalHandler = nil
+        }
     }
 
     /// Registers a tool, replacing any existing tool with the same name.
@@ -164,7 +179,7 @@ public actor ToolBus {
                     // Defense in depth: the gate never returns this verdict for these levels today,
                     // but a future gate change must not silently bypass approval, so honor it
                     // through the same handler path as gated writes.
-                    if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                    if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
                         return denial
                     }
                 }
@@ -191,11 +206,11 @@ public actor ToolBus {
                         content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
                     )
                 case .requiresApproval:
-                    if let denial = await resolveApproval(tool: tool, call: toolCall) {
+                    if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
                         return denial
                     }
                 }
-            } else if let denial = await resolveApproval(tool: tool, call: toolCall) {
+            } else if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
                 return denial
             }
         }
@@ -208,14 +223,14 @@ public actor ToolBus {
     }
 
     /// Resolves gated approval through the attached handler.
-    private func resolveApproval(tool: any Tool, call: ToolInput) async -> ToolResult? {
+    private func resolveApproval(tool: any Tool, call: ToolInput, context: ToolContext) async -> ToolResult? {
         guard let approvalHandler else {
             return .failure(
                 toolCallID: call.callID,
                 content: "Tool '\(call.toolName)' requires approval and no approval handler is set"
             )
         }
-        let allowed = await approvalHandler(tool, call)
+        let allowed = await approvalHandler(tool, call, context)
         if !allowed {
             return .failure(
                 toolCallID: call.callID,

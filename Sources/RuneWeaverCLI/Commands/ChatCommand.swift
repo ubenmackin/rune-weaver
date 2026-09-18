@@ -289,7 +289,7 @@ struct ChatCommand: AsyncParsableCommand {
 
     /// Wires the interactive approval handler to the permission gate.
     private func configureApprovalHandler(on toolBus: ToolBus, permissionGate: PermissionGate) async {
-        await toolBus.setApprovalHandler { tool, call in
+        await toolBus.setLegacyApprovalHandler { tool, call in
             print(TerminalStyle.tool("Tool '\(call.toolName)' requires approval."))
             print(TerminalStyle.dim("  [1] Only this time  [2] Next 5 minutes  [3] Next hour  [4] Next day  [5] Forever  [N] Deny (default)"))
             // Approval reads go through the line editor like the main

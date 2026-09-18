@@ -55,18 +55,40 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Derives a descriptor from a tool call.
+    /// - Parameters:
+    ///   - toolCall: Raw invocation arguments.
+    ///   - tool: Tool receiving the call.
+    /// - Returns: The action descriptor the gate stores and checks.
     public static func descriptor(for toolCall: ToolInput, tool: any Tool) -> ActionDescriptor {
-        if tool.name == "browser.act",
+        descriptor(for: toolCall, toolName: tool.name)
+    }
+
+    /// Derives a descriptor from a raw tool call and a tool name alone.
+    ///
+    /// An approval decision retains only the parked request's tool name, so the
+    /// decide path cannot reach a live `Tool` instance. Branching on the tool
+    /// name here keeps the grant stored on approval identical to the
+    /// descriptor allow-checks and usage accounting derive later; generic
+    /// extraction would store a different target for `browser.act` (action,
+    /// ref, and page URL) and `api.request` (method, URL, and body preview), so
+    /// a durable narrow grant would never cover the identical next call and the
+    /// engine would re-prompt despite the user having trusted that exact action.
+    /// - Parameters:
+    ///   - toolCall: Raw invocation arguments.
+    ///   - toolName: Tool name selecting the specialized target shape.
+    /// - Returns: The action descriptor the gate stores and checks.
+    public static func descriptor(for toolCall: ToolInput, toolName: String) -> ActionDescriptor {
+        if toolName == "browser.act",
            let combined = browserActTarget(from: toolCall)
         {
-            return ActionDescriptor(toolName: tool.name, target: combined)
+            return ActionDescriptor(toolName: toolName, target: combined)
         }
-        if tool.name == "api.request",
+        if toolName == "api.request",
            let combined = apiRequestTarget(from: toolCall)
         {
-            return ActionDescriptor(toolName: tool.name, target: combined)
+            return ActionDescriptor(toolName: toolName, target: combined)
         }
-        return ActionDescriptor(toolName: tool.name, target: ActionDescriptor.target(from: toolCall))
+        return ActionDescriptor(toolName: toolName, target: ActionDescriptor.target(from: toolCall))
     }
 
     /// Extracts a target string from raw tool arguments.
@@ -959,14 +981,30 @@ public actor PermissionGate {
     public func grantTrust(for descriptor: ActionDescriptor, duration: TrustDuration) async {
         guard duration != .thisTime else { return }
         pruneExpired()
-        grants.removeAll { $0.actionDescriptor == descriptor }
         let now = Date()
+        let expiresAt = duration.timeInterval.map { now.addingTimeInterval($0) }
+        // A tool-wide grant (empty target) covers every target for its tool,
+        // so installing one is a widening act and must obey the same
+        // never-shorten invariant as the explicit widen path: when an existing
+        // tool-wide grant already survives at least as long as the
+        // replacement, keep it and drop the redundant candidate. Effective
+        // expiry is the sole comparison, so an equal-tier grant created later
+        // or a lower-tier grant that expires later still wins, while an older
+        // long-tier grant that has decayed past the replacement is replaced.
+        if descriptor.target.isEmpty,
+           let existing = grants.first(where: { $0.actionDescriptor == descriptor }),
+           !Self.expiryLifetime(expiresAt, outlives: existing.expiresAt)
+        {
+            denials.removeValue(forKey: descriptor)
+            return
+        }
+        grants.removeAll { $0.actionDescriptor == descriptor }
         // A replacement grant starts its usage history fresh so prior
         // counters cannot leak into the new lifetime.
         let grant = TrustGrant(
             actionDescriptor: descriptor,
             grantedAt: now,
-            expiresAt: duration.timeInterval.map { now.addingTimeInterval($0) },
+            expiresAt: expiresAt,
             duration: duration,
             useCount: 0,
             lastUsedAt: nil
@@ -1015,6 +1053,63 @@ public actor PermissionGate {
         return true
     }
 
+    /// Promotes an existing active grant to a tool-wide grant (empty target).
+    /// Preserves the original grant's ID, grantedAt, expiresAt, duration, and usage counters.
+    /// When a longer-lived tool-wide grant for the same tool already exists, that
+    /// grant is kept instead so widening never shortens trust.
+    /// - Parameter id: Stable grant identifier.
+    /// - Returns: True when a valid grant was found and widened.
+    public func widenGrant(id: UUID) async -> Bool {
+        pruneExpired()
+        guard let current = grants.first(where: { $0.id == id && $0.isValid() }) else {
+            return false
+        }
+        guard !current.actionDescriptor.target.isEmpty else {
+            return true
+        }
+        let widenedDescriptor = ActionDescriptor(toolName: current.actionDescriptor.toolName, target: "")
+        // A pre-existing tool-wide grant may outlive the narrow grant the user
+        // is promoting. Widening must never shorten trust, so keep any
+        // covering tool-wide grant that survives at least as long as the
+        // promotion and drop the now-redundant narrow row. Effective expiry is
+        // the sole comparison: an absent expiry is the forever tier and always
+        // wins, an equal-tier grant created later or a lower-tier grant with a
+        // later expiry is kept rather than truncated to the promoted row's
+        // earlier expiry, and only a promotion that strictly outlives the
+        // covering grant replaces it.
+        if let covering = grants.first(where: { $0.id != id && $0.actionDescriptor == widenedDescriptor }),
+           !Self.expiryLifetime(current.expiresAt, outlives: covering.expiresAt)
+        {
+            grants.removeAll { $0.id == id }
+            await persist()
+            return true
+        }
+        // Dedupe can remove a tool-wide grant positioned before the target,
+        // shifting the target's slot; a pre-removal index would then land on an
+        // unrelated grant or read past the end when the target was last.
+        // Re-resolve the target by its stable identifier after the mutation.
+        grants.removeAll { $0.id != id && $0.actionDescriptor == widenedDescriptor }
+        let widened = TrustGrant(
+            id: current.id,
+            actionDescriptor: widenedDescriptor,
+            grantedAt: current.grantedAt,
+            expiresAt: current.expiresAt,
+            duration: current.duration,
+            useCount: current.useCount,
+            lastUsedAt: current.lastUsedAt
+        )
+        if let index = grants.firstIndex(where: { $0.id == id }) {
+            grants[index] = widened
+        } else {
+            // The dedupe excludes the target's own identifier, so it should
+            // always survive; append only as a last resort so a promoted grant
+            // is never silently dropped if in-memory state ever drifts.
+            grants.append(widened)
+        }
+        await persist()
+        return true
+    }
+
     /// Explicitly refuses an action with a reason.
     public func deny(_ descriptor: ActionDescriptor, reason: String) {
         denials[descriptor] = reason
@@ -1042,6 +1137,18 @@ public actor PermissionGate {
     }
 
     // MARK: - Private
+
+    /// Whether the first effective expiry strictly outlives the second. A nil
+    /// expiry is the forever tier, so it outlives every dated grant while two
+    /// forever grants tie. Widening and tool-wide granting rely on this as the
+    /// sole never-shorten comparison: a candidate only replaces a covering
+    /// grant when it strictly outlives it, so trust can never be truncated by
+    /// nominal tier or by a grant date that happens to land earlier.
+    private static func expiryLifetime(_ candidate: Date?, outlives incumbent: Date?) -> Bool {
+        guard let candidate else { return incumbent != nil }
+        guard let incumbent else { return false }
+        return candidate > incumbent
+    }
 
     /// Index of the live grant covering the descriptor, if any. An exact
     /// tool-plus-target grant wins, with a tool-wide empty-target grant as

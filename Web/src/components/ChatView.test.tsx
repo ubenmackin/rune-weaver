@@ -1005,6 +1005,30 @@ describe("Inline session approval banner", () => {
     });
   });
 
+  it("chevron menu Allow with all targets passes widen: true", async () => {
+    const user = userEvent.setup();
+    const { decideCalls } = stubApprovalsFetch([approval()]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole("button", { name: "Allow options for email.send" }),
+    );
+    await user.click(
+      screen.getByRole("menuitem", { name: "Next hour (all targets)" }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("email.send")).not.toBeInTheDocument();
+    });
+    expect(decideCalls).toHaveLength(1);
+    expect(JSON.parse(decideCalls[0].body)).toMatchObject({
+      approved: true,
+      duration: "oneHour",
+      widen: true,
+    });
+  });
+
   it("Deny decides with thisTime and evicts the row", async () => {
     const user = userEvent.setup();
     const { decideCalls } = stubApprovalsFetch([approval()]);

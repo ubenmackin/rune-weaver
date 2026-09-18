@@ -1673,10 +1673,15 @@ export default function ChatView({ health }: ChatViewProps) {
   // its own in-flight decision so concurrent approvals stay actionable, matching the inbox per-row
   // pattern.
   const handleDecideApproval = useCallback(
-    async (id: string, approved: boolean, duration: TrustDuration) => {
+    async (
+      id: string,
+      approved: boolean,
+      duration: TrustDuration,
+      widen?: boolean,
+    ) => {
       setDecidingApprovalIDs((previous) => new Set(previous).add(id));
       try {
-        await decideApproval(id, approved, duration);
+        await decideApproval(id, approved, duration, widen);
         setPendingApprovals((previous) =>
           previous.filter((item) => item.id !== id),
         );
@@ -3367,8 +3372,8 @@ export default function ChatView({ health }: ChatViewProps) {
                 key={request.id}
                 request={request}
                 deciding={decidingApprovalIDs.has(request.id)}
-                onDecide={(id, approved, duration) =>
-                  void handleDecideApproval(id, approved, duration)
+                onDecide={(id, approved, duration, widen) =>
+                  void handleDecideApproval(id, approved, duration, widen)
                 }
               />
             ))}

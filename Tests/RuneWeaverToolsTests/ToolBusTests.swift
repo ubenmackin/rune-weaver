@@ -55,7 +55,7 @@ struct ToolBusTests {
         let bus = ToolBus(permissionGate: PermissionGate())
         await bus.register(tool: ReadOnlyStubTool())
         // A denying handler would fail the call if consulted; success proves bypass.
-        await bus.setApprovalHandler { _, _ in false }
+        await bus.setLegacyApprovalHandler { _, _ in false }
         let result = await bus.execute(
             toolCall: ToolInput(toolName: "stub.read", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID())
@@ -111,5 +111,68 @@ struct ToolBusTests {
             context: ToolContext(conversationID: UUID(), dryRun: true)
         )
         #expect(result.isError == true)
+    }
+
+    @Test
+    func `Approval handler receives ToolContext with conversationID`() async {
+        actor ContextHolder {
+            var sessionID: UUID?
+
+            func set(_ id: UUID?) {
+                sessionID = id
+            }
+
+            func get() -> UUID? {
+                sessionID
+            }
+        }
+        let bus = ToolBus(permissionGate: PermissionGate())
+        await bus.register(tool: ApprovalStubTool())
+        let expectedSession = UUID()
+        let holder = ContextHolder()
+        await bus.setApprovalHandler { _, _, context in
+            await holder.set(context.conversationID)
+            return true
+        }
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: expectedSession)
+        )
+        #expect(result.isError == false)
+        #expect(await holder.get() == expectedSession)
+    }
+
+    @Test
+    func `Clearing the approval handler denies gated tools`() async {
+        let bus = ToolBus(permissionGate: PermissionGate())
+        await bus.register(tool: ApprovalStubTool())
+        await bus.setApprovalHandler { _, _, _ in true }
+        let allowed = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(allowed.isError == false)
+        // A bare nil literal must resolve to the context-aware setter and clear it;
+        // two same-named optional overloads would otherwise make this ambiguous.
+        await bus.setApprovalHandler(nil)
+        let denied = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(denied.isError == true)
+    }
+
+    @Test
+    func `Legacy two-argument handler still delegates`() async {
+        let bus = ToolBus(permissionGate: PermissionGate())
+        await bus.register(tool: ApprovalStubTool())
+        // Compatibility path: callers that predate context-aware approvals keep
+        // working through the bridging setter.
+        await bus.setLegacyApprovalHandler { _, _ in true }
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == false)
     }
 }

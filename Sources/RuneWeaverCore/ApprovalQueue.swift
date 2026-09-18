@@ -100,8 +100,14 @@ public actor ApprovalQueue {
     }
 
     /// Resolves one pending request.
+    /// - Parameters:
+    ///   - id: Request identifier.
+    ///   - approved: Whether the request was approved.
+    ///   - duration: Trust duration tier. Defaults to `.thisTime`.
+    ///   - widen: When true and duration is not `.thisTime`, grants tool-wide trust matching any target.
+    /// - Returns: True when the request was pending and resolved.
     @discardableResult
-    public func decide(id: UUID, approved: Bool, duration: TrustDuration = .thisTime) async -> Bool {
+    public func decide(id: UUID, approved: Bool, duration: TrustDuration = .thisTime, widen: Bool = false) async -> Bool {
         guard let request = pending.removeValue(forKey: id) else {
             return false
         }
@@ -114,10 +120,17 @@ public actor ApprovalQueue {
             earlyDecisions[id] = decision
         }
         if approved, duration != .thisTime {
-            let descriptor = ActionDescriptor(
-                toolName: request.toolName,
-                target: ActionDescriptor.target(from: request.input)
-            )
+            // The durable grant must store the same descriptor the gate derives
+            // for the next call, so narrow grants route through the shared
+            // tool-aware derivation instead of a generic target extraction that
+            // would not match `browser.act` or `api.request`. An empty target is
+            // the widen scope and covers every target for the tool; the gate's
+            // grant path enforces the never-shorten invariant for that scope, so
+            // a shorter decision here cannot truncate an existing tool-wide
+            // grant and both widen entry points agree on the same trust floor.
+            let descriptor = widen
+                ? ActionDescriptor(toolName: request.toolName, target: "")
+                : ActionDescriptor.descriptor(for: request.input, toolName: request.toolName)
             await permissionGate?.grantTrust(for: descriptor, duration: duration)
         }
         return true
@@ -222,8 +235,8 @@ public actor ApprovalQueue {
 
     /// Headless approval handler for scheduler tool buses.
     public func headlessApprovalHandler() -> ToolApprovalHandler {
-        { [queue = self] tool, call in
-            await queue.fileRequest(tool: tool, call: call)
+        { [queue = self] tool, call, context in
+            await queue.fileRequest(tool: tool, call: call, sessionID: context.conversationID)
             return false
         }
     }

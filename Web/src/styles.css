@@ -2847,6 +2847,14 @@ button:disabled {
   gap: 8px;
 }
 
+.approval-widen-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+
 .approval-decision-buttons {
   display: flex;
   align-items: center;

@@ -87,7 +87,10 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
 }
 
 /// Resumes a narrated parked approval in its tagged session, best-effort.
-func resumeNarratedApproval(
+/// Exposed so non-Vapor clients (the menu-bar app) can resolve an approval
+/// through the exact same resume, run-row, and `approval_decided` broadcast
+/// path as the REST and WebSocket routes instead of reimplementing it.
+public func resumeNarratedApproval(
     id: UUID,
     approved: Bool,
     context: ServerContext,

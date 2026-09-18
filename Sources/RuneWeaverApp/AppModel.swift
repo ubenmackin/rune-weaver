@@ -42,8 +42,11 @@ public final class AppModel {
 
     private func setupNotificationCallbacks() {
         notificationManager.onApprovalDecision = { [weak self] id, approved in
-            await self?.serverContext?.approvals.decide(id: id, approved: approved)
-            await self?.refreshPendingApprovals()
+            // Notification actions carry no duration choice, so they map to a
+            // one-shot this-time decision that never widens trust. Routing
+            // through the shared decision helper keeps this path from
+            // stranding a parked narrated turn the way a bare `decide` would.
+            await self?.decideApproval(id: id, approved: approved, duration: .thisTime, widen: false)
         }
 
         notificationManager.onOpenDashboard = { [weak self] in
@@ -366,18 +369,56 @@ public final class AppModel {
         self.pendingApprovals = await context.approvals.list()
     }
 
-    public func approve(id: UUID) {
+    public func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
         Task {
-            await serverContext?.approvals.decide(id: id, approved: true)
-            await refreshPendingApprovals()
+            await decideApproval(id: id, approved: true, duration: duration, widen: widen)
         }
     }
 
     public func deny(id: UUID) {
         Task {
-            await serverContext?.approvals.decide(id: id, approved: false)
-            await refreshPendingApprovals()
+            await decideApproval(id: id, approved: false, duration: .thisTime, widen: false)
         }
+    }
+
+    /// Resolves one approval through the same path the served inbox uses so
+    /// every client converges and a parked narrated turn continues instead of
+    /// stalling. The session tag plus decided call identifier must be captured
+    /// before `decide` removes the pending entry, because the resume path needs
+    /// the owning conversation and call to select the awaiting run. Decisions
+    /// for untagged approvals stop here: REST and WebSocket both skip the shared
+    /// resume helper when no session owns the request, and this path must match
+    /// so a menu-bar decision cannot broadcast a decided frame carrying a null
+    /// session or enter a resume no other client takes.
+    private func decideApproval(id: UUID, approved: Bool, duration: TrustDuration, widen: Bool) async {
+        guard let context = serverContext else { return }
+        let pending = await context.approvals.request(id: id)
+        let resolved = await context.approvals.decide(id: id, approved: approved, duration: duration, widen: widen)
+        guard resolved else {
+            await refreshPendingApprovals()
+            return
+        }
+        // Durable approvals create a stored grant inside `decide`, so the
+        // grants list must refresh; one-shot approvals store nothing. `widen`
+        // only applies off `thisTime`, so a this-time decision never widens.
+        if approved, duration != .thisTime {
+            await context.hub.broadcastTrustGrantsChanged()
+        }
+        // Only session-tagged approvals own a conversation to resume. The
+        // shared helper also emits the decided frame other tabs use to evict,
+        // so tagged one-shot approvals still broadcast even though the resume
+        // itself no-ops for them. Untagged approvals stay broadcast-free,
+        // matching REST and WebSocket and keeping a null session off the wire.
+        if pending?.sessionID != nil {
+            await resumeNarratedApproval(
+                id: id,
+                approved: approved,
+                context: context,
+                sessionID: pending?.sessionID,
+                decidedCallID: pending?.input.callID
+            )
+        }
+        await refreshPendingApprovals()
     }
 
     /// Builds a dashboard URL from a snapshot of the bind values so host text can never inject a
