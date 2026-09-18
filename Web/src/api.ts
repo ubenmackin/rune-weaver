@@ -97,24 +97,20 @@ export function sortToolActionsByRound(actions: ToolAction[]): ToolAction[] {
   return [...actions].sort(compareToolActionsByRound);
 }
 
-// Groups actions into one tools segment per round, oldest round first. The untracked
-// bucket shares one group re-entering at its stored slot, so mixed legacy+tracked
-// turns keep a deterministic position instead of drifting with input order. Pure
-// numbered inputs still sort oldest-first; callers sort before grouping so the
-// stored slot already reflects the total order on the normal path.
+// Groups actions into one tools segment per round, oldest round first. Sorts
+// internally to the shared untracked-last order so unsorted callers cannot
+// place legacy actions ahead of numbered rounds; the single untracked bucket
+// always trails because mixed history renders chronologically only when
+// untracked legacy actions stay after tracked rounds.
 export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
   if (actions.length === 0) return [];
+  const ordered = sortToolActionsByRound(actions);
   const byRound = new Map<number, ToolAction[]>();
   const untracked: ToolAction[] = [];
-  // Stored index of the first untracked action pins the single untracked bucket;
-  // without it a stored-first legacy action would render last after sorting.
-  let firstUntrackedIndex: number | null = null;
-  for (let index = 0; index < actions.length; index++) {
-    const action = actions[index] as ToolAction;
+  for (const action of ordered) {
     const round = normalizeRoundIndex(action.roundIndex);
     if (round === undefined) {
       untracked.push(action);
-      if (firstUntrackedIndex === null) firstUntrackedIndex = index;
       continue;
     }
     const list = byRound.get(round);
@@ -123,23 +119,17 @@ export function groupToolActionsByRound(actions: ToolAction[]): ToolAction[][] {
       byRound.set(round, [action]);
     }
   }
-  // Numbered rounds sort independently of where the untracked bucket sat, so a
-  // late R0 never renders after R1 just because legacy actions interleaved it.
+  // Numbered rounds sort independently of input order, so a late R0 never
+  // renders after R1 just because legacy actions interleaved it.
   const orderedRounds = [...byRound.keys()].sort((a, b) => a - b);
-  if (untracked.length === 0) {
-    return orderedRounds.map((round) => byRound.get(round) as ToolAction[]);
-  }
-  if (byRound.size === 0) {
-    return [[...untracked]];
-  }
   const groups = orderedRounds.map(
     (round) => byRound.get(round) as ToolAction[],
   );
-  const slot = Math.min(
-    firstUntrackedIndex ?? groups.length,
-    groups.length,
-  );
-  groups.splice(slot, 0, [...untracked]);
+  // Untracked legacy actions trail every numbered round to match the sorted
+  // total order; a missing bucket stays absent rather than emitting empties.
+  if (untracked.length > 0) {
+    groups.push([...untracked]);
+  }
   return groups;
 }
 
@@ -159,6 +149,12 @@ export interface OrchestratorResponse {
   // engines predate the resilient filter; absent means no tools were skipped
   // and the turn renders without a banner.
   warnings?: string[];
+  // Completion time on the server clock for this turn. Optional because older
+  // engines predate completion footers; absent degrades to client receipt time
+  // so live turns still show a footer until the server timestamp reconciles.
+  // Carries the same dual wire shape as run timestamps (Unix seconds from
+  // SQLite persistence versus ISO strings), normalized via parseRunTimestamp.
+  completedAt?: string | number | null;
 }
 
 export interface CancelChatResponse {
@@ -313,7 +309,11 @@ export interface ChatMessage {
   content: string;
   toolCallID?: string | null;
   isError?: boolean | null;
-  createdAt?: string;
+  // Creation time in either wire shape the engine emits: ISO-8601 strings from
+  // the Vapor API versus Unix seconds as JSON numbers from SQLite persistence.
+  // Kept as a union so callers normalize through parseRunTimestamp instead of
+  // assuming one encoding.
+  createdAt?: string | number;
 }
 
 export interface ConversationSession {
@@ -344,6 +344,11 @@ export interface SessionsResponse {
 export interface SessionMessageToolActions {
   messageID: string;
   actions: ToolAction[];
+  // Parent message completion time on the server clock, mirroring the
+  // persisted ChatMessage.createdAt for the same note. Optional because older
+  // engines predate completion footers; absent degrades to the sibling history
+  // timestamp for the same message so reloads still show a footer.
+  completedAt?: string | number | null;
 }
 
 export interface SessionToolActionsResponse {
@@ -737,6 +742,13 @@ export interface ProviderConfigData {
   apiStyle?: string;
   context_length?: number;
   contextLength?: number;
+  // llama.cpp prefix-reuse knobs round-tripped through SettingsResponse providers. Dual snake/camel
+  // aliases mirror the existing provider pattern so file-configured values survive a dashboard
+  // PUT instead of being stripped to nil. Absent stays unset (server auto-assign / always-on hint).
+  slot_count?: number;
+  slotCount?: number;
+  cache_prompt?: boolean;
+  cachePrompt?: boolean;
 }
 
 export interface EmailAccountData {
@@ -801,6 +813,9 @@ export interface UpdateSettingsInput {
   logLevel?: string;
   defaultProvider?: string;
   fallbackProvider?: string;
+  // Provider entries carry the prefix-reuse knobs (slot_count/slotCount/cache_prompt/cachePrompt)
+  // through ProviderConfigData so a dashboard PUT preserves file-configured values instead of
+  // stripping them to unset.
   providers?: Record<string, ProviderConfigData>;
   memoryVectorDBPath?: string;
   memoryEpisodesDBPath?: string;

@@ -3082,6 +3082,124 @@ button.danger:hover:not(:disabled) {
 }
 
 /* ==========================================================================
+   Built-in Engine Tools Cards Grid
+   ========================================================================== */
+
+/* Dense grid replaces the full-width row list so a dozen engine tools fit
+ * without long scrolling: auto-fill yields 3–4 cards per row on desktop
+ * panes while collapsing to a single column on narrow viewports. */
+.builtin-tools-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 600px) {
+  .builtin-tools-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.builtin-tool-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background-color: var(--bg-card, #1e2533);
+  border: 1px solid var(--border-color, #2d3748);
+  transition: border-color 0.15s ease;
+}
+
+.builtin-tool-card:hover {
+  border-color: rgba(72, 187, 120, 0.4);
+}
+
+.builtin-tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Long names truncate with an ellipsis (full name stays in title) so one
+ * verbose identifier never stretches its card or breaks the grid. */
+.builtin-tool-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 0.85rem;
+  color: #48bb78;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.builtin-tool-permission {
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background-color: #2d3748;
+  color: #a0aec0;
+  white-space: nowrap;
+}
+
+/* One-line clamp keeps every card the same height; the title tooltip plus
+ * the Details disclosure below carry the complete wording. */
+.builtin-tool-desc {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-secondary, #a0aec0);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Native disclosure keeps the full description keyboard-operable without
+ * extra state: summary stays in the tab order and announces expanded. */
+.builtin-tool-details {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #a0aec0);
+}
+
+.builtin-tool-details summary {
+  cursor: pointer;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.builtin-tool-details summary:hover {
+  color: #ffffff;
+}
+
+.builtin-tool-details summary:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.builtin-tool-details-body {
+  margin: 6px 0 0 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.builtin-tool-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color, #2d3748);
+}
+
+/* ==========================================================================
    Browser Navigate Extras (final URL, redirects, auth, snapshot, thumbnail)
    ========================================================================== */
 

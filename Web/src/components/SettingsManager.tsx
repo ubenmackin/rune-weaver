@@ -512,6 +512,12 @@ export default function SettingsManager() {
           apiStyle: cfg.api_style || cfg.apiStyle || "",
           context_length: cfg.context_length ?? cfg.contextLength,
           contextLength: cfg.context_length ?? cfg.contextLength,
+          // Prefix-reuse knobs use nullish coalescing (not ||) so an explicit false cache hint
+          // survives the load instead of collapsing to unset and being stripped on save.
+          slot_count: cfg.slot_count ?? cfg.slotCount,
+          slotCount: cfg.slot_count ?? cfg.slotCount,
+          cache_prompt: cfg.cache_prompt ?? cfg.cachePrompt,
+          cachePrompt: cfg.cache_prompt ?? cfg.cachePrompt,
         },
       })
     );
@@ -655,6 +661,56 @@ export default function SettingsManager() {
           : Number(cLenRaw);
       const cLen =
         cLenNum === undefined || Number.isNaN(cLenNum) ? undefined : cLenNum;
+      // Absent slot_count keeps server auto-assignment (nil), so only send a Number when the user
+      // entered a value; empty stays omitted. Present values fail closed on non-positive or non-
+      // integer input instead of pinning an out-of-range id, mirroring Config+Validation.
+      const slotRaw = entry.config.slot_count ?? entry.config.slotCount;
+      if (
+        slotRaw !== undefined &&
+        slotRaw !== null &&
+        (slotRaw as unknown) !== ""
+      ) {
+        const slotCheck = Number(slotRaw);
+        if (!Number.isInteger(slotCheck) || slotCheck <= 0) {
+          const label = trimmedName || "(unnamed)";
+          setError(
+            `Invalid slot_count for provider "${label}": slot_count must be a positive integer.`
+          );
+          setSaving(false);
+          return;
+        }
+      }
+      const slotNum =
+        slotRaw === undefined || slotRaw === null || (slotRaw as unknown) === ""
+          ? undefined
+          : Number(slotRaw);
+      const slot =
+        slotNum === undefined || Number.isNaN(slotNum) ? undefined : slotNum;
+      // Tri-state cache hint: unset omits both keys (always-on default), while explicit true/false
+      // dual-writes so an intentionally disabled hint survives the PUT instead of resetting to nil.
+      // Nullish coalescing preserves false; string forms from the select normalize to booleans.
+      const cacheRaw = entry.config.cache_prompt ?? entry.config.cachePrompt;
+      let cache: boolean | undefined;
+      if (
+        cacheRaw === undefined ||
+        cacheRaw === null ||
+        (cacheRaw as unknown) === ""
+      ) {
+        cache = undefined;
+      } else if (cacheRaw === true || (cacheRaw as unknown) === "true") {
+        cache = true;
+      } else if (cacheRaw === false || (cacheRaw as unknown) === "false") {
+        cache = false;
+      } else {
+        // Unrecognized cache values fail closed rather than coercing via Boolean(), which would
+        // silently treat 0/"maybe" as enabled. Mirrors slot_count validation above.
+        const label = trimmedName || "(unnamed)";
+        setError(
+          `Invalid cache_prompt for provider "${label}": cache_prompt must be true, false, or empty (unset).`
+        );
+        setSaving(false);
+        return;
+      }
 
       providersMap[trimmedName] = {
         enabled: entry.config.enabled,
@@ -669,6 +725,10 @@ export default function SettingsManager() {
         apiStyle: aStyle?.trim() || undefined,
         context_length: cLen != null ? Number(cLen) : undefined,
         contextLength: cLen != null ? Number(cLen) : undefined,
+        slot_count: slot != null ? Number(slot) : undefined,
+        slotCount: slot != null ? Number(slot) : undefined,
+        cache_prompt: cache,
+        cachePrompt: cache,
       };
     }
 
@@ -901,6 +961,10 @@ export default function SettingsManager() {
           apiStyle: "",
           context_length: undefined,
           contextLength: undefined,
+          slot_count: undefined,
+          slotCount: undefined,
+          cache_prompt: undefined,
+          cachePrompt: undefined,
         },
       },
     ]);
@@ -968,6 +1032,47 @@ export default function SettingsManager() {
               val === "" || val === undefined ? undefined : Number(val);
             updated.context_length = next as unknown as number | undefined;
             updated.contextLength = next as unknown as number | undefined;
+          }
+          // An empty slot input means server auto-assign (nil), so clear both aliases. Non-empty
+          // values (including NaN from invalid input) are preserved on both aliases so handleSave
+          // can fail closed instead of pinning an out-of-range id.
+          if (field === "slot_count") {
+            const next =
+              val === "" || val === undefined ? undefined : Number(val);
+            updated.slot_count = next as unknown as number | undefined;
+            updated.slotCount = next as unknown as number | undefined;
+          }
+          if (field === "slotCount") {
+            const next =
+              val === "" || val === undefined ? undefined : Number(val);
+            updated.slot_count = next as unknown as number | undefined;
+            updated.slotCount = next as unknown as number | undefined;
+          }
+          // Tri-state cache hint: empty means unset (always-on default), otherwise normalize the
+          // select strings to booleans on both aliases so an explicit false survives the PUT.
+          if (field === "cache_prompt") {
+            const next =
+              val === "" || val === undefined
+                ? undefined
+                : val === true || val === "true"
+                  ? true
+                  : val === false || val === "false"
+                    ? false
+                    : (val as unknown as boolean | undefined);
+            updated.cache_prompt = next;
+            updated.cachePrompt = next;
+          }
+          if (field === "cachePrompt") {
+            const next =
+              val === "" || val === undefined
+                ? undefined
+                : val === true || val === "true"
+                  ? true
+                  : val === false || val === "false"
+                    ? false
+                    : (val as unknown as boolean | undefined);
+            updated.cache_prompt = next;
+            updated.cachePrompt = next;
           }
           return { ...item, config: updated };
         }
@@ -1511,6 +1616,58 @@ export default function SettingsManager() {
                           placeholder="Backend default"
                         />
                       </div>
+
+                      {/* llama.cpp prefix reuse: sticky slot pool plus cache hint. Both stay unset by
+                          default so small servers keep auto-assignment and the always-on hint; the
+                          select keeps the cache tri-state (unset vs explicit on/off) visible. */}
+                      <div className="form-row">
+                        <div className="form-group flex-1">
+                          <label htmlFor={`slot-${item.id}`}>Slot Count (llama.cpp)</label>
+                          <input
+                            id={`slot-${item.id}`}
+                            type="number"
+                            min="1"
+                            step="1"
+                            className="input-field"
+                            value={entry.slot_count ?? entry.slotCount ?? ""}
+                            onChange={(e) => {
+                              const raw = e.target.value;
+                              handleProviderFieldChange(
+                                item.id,
+                                "slot_count",
+                                raw === "" ? undefined : Number(raw)
+                              );
+                            }}
+                            placeholder="Server auto-assign"
+                          />
+                        </div>
+
+                        <div className="form-group flex-1">
+                          <label htmlFor={`cache-${item.id}`}>Prefix Cache (llama.cpp)</label>
+                          <select
+                            id={`cache-${item.id}`}
+                            className="input-field"
+                            value={
+                              (entry.cache_prompt ?? entry.cachePrompt) === undefined
+                                ? ""
+                                : (entry.cache_prompt ?? entry.cachePrompt)
+                                  ? "true"
+                                  : "false"
+                            }
+                            onChange={(e) =>
+                              handleProviderFieldChange(
+                                item.id,
+                                "cache_prompt",
+                                e.target.value === "" ? undefined : e.target.value === "true"
+                              )
+                            }
+                          >
+                            <option value="">Default (enabled)</option>
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                          </select>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 );
@@ -1870,68 +2027,75 @@ export default function SettingsManager() {
               <span className="settings-tab-badge">{safeTools.filter((t) => t.isBuiltIn).length}</span>
             </h4>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {safeTools.filter((t) => t.isBuiltIn).map((tool) => {
-                const isToggling = togglingToolName === tool.name;
-                return (
-                  <div
-                    key={tool.name}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "10px 12px",
-                      borderRadius: "6px",
-                      backgroundColor: "var(--bg-card, #1e2533)",
-                      border: "1px solid var(--border-color, #2d3748)",
-                      gap: "12px",
-                    }}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
-                        <code style={{ fontWeight: 600, fontSize: "0.85rem", color: "#48bb78" }}>{tool.name}</code>
-                        <span style={{ fontSize: "0.7rem", padding: "1px 5px", borderRadius: "3px", backgroundColor: "#2d3748", color: "#a0aec0" }}>
-                          {tool.permissionLevel}
-                        </span>
+            {/* Responsive cards grid keeps 13 engine tools above the fold: dense
+                3–4-up cards on wide panes collapse to one column on narrow
+                screens so the Tools tab no longer scrolls through full rows. */}
+            {safeTools.filter((t) => t.isBuiltIn).length === 0 ? (
+              <div className="empty-state-box">
+                <WrenchIcon size={32} />
+                <p>No built-in tools available.</p>
+              </div>
+            ) : (
+              <div className="builtin-tools-grid">
+                {safeTools.filter((t) => t.isBuiltIn).map((tool) => {
+                  const isToggling = togglingToolName === tool.name;
+                  return (
+                    <article key={tool.name} className="builtin-tool-card">
+                      <div className="builtin-tool-card-header">
+                        <code className="builtin-tool-name" title={tool.name}>
+                          {tool.name}
+                        </code>
+                        <span className="builtin-tool-permission">{tool.permissionLevel}</span>
                       </div>
-                      <p style={{ margin: "4px 0 0 0", fontSize: "0.78rem", color: "var(--text-secondary, #a0aec0)", lineHeight: "1.3" }}>
+                      {/* Single-line clamp with full-text tooltip keeps cards even;
+                          native details below reveals the complete wording on
+                          demand for keyboard and screen-reader users. */}
+                      <p className="builtin-tool-desc" title={tool.description}>
                         {tool.description}
                       </p>
-                    </div>
-                    <label
-                      className="toggle-label tool-switch"
-                      style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
-                    >
-                      <input
-                        type="checkbox"
-                        role="switch"
-                        className="tool-switch-input"
-                        aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
-                        aria-checked={tool.isEnabled}
-                        checked={tool.isEnabled}
-                        onChange={() => void handleToggleTool(tool)}
-                        disabled={isToggling}
-                      />
-                      {/* Visual switch affordance: data-on drives the accent/muted
-                          fill and knob side in CSS while the native checkbox keeps
-                          keyboard and screen-reader semantics. */}
-                      <span
-                        className="tool-switch-track"
-                        data-on={tool.isEnabled ? "true" : "false"}
-                        aria-hidden="true"
-                      >
-                        <span className="tool-switch-thumb" />
-                      </span>
-                      {/* State-first text reports the persisted bus state instead of
-                          the next action so the row reads like a mobile setting. */}
-                      <span className="tool-switch-state">
-                        {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
-                      </span>
-                    </label>
-                  </div>
-                );
-              })}
-            </div>
+                      {tool.description && (
+                        <details className="builtin-tool-details">
+                          <summary>Details</summary>
+                          <p className="builtin-tool-details-body">{tool.description}</p>
+                        </details>
+                      )}
+                      <div className="builtin-tool-footer">
+                        <label
+                          className="toggle-label tool-switch"
+                          style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
+                        >
+                          <input
+                            type="checkbox"
+                            role="switch"
+                            className="tool-switch-input"
+                            aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
+                            aria-checked={tool.isEnabled}
+                            checked={tool.isEnabled}
+                            onChange={() => void handleToggleTool(tool)}
+                            disabled={isToggling}
+                          />
+                          {/* Visual switch affordance: data-on drives the accent/muted
+                              fill and knob side in CSS while the native checkbox keeps
+                              keyboard and screen-reader semantics. */}
+                          <span
+                            className="tool-switch-track"
+                            data-on={tool.isEnabled ? "true" : "false"}
+                            aria-hidden="true"
+                          >
+                            <span className="tool-switch-thumb" />
+                          </span>
+                          {/* State-first text reports the persisted bus state instead of
+                              the next action so the row reads like a mobile setting. */}
+                          <span className="tool-switch-state">
+                            {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
+                          </span>
+                        </label>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Plugin Configuration */}
             <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>

@@ -42,6 +42,8 @@ Each provider entry supports the same keys. Only set what that backend needs.
 | `provider_type` | string \| unset | unset | Backend type for generic local entries (e.g. `"llamacpp"`). |
 | `api_style` | string | `"chat-completions"` | Request style: `"chat-completions"` (`POST /chat/completions`, default) or `"responses"` (`POST /responses`). Use `"responses"` for the `muse-spark` family; use `"chat-completions"` for `glm`, `kimi`, `deepseek`, `mimo`, `hy`, and `longcat`. Models requiring Anthropic-style messages input are unsupported. |
 | `context_length` | integer \| unset | `unset (backend default)` | Context window, per-provider override (e.g. `1000000` for 1M endpoints), must be positive. Omit to use the backend default (MLX `8192`, llama.cpp `4096`, OpenAI-compatible `128000`). |
+| `slot_count` | integer \| unset | `unset (server auto-assign)` | llama.cpp-only sticky `id_slot` pool size. Must be positive when set. Match `llama-server --parallel` to opt into prefix reuse; omit so the server auto-assigns and small servers never see an out-of-range id. Ignored by other backends. |
+| `cache_prompt` | boolean \| unset | `unset (enabled)` | llama.cpp-only prefix-cache hint sent as `cache_prompt`. Omit to keep the always-on default; set `false` to disable. Ignored by other backends. |
 
 Shipped defaults (`RuneWeaverConfig.default`):
 
@@ -218,9 +220,11 @@ default_provider = "local"
 enabled = true
 provider_type = "llamacpp"
 server_url = "http://localhost:8081"
+# slot_count = 4  # match llama-server --parallel to pin turns for prefix reuse; omit for auto-assign
+# cache_prompt = true  # omit for default enabled; set false to disable the prefix hint
 ```
 
-Intel Macs should use this (or vLLM/cloud) — MLX requires Apple Silicon.
+Intel Macs should use this (or vLLM/cloud) — MLX requires Apple Silicon. Leave `slot_count` unset unless the server runs with a matching `--parallel` pool, since out-of-range ids are rejected.
 
 ### OpenRouter (cloud fallback)
 

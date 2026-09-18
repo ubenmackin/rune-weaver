@@ -87,6 +87,14 @@ extension RuneWeaverConfig {
             if let contextLength = entry.contextLength {
                 lines.append("context_length = \(contextLength)")
             }
+            // Persist prefix-reuse knobs only when set so older files round-trip
+            // without new keys and small `--parallel` servers keep auto-assign.
+            if let slotCount = entry.slotCount {
+                lines.append("slot_count = \(slotCount)")
+            }
+            if let cachePrompt = entry.cachePrompt {
+                lines.append("cache_prompt = \(cachePrompt ? "true" : "false")")
+            }
             lines.append("")
         }
         return lines

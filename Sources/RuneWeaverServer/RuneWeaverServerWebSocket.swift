@@ -81,8 +81,23 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
         try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
     case let .warning(message):
         // Degraded-tool notices stream as warning frames so clients surface skips
-        // mid-turn without failing; the terminal done frame repeats them.
+        // mid-turn without failing the turn; the terminal done frame repeats them.
         try? String(data: JSONEncoder().encode(WSWarningFrame(message: message, sessionID: sessionID)), encoding: .utf8)
+    case let .turnTokens(roundIndex, roundTokens, turnTotalTokens):
+        // Per-round usage progress for the live footer: session-tagged so multiplexed
+        // views only apply their own turn and older clients drop the unknown type.
+        // The terminal done frame stays authoritative for reconciliation.
+        try? String(
+            data: JSONEncoder().encode(
+                WSTurnTokensFrame(
+                    sessionID: sessionID,
+                    roundIndex: roundIndex,
+                    roundTokens: roundTokens,
+                    turnTotalTokens: turnTotalTokens
+                )
+            ),
+            encoding: .utf8
+        )
     case .approval:
         nil
     }

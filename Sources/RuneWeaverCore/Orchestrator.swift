@@ -2,263 +2,6 @@
 
 import Foundation
 
-/// Convenience alias for the conversation role.
-public typealias Role = Message.Role
-
-/// User input received by the orchestrator.
-public struct UserInput: Sendable, Codable, Equatable {
-    /// Raw user text (or voice transcription).
-    public let text: String
-    /// Owning session identifier.
-    public let sessionID: UUID
-    /// Input origin (e.g. `"text"`, `"voice"`, `"dashboard"`).
-    public let source: String
-    /// Optional turn-specific system prompt override.
-    public let systemPrompt: String?
-
-    /// Creates user input.
-    public init(text: String, sessionID: UUID = UUID(), source: String = "text", systemPrompt: String? = nil) {
-        self.text = text
-        self.sessionID = sessionID
-        self.source = source
-        self.systemPrompt = systemPrompt
-    }
-}
-
-/// One tool invocation performed while answering.
-public struct ToolAction: Sendable, Codable, Equatable {
-    /// Name of the tool that ran.
-    public let toolName: String
-    /// Correlation identifier of the call.
-    public let callID: String
-    /// Raw JSON arguments sent to the tool.
-    public let argumentsJSON: String
-    /// Result returned by the bus, if the call ran.
-    public let result: ToolResult?
-    /// Zero-based LLM round that produced this call, oldest first. Nil on payloads
-    /// written before round tracking so legacy history still decodes; clients treat
-    /// absent as unordered and fall back to stored order, which remains chronological.
-    public let roundIndex: Int?
-    /// Whether the call succeeded.
-    public var didSucceed: Bool {
-        result?.isError == false
-    }
-
-    /// Coding keys matching the persisted and wire shape.
-    private enum CodingKeys: String, CodingKey {
-        /// Name of the tool that ran.
-        case toolName
-        /// Correlation identifier of the call.
-        case callID
-        /// Raw JSON arguments sent to the tool.
-        case argumentsJSON
-        /// Result returned by the bus.
-        case result
-        /// Zero-based LLM round that produced the call.
-        case roundIndex
-    }
-
-    /// Creates a tool action.
-    public init(toolName: String, callID: String, argumentsJSON: String, result: ToolResult? = nil, roundIndex: Int? = nil) {
-        self.toolName = toolName
-        self.callID = callID
-        self.argumentsJSON = argumentsJSON
-        self.result = result
-        self.roundIndex = roundIndex
-    }
-
-    /// Decodes a tool action, defaulting a missing round to unordered for back-compat.
-    /// - Parameter decoder: Source decoder.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.toolName = try container.decode(String.self, forKey: .toolName)
-        self.callID = try container.decode(String.self, forKey: .callID)
-        self.argumentsJSON = try container.decode(String.self, forKey: .argumentsJSON)
-        self.result = try container.decodeIfPresent(ToolResult.self, forKey: .result)
-        self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex)
-    }
-
-    /// Encodes a tool action, omitting an absent round so older decoders see no new key.
-    /// - Parameter encoder: Destination encoder.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(toolName, forKey: .toolName)
-        try container.encode(callID, forKey: .callID)
-        try container.encode(argumentsJSON, forKey: .argumentsJSON)
-        try container.encodeIfPresent(result, forKey: .result)
-        try container.encodeIfPresent(roundIndex, forKey: .roundIndex)
-    }
-}
-
-/// Response returned by the orchestrator.
-public struct OrchestratorResponse: Sendable, Codable, Equatable {
-    /// Final assistant text.
-    public let text: String
-    /// Owning session identifier.
-    public let sessionID: UUID
-    /// Tool invocations performed while answering.
-    public let toolActions: [ToolAction]
-    /// Session-billed tokens accumulated across every LLM round in this turn (each round's
-    /// `totalTokens`, summed). Nil when no round reported usage, mirroring the CLI
-    /// `runChunkedTurn`/`runTextTurn` session total for the API path.
-    public let totalTokens: Int?
-    /// Serving model name.
-    public let modelName: String?
-    /// Context window limit in tokens.
-    public let contextLength: Int?
-    /// Cumulative billed tokens for this session, if tracked.
-    public let sessionTokens: Int?
-    /// Whether this turn parked waiting on approval.
-    public let isParked: Bool
-    /// Degraded-tool notices for tools omitted this turn. Carries only tool names
-    /// plus a static reason so no secrets or schema payloads reach the wire.
-    public let warnings: [String]
-
-    /// Coding keys matching the JSON wire shape.
-    private enum CodingKeys: String, CodingKey {
-        /// Final assistant text.
-        case text
-        /// Owning session identifier.
-        case sessionID
-        /// Tool invocations performed.
-        case toolActions
-        /// Session-billed tokens.
-        case totalTokens
-        /// Serving model name.
-        case modelName
-        /// Context window limit.
-        case contextLength
-        /// Cumulative billed tokens.
-        case sessionTokens
-        /// Whether the turn parked waiting on approval.
-        case isParked
-        /// Degraded-tool notices.
-        case warnings
-    }
-
-    /// Creates a response.
-    public init(
-        text: String,
-        sessionID: UUID,
-        toolActions: [ToolAction] = [],
-        totalTokens: Int? = nil,
-        modelName: String? = nil,
-        contextLength: Int? = nil,
-        sessionTokens: Int? = nil,
-        isParked: Bool = false,
-        warnings: [String] = []
-    ) {
-        self.text = text
-        self.sessionID = sessionID
-        self.toolActions = toolActions
-        self.totalTokens = totalTokens
-        self.modelName = modelName
-        self.contextLength = contextLength
-        self.sessionTokens = sessionTokens
-        self.isParked = isParked
-        self.warnings = warnings
-    }
-
-    /// Decodes a response, defaulting missing parked flags to not parked and missing warnings to empty.
-    /// - Parameter decoder: Source decoder.
-    public init(from decoder: any Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.text = try container.decode(String.self, forKey: .text)
-        self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
-        self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions) ?? []
-        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
-        self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
-        self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
-        self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
-        self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
-        self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
-    }
-
-    /// Encodes a response.
-    /// - Parameter encoder: Destination encoder.
-    public func encode(to encoder: any Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(text, forKey: .text)
-        try container.encode(sessionID, forKey: .sessionID)
-        try container.encode(toolActions, forKey: .toolActions)
-        try container.encodeIfPresent(totalTokens, forKey: .totalTokens)
-        try container.encodeIfPresent(modelName, forKey: .modelName)
-        try container.encodeIfPresent(contextLength, forKey: .contextLength)
-        try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
-        try container.encode(isParked, forKey: .isParked)
-        // Omit empty warnings so older decoders see an absent key and degrade to no banner,
-        // mirroring WSStreamDone which nils empty lists for back-compat.
-        if !warnings.isEmpty {
-            try container.encode(warnings, forKey: .warnings)
-        }
-    }
-}
-
-/// Failures raised by ``Orchestrator``.
-public enum OrchestratorError: Error, Sendable, Equatable {
-    /// The input text was empty or whitespace-only.
-    case emptyInput
-    /// The tool loop still requested tool calls after `maxToolIterations`
-    /// tool rounds plus the final synthesis turn.
-    case toolLoopExceeded(iterations: Int)
-    /// The LLM stream reported a mid-stream failure, even when partial
-    /// text was already yielded. Surfaced instead of finishing the turn
-    /// as a silent success.
-    case llmFailed(String)
-}
-
-extension OrchestratorError: LocalizedError {
-    public var errorDescription: String? {
-        switch self {
-        case .emptyInput:
-            "Input text was empty or whitespace-only."
-        case let .toolLoopExceeded(iterations):
-            "Tool loop exceeded \(iterations) rounds."
-        case let .llmFailed(detail):
-            detail
-        }
-    }
-}
-
-/// Real-time progress event emitted during turn orchestration.
-public enum OrchestratorEvent: Sendable, Codable, Equatable {
-    /// Tool execution is about to begin.
-    case toolStarted(toolName: String, callID: String, argumentsJSON: String, roundIndex: Int?)
-    /// Tool execution has completed.
-    case toolCompleted(toolName: String, callID: String, result: ToolResult, roundIndex: Int?)
-    /// Incremental assistant text delta generated by the model.
-    case textDelta(String)
-    /// Filed narrated approval awaiting an inbox decision.
-    case approval(PermissionRequest)
-    /// Degraded-tool notice for a tool omitted this turn. Carries only the
-    /// preformatted warning line so no schema payloads reach subscribers.
-    case warning(String)
-}
-
-/// Parked narrated approval awaiting a later decision.
-public struct ParkedNarratedApproval: Sendable, Equatable {
-    /// Owning session the narration parked in.
-    public let sessionID: UUID
-    /// Gated invocation filed for approval.
-    public let toolCall: ToolInput
-    /// Effective system prompt active when the turn parked.
-    public let systemPrompt: String?
-    /// Per-turn batch identifier shared by siblings parked together.
-    public let batchID: UUID
-    /// Zero-based LLM round that produced this gated call, so resumed turns can
-    /// rejoin the same chronological timeline instead of collapsing to one bucket.
-    public let roundIndex: Int?
-
-    /// Creates a parked approval.
-    public init(sessionID: UUID, toolCall: ToolInput, systemPrompt: String? = nil, batchID: UUID = UUID(), roundIndex: Int? = nil) {
-        self.sessionID = sessionID
-        self.toolCall = toolCall
-        self.systemPrompt = systemPrompt
-        self.batchID = batchID
-        self.roundIndex = roundIndex
-    }
-}
-
 /// Context grouping the inputs for one parked-approval filing path.
 private struct ParkGatedCallsContext {
     let gated: [ToolInput]
@@ -268,6 +11,7 @@ private struct ParkGatedCallsContext {
     let priorActions: [ToolAction]
     let billedTokens: Int?
     let systemPrompt: String?
+    let recall: Message?
     let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     /// Chronological round for the gated batch: one past the structured batch in
     /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
@@ -393,23 +137,35 @@ public actor Orchestrator {
                 return earlyResponse
             }
 
-            let effectiveSystemPrompt: String? = if let custom = input.systemPrompt {
+            // Single registry snapshot shared by the prompt and the wire so both omit the
+            // same disabled tools; sorted order mirrors the prompt so leading bytes stay
+            // identical for server prefix caching. Both branches recompose from this snapshot
+            // (vision-aware) so a mid-run tool toggle reaches the next turn's prompt as well
+            // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
+            // the next user message. An explicit operator override bypasses composition verbatim.
+            let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
+            let supportsVision = llm.modelInfo.supportsVision
+            let effectiveSystemPrompt: String? = if let custom = input.systemPrompt, !custom.isEmpty {
+                // Custom override bypasses composition and its cache verbatim.
                 custom
+            } else if let stored = systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
+                // Explicit stored override wins over scheduler composition so live turns
+                // and parked resumes honor the same custom prompt instead of diverging.
+                stored
             } else if input.source == "scheduler" {
-                await SystemPromptComposer.composeScheduled(tools: toolBus.availableTools())
+                SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision)
             } else {
-                systemPrompt
+                SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision)
             }
             let recall: Message? = if let memoryEngine {
                 try await memoryEngine.recallMessage(for: text, sessionID: sessionID, embedder: embedder)
             } else {
                 nil
             }
-            let workingMessages = await MemoryEngine.historyWithRecall(
+            let workingMessages = await Self.stableHistoryWithRecall(
                 conversations.workingHistory(for: sessionID, systemPrompt: effectiveSystemPrompt),
                 recall: recall
             )
-            let tools = await toolBus.availableTools()
             // Degraded tools stay out of the model request but must not fail the turn:
             // surface one static warning per skipped tool name mid-turn and again
             // on the terminal response so streaming and polling clients agree.
@@ -430,10 +186,12 @@ public actor Orchestrator {
             case let .parked(parkedResponse):
                 return parkedResponse
             case let .finished(finalText, toolActions, loopBilled):
-                await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
+                let finalNote = await storeFinalAssistantText(finalText, sessionID: sessionID, pendingEpisodic: &pendingEpisodic)
                 try Task.checkCancellation()
                 await flushEpisodic(pendingEpisodic, sessionID: sessionID)
                 let cumulativeTokens = accumulateSessionTokens(loopBilled, for: sessionID)
+                // Nil when suppressed text persisted no note so equality stays deterministic
+                // and clients fall back to receipt time instead of a wall-clock sample.
                 return OrchestratorResponse(
                     text: finalText,
                     sessionID: sessionID,
@@ -442,7 +200,8 @@ public actor Orchestrator {
                     modelName: llm.modelInfo.name,
                     contextLength: llm.modelInfo.contextLength,
                     sessionTokens: cumulativeTokens,
-                    warnings: turnWarnings
+                    warnings: turnWarnings,
+                    completedAt: finalNote?.createdAt.timeIntervalSince1970
                 )
             }
         } catch let error as CancellationError {
@@ -509,10 +268,11 @@ extension Orchestrator {
         _ parked: ParkedNarratedApproval,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)? = nil
     ) async throws -> OrchestratorResponse {
-        let denial = await recordParkedDenial(parked.toolCall, sessionID: parked.sessionID, onEvent: onEvent)
+        let denialNote = await recordParkedDenial(parked.toolCall, sessionID: parked.sessionID, onEvent: onEvent)
         return try await finishParkedBatch(
             parked: parked,
-            baseText: denial,
+            baseText: denialNote.content,
+            baseCompletedAt: denialNote.createdAt.timeIntervalSince1970,
             newAction: nil,
             approved: false,
             onEvent: onEvent
@@ -527,10 +287,11 @@ extension Orchestrator {
         let sessionID = parked.sessionID
         let call = parked.toolCall
         guard let tool = await toolBus.tool(named: call.toolName) else {
-            let missing = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
+            let missingNote = await recordParkedMissingTool(call.toolName, sessionID: sessionID, onEvent: onEvent)
             return try await finishParkedBatch(
                 parked: parked,
-                baseText: missing,
+                baseText: missingNote.content,
+                baseCompletedAt: missingNote.createdAt.timeIntervalSince1970,
                 newAction: nil,
                 approved: true,
                 onEvent: onEvent
@@ -540,6 +301,7 @@ extension Orchestrator {
         return try await finishParkedBatch(
             parked: parked,
             baseText: "",
+            baseCompletedAt: nil,
             newAction: action,
             approved: true,
             onEvent: onEvent
@@ -550,6 +312,7 @@ extension Orchestrator {
     private func finishParkedBatch(
         parked: ParkedNarratedApproval,
         baseText: String,
+        baseCompletedAt: Double? = nil,
         newAction: ToolAction?,
         approved: Bool,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
@@ -585,6 +348,8 @@ extension Orchestrator {
                 "\(baseText) Waiting for \(remaining.count) more \(noun)."
             }
             await onEvent?(.textDelta(progress))
+            // Progress text is ephemeral with no persisted note, so leave the stamp absent
+            // and let clients fall back to receipt time instead of sampling the clock.
             return OrchestratorResponse(
                 text: progress,
                 sessionID: sessionID,
@@ -593,11 +358,14 @@ extension Orchestrator {
                 contextLength: llm.modelInfo.contextLength,
                 sessionTokens: sessionTokensBySession[sessionID],
                 isParked: true,
-                warnings: resumeWarnings
+                warnings: resumeWarnings,
+                completedAt: nil
             )
         }
         let buffered = takeBufferedParkedActions(forBatch: batchID)
         if buffered.isEmpty {
+            // Nil when no denial or missing-tool note persisted so clients fall back
+            // to receipt time instead of a wall-clock sample.
             return OrchestratorResponse(
                 text: baseText,
                 sessionID: sessionID,
@@ -606,36 +374,56 @@ extension Orchestrator {
                 contextLength: llm.modelInfo.contextLength,
                 sessionTokens: sessionTokensBySession[sessionID],
                 isParked: false,
-                warnings: resumeWarnings
+                warnings: resumeWarnings,
+                completedAt: baseCompletedAt
             )
         }
         let prompt = await resolveParkedSynthesisPrompt(parked)
-        let synthesis = try await synthesizeParkedTurn(sessionID: sessionID, prompt: prompt, onEvent: onEvent)
+        let synthesis = try await synthesizeParkedTurn(
+            sessionID: sessionID,
+            prompt: prompt,
+            recall: parked.recall,
+            priorBilledTokens: parked.billedTokens,
+            synthesisRoundIndex: parked.synthesisRoundIndex,
+            onEvent: onEvent
+        )
         let cumulative = accumulateSessionTokens(synthesis.billedTokens, for: sessionID)
         return OrchestratorResponse(
             text: synthesis.text,
             sessionID: sessionID,
             toolActions: buffered,
-            totalTokens: synthesis.billedTokens,
+            totalTokens: Self.combinedTurnTokens(parked.billedTokens, synthesis.billedTokens),
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulative,
             isParked: false,
-            warnings: resumeWarnings
+            warnings: resumeWarnings,
+            completedAt: synthesis.completedAt
         )
     }
 
     /// Resolves the synthesis prompt for a parked turn.
+    /// Reuses an explicit operator override verbatim, otherwise recomposes from the live
+    /// registry with the model's vision branch so resumed synthesis advertises the same
+    /// tools as its wire even when toggles landed while parked.
     private func resolveParkedSynthesisPrompt(_ parked: ParkedNarratedApproval) async -> String? {
-        if let stored = parked.systemPrompt {
+        // Explicit overrides win over scheduler composition in the same order as the
+        // live turn, so a scheduler run with a stored custom prompt resumes with the
+        // same prompt instead of diverging to the scheduled template.
+        if let stored = parked.systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
             return stored
         }
+        if let stored = systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
+            return stored
+        }
+        // Anything else (composed snapshot or absent) recomposes live so tool toggles
+        // while parked reach synthesis; scheduler sessions keep the background template.
+        let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
         let source = await conversations.session(id: parked.sessionID)?.source
         if source == "scheduler" {
-            let tools = await toolBus.availableTools()
-            return SystemPromptComposer.composeScheduled(tools: tools)
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: llm.modelInfo.supportsVision)
         }
-        return systemPrompt
+        return SystemPromptComposer.compose(tools: tools, supportsVision: llm.modelInfo.supportsVision)
     }
 
     /// Pending actions for siblings still awaiting inbox decisions.
@@ -712,29 +500,35 @@ extension Orchestrator {
     }
 
     /// Records a denied parked call in its session.
+    /// Returns the persisted note so the terminal response can share its creation instant.
     private func recordParkedDenial(
         _ call: ToolInput,
         sessionID: UUID,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    ) async -> String {
+    ) async -> Message {
         let denial = OrchestratorToolLoop.deniedApprovalMessage(for: call.toolName)
-        await conversations.append(Message(role: .assistant, content: denial), to: sessionID)
+        let note = Message(role: .assistant, content: denial)
+        // Stamp from the stored instant so the live response and the history reload share one time.
+        let persisted = await conversations.append(note, to: sessionID)
         await onEvent?(.textDelta(denial))
         await flushEpisodic([(denial, .assistant)], sessionID: sessionID)
-        return denial
+        return persisted
     }
 
     /// Records a missing-tool notice for an allowed parked call.
+    /// Returns the persisted note so the terminal response can share its creation instant.
     private func recordParkedMissingTool(
         _ toolName: String,
         sessionID: UUID,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    ) async -> String {
+    ) async -> Message {
         let missing = "Approval allowed for \(toolName), but the tool is no longer available."
-        await conversations.append(Message(role: .assistant, content: missing), to: sessionID)
+        let note = Message(role: .assistant, content: missing)
+        // Stamp from the stored instant so the live response and the history reload share one time.
+        let persisted = await conversations.append(note, to: sessionID)
         await onEvent?(.textDelta(missing))
         await flushEpisodic([(missing, .assistant)], sessionID: sessionID)
-        return missing
+        return persisted
     }
 
     /// Executes one allowed parked call without re-entering the gate.
@@ -787,24 +581,54 @@ extension Orchestrator {
     }
 
     /// Runs one synthesis turn for a parked batch in its session.
+    /// Carries the parked turn's recall at the stable slot so resumed synthesis keeps the same
+    /// prefix as the live loop, and returns the persisted note's creation instant for the
+    /// terminal completion stamp. The pre-park share stays out of the stored session total
+    /// (already folded at park time) but folds into the live turn total so one user message
+    /// reports one cumulative turn.
     private func synthesizeParkedTurn(
         sessionID: UUID,
         prompt: String?,
+        recall: Message?,
+        priorBilledTokens: Int? = nil,
+        synthesisRoundIndex: Int,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
-    ) async throws -> (text: String, billedTokens: Int?) {
+    ) async throws -> ParkedTurnSynthesis {
         try Task.checkCancellation()
-        let tools = await toolBus.availableTools()
+        // Sorted snapshot mirrors the prompt order so the resumed synthesis keeps the same prefix.
+        let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
         // Live degraded notices already streamed once by the resume caller, so synthesis stays
         // quiet to keep one warning frame per skipped tool instead of doubling the bell badge.
         // Invalid schemas still stay out of the model request via the provider filter.
-        let workingMessages = await conversations.workingHistory(for: sessionID, systemPrompt: prompt)
-        let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
+        let workingMessages = await Self.stableHistoryWithRecall(
+            conversations.workingHistory(for: sessionID, systemPrompt: prompt),
+            recall: recall
+        )
+        let collected = try await collectTurn(messages: workingMessages, tools: tools, sessionID: sessionID, onDelta: { delta in
             await onEvent?(.textDelta(delta))
         })
+        // Mirror the live loop's per-round accounting so the resume footer advances
+        // instead of stalling until the terminal done frame. The round share stays
+        // synthesis-only while the running turn total spans the whole user message, so
+        // fold the pre-park share in here; the stored session total below still takes
+        // only the synthesis delta because park time already folded the prior share.
+        // Negatives drop like the dashboard so a drifted backend cannot emit negative progress.
+        // The synthesis round sits one past the gated batch so resumed progress never
+        // reuses a pre-park round and stays chronological with the live turns.
+        if let billed = collected.billedTokens, billed >= 0 {
+            let validPrior: Int = if let priorBilledTokens, priorBilledTokens >= 0 {
+                priorBilledTokens
+            } else {
+                0
+            }
+            await onEvent?(.turnTokens(roundIndex: synthesisRoundIndex, roundTokens: billed, turnTotalTokens: validPrior + billed))
+        }
         var pending: [(content: String, role: Message.Role)] = []
-        await storeFinalAssistantText(collected.text, sessionID: sessionID, pendingEpisodic: &pending)
+        let note = await storeFinalAssistantText(collected.text, sessionID: sessionID, pendingEpisodic: &pending)
         await flushEpisodic(pending, sessionID: sessionID)
-        return (collected.text, collected.billedTokens)
+        // Nil when suppressed text persisted no note so equality stays deterministic
+        // and clients fall back to receipt time instead of a wall-clock sample.
+        return ParkedTurnSynthesis(text: collected.text, billedTokens: collected.billedTokens, completedAt: note?.createdAt.timeIntervalSince1970)
     }
 
     // MARK: - Private helpers
@@ -823,6 +647,10 @@ extension Orchestrator {
         var finalText = ""
         var toolRounds = 0
         var billedTokens: Int?
+        // Zero-based LLM round counter for live usage progress. Tracks every
+        // collection pass so per-round token frames stay chronological even when
+        // a round reports no usage and emits nothing.
+        var llmRoundIndex = 0
         // Fail-closed names for structured calls: hallucinated names for omitted schemas never execute.
         // Silent partition keeps the prompt and wire filters as the single logging sites per turn.
         let validToolNames = Set(VisionSchemaFilter.partitionValidSchemas(
@@ -833,12 +661,25 @@ extension Orchestrator {
         ).valid.map(\.name))
         while true {
             try Task.checkCancellation()
-            let collected = try await collectTurn(messages: workingMessages, tools: tools, onDelta: { delta in
+            let collected = try await collectTurn(messages: workingMessages, tools: tools, sessionID: sessionID, onDelta: { delta in
                 await onEvent?(.textDelta(delta))
             })
-            if let billed = collected.billedTokens {
+            // Drop malformed negative usage like the dashboard so session totals
+            // never decrement and progress frames never carry negative counters.
+            if let billed = collected.billedTokens, billed >= 0 {
                 billedTokens = (billedTokens ?? 0) + billed
+                // Live footer progress only: session totals still accumulate once at
+                // turn end or park time, so parked resumes never bill twice and
+                // cancelled turns keep partials without touching stored totals.
+                if let turnTotal = billedTokens {
+                    await onEvent?(.turnTokens(
+                        roundIndex: llmRoundIndex,
+                        roundTokens: billed,
+                        turnTotalTokens: turnTotal
+                    ))
+                }
             }
+            llmRoundIndex += 1
             finalText = collected.text
             // Withheld schemas leave no executable call: fall through to the fail-closed narrated
             // fallback rather than running hallucinated names.
@@ -887,6 +728,7 @@ extension Orchestrator {
                         priorActions: toolActions,
                         billedTokens: billedTokens,
                         systemPrompt: request.systemPrompt,
+                        recall: recall,
                         onEvent: onEvent,
                         gatedRoundIndex: toolRounds
                     )
@@ -907,6 +749,7 @@ extension Orchestrator {
                         priorActions: toolActions,
                         billedTokens: billedTokens,
                         systemPrompt: request.systemPrompt,
+                        recall: recall,
                         onEvent: onEvent,
                         gatedRoundIndex: toolRounds
                     )
@@ -927,23 +770,41 @@ extension Orchestrator {
         )
     }
 
+    /// Stable recall slot keeping the prefix identical across rounds.
+    /// Single-sources the slot through the shared memory helper so CLI and service turns
+    /// agree; recall sits after every leading system so a summary arriving mid-turn
+    /// shifts history after recall instead of shifting recall itself.
+    public static func stableHistoryWithRecall(_ history: [Message], recall: Message?) -> [Message] {
+        MemoryEngine.historyWithRecall(history, recall: recall)
+    }
+
     /// Refreshes recall-augmented history after one tool round.
-    private func refreshedWorkingMessages(sessionID: UUID, recall: Message?, systemPrompt: String? = nil) async -> [Message] {
-        await MemoryEngine.historyWithRecall(
+    /// Reuses the turn's system string verbatim (never recomposes from the live
+    /// registry mid-loop) and the turn's recall at its stable slot. The caller
+    /// passes the turn's effective prompt explicitly so mid-loop history keeps
+    /// the composed vision-aware prompt instead of the raw stored value.
+    private func refreshedWorkingMessages(sessionID: UUID, recall: Message?, systemPrompt: String?) async -> [Message] {
+        await Self.stableHistoryWithRecall(
             conversations.workingHistory(for: sessionID, systemPrompt: systemPrompt ?? self.systemPrompt),
             recall: recall
         )
     }
 
     /// Stores the final assistant text when it carries user-visible content.
+    /// Returns the persisted note so callers can stamp the response completion from the same
+    /// creation instant the history reload path reads, keeping live and reload in agreement.
+    @discardableResult
     private func storeFinalAssistantText(
         _ finalText: String,
         sessionID: UUID,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
-    ) async {
-        guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return }
-        await conversations.append(Message(role: .assistant, content: finalText), to: sessionID)
+    ) async -> Message? {
+        guard OrchestratorToolLoop.shouldStoreAssistantText(finalText) else { return nil }
+        let note = Message(role: .assistant, content: finalText)
+        // Stamp from the stored instant so the live response and the history reload share one time.
+        let persisted = await conversations.append(note, to: sessionID)
         pendingEpisodic.append((finalText, .assistant))
+        return persisted
     }
 
     /// Executes tool calls in sequence, publishing real-time events and recording outcomes.
@@ -1015,15 +876,20 @@ extension Orchestrator {
                     sessionID: context.sessionID,
                     toolCall: call,
                     systemPrompt: context.systemPrompt,
+                    recall: context.recall,
                     batchID: batchID,
-                    roundIndex: effectiveGatedRound
+                    roundIndex: effectiveGatedRound,
+                    billedTokens: context.billedTokens,
+                    synthesisRoundIndex: effectiveGatedRound + 1
                 )
                 await context.onEvent?(.approval(request))
             }
         }
         let waiting = OrchestratorToolLoop.waitingOnApprovalMessage(for: context.gated)
         await conversations.append(assistantNoteMessage(text: context.narratedText, calls: context.gated), to: context.sessionID)
-        await conversations.append(Message(role: .assistant, content: waiting), to: context.sessionID)
+        let waitingNote = Message(role: .assistant, content: waiting)
+        // Stamp from the stored instant so the live parked response and the history reload share one time.
+        let persistedWaiting = await conversations.append(waitingNote, to: context.sessionID)
         pendingEpisodic.append((waiting, .assistant))
         await context.onEvent?(.textDelta(waiting))
         await flushEpisodic(pendingEpisodic, sessionID: context.sessionID)
@@ -1046,7 +912,8 @@ extension Orchestrator {
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulativeTokens,
             isParked: true,
-            warnings: parkedWarnings
+            warnings: parkedWarnings,
+            completedAt: persistedWaiting.createdAt.timeIntervalSince1970
         )
     }
 }
@@ -1091,7 +958,9 @@ extension Orchestrator {
             return nil
         }
         let acknowledgement = try await rememberAcknowledgement(factText: factText, source: source)
-        await conversations.append(Message(role: .assistant, content: acknowledgement), to: sessionID)
+        let acknowledgementNote = Message(role: .assistant, content: acknowledgement)
+        // Stamp from the stored instant so the live response and the history reload share one time.
+        let persistedAcknowledgement = await conversations.append(acknowledgementNote, to: sessionID)
         pendingEpisodic.append((acknowledgement, .assistant))
         await onEvent?(.textDelta(acknowledgement))
         // Remember turns bypass the model but must stay honest: surface the same degraded-tool
@@ -1105,13 +974,19 @@ extension Orchestrator {
             sessionID: sessionID,
             toolActions: [],
             sessionTokens: sessionTokensBySession[sessionID],
-            warnings: rememberWarnings
+            warnings: rememberWarnings,
+            completedAt: persistedAcknowledgement.createdAt.timeIntervalSince1970
         )
     }
 
     /// Folds this turn's billed tokens into the session total.
+    /// Drops malformed negative usage like the dashboard so a drifted backend
+    /// cannot decrement the stored total or leak negatives into done frames.
     private func accumulateSessionTokens(_ billedTokens: Int?, for sessionID: UUID) -> Int? {
         guard let billedTokens else {
+            return sessionTokensBySession[sessionID]
+        }
+        guard billedTokens >= 0 else {
             return sessionTokensBySession[sessionID]
         }
         let updated = (sessionTokensBySession[sessionID] ?? 0) + billedTokens
@@ -1133,6 +1008,33 @@ extension Orchestrator {
             }
         }
         return updated
+    }
+
+    /// Sums pre-park and synthesis usage into one turn total for a resumed user message.
+    /// Stored session totals already hold the pre-park share from park time, so this shapes
+    /// only the terminal turn total: nil when neither round reported usage, otherwise the
+    /// sum with absent sides treated as zero. Negatives drop like the dashboard.
+    private static func combinedTurnTokens(_ prior: Int?, _ synthesis: Int?) -> Int? {
+        let validPrior: Int? = if let prior, prior >= 0 {
+            prior
+        } else {
+            nil
+        }
+        let validSynthesis: Int? = if let synthesis, synthesis >= 0 {
+            synthesis
+        } else {
+            nil
+        }
+        switch (validPrior, validSynthesis) {
+        case (nil, nil):
+            return nil
+        case (let priorValue?, nil):
+            return priorValue
+        case (nil, let synthesisValue?):
+            return synthesisValue
+        case let (priorValue?, synthesisValue?):
+            return priorValue + synthesisValue
+        }
     }
 
     /// Drops the cached token total for one session.
@@ -1189,15 +1091,18 @@ extension Orchestrator {
     }
 
     /// Collects a full text turn from the streaming chat API.
+    /// Carries the chat identifier end to end so sticky-slot backends reuse the
+    /// cached prefix instead of falling back to server auto-assignment every turn.
     private func collectTurn(
         messages: [Message],
         tools: [any Tool],
+        sessionID: UUID? = nil,
         onDelta: (@Sendable (String) async -> Void)? = nil
     ) async throws -> TurnDraft {
         var text = ""
         var billed: Int?
         var toolCalls: [ToolInput] = []
-        let stream = llm.chat(messages: messages, tools: tools)
+        let stream = llm.chat(messages: messages, tools: tools, session: sessionID)
         for await chunk in stream {
             try Task.checkCancellation()
             if let message = chunk.errorMessage {
@@ -1214,7 +1119,11 @@ extension Orchestrator {
                 await onDelta?(chunk.delta)
             }
             if chunk.isFinished {
-                billed = chunk.totalTokens
+                // Drop malformed negative usage like the dashboard so a drifted
+                // backend cannot decrement session totals or emit negative progress.
+                if let total = chunk.totalTokens {
+                    billed = total >= 0 ? total : nil
+                }
                 break
             }
         }

@@ -45,6 +45,28 @@ public enum APIStyle: String, Sendable, Codable, CaseIterable {
     case responses
 }
 
+/// Single source of truth for llama.cpp prefix-reuse knob defaults.
+/// Both the TOML file shape and the JSON options shape store an absent key as
+/// unset so small servers keep auto-assignment and stored payloads keep an omitted
+/// key distinct from an explicit hint; the effective wire hint for an absent cache
+/// key is enabled, resolved through `resolvedCachePrompt(fileValue:)` at provider
+/// construction so storage stays aligned while the wire keeps the always-on hint.
+public enum LlamaPrefixReuse: Sendable {
+    /// File-level default for `slot_count` (absent keeps server auto-assign).
+    public static let defaultSlotCount: Int? = nil
+    /// File-level default for `cache_prompt` (absent keeps the always-on hint).
+    public static let defaultCachePrompt: Bool? = nil
+    /// Effective wire hint when the file omits `cache_prompt`.
+    public static let effectiveCachePromptWhenUnset = true
+
+    /// Resolves a stored file value to the wire hint.
+    /// - Parameter fileValue: Stored `cache_prompt`, nil when the file omits the key.
+    /// - Returns: Stored value, or the always-on hint when unset.
+    public static func resolvedCachePrompt(fileValue: Bool?) -> Bool {
+        fileValue ?? effectiveCachePromptWhenUnset
+    }
+}
+
 /// One `[llm.providers.<name>]` entry.
 public struct ProviderConfig: Sendable, Codable, Equatable {
     /// Whether the router may select this provider.
@@ -63,6 +85,14 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var apiStyle: APIStyle
     /// Context window in tokens, when explicitly configured.
     public var contextLength: Int?
+    /// Sticky slot pool size for llama.cpp prefix reuse. Nil keeps server
+    /// auto-assignment so small `--parallel` servers never see an out-of-range
+    /// id; set it to the server's `--parallel` value to opt into pinning.
+    public var slotCount: Int?
+    /// Prefix-cache hint for llama.cpp. Nil keeps the always-on default so
+    /// existing files without the key preserve current wire behavior; an
+    /// explicit false disables the hint.
+    public var cachePrompt: Bool?
 
     /// Creates a provider config.
     public init(
@@ -72,7 +102,9 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         apiKeyEnv: String? = nil,
         providerType: String? = nil,
         apiStyle: APIStyle = .chatCompletions,
-        contextLength: Int? = nil
+        contextLength: Int? = nil,
+        slotCount: Int? = LlamaPrefixReuse.defaultSlotCount,
+        cachePrompt: Bool? = LlamaPrefixReuse.defaultCachePrompt
     ) {
         self.enabled = enabled
         self.model = model
@@ -81,8 +113,14 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.providerType = providerType
         self.apiStyle = apiStyle
         self.contextLength = contextLength
+        self.slotCount = slotCount
+        self.cachePrompt = cachePrompt
     }
 
+    /// Snake wire keys match the TOML file shape. The JSON options shape in RuneWeaverLLM keeps
+    /// camel keys for a different transport; stored defaults for both reference LlamaPrefixReuse
+    /// plus the mirror test so the two shapes share one file-level default, with the effective
+    /// wire hint resolved separately at provider construction.
     private enum CodingKeys: String, CodingKey {
         case enabled
         case model
@@ -91,6 +129,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case providerType = "provider_type"
         case apiStyle = "api_style"
         case contextLength = "context_length"
+        case slotCount = "slot_count"
+        case cachePrompt = "cache_prompt"
     }
 
     public init(from decoder: Decoder) throws {
@@ -102,6 +142,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.providerType = try container.decodeIfPresent(String.self, forKey: .providerType)
         self.apiStyle = try container.decodeIfPresent(APIStyle.self, forKey: .apiStyle) ?? .chatCompletions
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+        self.slotCount = try container.decodeIfPresent(Int.self, forKey: .slotCount)
+        self.cachePrompt = try container.decodeIfPresent(Bool.self, forKey: .cachePrompt)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -113,6 +155,8 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         try container.encodeIfPresent(providerType, forKey: .providerType)
         try container.encode(apiStyle, forKey: .apiStyle)
         try container.encodeIfPresent(contextLength, forKey: .contextLength)
+        try container.encodeIfPresent(slotCount, forKey: .slotCount)
+        try container.encodeIfPresent(cachePrompt, forKey: .cachePrompt)
     }
 }
 

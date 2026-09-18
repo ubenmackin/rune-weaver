@@ -28,6 +28,13 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     public let contextLength: Int
     /// Whether the fronted model accepts vision input.
     public let supportsVision: Bool
+    /// Slot pool size used to derive the sticky `id_slot` for a chat session.
+    /// Nil leaves slot assignment to the server so small `--parallel` servers
+    /// never reject out-of-range ids; set it to the server's `--parallel`
+    /// value to opt into sticky prefix reuse.
+    public let slotCount: Int?
+    /// Prefix-cache hint sent as `cache_prompt`; nil omits the key.
+    public let cachePrompt: Bool?
 
     /// Stable provider identifier used by the router and config keys.
     public var name: String {
@@ -47,21 +54,40 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Creates a llama.cpp provider.
+    /// Stays session-agnostic on purpose: one provider value serves many
+    /// concurrent chats, so a stored session would pin every turn to one slot.
+    /// The sticky slot stays opt-in (`slotCount == nil` omits `id_slot`) because
+    /// a hardcoded pool rejects on servers started with a smaller `--parallel`.
     public init(
         serverURL: String = LlamaCppProvider.defaultServerURL,
         model: String = LlamaCppProvider.defaultModel,
         contextLength: Int = LlamaCppProvider.defaultContextLength,
-        supportsVision: Bool = false
+        supportsVision: Bool = false,
+        slotCount: Int? = nil,
+        cachePrompt: Bool? = LlamaPrefixReuse.effectiveCachePromptWhenUnset
     ) {
         self.serverURL = serverURL
         self.model = model
         self.contextLength = contextLength
         self.supportsVision = supportsVision
+        self.slotCount = slotCount
+        self.cachePrompt = cachePrompt
     }
 
     /// Shared HTTP client for this provider.
+    /// Sends only the `cache_prompt` prefix hint so the server may reuse the
+    /// cached system prompt and tool prefix across rounds; the slot stays unset
+    /// so the server auto-assigns. A stored sticky `id_slot` would pin every
+    /// turn sharing this value to one slot, and a fixed small hash cannot
+    /// isolate hundreds of live sessions anyway — callers needing stickiness
+    /// use the per-turn `chatChunks` overload below.
     var client: OpenAICompatibleHTTPClient {
-        OpenAICompatibleHTTPClient(baseURL: serverURL, model: model)
+        OpenAICompatibleHTTPClient(
+            baseURL: serverURL,
+            model: model,
+            cachePrompt: cachePrompt,
+            slotID: nil
+        )
     }
 
     /// Whether the llama.cpp server answers `GET <base>/models` right now.
@@ -71,8 +97,43 @@ public struct LlamaCppProvider: ChunkStreamingProvider, Sendable {
     }
 
     /// Streams chunk-level events from the llama.cpp server.
+    /// Session-agnostic path used when the caller holds no chat identifier;
+    /// leaves slot assignment to the server. Prefer the per-turn overload when
+    /// the chat identifier is known so the sticky slot follows the turn.
     public func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
         client.streamChunks(messages: messages, tools: tools)
+    }
+
+    /// Streams chunk-level events for one chat session.
+    /// Builds a per-turn client so the sticky `id_slot` follows the turn's
+    /// session instead of a shared stored value. The slot is only pinned when
+    /// the provider was configured with a pool size; otherwise nil lets the
+    /// server auto-assign so small `--parallel` servers never see an
+    /// out-of-range id. The chat identifier is also forwarded as the session
+    /// header for request tracing.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk> {
+        let perTurn = OpenAICompatibleHTTPClient(
+            baseURL: serverURL,
+            model: model,
+            sessionID: sessionID,
+            cachePrompt: cachePrompt,
+            slotID: resolvedSlotID(for: sessionID)
+        )
+        return perTurn.streamChunks(messages: messages, tools: tools)
+    }
+
+    /// Streams chunk-level events for one chat session UUID.
+    /// Same per-turn pinning as above for callers holding the chat identifier directly.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
+        chatChunks(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
+    /// Resolves the sticky slot for one chat session under the configured pool.
+    /// Nil when no pool is configured or the session is absent so the server
+    /// auto-assigns instead of risking an out-of-range rejection.
+    func resolvedSlotID(for sessionID: String?) -> Int? {
+        guard let slotCount, slotCount > 0 else { return nil }
+        return LlamaCppSlot.slotID(forSessionID: sessionID, slotCount: slotCount)
     }
 
     /// Embeds texts via the server's embeddings endpoint.

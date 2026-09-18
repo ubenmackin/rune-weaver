@@ -501,8 +501,31 @@ public protocol LLMProvider: Sendable {
     /// Streams a chat completion for the given history and tools.
     func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse>
 
+    /// Streams a chat completion for one chat session.
+    /// Lets backends with sticky prefix state keep the turn on the same slot
+    /// so cached prefixes survive across turns; backends without sticky state
+    /// fall back to the session-agnostic path.
+    func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse>
+
+    /// Streams a chat completion for callers holding the chat identifier directly.
+    /// Normalizes to the string form so every backend shares one hashing path.
+    func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse>
+
     /// Embeds texts for semantic-memory indexing and retrieval.
     /// - Parameter text: Texts to embed.
     /// - Returns: One embedding vector per input text.
     func embeddings(text: [String]) async throws -> [[Float]]
+}
+
+public extension LLMProvider {
+    /// Session-agnostic fallback so existing backends keep working while only
+    /// slot-aware backends override with real pinning.
+    func chat(messages: [Message], tools: [any Tool], sessionID _: String?) -> AsyncStream<LLMResponse> {
+        chat(messages: messages, tools: tools)
+    }
+
+    /// UUID convenience forwarding to the string form.
+    func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
+        chat(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
 }

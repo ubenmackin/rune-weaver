@@ -91,6 +91,32 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
         client.streamChunks(messages: messages, tools: tools)
     }
 
+    /// Streams chunk-level events for one chat session.
+    /// Builds a per-turn client so the chat identifier follows the turn as the
+    /// session header; a per-turn identifier wins when present, otherwise the
+    /// stored value preserves existing tagged-request behavior.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk> {
+        let resolved: String? = if let sessionID, !sessionID.isEmpty {
+            sessionID
+        } else {
+            self.sessionID
+        }
+        let perTurn = OpenAICompatibleHTTPClient(
+            baseURL: baseURL,
+            apiKey: apiKey,
+            model: model,
+            apiStyle: apiStyle,
+            sessionID: resolved
+        )
+        return perTurn.streamChunks(messages: messages, tools: tools)
+    }
+
+    /// Streams chunk-level events for one chat session UUID.
+    /// Normalizes to the string form so header hashing sees one shape.
+    public func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
+        chatChunks(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
     /// Embeds texts via the endpoint's embeddings API.
     /// - Parameter text: Texts to embed.
     /// - Returns: One embedding vector per input text.

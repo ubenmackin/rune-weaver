@@ -13,6 +13,7 @@ import {
   listApprovals,
   newSessionId,
   normalizeRoundIndex,
+  parseRunTimestamp,
   postChat,
   sortToolActionsByRound,
   updateSessionTitle,
@@ -43,6 +44,7 @@ import {
   normalizeSessionID,
 } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
+import { formatRelativeAgo } from "../relativeTime";
 
 interface MessageItem {
   id: string;
@@ -54,6 +56,10 @@ interface MessageItem {
   // lumped bucket. Flat `text`/`toolActions` stay as back-compat summaries while
   // rendering walks this list in order; absent on turns built before segmentation.
   segments?: ChatSegment[];
+  // Completion instant as milliseconds since the epoch on the server clock.
+  // The stamp stays grounded in the persisted creation time so live cards and
+  // history reloads agree; an omitted stamp renders no footer.
+  completedAt?: number;
 }
 
 interface InFlightTurn {
@@ -337,6 +343,30 @@ function isToolAction(value: unknown): value is ToolAction {
   return result == null || isToolResult(result);
 }
 
+// Normalizes a completion instant from either wire shape the engine emits
+// (ISO-8601 strings from Vapor versus Unix seconds as JSON numbers from
+// SQLite persistence) into milliseconds since the epoch. Epoch and
+// unparseable stamps drop to undefined so callers render no footer rather
+// than a 1970 date, and future skew is handled by the relative formatter.
+function normalizeCompletedAtMs(value: unknown): number | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  const parsed = parseRunTimestamp(value).getTime();
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return parsed;
+}
+
+// Relative completion label sharing the approvals countdown ladder so elapsed
+// time reads with identical granularity across the dashboard. Future stamps
+// from clock skew and sub-second deltas collapse to "just now" rather than
+// rendering a negative countdown or "0s ago".
+export function formatCompletionRelative(
+  completedAtMs: number,
+  nowMs: number = Date.now(),
+): string {
+  return formatRelativeAgo(nowMs - completedAtMs);
+}
+
 // Filters the approvals inbox to one session so the chat header badge only
 // reflects turns blocked on this conversation; unattributed entries stay in
 // the global inbox instead of alarming every session.
@@ -395,6 +425,22 @@ export function toolActionMap(
   return map;
 }
 
+// Indexes server-derived per-message completion times by parent message ID so
+// reloads reconcile to the same server instant that live done frames advertise.
+// Values normalize through the shared run-timestamp parser so ISO strings and
+// Unix seconds converge; unparseable or epoch stamps drop so callers fall back
+// to the sibling history timestamp for the same message instead of 1970.
+export function toolActionCompletedAtMap(
+  groups: SessionMessageToolActions[] | undefined,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const group of groups ?? []) {
+    const normalized = normalizeCompletedAtMs(group.completedAt);
+    if (normalized != null) map.set(group.messageID, normalized);
+  }
+  return map;
+}
+
 // Groups one message's authoritative actions into chronological tools segments,
 // oldest round first, so a multi-call note never collapses rounds into one bucket.
 function toolsSegmentsForMessage(actions: ToolAction[]): ChatSegment[] {
@@ -417,6 +463,12 @@ export function reconstructMessages(
   // Authoritative server-derived actions keyed by parent message ID (from `GET /sessions/:id/tool-
   // actions` via `toolActionMap`).
   structuredByMessageID?: Map<string, ToolAction[]> | Record<string, ToolAction[]>,
+  // Per-message completion times from the same tool-actions payload (via
+  // `toolActionCompletedAtMap`). Values arrive already normalized to
+  // milliseconds, so this map is read directly without re-entering the
+  // seconds-vs-milliseconds heuristic. Optional for back-compat; absent
+  // entries fall back to the sibling history `createdAt` for the same note.
+  completedAtByMessageID?: Map<string, number> | Record<string, number>,
 ): MessageItem[] {
   const getStructured = (messageID: string | undefined): ToolAction[] | undefined => {
     if (!structuredByMessageID || !messageID) return undefined;
@@ -425,9 +477,40 @@ export function reconstructMessages(
     }
     return (structuredByMessageID as Record<string, ToolAction[]>)[messageID];
   };
+  const getStructuredCompletedAt = (
+    messageID: string | undefined,
+  ): number | undefined => {
+    if (!completedAtByMessageID || !messageID) return undefined;
+    const raw: unknown =
+      completedAtByMessageID instanceof Map
+        ? completedAtByMessageID.get(messageID)
+        : (completedAtByMessageID as Record<string, number>)[messageID];
+    // Single normalization lives in `toolActionCompletedAtMap`; reuse the
+    // stored milliseconds directly so early-epoch stamps never re-enter the
+    // magnitude heuristic and drift into seconds.
+    return typeof raw === "number" &&
+      Number.isFinite(raw) &&
+      raw > 0
+      ? raw
+      : undefined;
+  };
+  // Latest completion across the notes folded into one turn, so a resumed
+  // parked batch reports its final synthesis rather than the first park.
+  const mergeCompletedAt = (
+    current: number | undefined,
+    candidate: number | undefined,
+  ): number | undefined => {
+    if (candidate == null) return current;
+    if (current == null) return candidate;
+    return Math.max(current, candidate);
+  };
   // Flushes one turn's ordered timeline while keeping flat summaries for legacy
   // readers: text joins text segments and actions flatten tool batches in order.
-  const flushTurn = (segments: ChatSegment[], id: string): MessageItem => {
+  const flushTurn = (
+    segments: ChatSegment[],
+    id: string,
+    completedAt?: number,
+  ): MessageItem => {
     const text = flatTextFromSegments(segments);
     const flat = flatActionsFromSegments(segments);
     return {
@@ -436,17 +519,22 @@ export function reconstructMessages(
       text,
       toolActions: flat.length > 0 ? flat : undefined,
       segments: [...segments],
+      ...(completedAt != null ? { completedAt } : {}),
     };
   };
   const result: MessageItem[] = [];
   let pendingSegments: ChatSegment[] = [];
+  let pendingCompletedAt: number | undefined;
 
   for (let i = 0; i < rawMessages.length; i++) {
     const m = rawMessages[i];
     if (m.role === "user") {
       if (pendingSegments.length > 0) {
-        result.push(flushTurn(pendingSegments, `interim_${i}`));
+        result.push(
+          flushTurn(pendingSegments, `interim_${i}`, pendingCompletedAt),
+        );
         pendingSegments = [];
+        pendingCompletedAt = undefined;
       }
       result.push({
         id: m.id || `${m.createdAt || i}`,
@@ -477,6 +565,14 @@ export function reconstructMessages(
         continue;
       }
 
+      // Completion for this note prefers the persisted history instant so
+      // reloads agree with live server times; the tool-actions timestamp only
+      // fills gaps where history omits the creation time.
+      const noteCompletedAt = mergeCompletedAt(
+        normalizeCompletedAtMs(m.createdAt),
+        getStructuredCompletedAt(m.id),
+      );
+      pendingCompletedAt = mergeCompletedAt(pendingCompletedAt, noteCompletedAt);
       const structured = getStructured(m.id);
       if (structured && structured.length > 0) {
         const coveredCallIDs = new Set(
@@ -524,8 +620,15 @@ export function reconstructMessages(
         // A prose message with no structured record closes the current turn's
         // timeline like before, so consecutive bare messages keep their prior
         // split instead of merging every turn into one.
-        result.push(flushTurn(pendingSegments, m.id || `${m.createdAt || i}`));
+        result.push(
+          flushTurn(
+            pendingSegments,
+            m.id || `${m.createdAt || i}`,
+            pendingCompletedAt,
+          ),
+        );
         pendingSegments = [];
+        pendingCompletedAt = undefined;
       } else if (pendingSegments.length > 0) {
         // Empty message with no server record: keep pending tool context
         // for the next prose turn instead of synthesizing.
@@ -537,7 +640,13 @@ export function reconstructMessages(
   }
 
   if (pendingSegments.length > 0) {
-    result.push(flushTurn(pendingSegments, `trailing_${rawMessages.length}`));
+    result.push(
+      flushTurn(
+        pendingSegments,
+        `trailing_${rawMessages.length}`,
+        pendingCompletedAt,
+      ),
+    );
   }
 
   return result.filter(
@@ -622,6 +731,13 @@ export default function ChatView({ health }: ChatViewProps) {
   // so the done handler reads this ref instead of nesting a message append
   // inside a turn updater, which would duplicate under double-invoke.
   const inFlightTurnRef = useRef<InFlightTurn | null>(null);
+  // Live mirror of the session total so the turn handler reads the latest base
+  // without re-creating its callback on every token update.
+  const sessionTokensRef = useRef(sessionTokens);
+  // Prior session base captured at turn start: live token frames add the running
+  // turn total onto this base so Turn shows this message's sum and Session shows
+  // base plus running, while done stays authoritative for reconciliation.
+  const sessionBaseRef = useRef<number>(0);
   // A server-side delete leaves the stored active ID stale; regenerate
   // it exactly once instead of resurrecting the deleted UUID on send.
   const didRecoverSessionRef = useRef(false);
@@ -642,6 +758,9 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     inFlightTurnRef.current = inFlightTurn;
   }, [inFlightTurn]);
+  useEffect(() => {
+    sessionTokensRef.current = sessionTokens;
+  }, [sessionTokens]);
   // Live copy of the context window so the inactivity budget scales without
   // re-creating the arming callback on every health poll.
   const contextLimitRef = useRef(contextLimit);
@@ -780,7 +899,8 @@ export default function ChatView({ health }: ChatViewProps) {
     // Warnings stay session-scoped with the turn frames so one session's
     // skipped tools never alarm another session's banner. Heartbeats stay
     // session-scoped for the same reason so one turn's proof of life never
-    // re-arms another session's timer.
+    // re-arms another session's timer. Token progress stays session-scoped so
+    // one turn's running sum never leaks into another session's footer.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
@@ -788,8 +908,92 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "tool_end" ||
         frameType === "done" ||
         frameType === "warning" ||
-        frameType === "turn_alive")
+        frameType === "turn_alive" ||
+        frameType === "turn_tokens")
     ) {
+      return;
+    }
+
+    if (frameType === "turn_tokens") {
+      // Per-round usage progress: Turn shows this message's running sum and
+      // Session shows the prior base plus running, without waiting for done.
+      // The shared guard already drops frames missing any counter so a partial
+      // payload never zeroes the footer here; out-of-range totals still degrade
+      // to no update, cancelled turns keep partials without persisting, and
+      // done stays authoritative so multi-tab viewers converge on the next
+      // terminal frame.
+      const record = data as Record<string, unknown>;
+      const rawTurnTotal = record.turnTotalTokens;
+      const rawRoundIndex = record.roundIndex;
+      const rawRoundTokens = record.roundTokens;
+      // Turn and round counters share the hub and engine integer contract so a
+      // fractional payload drops here instead of rendering floored live while
+      // failing the engine decoder.
+      if (
+        typeof rawTurnTotal !== "number" ||
+        !Number.isFinite(rawTurnTotal) ||
+        !Number.isInteger(rawTurnTotal) ||
+        rawTurnTotal < 0
+      ) {
+        return;
+      }
+      // Round counters share the hub's non-negative integer contract so a drifted engine
+      // cannot smuggle a negative or fractional round sum past the turn-total check above.
+      if (
+        typeof rawRoundIndex !== "number" ||
+        !Number.isInteger(rawRoundIndex) ||
+        rawRoundIndex < 0
+      ) {
+        return;
+      }
+      if (
+        typeof rawRoundTokens !== "number" ||
+        !Number.isFinite(rawRoundTokens) ||
+        !Number.isInteger(rawRoundTokens) ||
+        rawRoundTokens < 0
+      ) {
+        return;
+      }
+      // Token progress is session-tagged like heartbeats, so a frame for
+      // another turn must never rewrite this view's footer: gate the footer
+      // updates below on the owning turn, mirroring the liveness check, with
+      // the top-of-handler viewed-session filter covering idle viewers.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        if (
+          !frameSessionID ||
+          normalizeSessionID(frameSessionID) !==
+            normalizeSessionID(turnSessionIDRef.current)
+        ) {
+          return;
+        }
+      }
+      if (cancelledRef.current) return;
+      const turnTotal = rawTurnTotal;
+      setLastTurnTokens(turnTotal);
+      const base = sessionBaseRef.current;
+      // The cumulative base shares the integer contract, so a drifted base
+      // degrades to no session update instead of rendering a floored sum.
+      if (
+        typeof base === "number" &&
+        Number.isFinite(base) &&
+        Number.isInteger(base) &&
+        base >= 0
+      ) {
+        setSessionTokens(base + turnTotal);
+      }
+      // Re-arm the inactivity timer while this turn is in flight so long
+      // multi-round inference never looks like a dropped socket; idle viewers
+      // of the same session update their footer above without arming.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        if (
+          !frameSessionID ||
+          normalizeSessionID(frameSessionID) !==
+            normalizeSessionID(turnSessionIDRef.current)
+        ) {
+          return;
+        }
+        armTurnTimeout();
+      }
       return;
     }
 
@@ -1075,10 +1279,24 @@ export default function ChatView({ health }: ChatViewProps) {
       const modelName = typeof rawModelName === "string" ? rawModelName : undefined;
       const contextLength =
         typeof rawContextLength === "number" ? rawContextLength : undefined;
+      // Terminal counters share the live turn-tokens integer contract (finite,
+      // non-negative integers): a fractional or otherwise malformed done frame
+      // drops to absent instead of flooring, so live and terminal footers agree
+      // with the hub and engine decoders and never corrupt the persisted base.
       const totalTokens =
-        typeof rawTotalTokens === "number" ? rawTotalTokens : undefined;
+        typeof rawTotalTokens === "number" &&
+        Number.isFinite(rawTotalTokens) &&
+        Number.isInteger(rawTotalTokens) &&
+        rawTotalTokens >= 0
+          ? rawTotalTokens
+          : undefined;
       const sessionTokensValue =
-        typeof rawSessionTokens === "number" ? rawSessionTokens : undefined;
+        typeof rawSessionTokens === "number" &&
+        Number.isFinite(rawSessionTokens) &&
+        Number.isInteger(rawSessionTokens) &&
+        rawSessionTokens >= 0
+          ? rawSessionTokens
+          : undefined;
       const doneText = typeof rawDoneText === "string" ? rawDoneText : undefined;
       // Drop malformed entries so only well-shaped actions enter history; a
       // non-array tag defaults to absent like engines that omit it.
@@ -1091,25 +1309,48 @@ export default function ChatView({ health }: ChatViewProps) {
         setLastTurnTokens(totalTokens);
       }
       // Authoritative cumulative total wins when present so reloads,
-      // multi-client turns, and retries never drift from local sums.
+      // multi-client turns, and retries never drift from local sums. Live token
+      // frames already showed base plus running, so this overwrites with the same
+      // value. A parked turn keeps the pre-park base because the resume synthesis
+      // re-reports the parked tokens inside its running total; advancing the base
+      // here would count them twice in the live footer until done reconciles.
       if (typeof sessionTokensValue === "number") {
         const cumulative = sessionTokensValue;
         setSessionTokens(cumulative);
+        if (!isParked) {
+          sessionBaseRef.current = cumulative;
+        }
         try {
           localStorage.setItem(sessionTokensKey(currentSid), String(cumulative));
         } catch {
           // Storage is best-effort only.
         }
       } else if (typeof totalTokens === "number") {
-        setSessionTokens((prev) => {
-          const next = prev + totalTokens;
-          try {
-            localStorage.setItem(sessionTokensKey(currentSid), String(next));
-          } catch {
-            // Storage is best-effort only.
-          }
-          return next;
-        });
+        // No authoritative total: derive from the prior base plus this turn so a
+        // live footer that already added the running sum does not double-count.
+        // A parked turn still moves the displayed total forward while keeping the
+        // pre-park base for the same resume overlap reason above.
+        const turnTotal = totalTokens;
+        const base = sessionBaseRef.current;
+        // The derived base keeps the integer contract: a drifted stored base
+        // falls back to the live total instead of flooring into the sum.
+        const fallbackBase =
+          typeof base === "number" &&
+          Number.isFinite(base) &&
+          Number.isInteger(base) &&
+          base >= 0
+            ? base
+            : sessionTokensRef.current;
+        const next = fallbackBase + turnTotal;
+        setSessionTokens(next);
+        if (!isParked) {
+          sessionBaseRef.current = next;
+        }
+        try {
+          localStorage.setItem(sessionTokensKey(currentSid), String(next));
+        } catch {
+          // Storage is best-effort only.
+        }
       }
 
       if (isFirstMessageRef.current) {
@@ -1145,12 +1386,19 @@ export default function ChatView({ health }: ChatViewProps) {
           ? flatTextFromSegments(doneSegments)
           : (doneText ?? snapshot?.text ?? "");
       const legacyActions = flatActionsFromSegments(doneSegments);
+      // Completion stamps stay grounded in the server instant so live cards
+      // agree with history reloads: an omitted stamp renders no footer rather
+      // than sampling client receipt time.
+      const doneCompletedAt = normalizeCompletedAtMs(
+        (data as Record<string, unknown>).completedAt,
+      );
       const finalMsg: MessageItem = {
         id: newSessionId(),
         role: "assistant",
         text: legacyText,
         toolActions: legacyActions.length > 0 ? legacyActions : undefined,
         segments: doneSegments.length > 0 ? doneSegments : undefined,
+        ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
       };
       setMessages((prev) => {
         // Terminal dedup stays batch-scoped: evict only placeholders whose batch overlaps this
@@ -1264,6 +1512,9 @@ export default function ChatView({ health }: ChatViewProps) {
       ) {
         setPending(true);
         pendingRef.current = true;
+        // The resume synthesis re-reports the parked tokens inside its running
+        // total, so the base stays at its pre-park value; moving it to the parked
+        // cumulative would count the initial park twice in the live footer.
       }
       refreshApprovals();
     }
@@ -1277,8 +1528,11 @@ export default function ChatView({ health }: ChatViewProps) {
     const activeID = sessionID;
     // Hydrate the status bar from the cached cumulative total so a reload
     // does not reset a live session to zero; the next authoritative done
-    // frame corrects it when the server has newer usage.
-    setSessionTokens(loadSessionTokens(activeID));
+    // frame corrects it when the server has newer usage. The hydrated value
+    // doubles as the prior base for the next turn's live token frames.
+    const hydrated = loadSessionTokens(activeID);
+    setSessionTokens(hydrated);
+    sessionBaseRef.current = hydrated;
     setLastTurnTokens(null);
 
     // If this session is a local draft (not yet sent or persisted to the server),
@@ -1297,6 +1551,9 @@ export default function ChatView({ health }: ChatViewProps) {
           const mapped = reconstructMessages(
             res.messages,
             structured ? toolActionMap(structured.actions) : undefined,
+            structured
+              ? toolActionCompletedAtMap(structured.actions)
+              : undefined,
           );
           setMessages(mapped);
         }
@@ -1428,6 +1685,12 @@ export default function ChatView({ health }: ChatViewProps) {
     // Remember the owning session so timeout/close cancels this turn even
     // when the user switches sessions before the terminal frame arrives.
     turnSessionIDRef.current = sessionID;
+    // Freeze the prior session base so live token frames add the running turn
+    // total onto a stable starting point instead of compounding onto themselves.
+    // The live ref holds the latest committed total even when a prior turn's
+    // update has not re-rendered yet, so the next turn never restarts from a
+    // stale snapshot and reconciles without double-counting.
+    sessionBaseRef.current = sessionTokensRef.current;
 
     // Stream via WebSocket if connection is open
     if (isOpen()) {
@@ -1461,27 +1724,60 @@ export default function ChatView({ health }: ChatViewProps) {
 
       if (response.modelName) setActiveModel(response.modelName);
       if (response.contextLength) setContextLimit(response.contextLength);
-      const total = response.totalTokens;
+      // REST counters share the streaming integer contract: fractional totals
+      // drop instead of flooring so polling and streaming footers agree with
+      // the hub and engine decoders.
+      const total =
+        typeof response.totalTokens === "number" &&
+        Number.isFinite(response.totalTokens) &&
+        Number.isInteger(response.totalTokens) &&
+        response.totalTokens >= 0
+          ? response.totalTokens
+          : undefined;
+      const restSessionTokens =
+        typeof response.sessionTokens === "number" &&
+        Number.isFinite(response.sessionTokens) &&
+        Number.isInteger(response.sessionTokens) &&
+        response.sessionTokens >= 0
+          ? response.sessionTokens
+          : undefined;
       if (typeof total === "number") {
         setLastTurnTokens(total);
       }
-      if (typeof response.sessionTokens === "number") {
-        setSessionTokens(response.sessionTokens);
+      if (typeof restSessionTokens === "number") {
+        setSessionTokens(restSessionTokens);
+        if (!isParked) {
+          sessionBaseRef.current = restSessionTokens;
+        }
         try {
-          localStorage.setItem(sessionTokensKey(currentSid), String(response.sessionTokens));
+          localStorage.setItem(sessionTokensKey(currentSid), String(restSessionTokens));
         } catch {
           // Storage is best-effort only.
         }
       } else if (typeof total === "number") {
-        setSessionTokens((prev) => {
-          const next = prev + total;
-          try {
-            localStorage.setItem(sessionTokensKey(currentSid), String(next));
-          } catch {
-            // Storage is best-effort only.
-          }
-          return next;
-        });
+        // REST has no live footer, so the cached base plus this turn is the
+        // honest total. A parked turn keeps the pre-park base because a later
+        // resume synthesis re-reports the parked tokens in its running total.
+        // The base keeps the integer contract so a drifted store never seeds
+        // a fractional sum.
+        const restBase = sessionBaseRef.current;
+        const restFallbackBase =
+          typeof restBase === "number" &&
+          Number.isFinite(restBase) &&
+          Number.isInteger(restBase) &&
+          restBase >= 0
+            ? restBase
+            : sessionTokensRef.current;
+        const next = restFallbackBase + total;
+        setSessionTokens(next);
+        if (!isParked) {
+          sessionBaseRef.current = next;
+        }
+        try {
+          localStorage.setItem(sessionTokensKey(currentSid), String(next));
+        } catch {
+          // Storage is best-effort only.
+        }
       }
 
       // Pre-name session on first turn
@@ -1505,12 +1801,18 @@ export default function ChatView({ health }: ChatViewProps) {
           ? flatTextFromSegments(restSegments)
           : response.text;
       const restFlat = flatActionsFromSegments(restSegments);
+      // Same grounding rule as the streaming path so polling and streaming
+      // clients render identical footers; an omitted stamp renders no footer.
+      const restCompletedAt = normalizeCompletedAtMs(
+        (response as unknown as Record<string, unknown>).completedAt,
+      );
       const assistantMessage: MessageItem = {
         id: newSessionId(),
         role: "assistant",
         text: restFlatText,
         toolActions: restFlat.length > 0 ? restFlat : undefined,
         segments: restSegments.length > 0 ? restSegments : undefined,
+        ...(restCompletedAt != null ? { completedAt: restCompletedAt } : {}),
       };
 
       setMessages((prev) => [...prev, assistantMessage].slice(-MAX_MESSAGES));
@@ -1556,7 +1858,9 @@ export default function ChatView({ health }: ChatViewProps) {
     // another conversation's skipped-tool lines into the fresh view.
     setTurnWarnings([]);
     setLastTurnTokens(null);
-    setSessionTokens(loadSessionTokens(nextID));
+    const fresh = loadSessionTokens(nextID);
+    setSessionTokens(fresh);
+    sessionBaseRef.current = fresh;
   }
 
   function handleSelectSession(id: string) {
@@ -1570,7 +1874,9 @@ export default function ChatView({ health }: ChatViewProps) {
     setError(null);
     setTurnWarnings([]);
     setLastTurnTokens(null);
-    setSessionTokens(loadSessionTokens(id));
+    const hydrated = loadSessionTokens(id);
+    setSessionTokens(hydrated);
+    sessionBaseRef.current = hydrated;
   }
 
   const usedPercent =
@@ -1737,6 +2043,19 @@ export default function ChatView({ health }: ChatViewProps) {
                     ) : null}
                   </>
                 )}
+                {/* Completion footer: local relative time with an absolute
+                    tooltip so each agent card carries its when without touching
+                    markdown rendering. Missing stamps render no footer. */}
+                {message.role === "assistant" &&
+                message.completedAt != null ? (
+                  <div
+                    className="message-completed-footer muted text-xs"
+                    style={{ marginTop: "8px" }}
+                    title={new Date(message.completedAt).toLocaleString()}
+                  >
+                    {formatCompletionRelative(message.completedAt)}
+                  </div>
+                ) : null}
               </div>
             );
           })}

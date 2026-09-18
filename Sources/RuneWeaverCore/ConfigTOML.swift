@@ -474,7 +474,9 @@ extension RuneWeaverConfig {
             apiKeyEnv: node.strictString("api_key_env", field: "\(prefix).api_key_env"),
             providerType: node.strictString("provider_type", field: "\(prefix).provider_type"),
             apiStyle: apiStyle,
-            contextLength: node.strictInt("context_length", field: "\(prefix).context_length")
+            contextLength: node.strictInt("context_length", field: "\(prefix).context_length"),
+            slotCount: node.strictInt("slot_count", field: "\(prefix).slot_count"),
+            cachePrompt: node.strictBool("cache_prompt", field: "\(prefix).cache_prompt")
         )
     }
 

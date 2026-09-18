@@ -61,6 +61,10 @@ export interface WSStreamDone {
   // clients agree with streaming ones. Absent on older engines where the
   // turn renders without a banner.
   warnings?: string[];
+  // Completion time on the server clock for this turn. Optional because older
+  // engines predate completion footers; absent renders no footer so live cards
+  // agree with history reloads that derive the same instant from persistence.
+  completedAt?: string | number | null;
 }
 
 export interface WSCancelledFrame {
@@ -89,6 +93,26 @@ export interface WSWarningFrame {
 export interface WSTurnAliveFrame {
   type: "turn_alive";
   sessionID?: string;
+}
+
+// Per-round token usage progress for the in-flight turn. The engine emits one
+// frame after each LLM round that reports usage so the footer shows a running
+// turn total and a live session estimate without waiting for done, which stays
+// authoritative for reconciliation. Session-tagged like the heartbeat so
+// multiplexed views only apply their own turn and older dashboards drop the
+// unknown type. Counters stay required like the engine frame so a partial
+// payload never renders as a zeroed sum. TypeScript mirror of
+// RuneWeaverCore.WSTurnTokensFrame (Sources/RuneWeaverCore/WSWire.swift);
+// update both sides together.
+export interface WSTurnTokensFrame {
+  type: "turn_tokens";
+  sessionID?: string;
+  // Zero-based LLM round that produced this usage, oldest first.
+  roundIndex: number;
+  // Billed tokens for this round alone.
+  roundTokens: number;
+  // Cumulative billed tokens for this turn so far.
+  turnTotalTokens: number;
 }
 
 export interface WSErrorFrame {
@@ -120,7 +144,8 @@ export type WSIncomingFrame =
   | WSErrorFrame
   | WSWarningFrame
   | WSApprovalFrame
-  | WSTurnAliveFrame;
+  | WSTurnAliveFrame
+  | WSTurnTokensFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
@@ -175,6 +200,28 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // guard only checks the owner so malformed tags drop before re-arming.
       return (
         value.sessionID === undefined || typeof value.sessionID === "string"
+      );
+    case "turn_tokens":
+      // Token counters are required like the engine frame: a frame missing any
+      // counter drops here so dashboards never render a partial sum as zeroed
+      // progress, matching the engine decoder which throws on missing keys.
+      // Counters stay non-negative integers like the round-index and engine
+      // Int contract so a drifted engine cannot smuggle a negative or
+      // fractional sum into live footers.
+      return (
+        (value.sessionID === undefined ||
+          typeof value.sessionID === "string") &&
+        typeof value.roundIndex === "number" &&
+        Number.isInteger(value.roundIndex) &&
+        value.roundIndex >= 0 &&
+        typeof value.roundTokens === "number" &&
+        Number.isFinite(value.roundTokens) &&
+        Number.isInteger(value.roundTokens) &&
+        value.roundTokens >= 0 &&
+        typeof value.turnTotalTokens === "number" &&
+        Number.isFinite(value.turnTotalTokens) &&
+        Number.isInteger(value.turnTotalTokens) &&
+        value.turnTotalTokens >= 0
       );
     case "approval":
       return isApprovalFrame(value);
