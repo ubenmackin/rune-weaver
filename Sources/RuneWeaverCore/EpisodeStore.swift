@@ -424,11 +424,6 @@ enum EpisodeStoreIO {
             SQLiteHelpers.bindText(statement, index: index, value: value)
         }
 
-        /// Clamps a limit to the SQLite bind range.
-        private static func sqliteLimit(_ limit: Int) -> Int32 {
-            Int32(min(limit, Int(Int32.max)))
-        }
-
         /// Encodes metadata as a JSON object string.
         /// - Parameter metadata: Key/value annotations.
         /// - Returns: JSON string, or nil when empty.
@@ -524,7 +519,7 @@ enum EpisodeStoreIO {
             defer { sqlite3_finalize(statement) }
             bindText(statement, index: 1, value: sessionID.uuidString)
             if let limit {
-                sqlite3_bind_int(statement, 2, sqliteLimit(limit))
+                sqlite3_bind_int(statement, 2, SQLiteHelpers.sqliteLimit(limit))
             }
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -550,7 +545,7 @@ enum EpisodeStoreIO {
             }
             defer { sqlite3_finalize(statement) }
             bindText(statement, index: 1, value: sessionID.uuidString)
-            sqlite3_bind_int(statement, 2, sqliteLimit(limit))
+            sqlite3_bind_int(statement, 2, SQLiteHelpers.sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let episode = readEpisode(statement) {
@@ -597,7 +592,7 @@ enum EpisodeStoreIO {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare recent read")
             }
             defer { sqlite3_finalize(statement) }
-            sqlite3_bind_int(statement, 1, sqliteLimit(limit))
+            sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let episode = readEpisode(statement) {
@@ -623,7 +618,7 @@ enum EpisodeStoreIO {
             var statement: OpaquePointer?
             if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
                 bindText(statement, index: 1, value: ftsQuery)
-                sqlite3_bind_int(statement, 2, sqliteLimit(limit))
+                sqlite3_bind_int(statement, 2, SQLiteHelpers.sqliteLimit(limit))
                 var results: [Episode] = []
                 var step = sqlite3_step(statement)
                 while step == SQLITE_ROW {
@@ -666,7 +661,7 @@ enum EpisodeStoreIO {
             for (index, pattern) in patterns.enumerated() {
                 bindText(fallback, index: Int32(index + 1), value: pattern)
             }
-            sqlite3_bind_int(fallback, Int32(patterns.count + 1), sqliteLimit(limit))
+            sqlite3_bind_int(fallback, Int32(patterns.count + 1), SQLiteHelpers.sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(fallback) == SQLITE_ROW {
                 if let episode = readEpisode(fallback) {

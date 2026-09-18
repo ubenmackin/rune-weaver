@@ -73,6 +73,18 @@ public extension ToolInput {
     }
 
     /// Parses one persisted assistant placeholder line into a structured input.
+    ///
+    /// Wire grammar (authoritative; the dashboard `parsePlaceholderLine` in
+    /// `Web/src/api.ts` mirrors these steps exactly so history coverage and
+    /// plumbing stripping agree): outer whitespace trims, the last `[` wins,
+    /// the char before it must be space/tab, the bracketed identifier trims
+    /// and holds no space/tab/bracket, and the head splits into tool plus
+    /// optional arguments with empty arguments normalizing to `{}`. Shared
+    /// vectors pinning both sides: `Calling a {"limit":1} [c1]` and
+    /// `Calling a [c2]` parse, double-space/tab heads parse, slash/bracket
+    /// arguments keep the last bracket (`arg [inner] [c3]` → `c3`), and
+    /// inside-bracket spaces trim (`[  c4  ]` → `c4`); prose mentions,
+    /// spaced identifiers, and missing pre-bracket spaces reject.
     static func parsePlaceholderLine(_ line: String) -> ToolInput? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("Calling ") else { return nil }

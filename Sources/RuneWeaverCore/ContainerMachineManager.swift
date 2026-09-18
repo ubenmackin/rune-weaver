@@ -20,25 +20,10 @@ public struct ContainerMachineInfo: Sendable, Equatable {
 }
 
 /// Result of executing a command inside a container machine.
-public struct ContainerExecutionResult: Sendable, Equatable {
-    public let exitCode: Int32
-    public let stdout: Data
-    public let stderr: Data
-
-    public var stdoutString: String {
-        String(data: stdout, encoding: .utf8) ?? ""
-    }
-
-    public var stderrString: String {
-        String(data: stderr, encoding: .utf8) ?? ""
-    }
-
-    public init(exitCode: Int32, stdout: Data, stderr: Data) {
-        self.exitCode = exitCode
-        self.stdout = stdout
-        self.stderr = stderr
-    }
-}
+/// Shares the bounded runner's result shape so timeouts, output caps, and
+/// lossy string decoding stay single-source; the alias keeps the
+/// container-scoped name for existing callers.
+public typealias ContainerExecutionResult = BoundedProcessResult
 
 /// Summary result of pruning stale container machines.
 public struct ContainerPruneResult: Sendable, Equatable {
@@ -50,6 +35,127 @@ public struct ContainerPruneResult: Sendable, Equatable {
         self.stopped = stopped
         self.destroyed = destroyed
         self.errors = errors
+    }
+}
+
+/// Shared date formatting helpers backing run titles, email dates, and container dates.
+///
+/// Intent: run-title, email, and container paths share one call site so the
+/// POSIX locale and time-zone choices stay single-source and titles plus
+/// parsed dates stay stable across callers. Helpers build a fresh formatter
+/// per call because `DateFormatter` and `ISO8601DateFormatter` are reference
+/// types with shared mutable state that is not safe to share across
+/// concurrency domains; per-call instances keep every helper concurrency-safe
+/// with no shared mutable state.
+///
+/// Invariant: no stored formatter instances live here. Each helper configures
+/// a local formatter with the same locale, style, and options the cached
+/// instances previously used, so formatted output and accepted inputs match
+/// the prior behavior without shared state.
+public enum SharedDateFormatters: Sendable {
+    /// Formats a run-title timestamp with a locale-stable formatter.
+    /// - Parameter date: Timestamp to format.
+    /// - Returns: Short date plus short time string.
+    public static func runTitleString(from date: Date) -> String {
+        // Local instance preserves the en_US_POSIX short date plus short time
+        // shape without sharing mutable formatter state across threads.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateStyle = .short
+        formatter.timeStyle = .short
+        return formatter.string(from: date)
+    }
+
+    /// Parses a string with a POSIX formatter for one format.
+    /// - Parameters:
+    ///   - string: Candidate date string.
+    ///   - format: Date format to try.
+    ///   - timeZone: Time zone for the attempt (nil keeps the system zone).
+    /// - Returns: Parsed date, or nil when the format does not match.
+    public static func posixDate(from string: String, format: String, timeZone: TimeZone? = nil) -> Date? {
+        // Local instance keeps locale single-source while allowing per-attempt
+        // format and time-zone mutations without touching shared state.
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        return formatter.date(from: string)
+    }
+
+    /// Parses a timestamp as ISO-8601 with fractional seconds.
+    /// - Parameter string: Candidate date string.
+    /// - Returns: Parsed date, or nil when the string does not match.
+    public static func isoWithFractionalSecondsDate(from string: String) -> Date? {
+        // Local instance carries the same internet plus fractional-seconds
+        // options so container timestamps with fractions still parse.
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: string)
+    }
+
+    /// Formats a timestamp as ISO-8601 with fractional seconds.
+    /// - Parameter date: Timestamp to format.
+    /// - Returns: ISO-8601 string with fractional seconds.
+    public static func isoWithFractionalSecondsString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: date)
+    }
+
+    /// Parses a timestamp as ISO-8601 internet date-time without fractions.
+    /// - Parameter string: Candidate date string.
+    /// - Returns: Parsed date, or nil when the string does not match.
+    public static func isoInternetTimeDate(from string: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: string)
+    }
+
+    /// Formats a timestamp as ISO-8601 internet date-time without fractions.
+    /// - Parameter date: Timestamp to format.
+    /// - Returns: ISO-8601 internet date-time string without fractions.
+    public static func isoInternetTimeString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    /// Parses a timestamp as ISO-8601 internet date-time pinned to UTC.
+    /// - Parameter string: Candidate date string.
+    /// - Returns: Parsed date, or nil when the string does not match.
+    public static func isoInternetTimeUTCDate(from string: String) -> Date? {
+        // UTC pin matches the expiry-envelope shape for zone-less inputs.
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.date(from: string)
+    }
+
+    /// Formats a timestamp as ISO-8601 internet date-time pinned to UTC.
+    /// - Parameter date: Timestamp to format.
+    /// - Returns: ISO-8601 internet date-time string pinned to UTC.
+    public static func isoInternetTimeUTCString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
+
+    /// Parses a timestamp with the default ISO-8601 options.
+    /// - Parameter string: Candidate date string.
+    /// - Returns: Parsed date, or nil when the string does not match.
+    public static func isoDefaultDate(from string: String) -> Date? {
+        // Fresh default instance preserves the RFC 2822 fallback behavior.
+        let formatter = ISO8601DateFormatter()
+        return formatter.date(from: string)
+    }
+
+    /// Formats a timestamp with the default ISO-8601 options.
+    /// - Parameter date: Timestamp to format.
+    /// - Returns: Default ISO-8601 string.
+    public static func isoDefaultString(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        return formatter.string(from: date)
     }
 }
 
@@ -336,20 +442,21 @@ public enum ContainerMachineManager {
     }
 
     /// Probes trailing listing columns for a creation timestamp.
+    /// Tries ISO-8601 first, then the POSIX helper per known layout,
+    /// then epoch seconds, so container list output variations still age correctly.
     private static func parseCreationDate(from tokens: [String]) -> Date? {
         guard !tokens.isEmpty else { return nil }
 
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let isoPlain = ISO8601DateFormatter()
-        isoPlain.formatOptions = [.withInternetDateTime]
-
         let joined = tokens.joined(separator: " ")
-        if let date = iso.date(from: joined) ?? isoPlain.date(from: joined) {
+        if let date = SharedDateFormatters.isoWithFractionalSecondsDate(from: joined)
+            ?? SharedDateFormatters.isoInternetTimeDate(from: joined)
+        {
             return date
         }
         for token in tokens {
-            if let date = iso.date(from: token) ?? isoPlain.date(from: token) {
+            if let date = SharedDateFormatters.isoWithFractionalSecondsDate(from: token)
+                ?? SharedDateFormatters.isoInternetTimeDate(from: token)
+            {
                 return date
             }
         }
@@ -364,16 +471,15 @@ public enum ContainerMachineManager {
             "MM/dd/yyyy HH:mm:ss",
             "MM/dd/yyyy"
         ]
+        // Each attempt builds a local POSIX formatter so concurrent parses
+        // never share mutable formatter state.
+        let utc = TimeZone(secondsFromGMT: 0)
         for format in formats {
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(secondsFromGMT: 0)
-            formatter.dateFormat = format
-            if let date = formatter.date(from: joined) {
+            if let date = SharedDateFormatters.posixDate(from: joined, format: format, timeZone: utc) {
                 return date
             }
             for token in tokens {
-                if let date = formatter.date(from: token) {
+                if let date = SharedDateFormatters.posixDate(from: token, format: format, timeZone: utc) {
                     return date
                 }
             }
@@ -406,18 +512,15 @@ public enum ContainerMachineManager {
         maxOutputBytes: Int = maxProcessOutputBytes
     ) throws -> ContainerExecutionResult {
         do {
-            let result = try BoundedProcessRunner.runSync(
+            // The alias makes this the shared result directly, so no
+            // field-by-field copy can drift from the runner's shape.
+            return try BoundedProcessRunner.runSync(
                 executableURL: executableURL,
                 arguments: arguments,
                 inputData: inputData,
                 timeoutSeconds: timeoutSeconds,
                 maxOutputBytes: maxOutputBytes,
                 maxErrorBytes: maxProcessErrorBytes
-            )
-            return ContainerExecutionResult(
-                exitCode: result.exitCode,
-                stdout: result.stdout,
-                stderr: result.stderr
             )
         } catch let error as BoundedProcessError {
             throw ContainerMachineError.operationFailed(error.localizedDescription)
@@ -443,11 +546,9 @@ public enum ContainerMachineManager {
                 maxErrorBytes: maxProcessErrorBytes
             )
             try Task.checkCancellation()
-            return ContainerExecutionResult(
-                exitCode: result.exitCode,
-                stdout: result.stdout,
-                stderr: result.stderr
-            )
+            // The alias makes this the shared result directly, so no
+            // field-by-field copy can drift from the runner's shape.
+            return result
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as BoundedProcessError {

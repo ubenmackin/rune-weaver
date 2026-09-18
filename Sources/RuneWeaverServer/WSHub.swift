@@ -34,34 +34,6 @@ public actor WSSocketBox {
     }
 }
 
-/// One-shot gate ensuring a WebSocket send continuation resumes exactly once.
-private final class WSResumeOnce: Sendable {
-    private struct State: Sendable {
-        var continuation: CheckedContinuation<Void, Never>?
-        var didResume = false
-    }
-
-    private let state = OSAllocatedUnfairLock(initialState: State())
-
-    /// Creates a gate holding a continuation.
-    /// - Parameter continuation: Continuation to resume once.
-    init(_ continuation: CheckedContinuation<Void, Never>) {
-        state.withLock { $0.continuation = continuation }
-    }
-
-    /// Resumes the held continuation unless already resumed.
-    func resume() {
-        let cont = state.withLock { lockState -> CheckedContinuation<Void, Never>? in
-            guard !lockState.didResume else { return nil }
-            lockState.didResume = true
-            let continuation = lockState.continuation
-            lockState.continuation = nil
-            return continuation
-        }
-        cont?.resume()
-    }
-}
-
 /// Serializes outbound frames for one WebSocket connection.
 private actor WSSendQueue {
     /// Sends one frame through the queue, best-effort with timeout.
@@ -138,7 +110,11 @@ public actor WSHub {
             let type: String
             let run: RunLogEntry
         }
-        let eventType = (run.status == "running" || run.status == "awaiting_approval") ? "run_started" : "run_completed"
+        // Only a live `running` turn keeps the session badge lit. A parked
+        // `awaiting_approval` turn lands as completed so live and polled views
+        // agree; the approvals badge carries the wait instead of double-badging
+        // one blocked turn, matching the dashboard active-status filter.
+        let eventType = run.status == "running" ? "run_started" : "run_completed"
         guard let data = try? JSONEncoder().encode(WSRunEvent(type: eventType, run: run)),
               let text = String(data: data, encoding: .utf8)
         else { return }
@@ -169,71 +145,89 @@ public actor WSHub {
     }
 }
 
-/// Holds one side of the timeout race.
-private final class WSSendTaskHolder: Sendable {
-    private let task = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+/// Exactly-once gate for one best-effort send.
+/// Holds the non-throwing continuation so the send, the timeout, and
+/// cancellation race on one shared verdict without a throwing bridge.
+/// Invariant: only the first racer resumes; late arrivals are ignored, and a
+/// resume racing registration still settles instead of hanging.
+private final class WSSendGate: Sendable {
+    /// Locked verdict carrying the waiter plus the settled flag.
+    private struct State: Sendable {
+        /// Waiter to resume once, cleared on settle.
+        var continuation: CheckedContinuation<Void, Never>?
+        /// Whether a racer already settled the verdict.
+        var didResume = false
+    }
 
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Creates an empty gate awaiting its waiter.
     init() {}
 
-    func set(_ newTask: Task<Void, Never>) {
-        task.withLock { $0 = newTask }
+    /// Publishes the waiter, settling immediately when a racer already won.
+    func set(_ continuation: CheckedContinuation<Void, Never>) {
+        let alreadySettled = state.withLock { lockState -> Bool in
+            if lockState.didResume {
+                return true
+            }
+            lockState.continuation = continuation
+            return false
+        }
+        if alreadySettled {
+            continuation.resume(returning: ())
+        }
     }
 
-    func cancel() {
-        let current = task.withLock { $0 }
-        current?.cancel()
-    }
-}
-
-private final class WSResumeOnceBox: Sendable {
-    private let gate = OSAllocatedUnfairLock<WSResumeOnce?>(initialState: nil)
-
-    init() {}
-
-    func set(_ newGate: WSResumeOnce) {
-        gate.withLock { $0 = newGate }
-    }
-
-    func resume() {
-        let current = gate.withLock { $0 }
-        current?.resume()
+    /// Resumes the waiter unless already resumed.
+    func resume(returning value: Void = ()) {
+        let pending = state.withLock { lockState -> CheckedContinuation<Void, Never>? in
+            guard !lockState.didResume else { return nil }
+            lockState.didResume = true
+            let held = lockState.continuation
+            lockState.continuation = nil
+            return held
+        }
+        pending?.resume(returning: value)
     }
 }
 
 /// Sends one WebSocket text frame with a per-send timeout, best-effort.
+/// The send, the timeout, and cancellation race on one shared verdict so a slow
+/// socket arriving after a timeout cannot resume twice; the winner drops its loser
+/// so burst sends never stack lingering sleeps. Late arrivals observe the stored
+/// outcome instead of racing.
 private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanoseconds: UInt64 = 5_000_000_000) async {
-    let onceBox = WSResumeOnceBox()
-    let sendHolder = WSSendTaskHolder()
-    let timeoutHolder = WSSendTaskHolder()
+    let gate = WSSendGate()
+    let sendTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+    let timeoutTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
     await withTaskCancellationHandler {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let once = WSResumeOnce(continuation)
-            onceBox.set(once)
-            let timeoutTask = Task { [once, sendHolder] in
+            gate.set(continuation)
+            let timeoutTask = Task { [gate, sendTasks] in
                 do {
                     try await Task.sleep(nanoseconds: timeoutNanoseconds)
                 } catch {
                     return
                 }
-                sendHolder.cancel()
-                once.resume()
+                sendTasks.withLock { $0 }?.cancel()
+                gate.resume(returning: ())
             }
-            timeoutHolder.set(timeoutTask)
-            let sendTask = Task { [once, box, text, timeoutHolder] in
+            timeoutTasks.withLock { $0 = timeoutTask }
+            let sendTask = Task { [gate, box, text, timeoutTasks] in
                 try? await box.send(text)
-                timeoutHolder.cancel()
-                once.resume()
+                timeoutTasks.withLock { $0 }?.cancel()
+                gate.resume(returning: ())
             }
-            sendHolder.set(sendTask)
+            sendTasks.withLock { $0 = sendTask }
             if Task.isCancelled {
-                timeoutHolder.cancel()
-                sendHolder.cancel()
-                once.resume()
+                timeoutTasks.withLock { $0 }?.cancel()
+                sendTasks.withLock { $0 }?.cancel()
+                gate.resume(returning: ())
             }
         }
     } onCancel: {
-        timeoutHolder.cancel()
-        sendHolder.cancel()
-        onceBox.resume()
+        timeoutTasks.withLock { $0 }?.cancel()
+        sendTasks.withLock { $0 }?.cancel()
+        gate.resume(returning: ())
     }
 }

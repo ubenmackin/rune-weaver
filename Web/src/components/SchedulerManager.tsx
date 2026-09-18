@@ -6,8 +6,11 @@ import {
   ApiError,
   createJob,
   deleteJob,
+  isActiveRunStatus,
   listJobs,
   listRuns,
+  RUN_LOG_POLL_LIMIT,
+  RUN_POLL_INTERVAL_MS,
   runJobNow,
   updateJob,
   type NewSchedulerJobInput,
@@ -83,10 +86,10 @@ export default function SchedulerManager() {
       });
 
     // Check for in-progress runs on mount to restore "Running..." state across page navigation
-    listRuns(20)
+    listRuns(RUN_LOG_POLL_LIMIT)
       .then((res) => {
         if (cancelled) return;
-        const running = res.runs.find((r) => r.status === "running" && r.jobID);
+        const running = res.runs.find((r) => isActiveRunStatus(r.status) && r.jobID);
         if (running && running.jobID) {
           setRunningJobId(running.jobID);
         }
@@ -103,10 +106,10 @@ export default function SchedulerManager() {
     if (!runningJobId) return;
 
     const interval = setInterval(() => {
-      listRuns(10)
+      listRuns(RUN_LOG_POLL_LIMIT)
         .then((res) => {
           const isStillRunning = res.runs.some(
-            (r) => r.status === "running" && r.jobID === runningJobId
+            (r) => isActiveRunStatus(r.status) && r.jobID === runningJobId
           );
           if (!isStillRunning) {
             setRunningJobId(null);
@@ -116,7 +119,7 @@ export default function SchedulerManager() {
           }
         })
         .catch(() => {});
-    }, 2500);
+    }, RUN_POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
   }, [runningJobId, expandedRunsJobId]);

@@ -41,7 +41,9 @@ enum TOMLParser {
     static func parse(_ text: String) throws -> TOMLNode {
         var root = TOMLNode()
         var target = Target.root
-        let lines = text.components(separatedBy: .newlines)
+        // Shared fold keeps CRLF/CR configs on the same line numbers as history
+        // and archive parsing instead of splitting "\r\n" into phantom blanks.
+        let lines = NormalizedText.splitLines(text)
         for (index, rawLine) in lines.enumerated() {
             let lineNumber = index + 1
             let stripped = stripComment(from: rawLine).trimmingCharacters(
@@ -698,3 +700,5 @@ extension TOMLNode {
         return [node]
     }
 }
+
+// MARK: - NormalizedText line splitting lives in NormalizedText.swift

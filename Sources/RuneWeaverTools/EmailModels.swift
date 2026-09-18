@@ -862,10 +862,8 @@ public enum EmailAttachmentLifecycle: Sendable {
     /// - Parameter date: Expiry date.
     /// - Returns: ISO-8601 string (internet date-time, no fractional seconds).
     public static func expiryString(from date: Date) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        return formatter.string(from: date)
+        // Shared UTC formatter preserves the envelope shape without per-call setup.
+        SharedDateFormatters.isoInternetTimeUTCString(from: date)
     }
 
     /// Builds the human follow-up hint for an attachment outcome.
@@ -1065,6 +1063,8 @@ public enum EmailBridgeParsing {
 /// Merges per-mailbox search hits newest-first.
 public enum EmailSearchMerge: Sendable {
     /// Parses an RFC 2822 or ISO-8601 `Date` header.
+    /// Tries shared POSIX layouts first, then ISO-8601, so varied bridge date
+    /// headers still sort newest-first without per-call formatter setup.
     private static func rfc2822Dates(_ string: String) -> Date? {
         let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -1078,16 +1078,13 @@ public enum EmailSearchMerge: Sendable {
             "yyyy-MM-dd'T'HH:mm:ssXXXXX",
             "yyyy-MM-dd HH:mm:ss Z"
         ]
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
+        // One shared POSIX formatter serves every layout; no per-format allocation.
         for format in formats {
-            formatter.dateFormat = format
-            if let date = formatter.date(from: trimmed) {
+            if let date = SharedDateFormatters.posixDate(from: trimmed, format: format) {
                 return date
             }
         }
-        let isoFormatter = ISO8601DateFormatter()
-        return isoFormatter.date(from: trimmed)
+        return SharedDateFormatters.isoDefaultDate(from: trimmed)
     }
 
     /// Parses a hit date for sorting.

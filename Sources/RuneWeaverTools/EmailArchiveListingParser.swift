@@ -15,9 +15,11 @@ public enum EmailArchiveListingParser: Sendable {
     }
 
     /// Parses `unzip -l` rows into entries.
+    /// Uses the shared fold so guest listings with CRLF/CR breaks parse the
+    /// same entries as LF listings instead of hiding rows behind stray returns.
     public static func parseUnzipListing(_ output: String) -> [EmailArchiveEntry] {
         var entries: [EmailArchiveEntry] = []
-        for line in output.components(separatedBy: .newlines) {
+        for line in NormalizedText.splitLines(output) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             if trimmed.hasPrefix("Archive:") || trimmed.hasPrefix("Length") || trimmed.hasPrefix("----") {
@@ -37,9 +39,11 @@ public enum EmailArchiveListingParser: Sendable {
     }
 
     /// Parses `tar -tvf` rows into entries.
+    /// Shares the same line fold as the unzip path so both listing shapes agree
+    /// on boundaries for mixed-ending guest output.
     public static func parseTarListing(_ output: String) -> [EmailArchiveEntry] {
         var entries: [EmailArchiveEntry] = []
-        for line in output.components(separatedBy: .newlines) {
+        for line in NormalizedText.splitLines(output) {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let tokens = trimmed.split(whereSeparator: { $0.isWhitespace }).map(String.init)

@@ -44,6 +44,12 @@ public enum ServerPaths {
     /// Deletes the managed container entry while leaving the image cache so the
     /// next Start recreates it; a running entry stops first rather than half-deleting.
     public static let searchRemove = "remove"
+    /// Browser group serving the managed Playwright Python venv lifecycle.
+    public static let browser = "browser"
+    /// Browser health subpath under `/browser`.
+    public static let browserHealth = "health"
+    /// Browser ensure subpath under `/browser`.
+    public static let browserEnsure = "ensure"
     /// Run log group.
     public static let runs = "runs"
     /// Sessions group.

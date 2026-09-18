@@ -1110,9 +1110,16 @@ public extension SchedulerJobConfig {
     /// Loads durable scheduler configs for direct-core entry points.
     static func persistedConfigs(from dbPath: String) async -> [SchedulerJobConfig] {
         #if canImport(SQLite3)
-            await (try? SQLiteSerialIO.run {
-                persistedConfigsBlocking(from: dbPath)
-            }) ?? []
+            do {
+                return try await SQLiteSerialIO.run {
+                    persistedConfigsBlocking(from: dbPath)
+                }
+            } catch {
+                RuneWeaverLog.stores.warning(
+                    "SchedulerJobConfig: Failed reading scheduler configs from SQLite: \(error.localizedDescription); falling back to config seed."
+                )
+                return []
+            }
         #else
             return []
         #endif
@@ -1124,8 +1131,16 @@ public extension SchedulerJobConfig {
             struct LoadError: Error {}
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
-            guard let handle = try? SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { _ in LoadError() }) else {
-                RuneWeaverLog.stores.warning("SchedulerJobConfig: Failed opening scheduler store at \(dbPath); falling back to config seed.")
+            let handle: OpaquePointer
+            do {
+                guard let opened = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { _ in LoadError() }) else {
+                    return []
+                }
+                handle = opened
+            } catch {
+                RuneWeaverLog.stores.warning(
+                    "SchedulerJobConfig: Failed opening scheduler store at \(dbPath): \(error.localizedDescription); falling back to config seed."
+                )
                 return []
             }
             defer { sqlite3_close(handle) }

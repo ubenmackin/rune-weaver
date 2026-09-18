@@ -5,12 +5,23 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SessionSidebar from "./SessionSidebar";
-import { listSessions, updateSessionTitle } from "../api";
+import {
+  listRuns,
+  listSessions,
+  runningSessionIDsFromRuns,
+  updateSessionTitle,
+} from "../api";
+import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 
 vi.mock("../api", () => ({
   listSessions: vi.fn(),
   updateSessionTitle: vi.fn(),
   deleteSession: vi.fn(),
+  listRuns: vi.fn(),
+  runningSessionIDsFromRuns: vi.fn(),
+  isActiveRunStatus: vi.fn((status: string) => status === "running"),
+  RUN_LOG_POLL_LIMIT: 50,
+  RUN_POLL_INTERVAL_MS: 2500,
 }));
 
 const sessionsPayload = {
@@ -30,10 +41,17 @@ const sessionsPayload = {
 
 describe("SessionSidebar", () => {
   beforeEach(() => {
+    // Drop the shared poller's timer and cache so one suite's interval never
+    // leaks into the next and late subscribers never badge from stale rows.
+    resetSharedRunsForTesting();
     vi.clearAllMocks();
     localStorage.clear();
     vi.mocked(listSessions).mockResolvedValue(sessionsPayload);
     vi.mocked(updateSessionTitle).mockResolvedValue(undefined);
+    // Newer run-history helpers stay mocked so background-badge polling
+    // resolves empty instead of throwing on a missing export.
+    vi.mocked(listRuns).mockResolvedValue({ runs: [], count: 0 });
+    vi.mocked(runningSessionIDsFromRuns).mockReturnValue([]);
   });
 
   it("issues a single PATCH when submit and blur race", async () => {
@@ -189,6 +207,100 @@ describe("SessionSidebar", () => {
     const warningIcon = screen.getByTestId("session-approval-pending-icon");
     expect(warningIcon).toBeInTheDocument();
     expect(warningIcon).toHaveClass("pending-approval");
+  });
+
+  it("badges a background session whose turn is still running", async () => {
+    // Parked flights reach the sidebar as running identifiers so a turn left
+    // running while browsing elsewhere stays visible without opening Runs.
+    render(
+      <SessionSidebar
+        currentSessionID="other-session"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        runningSessionIDs={new Set(["session-1"])}
+      />,
+    );
+
+    await screen.findByText("Old title");
+    const badge = screen.getByTestId("session-running-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent("Running");
+  });
+
+  it("badges polled running sessions without a live broadcast", async () => {
+    // Reloads have no live socket yet, so the run-log poll alone must light
+    // the badge for sessions the engine still marks running.
+    vi.mocked(listRuns).mockResolvedValue({
+      runs: [
+        {
+          id: "run-1",
+          kind: "chat",
+          status: "running",
+          message: "thinking",
+          timestamp: new Date().toISOString(),
+          sessionID: "session-1",
+        },
+      ],
+      count: 1,
+    });
+    vi.mocked(runningSessionIDsFromRuns).mockReturnValue(["session-1"]);
+
+    render(
+      <SessionSidebar
+        currentSessionID="other-session"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+      />,
+    );
+
+    await screen.findByText("Old title");
+    expect(await screen.findByTestId("session-running-badge")).toBeInTheDocument();
+  });
+
+  it("groups drifted scheduler sources under Scheduled", async () => {
+    // Stored sources may carry casing or whitespace drift; the tabs normalize
+    // before classifying so scheduled runs never strand under Chats.
+    const user = userEvent.setup();
+    vi.mocked(listSessions).mockResolvedValue({
+      sessions: [
+        {
+          id: "chat-1",
+          title: "User conversation",
+          messageCount: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: "chat",
+        },
+        {
+          id: "scheduled-drift",
+          title: "Nightly job",
+          messageCount: 1,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          source: " Scheduler ",
+        },
+      ],
+      count: 2,
+    });
+
+    render(
+      <SessionSidebar
+        currentSessionID="chat-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+      />,
+    );
+
+    await screen.findByText("User conversation");
+    expect(screen.queryByText("Nightly job")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Scheduled" }));
+    expect(screen.getByText("Nightly job")).toBeInTheDocument();
   });
 });
 

@@ -88,7 +88,8 @@ public typealias EpisodeSummarizer = @Sendable ([Episode]) -> String
 /// Default extractive summarizer used when no LLM is wired in.
 public func defaultEpisodeSummarizer(_ episodes: [Episode]) -> String {
     let parts = episodes.map { episode -> String in
-        let firstLine = episode.content.split(separator: "\n").first.map { String($0) } ?? ""
+        // Shared split keeps episode first lines on the same boundaries as session summaries.
+        let firstLine = NormalizedText.splitLines(episode.content).first ?? ""
         let trimmed = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
         return "[\(episode.role.rawValue)] \(trimmed)"
     }
@@ -212,6 +213,14 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         /// Column-double helper.
         package static func columnDouble(_ statement: OpaquePointer?, index: Int32) -> Double {
             sqlite3_column_double(statement, index)
+        }
+
+        /// Clamps a row limit to the SQLite bind range.
+        /// Shared so episode and run-log reads agree that oversized caller
+        /// limits cap at the 32-bit bound and non-positive limits bind as zero
+        /// instead of wrapping into a negative LIMIT with wrong rows.
+        package static func sqliteLimit(_ limit: Int) -> Int32 {
+            Int32(min(max(limit, 0), Int(Int32.max)))
         }
 
         /// Lists declared columns for a table, lowercased for case-tolerant migration checks.

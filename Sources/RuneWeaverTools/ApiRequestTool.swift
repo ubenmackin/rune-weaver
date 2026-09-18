@@ -326,7 +326,10 @@ public struct ApiRequestTool: Tool, Sendable {
         guard !rawURL.isEmpty else {
             return .failure("Invalid api.request arguments: 'url' must not be empty.", callID: input.callID)
         }
-        if let refusal = ApiSSRFGuard.denyReason(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) {
+        // DNS blocks its thread with no kernel cancellation, so the verdict hops
+        // to the bounded pool instead of stalling shared tasks; literals still
+        // resolve inline without waiting.
+        if let refusal = await ApiSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) {
             RuneWeaverLog.tools.warning("api.request denied \(method.rawValue) \(rawURL) headers=\(ApiHeaderPolicy.logSummary([:])) reason=\(refusal)")
             return .failure(refusal, callID: input.callID)
         }
@@ -427,7 +430,7 @@ public struct ApiRequestTool: Tool, Sendable {
         var currentHeaders = headers
         var hops = 0
         while true {
-            try validateHopURL(currentURL.absoluteString)
+            try await validateHopURL(currentURL.absoluteString)
             let request = ApiRequestChain.chainRequest(
                 url: currentURL,
                 method: currentMethod,
@@ -501,7 +504,7 @@ public struct ApiRequestTool: Tool, Sendable {
                         note: "Redirect without a valid Location header (status \(statusCode))."
                     )
                 }
-                try validateHopURL(next.absoluteString)
+                try await validateHopURL(next.absoluteString)
                 // Cross-host redirects drop credentials so an allowlisted loopback probe cannot
                 // forward `Authorization` elsewhere.
                 let nextCanonicalHost = next.host.map { ApiSSRFGuard.normalizedHost($0) }
@@ -533,13 +536,15 @@ public struct ApiRequestTool: Tool, Sendable {
     }
 
     /// Rejects one hop URL that fails the shared allowlist or SSRF guard.
-    private func validateHopURL(_ urlString: String) throws {
+    /// Hop checks run off the cooperative pool because DNS blocks its thread;
+    /// literal refusals still return inline without waiting on the resolver.
+    private func validateHopURL(_ urlString: String) async throws {
         guard WebURLSafety.isSafeUrl(urlString) else {
             throw ApiRequestError.unsafeURL(
                 "Unsafe redirect target: refusing to dereference \(urlString)."
             )
         }
-        if let denial = ApiSSRFGuard.denyReason(
+        if let denial = await ApiSSRFGuard.denyReasonAsync(
             for: urlString,
             browserConfig: browserConfig,
             llmServerURLs: llmServerURLs

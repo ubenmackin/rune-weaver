@@ -419,7 +419,9 @@ public extension SearXNGEnsurer {
     /// - Parameter contents: Override file text.
     /// - Returns: Stamped version, or nil when absent or unparseable.
     static func overrideTemplateVersion(in contents: String) -> Int? {
-        for line in contents.components(separatedBy: "\n") {
+        // Shared fold keeps marker detection identical for CRLF/CR overrides
+        // instead of leaving a stray return on the version line.
+        for line in NormalizedText.splitLines(contents) {
             guard isTemplateVersionMarkerLine(line) else { continue }
             guard let regex = templateVersionNumberRegex else { return nil }
             let range = NSRange(line.startIndex..., in: line)
@@ -537,7 +539,12 @@ public extension SearXNGEnsurer {
     static func renderedSettingsYAML(template: String, secretKey: String) -> String {
         let secretReplacement = "  secret_key: \"\(secretKey)\""
         let markerReplacement = settingsTemplateVersionMarkerLine()
-        let lines = template.components(separatedBy: "\n")
+        // Single normalization feeds both the trailing-newline check and the
+        // line mapping so secret and marker replacements see the same lines
+        // on every platform without folding twice.
+        let normalizedTemplate = NormalizedText.normalizedLineEndings(template)
+        let hadTrailingNewline = normalizedTemplate.hasSuffix("\n")
+        let lines = NormalizedText.splitLines(normalizedTemplate)
         var replacedSecret = false
         var replacedMarker = false
         let mapped = lines.map { line -> String in
@@ -566,7 +573,13 @@ public extension SearXNGEnsurer {
             }
         }
         if replacedSecret {
-            return stamped.joined(separator: "\n")
+            var rendered = stamped.joined(separator: "\n")
+            // The shared split treats a trailing newline as a terminator, so
+            // restore it to keep template round-trips byte-identical otherwise.
+            if hadTrailingNewline, !rendered.hasSuffix("\n") {
+                rendered += "\n"
+            }
+            return rendered
         }
         return settingsYAML(secretKey: secretKey)
     }
@@ -788,13 +801,6 @@ public extension SearXNGEnsurer {
         "SearXNG container failed to start (run failed). Run `scripts/searxng-up.sh` to retry."
     }
 
-    /// Legacy run-banner name kept so existing callers keep compiling.
-    /// Pull failures have their own banners, so new code prefers `runBanner`.
-    @available(*, deprecated, renamed: "runBanner")
-    static func pullBanner() -> String {
-        runBanner()
-    }
-
     /// Trimmed banner for an image pull that exhausted its minutes budget.
     /// A timed-out pull is safe to retry because downloaded layers stay
     /// cached, so the next attempt resumes instead of restarting.
@@ -802,6 +808,13 @@ public extension SearXNGEnsurer {
     /// - Returns: Retry-with-cached-layers cause plus the single hatch command.
     static func pullTimeoutBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
         "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
+    }
+
+    /// Earlier pull banner spelling kept so existing callers keep compiling.
+    /// Forwards to the timeout banner so both spellings report the same cached-layer retry.
+    @available(*, deprecated, renamed: "pullTimeoutBanner")
+    static func pullBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
+        pullTimeoutBanner(timeoutSeconds: timeoutSeconds)
     }
 
     /// Trimmed banner for an image pull that failed without timing out.

@@ -3,139 +3,6 @@
 import Foundation
 import RuneWeaverCore
 
-/// Arguments for the `files.read` tool.
-public struct FilesReadArgs: Sendable, Equatable, Decodable {
-    /// Raw file path (may contain `~`, `.`, `..`, or symlinks; resolved by the guard).
-    public let path: String
-    /// 1-indexed first line to return, clamped to at least 1.
-    public let offset: Int
-    /// Maximum lines to return, clamped to `1...5000`.
-    public let limit: Int
-    /// Optional text encoding name (UTF-8 only in v1).
-    public let encoding: String?
-
-    /// Default line count when the caller omits `limit`.
-    public static let defaultLimit = 2000
-    /// Upper bound for `limit` so reads stay bounded.
-    public static let maxLimit = 5000
-    /// Default first line when the caller omits `offset`.
-    public static let defaultOffset = 1
-
-    /// Memberwise initializer with offset/limit clamping.
-    public init(path: String, offset: Int = defaultOffset, limit: Int = defaultLimit, encoding: String? = nil) {
-        self.path = path
-        self.offset = max(offset, Self.defaultOffset)
-        self.limit = min(max(limit, 1), Self.maxLimit)
-        self.encoding = encoding
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case path
-        case offset
-        case limit
-        case encoding
-    }
-
-    /// Decodes arguments, clamping `offset` and `limit`.
-    /// - Parameter decoder: Decoder for the arguments document.
-    public init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        let path = try container.decode(String.self, forKey: .path)
-        let rawOffset = try container.decodeIfPresent(Int.self, forKey: .offset) ?? Self.defaultOffset
-        let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        let encoding = try container.decodeIfPresent(String.self, forKey: .encoding)
-        self.init(path: path, offset: rawOffset, limit: rawLimit, encoding: encoding)
-    }
-
-    /// Trimmed file path.
-    public var trimmedPath: String {
-        path.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Trimmed encoding name, nil when omitted or blank.
-    public var trimmedEncoding: String? {
-        guard let encoding else { return nil }
-        let trimmed = encoding.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-    }
-}
-
-/// Envelope wrapping `files.read` success output.
-public struct FilesReadEnvelope: Sendable, Equatable, Codable {
-    /// Canonical path that was read.
-    public let path: String
-    /// On-disk file size in bytes.
-    public let sizeBytes: Int
-    /// Whether lines or bytes beyond the returned view were left unread.
-    public let truncated: Bool
-    /// Selected text lines joined with `\n`.
-    public let content: String
-
-    /// Creates a read envelope.
-    public init(path: String, sizeBytes: Int, truncated: Bool, content: String) {
-        self.path = path
-        self.sizeBytes = sizeBytes
-        self.truncated = truncated
-        self.content = content
-    }
-}
-
-/// Envelope wrapping `files.read` deny output.
-public struct FilesDeniedEnvelope: Sendable, Equatable, Codable {
-    /// Human-readable denial message.
-    public let error: String
-    /// Canonical path that was denied.
-    public let path: String
-    /// Escalation hint; mirrors the guard decision (false only when
-    /// `[files].require_approval_on_deny` is false and the denial is hard).
-    public let approvalRequired: Bool
-    /// Policy reason (never file content).
-    public let reason: String
-
-    /// Creates a denied envelope.
-    public init(error: String, path: String, approvalRequired: Bool = true, reason: String) {
-        self.error = error
-        self.path = path
-        self.approvalRequired = approvalRequired
-        self.reason = reason
-    }
-}
-
-/// Pure JSON encoding for the file tool output documents.
-public enum FilesToolEncoding {
-    /// Encodes a read envelope as the tool output document.
-    public static func encodeReadEnvelope(_ envelope: FilesReadEnvelope) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(envelope)
-        return String(bytes: data, encoding: .utf8) ?? ""
-    }
-
-    /// Encodes a denied envelope as the tool failure document.
-    public static func encodeDeniedEnvelope(_ envelope: FilesDeniedEnvelope) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(envelope)
-        return String(bytes: data, encoding: .utf8) ?? ""
-    }
-
-    /// Encodes a grep envelope as the tool output document.
-    public static func encodeGrepEnvelope(_ envelope: FilesGrepEnvelope) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(envelope)
-        return String(bytes: data, encoding: .utf8) ?? ""
-    }
-
-    /// Encodes a glob envelope as the tool output document.
-    public static func encodeGlobEnvelope(_ envelope: FilesGlobEnvelope) throws -> String {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let data = try encoder.encode(envelope)
-        return String(bytes: data, encoding: .utf8) ?? ""
-    }
-}
-
 /// Read-only `files.read` tool for bounded local file reads.
 public struct FilesReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
@@ -176,179 +43,46 @@ public struct FilesReadTool: Tool, Sendable {
     /// Reads the requested line window, enforcing the guard first.
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         let args: FilesReadArgs
-        do {
-            args = try JSONDecoder().decode(FilesReadArgs.self, from: Data(input.argumentsJSON.utf8))
-        } catch {
-            return .failure(
-                "Invalid files.read arguments: expected {\"path\": \"<file>\", \"offset\": <1-based>, \"limit\": <1-5000>}.",
-                callID: input.callID
-            )
+        switch FilesReadHelpers.decodedReadArgs(input.argumentsJSON, callID: input.callID) {
+        case let .success(decoded):
+            args = decoded
+        case let .failure(failure):
+            return failure.output
         }
-        let rawPath = args.trimmedPath
-        guard !rawPath.isEmpty else {
-            return .failure("Invalid files.read arguments: 'path' must not be empty.", callID: input.callID)
-        }
-        if let encoding = args.trimmedEncoding, !isSupportedEncoding(encoding) {
-            return .failure(
-                "Unsupported encoding '\(encoding)': only UTF-8 is supported (omit 'encoding' for UTF-8).",
-                callID: input.callID
-            )
-        }
-        // Guard before disk: denied paths never reach FileManager, so no
-        // existence oracle or byte leak can ride the failure message.
-        let decision = FilesAccessGuard.evaluate(path: rawPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        // Guard before disk: denied paths never reach the filesystem, so no
+        // existence oracle or byte leak can ride the failure message. Byte
+        // reads then open through the no-follow helper so the descriptor pins
+        // the inode while its live path is re-validated, closing a symlink
+        // swap between the first check and the read.
+        let decision = FilesAccessGuard.evaluate(path: args.trimmedPath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         guard decision.allowed else {
-            return deniedOutput(
+            return FilesReadHelpers.deniedOutput(
                 resolvedPath: decision.resolvedPath,
                 reason: decision.reason,
                 requiresApproval: decision.requiresApproval,
                 callID: input.callID
             )
         }
-        let fileURL = URL(fileURLWithPath: decision.resolvedPath)
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDirectory) else {
-            return .failure("File not found: \(decision.resolvedPath)", callID: input.callID)
+        let pinned: FilesReadHelpers.PinnedFileRead
+        switch FilesReadHelpers.readPinnedFile(
+            rawPath: args.trimmedPath,
+            decision: decision,
+            homeDirectoryURL: homeDirectoryURL,
+            filesConfig: filesConfig,
+            callID: input.callID
+        ) {
+        case let .success(read):
+            pinned = read
+        case let .failure(failure):
+            return failure.output
         }
-        guard !isDirectory.boolValue else {
-            return .failure("Not a file: \(decision.resolvedPath)", callID: input.callID)
-        }
-        let sizeBytes: Int
-        do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-            if let number = attributes[.size] as? NSNumber {
-                sizeBytes = number.intValue
-            } else if let intValue = attributes[.size] as? Int {
-                sizeBytes = intValue
-            } else {
-                sizeBytes = 0
-            }
-        } catch {
-            return .failure("Could not stat file: \(error.localizedDescription)", callID: input.callID)
-        }
-        let bytes: Data
-        let byteTruncated: Bool
-        do {
-            let read = try readUpToCap(at: fileURL)
-            bytes = read.prefix
-            byteTruncated = read.truncated
-        } catch {
-            return .failure("Could not read file: \(error.localizedDescription)", callID: input.callID)
-        }
-        // NUL-byte sniff refuses binaries before decoding so binary bytes
-        // never enter the envelope; the note names the refusal without
-        // echoing any file content.
-        if bytes.contains(0x00) {
-            return .failure(
-                "Binary file detected (NUL byte found); refusing to read \(decision.resolvedPath) as text.",
-                callID: input.callID
-            )
-        }
-        guard let text = String(data: bytes, encoding: .utf8) else {
-            return .failure(
-                "File is not valid UTF-8: \(decision.resolvedPath). Only UTF-8 text files are supported.",
-                callID: input.callID
-            )
-        }
-        let lines = splitLines(text)
-        let start = max(args.offset - 1, 0)
-        let selected: [String]
-        let windowTruncated: Bool
-        if start >= lines.count {
-            // Offset past end-of-file yields an empty view; the byte cap
-            // still governs `truncated` because unread bytes may exist past
-            // the ceiling even when the window itself is empty.
-            selected = []
-            windowTruncated = false
-        } else {
-            let end = min(start + args.limit, lines.count)
-            selected = Array(lines[start ..< end])
-            windowTruncated = end < lines.count
-        }
-        let envelope = FilesReadEnvelope(
-            path: decision.resolvedPath,
-            sizeBytes: sizeBytes,
-            truncated: byteTruncated || windowTruncated,
-            content: selected.joined(separator: "\n")
-        )
+        let envelope = FilesReadHelpers.windowedEnvelope(args: args, pinned: pinned)
         do {
             let content = try FilesToolEncoding.encodeReadEnvelope(envelope)
             return .success(content, callID: input.callID)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
-    }
-
-    /// Reports whether an encoding name selects the supported UTF-8 path.
-    private func isSupportedEncoding(_ encoding: String) -> Bool {
-        let normalised = encoding.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return normalised == "utf8" || normalised == "utf-8" || normalised == "utf_8"
-    }
-
-    /// Builds the approval-escalation failure without file bytes.
-    private func deniedOutput(resolvedPath: String, reason: String?, requiresApproval: Bool, callID: String) -> ToolOutput {
-        let detail = reason ?? "Reading this path requires explicit approval."
-        let envelope = FilesDeniedEnvelope(
-            error: "Access denied: \(detail)",
-            path: resolvedPath,
-            approvalRequired: requiresApproval,
-            reason: detail
-        )
-        do {
-            let content = try FilesToolEncoding.encodeDeniedEnvelope(envelope)
-            return .failure(content, callID: callID)
-        } catch {
-            return .failure("Access denied: \(detail)", callID: callID)
-        }
-    }
-
-    /// Reads at most the 1 MB ceiling, reporting whether bytes were left unread.
-    private func readUpToCap(at url: URL) throws -> (prefix: Data, truncated: Bool) {
-        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        let size: Int = if let number = attributes[.size] as? NSNumber {
-            number.intValue
-        } else if let intValue = attributes[.size] as? Int {
-            intValue
-        } else {
-            0
-        }
-        if size <= Self.maxFileBytes {
-            let data = try Data(contentsOf: url)
-            // A racing writer could still have grown the file past the
-            // ceiling between stat and read; honour the actual bytes read.
-            if data.count > Self.maxFileBytes {
-                return (data.prefix(Self.maxFileBytes), true)
-            }
-            return (data, false)
-        }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var prefix = Data()
-        var remaining = Self.maxFileBytes
-        while remaining > 0 {
-            let chunkSize = min(64 * 1024, remaining)
-            guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else {
-                break
-            }
-            prefix.append(chunk)
-            remaining -= chunk.count
-        }
-        return (prefix, true)
-    }
-
-    /// Splits decoded text into lines for windowed reads.
-    private func splitLines(_ text: String) -> [String] {
-        if text.isEmpty {
-            return []
-        }
-        let normalised = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        var parts = normalised.components(separatedBy: "\n")
-        if parts.last?.isEmpty == true {
-            parts.removeLast()
-        }
-        return parts
     }
 }
 
@@ -736,6 +470,13 @@ public struct FilesGrepTool: Tool, Sendable {
                 continue
             }
             for (index, line) in lines.enumerated() {
+                // Cooperative cancel inside the line loop so a costly pattern over a
+                // large file aborts with the turn instead of hanging it; the per-file
+                // check above alone would let one file monopolize the turn. Checked
+                // periodically to keep the fast path cheap while staying responsive.
+                if index & 15 == 0 {
+                    try Task.checkCancellation()
+                }
                 let range = NSRange(line.startIndex ..< line.endIndex, in: line)
                 guard expression.firstMatch(in: line, range: range) != nil else {
                     continue
@@ -756,70 +497,8 @@ public struct FilesGrepTool: Tool, Sendable {
         }
     }
 
-    /// Explains why a pattern cannot run on the RE2-safe subset, if any.
-    private static func re2UnsupportedReason(for pattern: String) -> String? {
-        let chars = Array(pattern)
-        var index = chars.startIndex
-        var inClass = false
-        while index < chars.endIndex {
-            let char = chars[index]
-            if char == "\\" {
-                // Escaped pair: `\1`-`\9` outside a class is a backreference
-                // (RE2 has no backreferences); `\k` starts a named
-                // backreference. Anything else is a harmless escape.
-                let next = chars.index(after: index)
-                if next < chars.endIndex, !inClass {
-                    let escaped = chars[next]
-                    if ("1" ... "9").contains(escaped) {
-                        return "backreferences (e.g. \\1) are not supported; match without referring to earlier groups."
-                    }
-                    if escaped == "k" {
-                        return "named backreferences (\\k) are not supported; match without referring to earlier groups."
-                    }
-                }
-                index = next < chars.endIndex ? chars.index(after: next) : chars.endIndex
-                continue
-            }
-            if char == "[" {
-                inClass = true
-                index = chars.index(after: index)
-                continue
-            }
-            if char == "]" {
-                inClass = false
-                index = chars.index(after: index)
-                continue
-            }
-            if inClass {
-                index = chars.index(after: index)
-                continue
-            }
-            if char == "(" {
-                // Peek the group opener for lookaround/atomic heads.
-                let rest = String(chars[chars.index(after: index)...].prefix(4))
-                if rest.hasPrefix("?=") || rest.hasPrefix("?!") {
-                    return "lookahead (e.g. (?=...)) is not supported; match the text directly."
-                }
-                if rest.hasPrefix("?<=") || rest.hasPrefix("?<!") {
-                    return "lookbehind (e.g. (?<=...)) is not supported; match the text directly."
-                }
-                if rest.hasPrefix("?>") {
-                    return "atomic groups ((?>...)) are not supported; use a plain group instead."
-                }
-            }
-            if char == "*" || char == "+" || char == "?" || char == "}" {
-                // A `+` immediately after a quantifier is possessive
-                // (`*+`, `++`, `?+`, `{2,3}+`); lazy `*?` stays legal.
-                let next = chars.index(after: index)
-                if next < chars.endIndex, chars[next] == "+" {
-                    return "possessive quantifiers (e.g. *+) are not supported; use a greedy or lazy quantifier instead."
-                }
-            }
-            index = chars.index(after: index)
-        }
-        return nil
-    }
-
+    /// RE2-safe pattern policy lives in `FilesGrepHelpers` so this tool stays
+    /// within budget; every search vets its pattern there before any file opens.
     /// Reports whether a file passes the optional include filter.
     private func includeMatches(include: String, fileURL: URL, root: URL) -> Bool {
         let filename = fileURL.lastPathComponent
@@ -872,26 +551,44 @@ public struct FilesGrepTool: Tool, Sendable {
     }
 
     /// Reads a file's searchable lines, or nil when the file is skipped.
+    /// Bytes come from the pinned no-follow descriptor with its live path
+    /// re-validated, so a symlink swapped after pruning cannot redirect the
+    /// read; denied, symlinked, or oversized files skip without leaking bytes.
     private func searchableLines(at url: URL) -> [String]? {
-        let size: Int
+        let pinned: (handle: FileHandle, resolvedPath: String)
         do {
-            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-            if let number = attributes[.size] as? NSNumber {
-                size = number.intValue
-            } else if let intValue = attributes[.size] as? Int {
-                size = intValue
-            } else {
-                return nil
-            }
+            pinned = try FilesAccessGuard.openNoFollowAndValidate(
+                path: url.path,
+                homeDirectoryURL: homeDirectoryURL,
+                filesConfig: filesConfig
+            )
         } catch {
             return nil
         }
-        guard size <= Self.maxFileBytes else {
+        let handle = pinned.handle
+        defer { try? handle.close() }
+        do {
+            let end = try handle.seekToEnd()
+            guard end <= UInt64(Self.maxFileBytes) else {
+                return nil
+            }
+            try handle.seek(toOffset: 0)
+        } catch {
             return nil
         }
         let data: Data
         do {
-            data = try Data(contentsOf: url)
+            var accumulated = Data()
+            while true {
+                guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else {
+                    break
+                }
+                accumulated.append(chunk)
+                guard accumulated.count <= Self.maxFileBytes else {
+                    return nil
+                }
+            }
+            data = accumulated
         } catch {
             return nil
         }
@@ -901,17 +598,7 @@ public struct FilesGrepTool: Tool, Sendable {
         guard let text = String(data: data, encoding: .utf8) else {
             return nil
         }
-        if text.isEmpty {
-            return []
-        }
-        let normalised = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        var parts = normalised.components(separatedBy: "\n")
-        if parts.last?.isEmpty == true {
-            parts.removeLast()
-        }
-        return parts
+        return NormalizedText.splitLines(text)
     }
 
     /// Builds the approval-escalation failure without file bytes.

@@ -3,7 +3,7 @@
 import Foundation
 
 /// Shared keyword helpers for memory search.
-enum Tokenization {
+enum Tokenization: Sendable {
     /// Lowercased alphanumeric tokens for keyword scoring.
     /// - Parameter text: Text to tokenize.
     /// - Returns: Token set.

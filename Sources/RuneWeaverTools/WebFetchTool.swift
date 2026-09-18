@@ -11,7 +11,9 @@
 // private ranges from prompt-injected content: only the exact configured
 // `searxng_url` origin is exempt. Redirect surfacing, text classification, and
 // the sensitive-range table are single-sourced with `api.request` so the two
-// web guards cannot diverge on obfuscated spellings.
+// web guards cannot diverge on obfuscated spellings. Blank checks in browser
+// validation and other modules stay with their owners; this file shares the
+// single blank agreement for its own guards so its verdicts cannot drift.
 
 import Foundation
 import RuneWeaverCore
@@ -22,8 +24,8 @@ public enum WebURLSafety: Sendable {
     /// - Parameter raw: Candidate URL string.
     /// - Returns: True for absolute `http`/`https` URLs with a host.
     public static func isSafeUrl(_ raw: String) -> Bool {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
+        // Shares the single blank agreement so whitespace-only input fails closed identically to guards.
+        guard let trimmed = NormalizedText.value(raw) else { return false }
         // Control characters never appear in a legitimate dereferenceable URL.
         if trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
             return false
@@ -77,14 +79,31 @@ public enum WebURLSafety: Sendable {
 public enum WebFetchSSRFGuard: Sendable {
     /// Refusal reason for a URL, or nil when the URL may be dialed.
     public static func denyReason(for rawURL: String, browserConfig: BrowserConfig) -> String? {
-        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "Empty URL: web.fetch needs an absolute http(s) URL." }
+        guard let trimmed = NormalizedText.value(rawURL) else {
+            return "Empty URL: web.fetch needs an absolute http(s) URL."
+        }
         return ApiSSRFGuard.denyReason(for: trimmed, browserConfig: browserConfig, llmServerURLs: [])
+    }
+
+    /// Async refusal reason that keeps blocking DNS off the cooperative pool.
+    /// Literal spellings still resolve inline; only hostnames needing the
+    /// resolver hop to the bounded pool with a fail-closed timeout, preserving
+    /// the exact `searxng_url`-only exemption of the synchronous shape.
+    public static func denyReasonAsync(for rawURL: String, browserConfig: BrowserConfig) async -> String? {
+        guard let trimmed = NormalizedText.value(rawURL) else {
+            return "Empty URL: web.fetch needs an absolute http(s) URL."
+        }
+        return await ApiSSRFGuard.denyReasonAsync(for: trimmed, browserConfig: browserConfig, llmServerURLs: [])
     }
 
     /// Whether a URL may be dialed under the fetch SSRF guard.
     public static func isAllowed(for rawURL: String, browserConfig: BrowserConfig) -> Bool {
         denyReason(for: rawURL, browserConfig: browserConfig) == nil
+    }
+
+    /// Async allow check that keeps blocking DNS on the bounded pool.
+    public static func isAllowedAsync(for rawURL: String, browserConfig: BrowserConfig) async -> Bool {
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig) == nil
     }
 
     /// Normalizes a URL host for sensitive-range comparison.
@@ -143,8 +162,9 @@ public struct WebFetchArgs: Sendable, Equatable, Decodable {
     }
 
     /// Trimmed URL.
+    /// Shares the single blank agreement so empty input collapses identically for guards.
     public var trimmedURL: String {
-        url.trimmingCharacters(in: .whitespacesAndNewlines)
+        NormalizedText.value(url, fallback: "")
     }
 }
 
@@ -298,8 +318,8 @@ public struct WebFetchTool: Tool, Sendable {
                 callID: input.callID
             )
         }
-        let rawURL = args.trimmedURL
-        guard !rawURL.isEmpty else {
+        // Shares the single blank agreement so whitespace-only URLs fail as empty identically to guards.
+        guard let rawURL = NormalizedText.value(args.url) else {
             return .failure("Invalid web.fetch arguments: 'url' must not be empty.", callID: input.callID)
         }
         guard WebURLSafety.isSafeUrl(rawURL) else {
@@ -313,7 +333,9 @@ public struct WebFetchTool: Tool, Sendable {
         // Approval-free fetch must not dial loopback, link-local, metadata, or private ranges:
         // prompt-injected content could otherwise exfiltrate the loopback-only no-auth service into
         // tool output. Only the exact configured `searxng_url` origin is exempt.
-        if let refusal = WebFetchSSRFGuard.denyReason(for: rawURL, browserConfig: browserConfig) {
+        // DNS blocks its thread, so the verdict hops to the bounded pool instead
+        // of stalling shared tasks.
+        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig) {
             return unsupportedFailure(
                 originalURL: rawURL,
                 finalURL: rawURL,
@@ -384,7 +406,9 @@ public struct WebFetchTool: Tool, Sendable {
                     reason: "Unsafe redirect target: refusing to dereference \(currentURL.absoluteString)."
                 )
             }
-            if let refusal = WebFetchSSRFGuard.denyReason(for: currentURL.absoluteString, browserConfig: browserConfig) {
+            // Hop checks hop to the bounded pool for the same wedged-resolver
+            // reason as the entry check, keeping redirects off shared tasks.
+            if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: currentURL.absoluteString, browserConfig: browserConfig) {
                 return chainEnvelope(
                     status: WebFetchEnvelope.statusUnsupported,
                     finalURL: currentURL.absoluteString,
@@ -429,8 +453,9 @@ public struct WebFetchTool: Tool, Sendable {
                 }
                 // Redirects re-enter the SSRF guard so a public page cannot
                 // bounce the approval-free fetcher into a loopback or
-                // private target.
-                if let refusal = WebFetchSSRFGuard.denyReason(for: next.absoluteString, browserConfig: browserConfig) {
+                // private target. The async shape keeps a wedged resolver
+                // from stalling shared tasks on redirect chains.
+                if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: next.absoluteString, browserConfig: browserConfig) {
                     return chainEnvelope(
                         status: WebFetchEnvelope.statusUnsupported,
                         finalURL: next.absoluteString,
@@ -510,10 +535,8 @@ public struct WebFetchTool: Tool, Sendable {
     /// helper distinguishes them: an unsafe hop fails closed with its raw value
     /// preserved instead of a plain unsupported success.
     private static func redirectFailure(http: HTTPURLResponse, statusCode: Int, currentURL: URL) -> (finalURL: String, reason: String) {
-        if let rawLocation = http.value(forHTTPHeaderField: "Location")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !rawLocation.isEmpty
-        {
+        // Shares the single blank agreement so whitespace-only locations read as missing everywhere.
+        if let rawLocation = NormalizedText.value(http.value(forHTTPHeaderField: "Location")) {
             return (currentURL.absoluteString, "Unsafe redirect target: refusing to dereference \(rawLocation).")
         }
         return (currentURL.absoluteString, "Redirect without a valid Location header (status \(statusCode)).")
@@ -658,8 +681,9 @@ public struct WebFetchTool: Tool, Sendable {
             }
         }
         // Collapse runs so indented HTML does not spend context on whitespace.
+        // Shares the single blank agreement so whitespace-only bodies collapse identically for callers.
         let collapsed = text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-        return collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return NormalizedText.value(collapsed, fallback: "")
     }
 
     /// Removes script and style blocks before tag stripping.

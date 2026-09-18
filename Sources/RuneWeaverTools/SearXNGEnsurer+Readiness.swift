@@ -721,11 +721,15 @@ public extension SearXNGEnsurer {
     /// settings toggle never sticks on a 500; later searches re-ensure.
     static func bestEffortStop() async {
         guard let runtime = resolveRuntimeURL() else { return }
-        _ = try? await runProcess(
-            executableURL: runtime,
-            arguments: ["stop", containerName],
-            timeoutSeconds: 8
-        )
+        do {
+            _ = try await runProcess(
+                executableURL: runtime,
+                arguments: ["stop", containerName],
+                timeoutSeconds: 8
+            )
+        } catch {
+            RuneWeaverLog.tools.debug("SearXNG bestEffortStop completed with: \(error.localizedDescription)")
+        }
     }
 
     /// Probes the SearXNG base URL with a short timeout.

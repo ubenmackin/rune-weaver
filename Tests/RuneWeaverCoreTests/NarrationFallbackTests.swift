@@ -107,7 +107,7 @@ private func makeNarrationReadTool(name: String, output: String) -> FixtureNarra
 @Suite("Narration Fallback")
 struct NarrationFallbackTests {
     @Test
-    func `Single narrated placeholder converts with fresh call ID`() {
+    func `Single narrated placeholder converts preserving call ID`() {
         let tool = makeNarrationReadTool(name: "email.search", output: "ok")
         let args = #"{"query":"lighthouse"}"#
         let narratedID = "call_narrated_001"
@@ -120,7 +120,9 @@ struct NarrationFallbackTests {
         #expect(calls.first?.argumentsJSON == args)
         let freshID = calls.first?.callID ?? ""
         #expect(!freshID.isEmpty)
-        #expect(freshID != narratedID)
+        // Preserve the narrated identifier so the executed record collapses
+        // with its persisted placeholder twin when grouping by call identity.
+        #expect(freshID == narratedID)
     }
 
     @Test
@@ -138,8 +140,10 @@ struct NarrationFallbackTests {
         #expect(calls.map(\.toolName) == ["email.search", "calendar.list"])
         #expect(calls[0].argumentsJSON == searchArgs)
         #expect(calls[1].argumentsJSON == calendarArgs)
-        #expect(calls[0].callID != "call_narrated_aaa")
-        #expect(calls[1].callID != "call_narrated_bbb")
+        // Preserved identifiers stay distinct per placeholder so ordered
+        // records still collapse with their own persisted twins.
+        #expect(calls[0].callID == "call_narrated_aaa")
+        #expect(calls[1].callID == "call_narrated_bbb")
         #expect(calls[0].callID != calls[1].callID)
     }
 
@@ -222,10 +226,12 @@ struct NarrationFallbackTests {
         #expect(response.toolActions.first?.result?.content.contains("lighthouse") == true)
         let executedID = response.toolActions.first?.callID ?? ""
         #expect(!executedID.isEmpty)
-        #expect(executedID != narratedID)
+        // The executed call keeps the narrated identifier so history groups
+        // the tool record with its placeholder line by call identity.
+        #expect(executedID == narratedID)
         let history = await conversations.history(for: sessionID)
         #expect(history.contains { $0.role == .tool && $0.toolCallID == executedID })
-        #expect(!history.contains { $0.role == .tool && $0.toolCallID == narratedID })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == narratedID })
     }
 
     @Test
@@ -257,8 +263,9 @@ struct NarrationFallbackTests {
         #expect(response.text == finalText)
         #expect(response.toolActions.count == 2)
         #expect(response.toolActions.map(\.toolName) == ["email.search", "calendar.list"])
-        #expect(!response.toolActions.map(\.callID).contains("call_narrated_one"))
-        #expect(!response.toolActions.map(\.callID).contains("call_narrated_two"))
+        // Each executed call keeps its narrated identifier for grouping.
+        #expect(response.toolActions.map(\.callID).contains("call_narrated_one"))
+        #expect(response.toolActions.map(\.callID).contains("call_narrated_two"))
     }
 
     @Test

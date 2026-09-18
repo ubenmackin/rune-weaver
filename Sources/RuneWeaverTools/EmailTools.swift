@@ -668,6 +668,9 @@ extension EmailAttachmentTool {
     }
 
     /// Stages document and image bytes under Seatbelt-confined isolated temp and builds the success result.
+    /// Staged bytes arrive from the IMAP gateway into isolated temp, never from
+    /// a workspace read, so no descriptor pinning applies; workspace exports
+    /// take the guarded staging path instead.
     private func storedEnvelope(
         target: AttachmentTarget,
         accountName: String,
@@ -876,6 +879,10 @@ extension EmailAttachmentTool {
     }
 
     /// Exports detonated archive bytes through confined-temp staging.
+    /// Bytes originate from the isolated detonation, not a workspace read, so
+    /// no descriptor pinning applies on the source; the workspace contact is a
+    /// guarded write that re-validates the destination before committing, while
+    /// pinned workspace reads stay single-use in the file tools.
     private func exportArchiveBytes(
         for target: AttachmentTarget,
         fetched: EmailAttachmentData,

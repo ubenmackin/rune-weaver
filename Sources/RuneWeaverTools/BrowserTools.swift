@@ -477,7 +477,9 @@ public struct BrowserNavigateTool: Tool, Sendable {
     }
 
     /// Opens the page and returns its distilled snapshot.
-    public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+    /// Dry-run previews resolve the interpreter from the fast path only so
+    /// validation never provisions the managed venv.
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args: BrowserNavigateArgs
         do {
             args = try JSONDecoder().decode(BrowserNavigateArgs.self, from: Data(input.argumentsJSON.utf8))
@@ -489,7 +491,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try BrowserValidation.validateURL(args.trimmedURL)
+            url = try await BrowserValidation.validateURLAsync(args.trimmedURL)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -499,7 +501,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
         let includeScreenshot = args.includeScreenshot
             || BrowserScreenshotPolicy.includeScreenshotRequested(argumentsJSON: input.argumentsJSON)
         do {
-            let snapshot = try await gateway.navigate(url: url, includeScreenshot: includeScreenshot)
+            let snapshot = try await gateway.navigate(url: url, includeScreenshot: includeScreenshot, dryRun: context.dryRun)
             let content = try navigateContent(for: snapshot, includeScreenshotRequested: includeScreenshot)
             return .success(content, callID: input.callID)
         } catch let browserError as BrowserError {
@@ -654,7 +656,7 @@ public struct BrowserActTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try BrowserValidation.validateURL(args.trimmedURL)
+            url = try await BrowserValidation.validateURLAsync(args.trimmedURL)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -668,6 +670,9 @@ public struct BrowserActTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
+        // Act previews stay local: the would-act envelope returns without
+        // reaching the gateway, so no browser context is opened and the
+        // gateway exposes no dry-run overload to go stale.
         if context.dryRun {
             return dryRunOutput(action: action, ref: ref, url: url, callID: input.callID)
         }

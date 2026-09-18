@@ -12,6 +12,7 @@ import {
 } from "react";
 import {
   deleteSession,
+  isActiveRunStatus,
   listSessions,
   updateSessionTitle,
   type PermissionRequest,
@@ -20,8 +21,13 @@ import {
 import {
   getSavedEnum,
   isSameSession,
+  normalizeSessionID,
   persistEnum,
+  runSessionID,
 } from "../approvalsSession";
+import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useRunningRuns } from "../hooks/useRunningRuns";
+import type { WSGenericFrame } from "../hooks/useSharedWebSocket";
 import {
   AlertTriangleIcon,
   ChatIcon,
@@ -44,6 +50,10 @@ interface SessionSidebarProps {
   onToggleOpen: () => void;
   refreshTrigger?: number;
   pendingApprovals?: PermissionRequest[];
+  // Live interactive turns parked in the chat view while the user browses
+  // other sessions. The sidebar merges these with polled run rows so a
+  // background turn stays badged even before its run record persists.
+  runningSessionIDs?: Set<string> | string[] | null;
 }
 
 interface GroupedSessions {
@@ -107,6 +117,14 @@ function getSavedSessionFilter(): SessionFilter {
   );
 }
 
+// Classifies one session for the Chats/Scheduled tabs. Normalizes the stored
+// source so drifted casing or surrounding whitespace never strands a scheduled
+// run under Chats; unattributed rows stay chats to match the history default.
+function isScheduledSession(session: SessionSummary | null | undefined): boolean {
+  const raw = session?.source;
+  return typeof raw === "string" && raw.trim().toLowerCase() === "scheduler";
+}
+
 export default function SessionSidebar({
   currentSessionID,
   onSelectSession,
@@ -115,6 +133,7 @@ export default function SessionSidebar({
   onToggleOpen,
   refreshTrigger,
   pendingApprovals,
+  runningSessionIDs,
 }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -134,6 +153,74 @@ export default function SessionSidebar({
   const focusRenameInput = useCallback((node: HTMLInputElement | null) => {
     if (node) node.focus();
   }, []);
+
+  // Sessions with a turn still running on the engine while the user browses
+  // elsewhere. Live broadcasts mark the start immediately while the shared
+  // run-log poller covers reloads and missed sockets, so the badge never
+  // depends on one transport alone. Entries are normalized lowercase for
+  // comparison since the engine formats UUIDs uppercase and the dashboard
+  // mints lowercase. Polling lives single-source in `useRunningRuns` alongside
+  // the chat view so two mounted views share one interval instead of doubling
+  // QPS; this view keeps only the live set plus the shared polled set.
+  const [liveRunningIDs, setLiveRunningIDs] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
+  const { runningIDs: sharedRunningIDs, refresh: refreshSharedRuns } =
+    useRunningRuns();
+  // Shared poller already returns normalized lowercase owners through the
+  // single active contract, so wrap directly as the polled set for the badge
+  // union below without a second derivation.
+  const polledRunningIDs = useMemo(
+    () => new Set<string>(sharedRunningIDs),
+    [sharedRunningIDs],
+  );
+
+  const handleRunBroadcast = useCallback((data: unknown) => {
+    const frame = data as WSGenericFrame | null;
+    if (!frame || typeof frame !== "object") return;
+    const frameType = typeof frame.type === "string" ? frame.type : undefined;
+    if (frameType !== "run_started" && frameType !== "run_completed") return;
+    const nested = (frame as Record<string, unknown>).run;
+    if (!nested || typeof nested !== "object") return;
+    const owner = runSessionID(
+      nested as Parameters<typeof runSessionID>[0],
+    );
+    const normalized = normalizeSessionID(owner);
+    if (!normalized) return;
+    // Single active contract with the polled run log: only a live running
+    // status keeps the badge lit. A parked awaiting_approval turn arrives as
+    // completed and surfaces through the approvals icon instead, so live and
+    // polled views agree after reload without double-badging.
+    const nestedStatus =
+      typeof (nested as Record<string, unknown>).status === "string"
+        ? ((nested as Record<string, unknown>).status as string)
+        : undefined;
+    if (frameType === "run_started" && isActiveRunStatus(nestedStatus)) {
+      setLiveRunningIDs((previous) => {
+        if (previous.has(normalized)) return previous;
+        const next = new Set(previous);
+        next.add(normalized);
+        return next;
+      });
+    } else {
+      setLiveRunningIDs((previous) => {
+        if (!previous.has(normalized)) return previous;
+        const next = new Set(previous);
+        next.delete(normalized);
+        return next;
+      });
+    }
+  }, []);
+
+  useSharedWebSocket(handleRunBroadcast);
+
+  // Revalidate the shared poller when the viewed session changes so a switch
+  // badges without waiting for the next tick; the interval itself stays owned
+  // by the shared hook. Terminal eviction needs no local timer because the
+  // shared tick plus live `run_completed` broadcasts clear both sets.
+  useEffect(() => {
+    refreshSharedRuns();
+  }, [refreshSharedRuns, currentSessionID, refreshTrigger]);
 
   const handleFilterChange = (nextFilter: SessionFilter) => {
     setFilter(nextFilter);
@@ -245,12 +332,34 @@ export default function SessionSidebar({
 
   const filteredSessions = useMemo(() => {
     return activeSessions.filter((session) => {
-      const isScheduled = session.source === "scheduler";
+      const isScheduled = isScheduledSession(session);
       if (filter === "chat") return !isScheduled;
       if (filter === "scheduler") return isScheduled;
       return true;
     });
   }, [activeSessions, filter]);
+
+  // Union of every running signal so one missed transport never hides a
+  // background turn: live broadcasts for immediacy, polled runs for reloads,
+  // and the chat view's parked flights for turns whose run row has not
+  // persisted yet. All entries stay normalized for case-insensitive matches.
+  const backgroundRunning = useMemo(() => {
+    const merged = new Set<string>();
+    for (const id of liveRunningIDs) merged.add(id);
+    for (const id of polledRunningIDs) merged.add(id);
+    if (runningSessionIDs) {
+      const incoming: Iterable<string> = Array.isArray(runningSessionIDs)
+        ? runningSessionIDs
+        : runningSessionIDs instanceof Set
+          ? runningSessionIDs
+          : [];
+      for (const id of incoming) {
+        const normalized = normalizeSessionID(id);
+        if (normalized) merged.add(normalized);
+      }
+    }
+    return merged;
+  }, [liveRunningIDs, polledRunningIDs, runningSessionIDs]);
 
   const grouped = groupSessionsByDate(filteredSessions);
 
@@ -262,7 +371,14 @@ export default function SessionSidebar({
         {items.map((session) => {
           const isActive = isSameSession(session.id, currentSessionID);
           const isEditing = editingId === session.id;
-          const isScheduled = session.source === "scheduler";
+          const isScheduled = isScheduledSession(session);
+          // Background turns keep their badge even while viewed elsewhere so
+          // the user can spot a still-running session without opening Runs.
+          // The active session keeps its typing indicator in chat; the row
+          // badge stays as the cross-session signal.
+          const isBackgroundRunning = backgroundRunning.has(
+            normalizeSessionID(session.id),
+          );
 
           return (
             <div
@@ -341,6 +457,16 @@ export default function SessionSidebar({
                   <span className="session-title" title={session.title}>
                     {session.title}
                   </span>
+                  {isBackgroundRunning ? (
+                    <span
+                      className="session-running-badge"
+                      data-testid="session-running-badge"
+                      title="Turn running in background"
+                      aria-label={`Turn running in background for ${session.title}`}
+                    >
+                      Running
+                    </span>
+                  ) : null}
                   <div className="session-item-actions">
                     <button
                       type="button"

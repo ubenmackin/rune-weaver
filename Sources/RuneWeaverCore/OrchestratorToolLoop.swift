@@ -71,19 +71,25 @@ public enum OrchestratorToolLoop {
             logSkips: false
         ).valid
         let byName = Dictionary(validTools.map { ($0.name, $0) }, uniquingKeysWith: { first, _ in first })
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
+        // Single line-ending source keeps narration parsing identical to history
+        // coverage, which folds the same shapes before matching plumbing lines.
+        // A trailing newline is a terminator, not an extra blank line.
         var calls: [ToolInput] = []
-        for rawLine in normalized.components(separatedBy: "\n") {
+        for rawLine in NormalizedText.splitLines(text) {
             guard let parsed = ToolInput.parsePlaceholderLine(rawLine) else { continue }
             guard let tool = byName[parsed.toolName] else { continue }
             guard predicate(tool) else { continue }
             guard isNarrationArgumentsJSON(parsed.argumentsJSON) else { continue }
+            // Preserve the narrated identifier so the executed record collapses
+            // with its persisted placeholder twin when grouping by call identity.
+            // A blank identifier would collapse unrelated calls into one bucket,
+            // so mint a fresh one there instead of reusing an empty key.
+            let trimmedCallID = parsed.callID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let callID = trimmedCallID.isEmpty ? UUID().uuidString : trimmedCallID
             calls.append(ToolInput(
                 toolName: parsed.toolName,
                 argumentsJSON: parsed.argumentsJSON,
-                callID: UUID().uuidString
+                callID: callID
             ))
         }
         return calls
@@ -140,3 +146,5 @@ public enum OrchestratorToolLoop {
         }
     }
 }
+
+// MARK: - NormalizedText line-ending fold lives in NormalizedText.swift

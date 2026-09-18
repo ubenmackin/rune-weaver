@@ -88,6 +88,102 @@ function getEmailPasswordEnv(name: string): string {
   return `EMAIL_${safeName}_PASSWORD`;
 }
 
+// Managed browser Python (Playwright) staged progress, mirroring the search
+// health shape so the Settings search pane stays in lockstep instead of
+// duplicating timer logic. Homebrew system pythons refuse `pip install`
+// outside a venv while `pipx` and the Homebrew `playwright-cli` formula never
+// satisfy `import playwright`, so the engine provisions `~/.runeweaver/python`
+// once (venv, `pip install playwright`, `playwright install chromium`) and
+// publishes one of these steps plus the Start time while the flight runs.
+export const BROWSER_PYTHON_VENV_DISPLAY = "~/.runeweaver/python";
+export const BROWSER_START_POLL_INTERVAL_MS = 1000;
+export const BROWSER_START_CAP_MS = 600_000;
+// User copy per managed-browser provision stage. Mirrors the engine provision
+// stage copy so the Preparing line names the same step on both sides; the
+// contract test pins this table to the engine wording so drift fails loudly
+// instead of silently relabeling the flight.
+export const BROWSER_PYTHON_STAGE_COPY: Record<string, string> = {
+  resolving: "Finding system Python",
+  creating: "Creating managed browser environment",
+  installing: "Installing Playwright package",
+  browsers: "Installing Chromium browser",
+};
+
+interface BrowserPythonHealthPayload {
+  ready?: boolean | null;
+  pythonPath?: string | null;
+  venvPath?: string | null;
+  stage?: string | null;
+  startedAt?: number | null;
+  message?: string | null;
+  diagnostics?: string | null;
+  started?: boolean | null;
+}
+
+// Extracts the live provision stage, normalizing blank or non-string payloads
+// to null so the Preparing line only renders for a real in-flight step.
+export function resolveBrowserStage(
+  response: BrowserPythonHealthPayload | null | undefined,
+): string | null {
+  if (!response) return null;
+  const raw =
+    typeof response.stage === "string" && response.stage.trim()
+      ? response.stage.trim()
+      : "";
+  return raw || null;
+}
+
+// Extracts the in-flight provision Start time (Unix seconds), normalizing
+// missing or non-positive payloads to null so elapsed math falls back to the
+// client-side Start instant instead of a garbage epoch.
+export function resolveBrowserStartedAt(
+  response: BrowserPythonHealthPayload | null | undefined,
+): number | null {
+  if (!response) return null;
+  const raw = response.startedAt;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0
+    ? raw
+    : null;
+}
+
+// Maps a provision stage to its user copy, degrading unknown stages to a bare
+// Preparing label so engine drift never blanks the in-flight line.
+export function browserStageCopy(stage: string | null | undefined): string {
+  if (stage && BROWSER_PYTHON_STAGE_COPY[stage])
+    return BROWSER_PYTHON_STAGE_COPY[stage];
+  return "Preparing";
+}
+
+// Reports whether the live stage is a minutes-budget download, during which
+// the client cap suspends so a first-run pip or Chromium fetch never trips the
+// hung-provision path early. Single-sourced so the poll and the cap agree.
+export function isBrowserLongStage(stage: string | null | undefined): boolean {
+  return stage === "installing" || stage === "browsers";
+}
+
+// Elapsed whole seconds since provisioning began, preferring the engine Start
+// time and falling back to the client-side instant. Clamped at zero so clock
+// skew never renders a negative count.
+export function browserElapsedSeconds(
+  startedAtSeconds: number | null | undefined,
+  clientStartMs: number,
+  nowMs: number = Date.now(),
+): number {
+  const baseMs =
+    startedAtSeconds != null &&
+    Number.isFinite(startedAtSeconds) &&
+    startedAtSeconds > 0
+      ? startedAtSeconds * 1000
+      : clientStartMs;
+  return Math.max(0, Math.floor((nowMs - baseMs) / 1000));
+}
+
+// Trims an engine banner or diagnostics string, normalizing blank payloads to
+// null so callers never render whitespace as detail.
+function trimBrowserText(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
 export default function SettingsManager() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>("providers");
@@ -192,6 +288,32 @@ export default function SettingsManager() {
   const [searchDiagnostics, setSearchDiagnostics] = useState<string | null>(
     null
   );
+  // Managed browser Python health for the Search pane: probed on tab open and
+  // updated directly from the Ensure response so the pill stays honest without
+  // a reload. Pill-only tri-state (Ready/Missing/Unknown) plus a Preparing
+  // pill with stage copy and elapsed while a provision flight runs, mirroring
+  // the search Starting line instead of repeating the venv path.
+  const [browserReady, setBrowserReady] = useState<boolean | null>(null);
+  const [browserPythonPath, setBrowserPythonPath] = useState<string>("");
+  const [browserVenvPath, setBrowserVenvPath] = useState<string>(
+    BROWSER_PYTHON_VENV_DISPLAY
+  );
+  const [browserHealthLoading, setBrowserHealthLoading] = useState(false);
+  const [browserAction, setBrowserAction] = useState<"ensure" | null>(null);
+  // Synchronous guard for the ensure flight: state commits asynchronously, so
+  // a double-click before re-render would otherwise start two provisions. The
+  // ref flips immediately and the state mirrors it for rendering.
+  const browserActionRef = useRef<"ensure" | null>(null);
+  const browserActionBusy = browserAction !== null;
+  const [browserStage, setBrowserStage] = useState<string | null>(null);
+  const [browserElapsed, setBrowserElapsed] = useState(0);
+  const browserTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const browserStageRef = useRef<string | null>(null);
+  const browserStartMsRef = useRef(0);
+  const [browserError, setBrowserError] = useState<string | null>(null);
+  const [browserDiagnostics, setBrowserDiagnostics] = useState<string | null>(
+    null
+  );
   const [emailAccountsList, setEmailAccountsList] = useState<EmailEntry[]>([]);
   const [pluginsDir, setPluginsDir] = useState("~/.runeweaver/plugins");
   const [pluginsMarketplaceIndexURL, setPluginsMarketplaceIndexURL] = useState(
@@ -262,6 +384,190 @@ export default function SettingsManager() {
       setSearchHealthLoading(false);
     }
   }, []);
+
+  // Stops the browser provision poll without touching terminal state; safe to
+  // call twice so the cap path and the settle path can share it.
+  const clearBrowserPoll = useCallback(() => {
+    if (browserTimerRef.current !== null) {
+      clearInterval(browserTimerRef.current);
+      browserTimerRef.current = null;
+    }
+  }, []);
+
+  // Refreshes the browser Python health line without touching the form:
+  // provisioning changes the managed venv, not config values. Honest
+  // tri-state like search: only a boolean ready flag may move the pill, while
+  // a 404 from an older engine without `/browser/health` keeps Unknown with
+  // the static venv hint instead of an error banner.
+  const refreshBrowserHealth = useCallback(async () => {
+    setBrowserHealthLoading(true);
+    try {
+      const res = await fetch("/browser/health");
+      if (!res.ok) {
+        // Older engines predate the browser lifecycle; keep the pill Unknown
+        // so the static venv path plus manual fallback still guides setup.
+        setBrowserReady(null);
+        return;
+      }
+      const payload = (await res.json()) as BrowserPythonHealthPayload;
+      if (typeof payload?.ready === "boolean") {
+        setBrowserReady(payload.ready);
+        if (typeof payload.pythonPath === "string" && payload.pythonPath.trim()) {
+          setBrowserPythonPath(payload.pythonPath.trim());
+        }
+        if (typeof payload.venvPath === "string" && payload.venvPath.trim()) {
+          setBrowserVenvPath(payload.venvPath.trim());
+        }
+      } else {
+        setBrowserReady(null);
+      }
+    } catch {
+      setBrowserReady(null);
+    } finally {
+      setBrowserHealthLoading(false);
+    }
+  }, []);
+
+  // Arms a fresh provision poll: resets the stage line, records the
+  // client-side Start instant, and polls health about 1s for the live step
+  // plus elapsed. The cap fires only past the minutes budget while not in a
+  // long download; it clears the stage line and re-probes the dot while
+  // keeping the button locked until the terminal ensure result lands.
+  const beginBrowserProgress = useCallback(() => {
+    setBrowserStage(null);
+    browserStageRef.current = null;
+    setBrowserElapsed(0);
+    const clientStartMs = Date.now();
+    browserStartMsRef.current = clientStartMs;
+    if (browserTimerRef.current !== null) {
+      clearInterval(browserTimerRef.current);
+      browserTimerRef.current = null;
+    }
+    browserTimerRef.current = setInterval(() => {
+      if (
+        Date.now() - clientStartMs > BROWSER_START_CAP_MS &&
+        !isBrowserLongStage(browserStageRef.current)
+      ) {
+        if (browserTimerRef.current !== null) {
+          clearInterval(browserTimerRef.current);
+          browserTimerRef.current = null;
+        }
+        browserStageRef.current = null;
+        setBrowserStage(null);
+        void refreshBrowserHealth();
+        return;
+      }
+      fetch("/browser/health")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((payload) => {
+          if (!payload || typeof payload !== "object") return;
+          const typed = payload as BrowserPythonHealthPayload;
+          const stage = resolveBrowserStage(typed);
+          browserStageRef.current = stage;
+          setBrowserStage(stage);
+          setBrowserElapsed(
+            browserElapsedSeconds(
+              resolveBrowserStartedAt(typed),
+              browserStartMsRef.current
+            )
+          );
+        })
+        .catch(() => {
+          // Poll failures only skip one tick; the next poll retries while the
+          // pill stays put.
+        });
+    }, BROWSER_START_POLL_INTERVAL_MS);
+  }, [refreshBrowserHealth]);
+
+  // Terminal settle stops the Preparing line on every path so no settle leaves
+  // the poll behind. Busy ownership stays with the caller.
+  const endBrowserProgress = useCallback(() => {
+    clearBrowserPoll();
+    browserStageRef.current = null;
+    setBrowserStage(null);
+  }, [clearBrowserPoll]);
+
+  // Provisions the managed venv through the dedicated ensure path: the server
+  // collapses concurrent callers onto one flight, reuses an existing entry
+  // instead of clobbering it, and fails closed offline with the venv path plus
+  // manual fallback. The pill moves solely on the terminal result below, so
+  // mid-flight flaps never flip it early.
+  const handleEnsureBrowser = async () => {
+    // Guard on the ref, not the state, so a second click before the re-render
+    // still sees the in-flight flight and drops instead of racing it.
+    if (browserActionRef.current !== null) return;
+    browserActionRef.current = "ensure";
+    setBrowserAction("ensure");
+    setBrowserError(null);
+    setBrowserDiagnostics(null);
+    beginBrowserProgress();
+    try {
+      const res = await fetch("/browser/ensure", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) {
+        let detail = `Request failed: /browser/ensure (${res.status})`;
+        try {
+          const text = await res.text();
+          if (text) {
+            try {
+              const parsed: unknown = JSON.parse(text);
+              const record =
+                typeof parsed === "object" && parsed !== null
+                  ? (parsed as Record<string, unknown>)
+                  : null;
+              const reason =
+                record != null
+                  ? (record.reason ?? record.message ?? record.error)
+                  : undefined;
+              detail =
+                typeof reason === "string" && reason.trim()
+                  ? reason.trim().slice(0, 500)
+                  : text.slice(0, 500);
+            } catch {
+              detail = text.slice(0, 500);
+            }
+          }
+        } catch {
+          // Keep the status fallback when the body is unreadable.
+        }
+        setBrowserReady(null);
+        setBrowserError(detail);
+        return;
+      }
+      const payload = (await res.json()) as BrowserPythonHealthPayload;
+      if (typeof payload?.ready === "boolean") {
+        setBrowserReady(payload.ready);
+        if (typeof payload.pythonPath === "string" && payload.pythonPath.trim()) {
+          setBrowserPythonPath(payload.pythonPath.trim());
+        }
+        if (typeof payload.venvPath === "string" && payload.venvPath.trim()) {
+          setBrowserVenvPath(payload.venvPath.trim());
+        }
+        setBrowserDiagnostics(trimBrowserText(payload.diagnostics));
+        if (!payload.ready) {
+          const detail = trimBrowserText(payload.message);
+          setBrowserError(
+            detail ?? "Browser Python is not ready; status unchanged."
+          );
+        }
+      } else {
+        setBrowserError(
+          "Browser ensure returned an unexpected response; status unchanged."
+        );
+      }
+    } catch (err) {
+      setBrowserError(
+        err instanceof Error ? err.message : "Failed to ensure browser Python."
+      );
+    } finally {
+      endBrowserProgress();
+      browserActionRef.current = null;
+      setBrowserAction(null);
+    }
+  };
 
   // Single lifecycle toggle mirroring the TopNav shape: unknown and stopped
   // both start, running stops. The direction is captured up front so the busy
@@ -600,8 +906,21 @@ export default function SettingsManager() {
   useEffect(() => {
     if (activeTab === "search") {
       void refreshSearchHealth();
+      void refreshBrowserHealth();
     }
-  }, [activeTab, refreshSearchHealth]);
+  }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
+
+  // Unmount must never leave the browser provision poll running behind a
+  // closed pane.
+  useEffect(() => {
+    const timerRef = browserTimerRef;
+    return () => {
+      if (timerRef.current !== null) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2788,6 +3107,125 @@ export default function SettingsManager() {
               Stop keeps the container for fast restart, Remove deletes it
               fully, and quit leaves it running by design.
             </p>
+            {/* Browser automation (Playwright) lifecycle: managed venv under
+                ~/.runeweaver/python provisioned on first navigate or serve
+                boot (venv, pip install playwright, playwright install
+                chromium). Resolution prefers RUNEWEAVER_PYTHON_BIN, then the
+                managed venv, then PATH python3; pipx and Homebrew
+                playwright-cli never satisfy `import playwright`. Health stays
+                pill-only like search with a Preparing line plus elapsed while
+                provisioning, and failures name the venv path plus manual
+                fallback instead of the generic pip hint. */}
+            <div
+              style={{
+                marginTop: "20px",
+                paddingTop: "16px",
+                borderTop: "1px solid var(--border-color, #2d3748)",
+              }}
+            >
+              <div className="settings-section-header">
+                <div className="settings-section-title-group">
+                  <h4 style={{ margin: "0 0 4px 0" }}>
+                    Browser automation (Playwright)
+                  </h4>
+                  <p className="settings-section-hint">
+                    Managed Python at {browserVenvPath} for browser.navigate
+                    and browser.act. First use creates the venv and installs
+                    Playwright plus Chromium; later uses reuse it. Override
+                    with RUNEWEAVER_PYTHON_BIN, then managed venv, then PATH
+                    python3. pipx and brew playwright-cli do not provide import
+                    playwright.
+                  </p>
+                </div>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    data-testid="browser-ensure"
+                    onClick={() => void handleEnsureBrowser()}
+                    disabled={browserActionBusy}
+                    aria-label="Ensure browser Python"
+                    title="Ensure browser Python"
+                  >
+                    <WrenchIcon size={14} />
+                    <span>
+                      {browserAction === "ensure"
+                        ? "Preparing…"
+                        : "Ensure browser Python"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+              {/* Health line stays pill-only: the venv hint above is the single
+                  path display, so repeating it here only duplicates long paths
+                  in narrow panes. */}
+              <span
+                data-testid="browser-health-text"
+                className="search-health-line"
+              >
+                {browserAction === "ensure" ? (
+                  <>
+                    <span
+                      className="status-pill running"
+                      data-testid="browser-starting-pill"
+                    >
+                      Preparing
+                    </span>
+                    <span
+                      className="muted text-sm"
+                      data-testid="browser-start-stage"
+                    >
+                      {browserStageCopy(browserStage)} · {browserElapsed}s
+                    </span>
+                  </>
+                ) : browserHealthLoading ? (
+                  <span className="muted text-sm">
+                    Checking browser health…
+                  </span>
+                ) : browserReady === null ? (
+                  <span className="status-pill skipped">Unknown</span>
+                ) : browserReady ? (
+                  <span className="status-pill ok">Ready</span>
+                ) : (
+                  <span className="status-pill error">Missing</span>
+                )}
+              </span>
+              {browserPythonPath ? (
+                <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
+                  Python: <code>{browserPythonPath}</code> (venv{" "}
+                  {browserVenvPath})
+                </p>
+              ) : null}
+              {browserError ? (
+                <div
+                  className="error-banner"
+                  data-testid="browser-health-error"
+                >
+                  {browserError}
+                </div>
+              ) : null}
+              {browserDiagnostics ? (
+                <details
+                  className="muted text-sm"
+                  data-testid="browser-health-diagnostics"
+                >
+                  <summary>Diagnostics</summary>
+                  <pre style={{ whiteSpace: "pre-wrap", margin: "8px 0 0 0" }}>
+                    {browserDiagnostics}
+                  </pre>
+                </details>
+              ) : null}
+              <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
+                Manual fallback:{" "}
+                <code>
+                  {browserVenvPath}/bin/python -m pip install playwright &&{" "}
+                  {browserVenvPath}/bin/python -m playwright install chromium
+                </code>{" "}
+                (on Linux also run {browserVenvPath}/bin/python -m playwright
+                install-deps or install system browser dependencies manually).
+                Offline installs fail closed without changing the existing venv.
+              </p>
+            </div>
             {/* Guarded remove confirmation via the shared modal so the entry is
                 never deleted by an accidental click. */}
             {pendingRemoveSearch ? (

@@ -6,15 +6,27 @@ import Foundation
 /// Security and integrity services for Rune Weaver plugins.
 public enum PluginSecurity {
     /// File and directory names ignored during tree hashing and validation.
+    /// Transient caches plus source-control metadata stay out of the hash so
+    /// routine checkouts never read as tampering, while review covers
+    /// provisioned source rather than the runtime itself.
+    /// Provisioned virtual-environment directories (`.venv`/`venv`) hold
+    /// executable code and stay hashed: skipping them would let a tampered
+    /// interpreter or installed package bypass detection. Only narrow
+    /// reinstall caches inside those environments (pip HTTP subtree, wheel
+    /// downloads, `__pycache__` bytecode) stay out of the hash via
+    /// `isVenvCacheEntry`; arbitrary files such as `.cache/evil.py` keep
+    /// hashing, and dependency upgrades still change the digest and require
+    /// re-approval by design.
     public static let ignoredFileNames: Set<String> = [
         ".DS_Store",
         "__pycache__",
         ".git",
         ".gitignore",
-        ".venv",
-        "venv",
         ".pytest_cache"
     ]
+
+    /// Directory names marking a provisioned Python virtual environment.
+    private static let venvDirectoryNames: Set<String> = ["venv", ".venv"]
 
     /// Calculates a deterministic SHA-256 tree hash of all files in a plugin directory.
     public static func calculateDirectoryHash(at directoryURL: URL) -> String? {
@@ -113,6 +125,21 @@ public enum PluginSecurity {
             guard !relative.isEmpty else {
                 continue
             }
+            // Only regenerable reinstall caches inside provisioned environments
+            // stay out of the hash; every other venv entry (executables,
+            // manifests, installed sources, plus arbitrary files such as
+            // `.cache/evil.py`) remains hashed so tamper stays visible.
+            if isVenvCacheEntry(
+                relativePath: relative,
+                lastComponent: lastComponent,
+                isDirectory: isDirectory,
+                isSymlink: isSymlink
+            ) {
+                if isDirectory, !isSymlink {
+                    enumerator.skipDescendants()
+                }
+                continue
+            }
 
             var mode: UInt32 = 0
             if let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path),
@@ -135,6 +162,71 @@ public enum PluginSecurity {
 
         entries.sort { $0.relativePath < $1.relativePath }
         return entries
+    }
+
+    /// Reports whether a plugin-relative path is a regenerable reinstall cache
+    /// inside a provisioned virtual environment. Only the pip HTTP cache
+    /// subtree, wheel downloads, and bytecode inside `__pycache__` qualify;
+    /// launchers, manifests, installed sources, and arbitrary files such as
+    /// `.cache/evil.py` stay hashed so executable tamper changes the digest.
+    /// Symlinks always hash so a retargeted link cannot hide behind a cache
+    /// name, and cache directory markers hash (except the pip subtree root)
+    /// so file tamper inside stays visible while pip churn alone avoids
+    /// forcing re-approval.
+    private static func isVenvCacheEntry(
+        relativePath: String,
+        lastComponent: String,
+        isDirectory: Bool,
+        isSymlink: Bool
+    ) -> Bool {
+        // A symlink target change is tamper even under a cache-looking name,
+        // and hashing a link costs only its target string, so links never skip.
+        if isSymlink {
+            return false
+        }
+        let segments = relativePath.lowercased().split(separator: "/").map(String.init)
+        guard let venvIndex = segments.firstIndex(where: { venvDirectoryNames.contains($0) }) else {
+            return false
+        }
+        // The venv directory marker itself hashes so removing the environment
+        // stays visible; only entries beneath it can qualify as caches.
+        guard venvIndex + 1 < segments.count else {
+            return false
+        }
+        let suffix = Array(segments[(venvIndex + 1)...])
+        let loweredLast = lastComponent.lowercased()
+        // Wheel downloads are regenerable fetches, never executed in place;
+        // sibling sources such as `wheels/evil.py` keep hashing. Only files
+        // skip so a directory that happens to end in `.whl` still hashes its
+        // marker and lets its contents speak individually.
+        if !isDirectory, loweredLast.hasSuffix(".whl") {
+            return true
+        }
+        // Bytecode only counts inside `__pycache__` where the interpreter
+        // regenerates it; stray colocated `.pyc` files hash so planted
+        // bytecode stays visible. Top-level `__pycache__` directories already
+        // skip via the ignored names before reaching here.
+        if !isDirectory,
+           loweredLast.hasSuffix(".pyc") || loweredLast.hasSuffix(".pyo"),
+           suffix.contains("__pycache__")
+        {
+            return true
+        }
+        // Pip HTTP cache only: a consecutive `.cache/pip` pair anywhere beneath
+        // the venv. The pair covers both the immediate `venv/.cache/pip` layout
+        // and nested managers, while a bare `.cache/evil.py` without the `pip`
+        // hop keeps hashing. Directories hash except the pip subtree root, whose
+        // marker plus descendants skip together so cache churn does not force
+        // re-approval; file tamper under a hashed parent still surfaces via the
+        // file entry itself.
+        if suffix.count >= 2 {
+            for index in 0 ..< (suffix.count - 1) {
+                if suffix[index] == ".cache", suffix[index + 1] == "pip" {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private static func hashFileEntry(

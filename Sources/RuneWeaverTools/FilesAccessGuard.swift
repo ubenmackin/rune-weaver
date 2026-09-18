@@ -15,6 +15,21 @@
 
 import Foundation
 import RuneWeaverCore
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
+
+/// Failure opening a guarded path without following symlinks.
+public enum FilesAccessOpenError: Error, Sendable, Equatable {
+    /// Policy denied the path (point-in-time or re-validated handle path).
+    case denied(String)
+    /// The final component is a symlink, refused without following it.
+    case symlinkRefused(String)
+    /// The file could not be opened or inspected.
+    case openFailed(String)
+}
 
 /// Single source of truth for file-tool path policy.
 public enum FilesAccessGuard: Sendable {
@@ -81,6 +96,11 @@ public enum FilesAccessGuard: Sendable {
     }
 
     /// Expands and absolutises a raw path without applying policy.
+    /// Resolution is point-in-time: the nearest existing ancestor is resolved
+    /// once and missing trailing components are re-appended without a second
+    /// validation, so a symlink swapped between this check and the later open
+    /// could redirect the final target. Callers that read file bytes open via
+    /// `openNoFollowAndValidate` instead of trusting this view across the gap.
     public static func resolvedURL(for path: String) -> URL {
         let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
         let expanded = (trimmed as NSString).expandingTildeInPath
@@ -91,7 +111,122 @@ public enum FilesAccessGuard: Sendable {
             let cwd = FileManager.default.currentDirectoryPath
             absolute = (cwd as NSString).appendingPathComponent(expanded)
         }
-        return URL(fileURLWithPath: absolute).standardized.resolvingSymlinksInPath()
+        let url = URL(fileURLWithPath: absolute).standardizedFileURL
+        // Walk up until we find an existing ancestor, resolve it, then re-append.
+        let fileManager = FileManager.default
+        var existing = url
+        var trailing: [String] = []
+        while !fileManager.fileExists(atPath: existing.path), existing.path != "/" {
+            trailing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+        var resolved = existing.resolvingSymlinksInPath()
+        for component in trailing {
+            resolved.appendPathComponent(component)
+        }
+        return resolved
+    }
+
+    /// Opens a guarded path for reading without following a trailing symlink,
+    /// then re-validates the opened handle against policy before returning it.
+    /// Point-in-time evaluation alone leaves a symlink-swap gap between the
+    /// check and the open, so the open refuses symlinked finals and the live
+    /// handle path is checked again while its inode is pinned.
+    /// - Parameters:
+    ///   - path: Raw caller path (tilde and relative forms accepted).
+    ///   - homeDirectoryURL: Test home override, if any.
+    ///   - filesConfig: `[files]` policy to enforce on both checks.
+    /// - Returns: Open handle plus the validated handle path.
+    public static func openNoFollowAndValidate(
+        path: String,
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig()
+    ) throws -> (handle: FileHandle, resolvedPath: String) {
+        let decision = evaluate(path: path, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        guard decision.allowed else {
+            throw FilesAccessOpenError.denied(decision.reason ?? "Reading this path requires explicit approval.")
+        }
+        let fd: Int32 = decision.resolvedPath.withCString { cString in
+            open(cString, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        }
+        guard fd >= 0 else {
+            if errno == ELOOP {
+                throw FilesAccessOpenError.symlinkRefused(
+                    "Refusing to follow symlink at \(decision.resolvedPath)."
+                )
+            }
+            throw FilesAccessOpenError.openFailed(
+                "Could not open file: \(decision.resolvedPath)."
+            )
+        }
+        // The pinned descriptor outlives the read and would otherwise be
+        // inherited by plugin and voice children, so enforce close-on-exec
+        // even where the open-time flag is ignored.
+        let existingFDFlags = fcntl(fd, F_GETFD)
+        if existingFDFlags != -1 {
+            _ = fcntl(fd, F_SETFD, existingFDFlags | FD_CLOEXEC)
+        } else {
+            _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
+        }
+        guard let handlePath = handlePath(for: fd) else {
+            _ = close(fd)
+            throw FilesAccessOpenError.openFailed("Could not resolve opened file path.")
+        }
+        var statBuf = stat()
+        guard fstat(fd, &statBuf) == 0 else {
+            _ = close(fd)
+            throw FilesAccessOpenError.openFailed("Could not stat opened file.")
+        }
+        // Refuse directories here so a directory handle never masquerades as
+        // file bytes further up the call chain.
+        let fileType = statBuf.st_mode & S_IFMT
+        if fileType == S_IFDIR {
+            _ = close(fd)
+            throw FilesAccessOpenError.openFailed("Not a file: \(handlePath).")
+        }
+        // The descriptor pins the inode, so re-checking its live path closes
+        // a swap that landed after the first evaluation.
+        let recheck = evaluate(path: handlePath, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        guard recheck.allowed else {
+            _ = close(fd)
+            throw FilesAccessOpenError.denied(recheck.reason ?? "Reading this path requires explicit approval.")
+        }
+        return (FileHandle(fileDescriptor: fd, closeOnDealloc: true), recheck.resolvedPath)
+    }
+
+    /// Resolves the live filesystem path backing an open descriptor.
+    private static func handlePath(for fd: Int32) -> String? {
+        #if canImport(Darwin)
+            var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            let result = buffer.withUnsafeMutableBufferPointer { pointer -> Int32 in
+                guard let base = pointer.baseAddress else { return -1 }
+                return fcntl(fd, F_GETPATH, base)
+            }
+            guard result != -1 else { return nil }
+            // Decode through the pointer form so decoding stops at the first
+            // NUL instead of carrying the trailing padding into the path.
+            return buffer.withUnsafeBufferPointer { pointer -> String? in
+                guard let base = pointer.baseAddress else { return nil }
+                return String(cString: base)
+            }
+        #else
+            let procPath = "/proc/self/fd/\(fd)"
+            var buffer = [CChar](repeating: 0, count: 4096)
+            let length: Int = procPath.withCString { procCString in
+                buffer.withUnsafeMutableBufferPointer { bufPtr -> Int in
+                    guard let base = bufPtr.baseAddress else { return -1 }
+                    return readlink(procCString, base, bufPtr.count - 1)
+                }
+            }
+            guard length > 0, length < buffer.count else { return nil }
+            buffer[length] = 0
+            // Decode through the pointer form so decoding stops at the first
+            // NUL instead of carrying the trailing padding into the path.
+            return buffer.withUnsafeBufferPointer { pointer -> String? in
+                guard let base = pointer.baseAddress else { return nil }
+                return String(cString: base)
+            }
+        #endif
     }
 
     /// Resolves the home boundary to a canonical URL.

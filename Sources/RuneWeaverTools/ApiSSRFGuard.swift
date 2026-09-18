@@ -3,383 +3,134 @@
 // The guard refuses metadata hosts, link-local, loopback except configured
 // origins, private RFC 1918 ranges, and IPv6 unique-local addresses across
 // decimal, hex, octal, and short IPv4 spellings. IPv4 parsing, address
-// classification, and origin normalization live in small sibling helpers so
+// classification, and origin normalization live in `ApiSSRFParsing` while the
+// literal-only verdict plus resolved-range vetting live in `ApiSSRFVerdict` so
 // the gate type stays within budget; every caller still enters through
 // `ApiSSRFGuard`, so allowlist checks cannot diverge on obfuscated hosts.
 
 import Foundation
+import os
 import RuneWeaverCore
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
-/// Four parsed IPv4 octets for range checks without tuple destructuring.
-public struct IPv4Octets: Sendable, Equatable {
-    /// First octet (e.g. `169` in `169.254.x.x`).
-    public let firstOctet: Int
-    /// Second octet (e.g. `254` in `169.254.x.x`).
-    public let secondOctet: Int
-    /// Third octet.
-    public let thirdOctet: Int
-    /// Fourth octet.
-    public let fourthOctet: Int
-
-    /// Creates parsed octets.
-    public init(firstOctet: Int, secondOctet: Int, thirdOctet: Int, fourthOctet: Int) {
-        self.firstOctet = firstOctet
-        self.secondOctet = secondOctet
-        self.thirdOctet = thirdOctet
-        self.fourthOctet = fourthOctet
-    }
-}
-
-/// Resolver-accepted IPv4 parsing shared by the SSRF guard.
-///
-/// Handles decimal, hex, octal, and short forms plus IPv4-mapped IPv6 so
-/// obfuscated spellings canonicalize before any range decision.
-enum ApiIPv4Parsing: Sendable {
-    /// Parses one numeric IPv4 part in decimal, octal, or hex.
-    static func parseNumericPart(_ part: String) -> UInt32? {
-        let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasPrefix("0x") || trimmed.hasPrefix("0X") {
-            let hex = String(trimmed.dropFirst(2))
-            guard !hex.isEmpty, hex.count <= 8 else { return nil }
-            guard hex.allSatisfy(\.isHexDigit) else { return nil }
-            return UInt32(hex, radix: 16)
-        }
-        if trimmed.hasPrefix("0"), trimmed.count > 1, trimmed.allSatisfy(\.isNumber) {
-            let digits = trimmed
-            let isOctal = digits.allSatisfy { char in
-                guard let ascii = char.asciiValue else { return false }
-                return ascii >= 48 && ascii <= 55
-            }
-            if isOctal {
-                return UInt32(digits, radix: 8)
-            }
-            return UInt32(digits, radix: 10)
-        }
-        guard trimmed.allSatisfy(\.isNumber) else { return nil }
-        return UInt32(trimmed, radix: 10)
-    }
-
-    /// Parses IPv6 text into eight hextets for loopback and mapped checks.
-    static func ipv6Hextets(_ host: String) -> [UInt16]? {
-        let lowered = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !lowered.isEmpty, lowered.contains(":"), !lowered.contains(".") else { return nil }
-        guard !lowered.contains("%") else { return nil }
-        if lowered.contains("::") {
-            let halves = lowered.components(separatedBy: "::")
-            guard halves.count == 2 else { return nil }
-            let headParts = halves[0].isEmpty ? [] : halves[0].split(separator: ":", omittingEmptySubsequences: false)
-            let tailParts = halves[1].isEmpty ? [] : halves[1].split(separator: ":", omittingEmptySubsequences: false)
-            for part in headParts + tailParts {
-                guard !part.isEmpty, part.count <= 4, part.allSatisfy(\.isHexDigit) else { return nil }
-            }
-            guard headParts.count + tailParts.count <= 7 else { return nil }
-            var groups: [UInt16] = []
-            groups.reserveCapacity(8)
-            for part in headParts {
-                guard let value = UInt16(String(part), radix: 16) else { return nil }
-                groups.append(value)
-            }
-            let missing = 8 - (headParts.count + tailParts.count)
-            groups.append(contentsOf: Array(repeating: UInt16(0), count: missing))
-            for part in tailParts {
-                guard let value = UInt16(String(part), radix: 16) else { return nil }
-                groups.append(value)
-            }
-            guard groups.count == 8 else { return nil }
-            return groups
-        }
-        let parts = lowered.split(separator: ":", omittingEmptySubsequences: false)
-        guard parts.count == 8 else { return nil }
-        var groups: [UInt16] = []
-        groups.reserveCapacity(8)
-        for part in parts {
-            guard !part.isEmpty, part.count <= 4, part.allSatisfy(\.isHexDigit) else { return nil }
-            guard let value = UInt16(String(part), radix: 16) else { return nil }
-            groups.append(value)
-        }
-        return groups
-    }
-
-    /// Parses any resolver-accepted IPv4 spelling to canonical octets.
-    static func canonicalIPv4Octets(_ host: String) -> IPv4Octets? {
-        let cleaned = ApiSSRFOrigin.cleanedHostBase(host)
-        guard !cleaned.isEmpty else { return nil }
-        if cleaned.contains(":") {
-            return octetsFromMappedIPv6(cleaned.lowercased())
-        }
-        guard let values = numericValuesForDottedHost(cleaned) else { return nil }
-        return octetsFromNumericValues(values)
-    }
-
-    /// Resolves the IPv4 octets hidden inside an IPv6 literal.
-    static func octetsFromMappedIPv6(_ lowered: String) -> IPv4Octets? {
-        if lowered.contains(".") {
-            guard let lastColon = lowered.lastIndex(of: ":") else { return nil }
-            let tail = String(lowered[lowered.index(after: lastColon)...])
-            guard !tail.isEmpty, !tail.contains(":") else { return nil }
-            return canonicalIPv4Octets(tail)
-        }
-        guard let groups = ipv6Hextets(lowered) else { return nil }
-        guard isIPv4Mapped(groups) else { return nil }
-        let high = groups[6]
-        let low = groups[7]
-        return IPv4Octets(
-            firstOctet: Int(high >> 8),
-            secondOctet: Int(high & UInt16(0xFF)),
-            thirdOctet: Int(low >> 8),
-            fourthOctet: Int(low & UInt16(0xFF))
-        )
-    }
-
-    /// Whether eight hextets are an IPv4-mapped prefix (`::ffff:0:0/96`).
-    static func isIPv4Mapped(_ groups: [UInt16]) -> Bool {
-        guard groups.count == 8 else { return false }
-        return groups[0] == 0 && groups[1] == 0 && groups[2] == 0 && groups[3] == 0 && groups[4] == 0 && groups[5] == 0xFFFF
-    }
-
-    /// Parses the dotted parts of a cleaned host into resolver numbers.
-    static func numericValuesForDottedHost(_ cleaned: String) -> [UInt32]? {
-        let parts = cleaned.split(separator: ".", omittingEmptySubsequences: false)
-        guard (1 ... 4).contains(parts.count) else { return nil }
-        var values: [UInt32] = []
-        values.reserveCapacity(parts.count)
-        for part in parts {
-            guard !part.isEmpty else { return nil }
-            guard let value = parseNumericPart(String(part)) else { return nil }
-            values.append(value)
-        }
-        return values
-    }
-
-    /// Expands one to four resolver numbers into four canonical octets.
-    static func octetsFromNumericValues(_ values: [UInt32]) -> IPv4Octets? {
-        switch values.count {
-        case 1:
-            let value = values[0]
-            return IPv4Octets(
-                firstOctet: Int((value >> 24) & 0xFF),
-                secondOctet: Int((value >> 16) & 0xFF),
-                thirdOctet: Int((value >> 8) & 0xFF),
-                fourthOctet: Int(value & 0xFF)
-            )
-        case 2:
-            guard values[0] <= 255, values[1] <= 0xFFFFFF else { return nil }
-            let first = values[0]
-            let second = values[1]
-            return IPv4Octets(
-                firstOctet: Int(first),
-                secondOctet: Int((second >> 16) & 0xFF),
-                thirdOctet: Int((second >> 8) & 0xFF),
-                fourthOctet: Int(second & 0xFF)
-            )
-        case 3:
-            guard values[0] <= 255, values[1] <= 255, values[2] <= 0xFFFF else { return nil }
-            let third = values[2]
-            return IPv4Octets(
-                firstOctet: Int(values[0]),
-                secondOctet: Int(values[1]),
-                thirdOctet: Int((third >> 8) & 0xFF),
-                fourthOctet: Int(third & 0xFF)
-            )
-        case 4:
-            for value in values {
-                guard value <= 255 else { return nil }
-            }
-            return IPv4Octets(
-                firstOctet: Int(values[0]),
-                secondOctet: Int(values[1]),
-                thirdOctet: Int(values[2]),
-                fourthOctet: Int(values[3])
-            )
-        default:
-            return nil
-        }
-    }
-}
-
-/// Host normalization and origin comparison shared by the SSRF guard.
-///
-/// Canonicalizes bracketed IPv6, zone IDs, and trailing dots plus the
-/// scheme-default port so allowlist exemptions compare `host:port` exactly.
-enum ApiSSRFOrigin: Sendable {
-    /// Trims a raw host to its comparable base form.
-    static func cleanedHostBase(_ host: String) -> String {
-        var cleaned = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if cleaned.hasPrefix("["), cleaned.hasSuffix("]"), cleaned.count >= 2 {
-            cleaned = String(cleaned.dropFirst().dropLast())
-            cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let percent = cleaned.firstIndex(of: "%") {
-            cleaned = String(cleaned[..<percent])
-        }
-        while cleaned.hasSuffix("."), cleaned.count > 1 {
-            cleaned = String(cleaned.dropLast())
-        }
-        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Normalizes a URL host for origin comparison.
-    static func normalizedHost(_ host: String) -> String {
-        let cleaned = cleanedHostBase(host)
-        guard !cleaned.isEmpty else { return "" }
-        if let octets = ApiIPv4Parsing.canonicalIPv4Octets(cleaned) {
-            return "\(octets.firstOctet).\(octets.secondOctet).\(octets.thirdOctet).\(octets.fourthOctet)"
-        }
-        if cleaned.contains(":"), !cleaned.contains("."), let groups = ApiIPv4Parsing.ipv6Hextets(cleaned) {
-            return groups.map { String(Int($0), radix: 16) }.joined(separator: ":")
-        }
-        return cleaned
-    }
-
-    /// Effective port for origin comparison, filling the scheme default.
-    static func effectivePort(for url: URL) -> Int {
-        if let port = url.port, (1 ... 65535).contains(port) {
-            return port
-        }
-        if url.scheme?.lowercased() == "https" {
-            return 443
-        }
-        return 80
-    }
-
-    /// Origin key (`host:port`) for allowlist comparison.
-    /// - Parameter url: Parsed URL with a host.
-    /// - Returns: Lowercased origin, or nil when hostless.
-    static func originKey(for url: URL) -> String? {
-        guard let host = url.host, !host.isEmpty else { return nil }
-        return "\(normalizedHost(host)):\(effectivePort(for: url))"
-    }
-}
-
-/// Sensitive-range classification shared by the SSRF guard.
-///
-/// Covers loopback, link-local, private RFC 1918, `0.0.0.0/8`, and IPv6
-/// unique-local addresses so fetch and API checks share one range table.
-enum ApiSSRFAddresses: Sendable {
-    /// Whether a host is in `169.254.0.0/16` (link-local, never allowlisted).
-    static func isLinkLocalIPv4(_ host: String) -> Bool {
-        guard let octets = ApiIPv4Parsing.canonicalIPv4Octets(host) else { return false }
-        return octets.firstOctet == 169 && octets.secondOctet == 254
-    }
-
-    /// Whether a host is IPv6 link-local (`fe80::/10`, never allowlisted).
-    static func isLinkLocalIPv6(_ host: String) -> Bool {
-        let cleaned = ApiSSRFOrigin.cleanedHostBase(host)
-        guard cleaned.contains(":"), !cleaned.contains(".") else { return false }
-        guard let groups = ApiIPv4Parsing.ipv6Hextets(cleaned) else { return false }
-        return (groups[0] & 0xFFC0) == 0xFE80
-    }
-
-    /// Whether a host is IPv4 loopback (`127.0.0.0/8`).
-    static func isLoopbackIPv4(_ host: String) -> Bool {
-        guard let octets = ApiIPv4Parsing.canonicalIPv4Octets(host) else { return false }
-        return octets.firstOctet == 127
-    }
-
-    /// Whether a host is IPv6 loopback or unspecified.
-    static func isLoopbackIPv6(_ host: String) -> Bool {
-        let cleaned = ApiSSRFOrigin.cleanedHostBase(host)
-        guard cleaned.contains(":") else { return false }
-        if cleaned.contains(".") {
-            return false
-        }
-        guard let groups = ApiIPv4Parsing.ipv6Hextets(cleaned) else { return false }
-        let allZero = groups.allSatisfy { $0 == 0 }
-        if allZero {
-            return true
-        }
-        return groups[0] == 0 && groups[1] == 0 && groups[2] == 0 && groups[3] == 0 && groups[4] == 0 && groups[5] == 0 && groups[6] == 0 && groups[7] == 1
-    }
-
-    /// Whether a host is a loopback equivalent.
-    static func isLoopbackHost(_ host: String) -> Bool {
-        let cleaned = ApiSSRFOrigin.cleanedHostBase(host)
-        guard !cleaned.isEmpty else { return false }
-        if cleaned == "localhost" {
-            return true
-        }
-        if isLoopbackIPv6(cleaned) {
-            return true
-        }
-        guard let octets = ApiIPv4Parsing.canonicalIPv4Octets(cleaned) else { return false }
-        if octets.firstOctet == 127 {
-            return true
-        }
-        if octets.firstOctet == 0, octets.secondOctet == 0, octets.thirdOctet == 0, octets.fourthOctet == 0 {
-            return true
-        }
-        return false
-    }
-
-    /// Whether a 32-bit IPv4 value dials a sensitive range (loopback,
-    /// link-local, private RFC 1918, or `0.0.0.0/8`). Single-sourced so the
-    /// API guard and the fetch guard cannot diverge on obfuscated spellings.
-    static func isSensitiveIPv4Value(_ value: UInt32) -> Bool {
-        if (value & 0xFF00_0000) == 0x7F00_0000 {
-            return true
-        }
-        if (value & 0xFFFF_0000) == 0xA9FE_0000 {
-            return true
-        }
-        if (value & 0xFF00_0000) == 0x0A00_0000 {
-            return true
-        }
-        if (value & 0xFFF0_0000) == 0xAC10_0000 {
-            return true
-        }
-        if (value & 0xFFFF_0000) == 0xC0A8_0000 {
-            return true
-        }
-        if (value & 0xFF00_0000) == 0x0000_0000 {
-            return true
-        }
-        return false
-    }
-
-    /// Parses a canonical host to its 32-bit IPv4 value for range checks.
-    static func ipv4Value(_ host: String) -> UInt32? {
-        guard let octets = ApiIPv4Parsing.canonicalIPv4Octets(host) else { return nil }
-        return (UInt32(octets.firstOctet) << 24) | (UInt32(octets.secondOctet) << 16)
-            | (UInt32(octets.thirdOctet) << 8) | UInt32(octets.fourthOctet)
-    }
-
-    /// Whether a canonical host is a sensitive IPv6 literal (loopback,
-    /// link-local, unique-local `fc00::/7`, or mapped sensitive tails).
-    /// Unique-local requires an IPv6 literal (a colon) plus the `fc00::/7`
-    /// hextet mask, so DNS names like `fc.example.com` never false-positive.
-    static func isSensitiveIPv6Host(_ canonical: String) -> Bool {
-        if isLoopbackIPv6(canonical) || isLinkLocalIPv6(canonical) {
-            return true
-        }
-        let lowered = canonical.lowercased()
-        if lowered.contains(":"), lowered.contains(".") {
-            if let lastColon = lowered.lastIndex(of: ":") {
-                let embedded = String(lowered[lowered.index(after: lastColon)...])
-                if let value = ipv4Value(embedded), isSensitiveIPv4Value(value) {
-                    return true
-                }
-            }
-            return false
-        }
-        if lowered.contains(":"), let groups = ApiIPv4Parsing.ipv6Hextets(lowered), !groups.isEmpty,
-           (groups[0] & 0xFE00) == 0xFC00
-        {
-            return true
-        }
-        if lowered.contains("ffff"), lowered.hasSuffix(":7f00:1") || lowered.hasSuffix(":7f00:0001") {
-            return true
-        }
-        return false
-    }
-}
+/// Single width for the bounded DNS pool shared by the queue and the permit gate.
+/// One constant keeps the worker count and the pending-vetting bound converged,
+/// so a later tune cannot leave the queue wider than the gate that sheds excess
+/// fail-closed.
+private let ssrfDNSPoolWidth = 4
 
 /// SSRF guard for API URLs.
 ///
 /// Single entry point for decimal, hex, octal, and short IPv4 forms plus IPv6
 /// and metadata hosts; parsing, classification, and origin helpers live in
-/// sibling types so this gate stays within budget without a second range pass.
+/// `ApiSSRFParsing` so this gate stays within budget without a second range pass.
+///
+/// Bounded DNS pool for async checks. The resolver blocks its thread with no
+/// kernel cancellation, so async verdicts hop here instead of the cooperative
+/// pool; only loopback-exempted literals skip this hop, everything else needing
+/// DNS must prove its addresses here. The cap keeps a wedged burst from
+/// exhausting threads while queued lookups wait without holding one, and
+/// abandonment stays fail-closed. The gate bounds total pending (running plus
+/// queued) so a burst cannot stack unlimited blocking lookups behind the pool
+/// width threads; excess drops fail-closed instead of queueing behind a wedged
+/// resolver.
+private let ssrfDNSQueue: OperationQueue = {
+    let queue = OperationQueue()
+    queue.name = "com.runeweaver.ssrf-dns"
+    queue.maxConcurrentOperationCount = ssrfDNSPoolWidth
+    queue.qualityOfService = .utility
+    return queue
+}()
+
+/// Non-blocking permit gate bounding total pending DNS vettings to the pool width.
+/// A semaphore cannot be waited from an async context without stalling the
+/// cooperative pool, so saturation is probed with a lock-guarded counter
+/// instead: acquiring never blocks, and a miss reads as unverified rather
+/// than permission to dial. All mutable state stays behind the unfair lock so
+/// the gate remains safe to share across awaiting tasks and queue workers; the
+/// unfair lock matches the repo-wide checked-Sendable standard and keeps the
+/// gate compatible with strict concurrency without bypassing checking.
+private final class SSRFPermitGate: Sendable {
+    private let permits: OSAllocatedUnfairLock<Int>
+
+    /// Creates a gate holding a fixed number of permits.
+    /// - Parameter permits: Total concurrent vettings the pool may hold.
+    init(_ permits: Int) {
+        self.permits = OSAllocatedUnfairLock(initialState: permits)
+    }
+
+    /// Takes one permit when available without waiting.
+    /// - Returns: True when the caller owns a permit and must release it.
+    func tryAcquire() -> Bool {
+        permits.withLock { count in
+            guard count > 0 else { return false }
+            count -= 1
+            return true
+        }
+    }
+
+    /// Returns a previously acquired permit.
+    func release() {
+        permits.withLock { $0 += 1 }
+    }
+}
+
+/// Drop-newest gate bounding total pending DNS vettings to the pool width.
+/// Queued lookups hold no thread, but an unbounded queue would still let a
+/// burst stack unlimited blocking work behind a wedged resolver while each
+/// waiter times out yet its lookup still waits to hold a thread. Trying the
+/// gate without waiting keeps the burst fail-closed: saturation reads as
+/// unverified rather than permission to dial.
+private let ssrfDNSGate = SSRFPermitGate(ssrfDNSPoolWidth)
+
+#if DEBUG
+    /// Test-only DNS override keeping stubbed suites hermetic without a production allowlist.
+    /// Compiled into debug builds only so release has no stub surface to forge: production
+    /// always resolves via the system resolver and fails closed when unverified, while
+    /// debug tests publish canned addresses here so hermetic suites never touch the network
+    /// or the bounded pool. All state stays behind the unfair lock so the override is safe
+    /// to share across tasks under strict concurrency.
+    private final class SSRFTestDNSBox: Sendable {
+        private let box: OSAllocatedUnfairLock<(@Sendable (String) -> [String])?>
+
+        /// Creates an empty holder restoring system resolution by default.
+        init() {
+            box = OSAllocatedUnfairLock(initialState: nil)
+        }
+
+        /// Returns the published stub, if any.
+        func get() -> (@Sendable (String) -> [String])? {
+            box.withLock { $0 }
+        }
+
+        /// Publishes or clears the stub.
+        /// - Parameter newValue: Canned resolver, or nil to restore system resolution.
+        func set(_ newValue: (@Sendable (String) -> [String])?) {
+            box.withLock { $0 = newValue }
+        }
+    }
+
+    /// Shared holder for the test-only DNS stub; production paths leave it empty.
+    private let ssrfTestDNSBox = SSRFTestDNSBox()
+#endif
+
 public enum ApiSSRFGuard: Sendable {
+    #if DEBUG
+        /// Test-only DNS stub keeping hermetic suites off the network without a production bypass.
+        /// Debug-only so release builds cannot publish canned proof: production always proves
+        /// addresses via the system resolver, while debug tests publish canned addresses and
+        /// clear afterwards so one suite cannot leak proof into another. Reads and writes stay
+        /// behind the shared unfair-lock box.
+        static var testDNSResolver: (@Sendable (String) -> [String])? {
+            get { ssrfTestDNSBox.get() }
+            set { ssrfTestDNSBox.set(newValue) }
+        }
+    #endif
+
     /// Well-known cloud metadata hostnames refused even over public DNS.
     public static let blockedMetadataHosts: Set<String> = [
         "metadata.google.internal",
@@ -393,25 +144,19 @@ public enum ApiSSRFGuard: Sendable {
     ]
 
     /// Whether a host is a well-known metadata hostname.
+    /// Intent: exact plus dot-suffix match against the blocked set keeps
+    /// subdomains like `sub.metadata.google.internal` refused while
+    /// `foo-metadata.google-bar.example.com` passes; substring matching
+    /// would overblock the latter. Invariant: comparison uses the cleaned
+    /// lowercased base form, and empty hosts never match.
     public static func isMetadataHost(_ host: String) -> Bool {
         let lowered = ApiSSRFOrigin.cleanedHostBase(host)
         guard !lowered.isEmpty else { return false }
         if blockedMetadataHosts.contains(lowered) {
             return true
         }
-        if lowered == "metadata" {
-            return true
-        }
-        if lowered.contains("metadata.google") {
-            return true
-        }
-        if lowered.contains("instance-data") {
-            return true
-        }
-        if lowered.contains("metadata.azure") {
-            return true
-        }
-        return false
+        // Dot-suffix covers subdomains of a blocked name without substring overblocking.
+        return blockedMetadataHosts.contains { lowered.hasSuffix("." + $0) }
     }
 
     /// Parses one numeric IPv4 part in decimal, octal, or hex.
@@ -426,11 +171,6 @@ public enum ApiSSRFGuard: Sendable {
 
     /// Parses any resolver-accepted IPv4 spelling to canonical octets.
     public static func canonicalIPv4Octets(_ host: String) -> IPv4Octets? {
-        ApiIPv4Parsing.canonicalIPv4Octets(host)
-    }
-
-    /// Whether a host string is a dotted IPv4 literal.
-    public static func ipv4Octets(_ host: String) -> IPv4Octets? {
         ApiIPv4Parsing.canonicalIPv4Octets(host)
     }
 
@@ -491,13 +231,19 @@ public enum ApiSSRFGuard: Sendable {
         ApiSSRFOrigin.originKey(for: url)
     }
 
+    /// Bounded wait for the async DNS probe so a wedged resolver fails closed
+    /// quickly instead of stalling the gate; literal refusals never wait on DNS.
+    private static let dnsResolutionTimeoutSeconds: TimeInterval = 2
+
     /// Allowlisted loopback origins derived from configuration.
     public static func allowlistedOrigins(browserConfig: BrowserConfig, llmServerURLs: [String]) -> Set<String> {
         var origins = Set<String>()
         let candidates = [browserConfig.searxngURL] + llmServerURLs
         for raw in candidates {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, let url = URL(string: trimmed), let key = originKey(for: url) else { continue }
+            guard let trimmed = NormalizedText.value(raw),
+                  let url = URL(string: trimmed),
+                  let key = originKey(for: url)
+            else { continue }
             origins.insert(key)
         }
         return origins
@@ -506,6 +252,13 @@ public enum ApiSSRFGuard: Sendable {
     /// Refusal reason against an explicit exemption set, or nil when dialable.
     /// Browser flows pass an empty set because they never dial local origins,
     /// so every loopback and LAN spelling fails closed with no config to forge.
+    /// Blocking on the calling thread for DNS and point-in-time: prefer
+    /// `denyReasonAsync` off the cooperative pool, and pin the resolved
+    /// address at dial time because a hostname can rebind between this check
+    /// and the connection. Hostnames that cannot be resolved fail closed.
+    /// The synchronous shape stays for callers that cannot suspend, such as
+    /// browser bridge input checks; suspendable web and API paths use the
+    /// bounded-pool variant so a wedged resolver cannot stall shared tasks.
     /// - Parameters:
     ///   - rawURL: Candidate URL.
     ///   - allowlistedOrigins: Precomputed `host:port` exemptions that may be dialed.
@@ -521,17 +274,76 @@ public enum ApiSSRFGuard: Sendable {
     /// Denies metadata, link-local, loopback (except the configured
     /// `searxng_url` plus LLM origins), private RFC 1918 ranges, `0.0.0.0/8`,
     /// and IPv6 unique-local addresses across decimal/hex/octal/short forms.
+    /// Blocking on the calling thread for DNS and point-in-time: prefer
+    /// `denyReasonAsync` off the cooperative pool, and pin the resolved
+    /// address at dial time because a hostname can rebind between this check
+    /// and the connection. Hostnames that cannot be resolved fail closed.
     public static func denyReason(
         for rawURL: String,
         browserConfig: BrowserConfig,
         llmServerURLs: [String] = []
     ) -> String? {
         let origins = allowlistedOrigins(browserConfig: browserConfig, llmServerURLs: llmServerURLs)
-        let hasLLM = llmServerURLs.contains(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+        let hasLLM = llmServerURLs.contains(where: { NormalizedText.value($0) != nil })
         return denyReasonImpl(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLM)
     }
 
+    /// Async refusal reason against an explicit exemption set, or nil when dialable.
+    /// Literal checks run inline on the calling task while DNS hops to the
+    /// bounded pool with a fail-closed timeout, so the cooperative pool never
+    /// stalls on a wedged resolver. Cancellation abandons the lookup without
+    /// waiting: the resolver has no kernel cancellation, so its slot stays
+    /// held until return while the waiter fails closed. The verdict stays
+    /// point-in-time: pin the resolved address at dial time because a hostname
+    /// can rebind between this check and the connection.
+    /// - Parameters:
+    ///   - rawURL: Candidate URL.
+    ///   - allowlistedOrigins: Precomputed `host:port` exemptions that may be dialed.
+    /// - Returns: Refusal reason, or nil when allowed.
+    public static func denyReasonAsync(
+        for rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) async -> String? {
+        switch preDNSOutcome(for: rawURL, allowlistedOrigins: allowlistedOrigins, hasLLMOrigins: false) {
+        case let .denied(reason):
+            reason
+        case .allowed:
+            nil as String?
+        case let .needsDNS(host):
+            await dnsVerdictAsync(host: host)
+        }
+    }
+
+    /// Async refusal reason for a URL, or nil when the URL may be dialed.
+    /// Literal checks run inline on the calling task while DNS hops to the
+    /// bounded pool with a fail-closed timeout, so the cooperative pool never
+    /// stalls on a wedged resolver. Cancellation abandons the lookup without
+    /// waiting: the resolver has no kernel cancellation, so its slot stays
+    /// held until return while the waiter fails closed. The verdict stays
+    /// point-in-time: pin the resolved address at dial time because a hostname
+    /// can rebind between this check and the connection.
+    public static func denyReasonAsync(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        llmServerURLs: [String] = []
+    ) async -> String? {
+        let origins = allowlistedOrigins(browserConfig: browserConfig, llmServerURLs: llmServerURLs)
+        let hasLLM = llmServerURLs.contains(where: { NormalizedText.value($0) != nil })
+        return switch preDNSOutcome(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLM) {
+        case let .denied(reason):
+            reason
+        case .allowed:
+            nil as String?
+        case let .needsDNS(host):
+            await dnsVerdictAsync(host: host)
+        }
+    }
+
     /// Shared refusal engine over a precomputed exemption set.
+    /// Blocking on the calling thread for DNS: kept for existing callers while
+    /// new paths prefer `denyReasonAsync`, which reuses the same literal stage
+    /// inline and isolates only DNS on the bounded pool. Hostnames without a
+    /// verified address fail closed.
     /// - Parameters:
     ///   - rawURL: Candidate URL.
     ///   - origins: Precomputed `host:port` exemptions that may be dialed.
@@ -542,61 +354,204 @@ public enum ApiSSRFGuard: Sendable {
         allowlistedOrigins origins: Set<String>,
         hasLLMOrigins: Bool
     ) -> String? {
-        let trimmed = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "Empty URL: api.request needs an absolute http(s) URL." }
-        let lowered = trimmed.lowercased()
-        if lowered.hasPrefix("file:") {
-            return "SSRF denied: file scheme is not allowed (\(trimmed))."
+        // Synchronous callers pay the resolver cost here; the async path
+        // moves this same vetting onto the bounded pool instead.
+        switch preDNSOutcome(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLMOrigins) {
+        case let .denied(reason):
+            reason
+        case .allowed:
+            nil as String?
+        case let .needsDNS(host):
+            vettedDNSDenial(for: host)
         }
-        guard WebURLSafety.isSafeUrl(trimmed) else {
-            return "Unsafe URL: api.request only dereferences absolute http(s) URLs (\(trimmed))."
+    }
+
+    /// Literal-only refusal plus resolved-range vetting live in `ApiSSRFVerdict`
+    /// so this gate stays within budget; the sync engine and the async inline
+    /// stage share that verdict.
+    /// Vets resolved addresses for one hostname, failing closed when empty.
+    /// Single-sourced by the sync engine, the bounded async worker, and the
+    /// debug stub fast path so every path enforces the same resolved-range table.
+    /// - Parameter host: Hostname whose addresses were resolved.
+    /// - Returns: Refusal reason, or nil when every address is dialable.
+    private static func vettedDNSDenial(for host: String) -> String? {
+        vettedIPListDenial(host: host, addresses: resolveHostAddresses(host))
+    }
+
+    /// Bounded async DNS vetting with fail-closed timeout and cancellation.
+    /// Runs the blocking resolver on the capped pool; a wedged lookup keeps
+    /// its slot until return while the waiter fails closed, and queued
+    /// lookups wait without holding threads. Saturation drops fail-closed
+    /// without queueing, and a queued lookup that lost the race to timeout or
+    /// cancellation skips the resolver instead of holding a thread for a
+    /// verdict nobody waits on.
+    /// - Parameter host: Hostname needing DNS vetting.
+    /// - Returns: Refusal reason, or nil when every address is dialable.
+    private static func dnsVerdictAsync(host: String) async -> String? {
+        if Task.isCancelled {
+            return unverifiedDenial(for: host)
         }
-        guard let url = URL(string: trimmed), let host = url.host, !host.isEmpty else {
-            return "Unsafe URL: api.request only dereferences absolute http(s) URLs (\(trimmed))."
-        }
-        if isMetadataHost(host) {
-            return "SSRF denied: refusing metadata host '\(host)'."
-        }
-        if isLinkLocalIPv4(host) {
-            return "SSRF denied: refusing link-local address '\(host)' (169.254.0.0/16)."
-        }
-        if isLinkLocalIPv6(host) {
-            return "SSRF denied: refusing link-local address '\(host)' (fe80::/10)."
-        }
-        if isLoopbackHost(host) {
-            if let key = originKey(for: url), origins.contains(key) {
-                return nil
+        #if DEBUG
+            // Hermetic suites publish canned proof here so stubbed hosts never
+            // touch the network or consume a bounded-pool slot; the holder is
+            // debug-only so release keeps no stub surface and always vets via
+            // the system resolver fail-closed. Serialized suites publish and
+            // clear per test because the holder is process-global.
+            if let stub = ssrfTestDNSBox.get() {
+                return vettedIPListDenial(host: host, addresses: stub(host))
             }
-            // Exemption wording follows the configured origins so fetch-only
-            // callers (no LLM origins) never promise an LLM exemption they do
-            // not honor; the range decision stays single-source above.
-            if hasLLMOrigins {
-                return "SSRF denied: refusing loopback host '\(host)' except configured searxng_url and LLM endpoints."
-            }
-            return "SSRF denied: refusing loopback host '\(host)' except configured searxng_url."
+        #endif
+        // Drop-newest when the pool is saturated so a burst cannot stack
+        // unlimited blocking lookups behind a wedged resolver; saturation
+        // reads as unverified rather than permission to dial. The probe never
+        // blocks, so awaiting tasks keep the cooperative pool moving.
+        guard ssrfDNSGate.tryAcquire() else {
+            return unverifiedDenial(for: host)
         }
-        let canonical = normalizedHost(host)
-        if let value = ipv4Value(canonical), isSensitiveIPv4Value(value) {
-            if let key = originKey(for: url), origins.contains(key) {
-                return nil
+        // Single one-shot verdict shared by DNS, timeout, and cancellation so a slow
+        // resolver arriving after a timeout cannot resume twice; late arrivals observe
+        // the stored outcome instead of racing. The sleeper holder stays apart from the
+        // verdict lock and is re-checked after storing, so a resume racing registration
+        // still drops the late sleeper instead of leaking sleeps under bursts.
+        let once = CheckedOnce<String?>()
+        let sleeper = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+        return await withTaskCancellationHandler {
+            // The shared once gate never resumes with failure, so the throwing
+            // shape only bridges the shared gate into this Never-style waiter;
+            // any unexpected throw still fails closed rather than dialing.
+            do {
+                return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String?, Error>) in
+                    once.set(continuation)
+                    // Register the fail-closed sleeper before queueing DNS so an early
+                    // DNS answer always finds a handle to drop; the winner cancels the
+                    // loser on settle, keeping burst lookups from stacking lingering sleeps.
+                    let timeoutTask = Task {
+                        let nanos = UInt64((dnsResolutionTimeoutSeconds * 1_000_000_000).rounded(.down))
+                        try? await Task.sleep(nanoseconds: nanos)
+                        let held = sleeper.withLock { current -> Task<Void, Never>? in
+                            let task = current
+                            current = nil
+                            return task
+                        }
+                        held?.cancel()
+                        once.resume(returning: unverifiedDenial(for: host))
+                    }
+                    if once.isSettled {
+                        timeoutTask.cancel()
+                    } else {
+                        sleeper.withLock { $0 = timeoutTask }
+                        if once.isSettled {
+                            let late = sleeper.withLock { current -> Task<Void, Never>? in
+                                let task = current
+                                current = nil
+                                return task
+                            }
+                            late?.cancel()
+                        }
+                    }
+                    ssrfDNSQueue.addOperation {
+                        // Cooperative removal: when timeout or cancellation already
+                        // won, skip the blocking resolver so a queued burst never
+                        // holds a pool thread for an abandoned verdict.
+                        if once.isSettled {
+                            ssrfDNSGate.release()
+                            return
+                        }
+                        defer { ssrfDNSGate.release() }
+                        let verdict = vettedDNSDenial(for: host)
+                        let held = sleeper.withLock { current -> Task<Void, Never>? in
+                            let task = current
+                            current = nil
+                            return task
+                        }
+                        held?.cancel()
+                        once.resume(returning: verdict)
+                    }
+                    if Task.isCancelled {
+                        let held = sleeper.withLock { current -> Task<Void, Never>? in
+                            let task = current
+                            current = nil
+                            return task
+                        }
+                        held?.cancel()
+                        once.resume(returning: unverifiedDenial(for: host))
+                    }
+                }
+            } catch {
+                return unverifiedDenial(for: host)
             }
-            return "SSRF denied: refusing private or reserved IPv4 host '\(host)'."
-        }
-        if isSensitiveIPv6Host(canonical) {
-            if let key = originKey(for: url), origins.contains(key) {
-                return nil
+        } onCancel: {
+            let held = sleeper.withLock { current -> Task<Void, Never>? in
+                let task = current
+                current = nil
+                return task
             }
-            return "SSRF denied: refusing private or loopback IPv6 host '\(host)'."
+            held?.cancel()
+            once.resume(returning: unverifiedDenial(for: host))
         }
-        return nil
+    }
+
+    /// Resolves a hostname to its IP addresses.
+    /// Blocking by design with no kernel cancellation: callers on the
+    /// cooperative pool must use `denyReasonAsync`, which hops this work to
+    /// the bounded pool with a fail-closed timeout. The result stays
+    /// point-in-time; pin the address at dial time because a hostname can
+    /// rebind between this check and the connection.
+    private static func resolveHostAddresses(_ host: String) -> [String] {
+        #if DEBUG
+            // Hermetic debug suites publish canned proof here so they never touch the network;
+            // the stub exists in debug builds only, so release always vets via the system resolver.
+            if let stub = ssrfTestDNSBox.get() {
+                return stub(host)
+            }
+        #endif
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = Int32(SOCK_STREAM)
+
+        var res: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, nil, &hints, &res)
+        guard status == 0, let first = res else { return [] }
+        defer { freeaddrinfo(res) }
+
+        var addresses = [String]()
+        var current: UnsafeMutablePointer<addrinfo>? = first
+        while let ptr = current {
+            let addr = ptr.pointee
+            var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            if getnameinfo(addr.ai_addr, addr.ai_addrlen, &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST) == 0 {
+                let resolved = hostname.withUnsafeBufferPointer { buf in
+                    let bytes = buf.prefix(while: { $0 != 0 }).map { UInt8(bitPattern: $0) }
+                    return String(bytes: bytes, encoding: .utf8) ?? ""
+                }
+                addresses.append(resolved)
+            }
+            current = addr.ai_next
+        }
+        return addresses
     }
 
     /// Whether a URL may be dialed under the SSRF guard.
+    /// Blocking on the calling thread for DNS; prefer `isAllowedAsync` off
+    /// the cooperative pool. Unverified hostnames fail closed. The synchronous
+    /// shape stays for callers that cannot suspend, such as browser bridge
+    /// input checks.
     public static func isAllowed(
         _ rawURL: String,
         browserConfig: BrowserConfig,
         llmServerURLs: [String] = []
     ) -> Bool {
         denyReason(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) == nil
+    }
+
+    /// Async allow check that keeps blocking DNS on the bounded pool.
+    /// Unverified hostnames fail closed. The verdict stays point-in-time;
+    /// pin the resolved address at dial time.
+    public static func isAllowedAsync(
+        _ rawURL: String,
+        browserConfig: BrowserConfig,
+        llmServerURLs: [String] = []
+    ) async -> Bool {
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) == nil
     }
 }

@@ -234,12 +234,10 @@ private func recordResumedRun(
 }
 
 /// Builds a locale-stable per-run title for a scheduler job.
+/// Uses the shared cached run-title formatter so repeated fires reuse one
+/// POSIX-stable instance instead of allocating per title.
 func schedulerRunTitle(for job: SchedulerJob, at startTime: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "en_US_POSIX")
-    formatter.dateStyle = .short
-    formatter.timeStyle = .short
-    return "\(job.name) (\(formatter.string(from: startTime)))"
+    "\(job.name) (\(SharedDateFormatters.runTitleString(from: startTime)))"
 }
 
 /// Creates an isolated per-run scheduler session for a job fire.
@@ -337,6 +335,10 @@ func registerSchedulerRunRoute(_ app: Application) {
             )
             throw Abort(.conflict, reason: "Job \(raw) is already running")
         }
+        // The single-flight lock is held for the whole turn and released with a
+        // structured await on every terminal path before returning, so the next
+        // acquire never observes a stale held lock from a detached release
+        // racing the return.
         let startTime = Date()
         let sessionID = await makeSchedulerRunSession(job: job, startTime: startTime, conversations: context.conversations)
 

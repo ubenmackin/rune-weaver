@@ -120,7 +120,7 @@ func openAIChatRequestBody(
         }
     }
     do {
-        return try JSONSerialization.data(withJSONObject: body)
+        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
     } catch {
         throw LLMProviderError.invalidResponse("Could not encode chat request: \(error.localizedDescription)")
     }
@@ -134,12 +134,11 @@ func parseResponsesPlaceholderLine(_ line: String) -> ToolCall? {
 
 /// Splits an assistant message into structured calls plus leftover text.
 func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], leftover: String) {
-    let normalized = content
-        .replacingOccurrences(of: "\r\n", with: "\n")
-        .replacingOccurrences(of: "\r", with: "\n")
+    // Shared split keeps wire validation on the same line boundaries as narration
+    // parsing; a trailing newline stays a terminator, not an extra blank.
     var calls: [ToolCall] = []
     var leftoverLines: [String] = []
-    for rawLine in normalized.components(separatedBy: "\n") {
+    for rawLine in NormalizedText.splitLines(content) {
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { continue }
         if let call = parseResponsesPlaceholderLine(line) {
@@ -243,7 +242,7 @@ func openAIResponsesRequestBody(
         }
     }
     do {
-        return try JSONSerialization.data(withJSONObject: body)
+        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
     } catch {
         throw LLMProviderError.invalidResponse("Could not encode responses request: \(error.localizedDescription)")
     }
