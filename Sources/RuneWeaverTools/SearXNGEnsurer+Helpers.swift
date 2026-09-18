@@ -810,13 +810,6 @@ public extension SearXNGEnsurer {
         "SearXNG image pull timed out after \(Int(timeoutSeconds))s. Retry — downloaded layers are cached. Run `scripts/searxng-up.sh` to retry."
     }
 
-    /// Earlier pull banner spelling kept so existing callers keep compiling.
-    /// Forwards to the timeout banner so both spellings report the same cached-layer retry.
-    @available(*, deprecated, renamed: "pullTimeoutBanner")
-    static func pullBanner(timeoutSeconds: Double = containerImagePullTimeoutSeconds) -> String {
-        pullTimeoutBanner(timeoutSeconds: timeoutSeconds)
-    }
-
     /// Trimmed banner for an image pull that failed without timing out.
     /// Points at Hub reachability (auth, network, or registry outage) rather
     /// than the run step, so a registry miss never renders as a run failure.

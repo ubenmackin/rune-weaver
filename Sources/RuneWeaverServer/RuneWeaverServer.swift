@@ -335,7 +335,8 @@ public final class ServerContext: Sendable {
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
-        llmServerURLs: [String] = []
+        llmServerURLs: [String] = [],
+        engineConfig: EngineConfig = EngineConfig()
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -370,7 +371,8 @@ public final class ServerContext: Sendable {
             systemPrompt: systemPrompt,
             memoryEngine: memoryEngine,
             approvalQueue: approvals,
-            embedder: embedder
+            embedder: embedder,
+            compactionThresholdPercent: engineConfig.compactionThresholdPercent
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: scheduler,

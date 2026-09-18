@@ -195,6 +195,7 @@ export default function SettingsManager() {
   // Form state
   const [engineName, setEngineName] = useState("");
   const [logLevel, setLogLevel] = useState("info");
+  const [compactionThresholdPercent, setCompactionThresholdPercent] = useState(80);
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
@@ -797,6 +798,7 @@ export default function SettingsManager() {
     setSettings(data);
     setEngineName(data.engineName);
     setLogLevel(data.logLevel);
+    setCompactionThresholdPercent(data.compactionThresholdPercent ?? 80);
     setDefaultProvider(data.defaultProvider);
     setFallbackProvider(data.fallbackProvider ?? "");
 
@@ -1214,6 +1216,7 @@ export default function SettingsManager() {
       const updated = await updateSettings({
         engineName,
         logLevel,
+        compactionThresholdPercent: Number(compactionThresholdPercent),
         defaultProvider,
         // Empty string clears the fallback server-side; omitting the field
         // would preserve the previous value instead.
@@ -2031,6 +2034,31 @@ export default function SettingsManager() {
                   <option value="warning">Warning</option>
                   <option value="error">Error</option>
                 </select>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="compaction-threshold">
+                  Context Compaction Threshold: {compactionThresholdPercent}%
+                </label>
+                <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+                  <input
+                    id="compaction-threshold"
+                    type="range"
+                    min={10}
+                    max={100}
+                    step={5}
+                    value={compactionThresholdPercent}
+                    onChange={(e) => setCompactionThresholdPercent(Number(e.target.value))}
+                    style={{ flex: 1 }}
+                  />
+                  <span style={{ minWidth: "3rem", fontWeight: "bold" }}>
+                    {compactionThresholdPercent}%
+                  </span>
+                </div>
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is 80%.
+                </p>
               </div>
             </div>
           </div>

@@ -6,6 +6,7 @@
 [engine]
 name = "Rune Weaver"
 log_level = "info"  # trace | debug | info | notice | warning | error | critical
+# compaction_threshold_percent = 80  # Context compaction threshold in percent (10-100); oldest turns fold into a rolling summary past this budget.
 
 [llm]
 default_provider = "mlx"

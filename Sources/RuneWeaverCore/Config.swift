@@ -18,22 +18,33 @@ public enum ConfigError: Error, Sendable, Equatable {
 
 // MARK: - Section structs
 
-/// `[engine]` — top-level engine identity and logging.
+/// `[engine]` — top-level engine identity, logging, and context management.
 public struct EngineConfig: Sendable, Codable, Equatable {
     /// Human-readable engine name shown in clients.
     public var name: String
     /// Log level: trace, debug, info, notice, warning, error, or critical.
     public var logLevel: String
+    /// Context compaction threshold percentage (10-100). Default is 80%.
+    public var compactionThresholdPercent: Int
 
     /// Creates an engine config.
-    public init(name: String = "Rune Weaver", logLevel: String = "info") {
+    public init(name: String = "Rune Weaver", logLevel: String = "info", compactionThresholdPercent: Int = 80) {
         self.name = name
         self.logLevel = logLevel
+        self.compactionThresholdPercent = compactionThresholdPercent
     }
 
     private enum CodingKeys: String, CodingKey {
         case name
         case logLevel = "log_level"
+        case compactionThresholdPercent = "compaction_threshold_percent"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Rune Weaver"
+        self.logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
+        self.compactionThresholdPercent = try container.decodeIfPresent(Int.self, forKey: .compactionThresholdPercent) ?? 80
     }
 }
 

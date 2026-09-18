@@ -53,4 +53,58 @@ describe("ToolActionRow honest status", () => {
     await user.click(screen.getByRole("button"));
     expect(screen.getAllByText("call-debug-123").length).toBeGreaterThan(0);
   });
+
+  it("hides browser.navigate summary when collapsed and reveals it when expanded (card)", async () => {
+    const user = userEvent.setup();
+    const navigateAction = {
+      toolName: "browser.navigate",
+      callID: "call-nav-1",
+      argumentsJSON: '{"url":"https://developer.apple.com/xcode/"}',
+      result: {
+        toolCallID: "call-nav-1",
+        content: JSON.stringify({
+          final_url: "https://developer.apple.com/xcode/",
+          title: "Xcode - Apple Developer",
+          redirect_count: 0,
+        }),
+        isError: false,
+      },
+    };
+
+    render(<ToolActionRow action={navigateAction} variant="card" />);
+    // Collapsed: summary row should not be rendered
+    expect(screen.queryByTestId("browser-final-url")).not.toBeInTheDocument();
+
+    // Expanded: summary row is rendered
+    await user.click(screen.getByRole("button"));
+    expect(screen.getByTestId("browser-final-url")).toBeInTheDocument();
+    expect(screen.getByText("https://developer.apple.com/xcode/")).toBeInTheDocument();
+  });
+
+  it("hides browser.navigate summary when collapsed and reveals it when expanded (chat pill)", async () => {
+    const user = userEvent.setup();
+    const navigateAction = {
+      toolName: "browser.navigate",
+      callID: "call-nav-2",
+      argumentsJSON: '{"url":"https://developer.apple.com/xcode/"}',
+      result: {
+        toolCallID: "call-nav-2",
+        content: JSON.stringify({
+          final_url: "https://developer.apple.com/xcode/",
+          title: "Xcode - Apple Developer",
+          redirect_count: 0,
+        }),
+        isError: false,
+      },
+    };
+
+    render(<ToolActionRow action={navigateAction} variant="chat" />);
+    // Collapsed: summary row should not be rendered
+    expect(screen.queryByTestId("browser-final-url")).not.toBeInTheDocument();
+
+    // Expanded: summary row is rendered
+    await user.click(screen.getByRole("button"));
+    expect(screen.getByTestId("browser-final-url")).toBeInTheDocument();
+    expect(screen.getByText("https://developer.apple.com/xcode/")).toBeInTheDocument();
+  });
 });

@@ -90,19 +90,6 @@ public actor SearXNGEnsurer: SearXNGEnsuring {
     /// timeouts; a first-run pull adds its minutes budget on top. Single source for the
     /// minutes-scale backstop.
     public static let readinessWatchTimeoutSeconds: Double = 165
-    /// Earlier budget spelling kept so existing integrations keep compiling.
-    /// Forwards to the current watch backstop so both names share one timeout instead of forking.
-    @available(*, deprecated, renamed: "readinessWatchTimeoutSeconds")
-    public static var ensureBudgetSeconds: Double {
-        readinessWatchTimeoutSeconds
-    }
-
-    /// Earlier readiness spelling kept so existing integrations keep compiling.
-    /// Forwards to the current watch backstop so both names share one timeout instead of forking.
-    @available(*, deprecated, renamed: "readinessWatchTimeoutSeconds")
-    public static var readinessTimeoutSeconds: Double {
-        readinessWatchTimeoutSeconds
-    }
 
     /// Delay between readiness watch ticks while waiting for boot.
     /// Short so a crash fails fast on the next tick instead of sleeping through the backstop.

@@ -90,6 +90,17 @@ struct SystemPromptComposerTests {
         #expect(prompt.contains("Rune Weaver"))
         #expect(prompt.contains("recall_memories"))
         #expect(prompt.contains("remember_fact"))
+        #expect(prompt.contains("Current date: " + SystemPromptComposer.currentDateString()))
+    }
+
+    @Test
+    func `Current date parameter overrides calendar date and alters rendered prompt`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let promptA = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-18")
+        let promptB = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
+        #expect(promptA.contains("Current date: 2026-09-18"))
+        #expect(promptB.contains("Current date: 2026-09-19"))
+        #expect(promptA != promptB)
     }
 
     @Test

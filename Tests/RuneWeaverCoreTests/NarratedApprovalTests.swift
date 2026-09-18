@@ -225,4 +225,53 @@ struct NarratedApprovalTests {
         #expect(response.toolActions.first?.toolName == "email.search")
         #expect(response.toolActions.first?.result?.isError == false)
     }
+
+    @Test
+    func `Allowed gated approval resumes loop and chains subsequent tool call`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "write-ok"))
+        await bus.register(tool: makeParkedReadTool(name: "stub.read", output: "read-ok"))
+        let args1 = #"{"text":"gated"}"#
+        let narrated1 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.write", argumentsJSON: args1, callID: "call_gated")
+        ])
+        let args2 = #"{"query":"item"}"#
+        let narrated2 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.read", argumentsJSON: args2, callID: "call_read")
+        ])
+        let synthesis = "All steps complete."
+        let llm = ParkedApprovalLLM(texts: [narrated1, narrated2, synthesis])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Run test", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 1)
+        guard let approvalID = await queue.list().first?.id else {
+            Issue.record("Expected a filed gated approval")
+            return
+        }
+        #expect(await queue.decide(id: approvalID, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: approvalID, approved: true)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text == synthesis)
+        #expect(resumed?.toolActions.count == 2)
+        #expect(resumed?.toolActions[0].toolName == "stub.write")
+        #expect(resumed?.toolActions[0].result?.content.contains("write-ok") == true)
+        #expect(resumed?.toolActions[1].toolName == "stub.read")
+        #expect(resumed?.toolActions[1].result?.content.contains("read-ok") == true)
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_gated" })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_read" })
+        #expect(history.contains { $0.role == .assistant && $0.content == synthesis })
+    }
 }

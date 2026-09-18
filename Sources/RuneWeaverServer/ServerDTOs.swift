@@ -868,6 +868,7 @@ public struct CancelChatResponse: Content, Equatable {
 public struct SettingsResponse: Content, Equatable {
     public let engineName: String
     public let logLevel: String
+    public let compactionThresholdPercent: Int
     public let defaultProvider: String
     public let fallbackProvider: String?
     public let providers: [String: ProviderConfig]
@@ -899,6 +900,7 @@ public struct SettingsResponse: Content, Equatable {
     public init(config: RuneWeaverConfig, configPath: String) {
         self.engineName = config.engine.name
         self.logLevel = config.engine.logLevel
+        self.compactionThresholdPercent = config.engine.compactionThresholdPercent
         self.defaultProvider = config.llm.defaultProvider
         self.fallbackProvider = config.llm.fallbackProvider
         self.providers = config.llm.providers
@@ -935,6 +937,7 @@ public struct SettingsResponse: Content, Equatable {
 public struct UpdateSettingsRequest: Content, Equatable {
     public let engineName: String?
     public let logLevel: String?
+    public let compactionThresholdPercent: Int?
     public let defaultProvider: String?
     public let fallbackProvider: String?
     public let providers: [String: ProviderConfig]?
@@ -965,6 +968,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public init(
         engineName: String? = nil,
         logLevel: String? = nil,
+        compactionThresholdPercent: Int? = nil,
         defaultProvider: String? = nil,
         fallbackProvider: String? = nil,
         providers: [String: ProviderConfig]? = nil,
@@ -994,6 +998,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     ) {
         self.engineName = engineName
         self.logLevel = logLevel
+        self.compactionThresholdPercent = compactionThresholdPercent
         self.defaultProvider = defaultProvider
         self.fallbackProvider = fallbackProvider
         self.providers = providers
@@ -1043,6 +1048,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let logLevel {
             engine.logLevel = logLevel
+        }
+        if let compactionThresholdPercent {
+            engine.compactionThresholdPercent = compactionThresholdPercent
         }
     }
 
