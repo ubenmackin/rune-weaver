@@ -1,5 +1,6 @@
 // Rune Weaver LLM — Priority-ordered provider router and failover orchestrator.
 
+import Foundation
 import RuneWeaverCore
 
 /// Selects the active LLM provider and falls through on failure.
@@ -55,7 +56,9 @@ public actor LLMRouter {
     }
 
     /// Streams a chat completion via the first healthy provider.
-    public func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
+    /// Carries the chat identifier to session-aware chunk providers so sticky
+    /// slots follow the turn; nil preserves the session-agnostic path.
+    public func chat(messages: [Message], tools: [any Tool], sessionID: String? = nil) -> AsyncStream<LLMResponse> {
         let providers = self.providers
         return AsyncStream { continuation in
             let task = Task {
@@ -78,6 +81,7 @@ public actor LLMRouter {
                             chunked,
                             messages: outboundMessages,
                             tools: definitions,
+                            sessionID: sessionID,
                             continuation: continuation
                         )
                         if let message = step.lastError {
@@ -93,6 +97,7 @@ public actor LLMRouter {
                         provider,
                         messages: outboundMessages,
                         tools: Self.visionGatedTools(tools, supportsVision: supportsVision),
+                        sessionID: sessionID,
                         continuation: continuation
                     )
                     if let message = step.lastError {
@@ -110,17 +115,26 @@ public actor LLMRouter {
         }
     }
 
+    /// Streams a chat completion for callers holding the chat UUID directly.
+    /// Normalizes to the string form so sticky-slot hashing sees one shape.
+    public func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
+        chat(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
     /// Drains one chunk-streaming provider, preserving mid-stream error propagation.
+    /// Threads the chat identifier so sticky-slot backends pin the turn instead
+    /// of always falling back to server auto-assignment.
     private static func drainChunkedProvider(
         _ provider: any ChunkStreamingProvider,
         messages: [Message],
         tools: [ToolDefinition],
+        sessionID: String? = nil,
         continuation: AsyncStream<LLMResponse>.Continuation
     ) async -> ChunkedDrainResult {
         var yieldedText = false
         var failureMessage: String?
         var lastUsage: Int?
-        chunkLoop: for await chunk in provider.chatChunks(messages: messages, tools: tools) {
+        chunkLoop: for await chunk in provider.chatChunks(messages: messages, tools: tools, sessionID: sessionID) {
             if Task.isCancelled {
                 break
             }
@@ -158,14 +172,18 @@ public actor LLMRouter {
     }
 
     /// Drains one text-streaming provider, preserving error propagation.
+    /// Threads the chat identifier so backends with per-turn session handling
+    /// pin the turn; backends without sticky state fall back to the
+    /// session-agnostic path via the base default, so only sticky backends pin.
     private static func drainStandardProvider(
         _ provider: any LLMProvider,
         messages: [Message],
         tools: [any Tool],
+        sessionID: String? = nil,
         continuation: AsyncStream<LLMResponse>.Continuation
     ) async -> (didFinish: Bool, lastError: String?) {
         var failureMessage: String?
-        for await part in provider.chat(messages: messages, tools: tools) {
+        for await part in provider.chat(messages: messages, tools: tools, sessionID: sessionID) {
             if Task.isCancelled {
                 break
             }

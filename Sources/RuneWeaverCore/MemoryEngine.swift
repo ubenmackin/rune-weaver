@@ -1013,15 +1013,20 @@ public extension MemoryEngine {
         }
     }
 
-    /// Inserts injected recall into LLM history after leading system messages.
+    /// Inserts injected recall at a stable slot keeping the prefix identical across rounds.
+    /// Order is always (systems..., recall, history): recall sits after every leading
+    /// system message so a rolling summary arriving alongside the prompt never wedges
+    /// between them mid-turn. Keeping recall past the full system prefix preserves
+    /// prefix-cache hits and keeps CLI and service turns identical.
     static func historyWithRecall(_ history: [Message], recall: Message?) -> [Message] {
         guard let recall else { return history }
-        var spliced = history
-        var index = 0
-        while index < spliced.count, spliced[index].role == .system {
-            index += 1
+        guard !history.isEmpty else { return [recall] }
+        var insertAt = 0
+        while insertAt < history.count, history[insertAt].role == .system {
+            insertAt += 1
         }
-        spliced.insert(recall, at: index)
+        var spliced = history
+        spliced.insert(recall, at: insertAt)
         return spliced
     }
 

@@ -53,12 +53,41 @@ public struct TokenUsage: Sendable, Codable, Equatable {
     public let completionTokens: Int
     /// Total tokens billed for the request.
     public let totalTokens: Int
+    /// Prefix tokens the server served from KV cache, when reported.
+    /// Nil when the backend omits cache fields so callers degrade to prompt-only accounting.
+    public let cachedTokens: Int?
 
     /// Creates token usage.
-    public init(promptTokens: Int, completionTokens: Int, totalTokens: Int) {
+    public init(promptTokens: Int, completionTokens: Int, totalTokens: Int, cachedTokens: Int? = nil) {
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.totalTokens = totalTokens
+        self.cachedTokens = cachedTokens
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case promptTokens
+        case completionTokens
+        case totalTokens
+        case cachedTokens
+    }
+
+    /// Decodes usage tolerantly so payloads written before cache tracking still decode.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.promptTokens = try container.decode(Int.self, forKey: .promptTokens)
+        self.completionTokens = try container.decode(Int.self, forKey: .completionTokens)
+        self.totalTokens = try container.decode(Int.self, forKey: .totalTokens)
+        self.cachedTokens = try container.decodeIfPresent(Int.self, forKey: .cachedTokens)
+    }
+
+    /// Encodes usage, omitting an absent cache count so older decoders see no new key.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(promptTokens, forKey: .promptTokens)
+        try container.encode(completionTokens, forKey: .completionTokens)
+        try container.encode(totalTokens, forKey: .totalTokens)
+        try container.encodeIfPresent(cachedTokens, forKey: .cachedTokens)
     }
 }
 
@@ -142,8 +171,13 @@ public extension LLMProvider {
 
     /// Maps runtime tool plugins to provider-layer definitions.
     /// - Parameter tools: Registered tools the model may call.
-    /// - Returns: Definitions in provider wire shape.
+    /// - Returns: Definitions in provider wire shape, preserving caller order.
     func toolDefinitions(for tools: [any Tool]) -> [ToolDefinition] {
+        // Ordering stays unsorted here on purpose: the request-body builders own
+        // the single canonical name sort at the wire boundary, where the prompt
+        // and both endpoints already converge for prefix-stable caching. Sorting
+        // here as well would duplicate that guarantee and mask callers that
+        // bypass this helper straight to the builders.
         tools.map { ToolDefinition($0) }
     }
 }
@@ -152,13 +186,37 @@ public extension LLMProvider {
 public protocol ChunkStreamingProvider: LLMProvider {
     /// Streams chunk-level events for the given history and tools.
     func chatChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk>
+    /// Streams chunk-level events for one chat session.
+    /// Lets backends with sticky prefix state keep the turn on the same slot;
+    /// backends without sticky state fall back to the session-agnostic path.
+    func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID: String?) -> AsyncStream<LLMResponseChunk>
 }
 
 public extension ChunkStreamingProvider {
+    /// Session-agnostic fallback for backends without sticky prefix state.
+    /// Keeps the router's per-turn session threading compiling for every
+    /// provider while only slot-aware backends override with real pinning.
+    func chatChunks(messages: [Message], tools: [ToolDefinition], sessionID _: String?) -> AsyncStream<LLMResponseChunk> {
+        chatChunks(messages: messages, tools: tools)
+    }
+
+    /// Session-identifier convenience for callers holding a chat UUID.
+    /// Normalizes to the string form so every backend shares one hashing path.
+    func chatChunks(messages: [Message], tools: [ToolDefinition], session: UUID?) -> AsyncStream<LLMResponseChunk> {
+        chatChunks(messages: messages, tools: tools, sessionID: session?.uuidString)
+    }
+
     /// Streams text via ``chatChunks(messages:tools:)``.
     func chat(messages: [Message], tools: [any Tool]) -> AsyncStream<LLMResponse> {
+        chat(messages: messages, tools: tools, sessionID: nil)
+    }
+
+    /// Streams text for one chat session via the session-aware chunk path.
+    /// Carries the chat identifier end to end so sticky-slot backends can reuse
+    /// the cached prefix instead of always falling back to auto-assignment.
+    func chat(messages: [Message], tools: [any Tool], sessionID: String?) -> AsyncStream<LLMResponse> {
         let definitions = toolDefinitions(for: tools)
-        let chunks = chatChunks(messages: messages, tools: definitions)
+        let chunks = chatChunks(messages: messages, tools: definitions, sessionID: sessionID)
         return AsyncStream { continuation in
             let task = Task {
                 chunkLoop: for await chunk in chunks {
@@ -181,6 +239,12 @@ public extension ChunkStreamingProvider {
             }
             continuation.onTermination = { @Sendable _ in task.cancel() }
         }
+    }
+
+    /// UUID convenience for callers holding the chat identifier directly.
+    /// Normalizes to the string form so the sticky-slot hash sees one shape.
+    func chat(messages: [Message], tools: [any Tool], session: UUID?) -> AsyncStream<LLMResponse> {
+        chat(messages: messages, tools: tools, sessionID: session?.uuidString)
     }
 }
 
@@ -215,6 +279,16 @@ func openAIBaseURL(from raw: String) -> String {
     return trimmed + "/v1"
 }
 
+/// Cached-token detail inside a chat usage block.
+struct OpenAIPromptTokensDetailsDTO: Decodable, Sendable {
+    /// Prefix tokens served from KV cache, when reported.
+    var cachedTokens: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case cachedTokens = "cached_tokens"
+    }
+}
+
 /// Usage block reported inside streaming chunks.
 struct OpenAIUsageDTO: Decodable, Sendable {
     /// Request tokens.
@@ -223,11 +297,26 @@ struct OpenAIUsageDTO: Decodable, Sendable {
     var completionTokens: Int?
     /// Total tokens.
     var totalTokens: Int?
+    /// Nested cache detail (`prompt_tokens_details.cached_tokens`).
+    var promptTokensDetails: OpenAIPromptTokensDetailsDTO?
+    /// Top-level cache count some servers report beside the details block.
+    var cachedTokensDirect: Int?
+    /// Alternate hit-counter spelling reported by some OpenAI-compatible servers.
+    var promptCacheHitTokens: Int?
 
     private enum CodingKeys: String, CodingKey {
         case promptTokens = "prompt_tokens"
         case completionTokens = "completion_tokens"
         case totalTokens = "total_tokens"
+        case promptTokensDetails = "prompt_tokens_details"
+        case cachedTokensDirect = "cached_tokens"
+        case promptCacheHitTokens = "prompt_cache_hit_tokens"
+    }
+
+    /// Best-effort cached count across the spellings servers use.
+    /// Nil when the server reports no cache fields so callers keep prompt-only behavior.
+    var effectiveCachedTokens: Int? {
+        promptTokensDetails?.cachedTokens ?? cachedTokensDirect ?? promptCacheHitTokens
     }
 }
 
@@ -311,6 +400,16 @@ struct OpenAIResponsesFunctionCallItemDTO: Decodable, Sendable {
     }
 }
 
+/// Cached-token detail inside a Responses usage block.
+struct OpenAIResponsesInputTokensDetailsDTO: Decodable, Sendable {
+    /// Prefix tokens served from cache, when reported.
+    var cachedTokens: Int?
+
+    private enum CodingKeys: String, CodingKey {
+        case cachedTokens = "cached_tokens"
+    }
+}
+
 /// Usage block inside a completed Responses response.
 struct OpenAIResponsesUsageDTO: Decodable, Sendable {
     /// Request tokens.
@@ -319,11 +418,22 @@ struct OpenAIResponsesUsageDTO: Decodable, Sendable {
     var outputTokens: Int?
     /// Total tokens.
     var totalTokens: Int?
+    /// Nested cache detail (`input_tokens_details.cached_tokens`).
+    var inputTokensDetails: OpenAIResponsesInputTokensDetailsDTO?
+    /// Top-level cache count some servers report beside the details block.
+    var cachedTokensDirect: Int?
 
     private enum CodingKeys: String, CodingKey {
         case inputTokens = "input_tokens"
         case outputTokens = "output_tokens"
         case totalTokens = "total_tokens"
+        case inputTokensDetails = "input_tokens_details"
+        case cachedTokensDirect = "cached_tokens"
+    }
+
+    /// Best-effort cached count; nil when the server reports no cache fields.
+    var effectiveCachedTokens: Int? {
+        inputTokensDetails?.cachedTokens ?? cachedTokensDirect
     }
 }
 
@@ -581,6 +691,43 @@ struct OpenAIResponsesToolCallAccumulator: Sendable {
     }
 }
 
+/// Best-effort sticky slot hint for llama.cpp prompt-cache reuse.
+public enum LlamaCppSlot: Sendable {
+    /// Derives a best-effort slot for one chat session.
+    /// Nil when no session is set so the server auto-assigns. The hash spreads
+    /// sessions (FNV-1a over UTF-8) but cannot isolate them: hash collisions and
+    /// pigeonhole overlap share a slot and evict each other's KV prefix, so treat
+    /// pinning as a cache hint rather than isolation. The pool size stays an
+    /// explicit caller argument with no fallback because any hardcoded count
+    /// risks an out-of-range id on servers started with a smaller `--parallel`;
+    /// pass the configured provider pool so small servers keep auto-assignment.
+    public static func slotID(forSessionID sessionID: String?, slotCount: Int) -> Int? {
+        guard let sessionID else { return nil }
+        // Trim once and hash the trimmed form so padded and bare identifiers
+        // share one slot; hashing the raw string would scatter one session
+        // across slots and defeat prefix reuse.
+        let trimmed = sessionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        guard slotCount > 0 else { return nil }
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in trimmed.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return Int(hash % UInt64(slotCount))
+    }
+
+    /// Derives a best-effort slot for one chat session UUID.
+    /// Same collision caveat as above; nil lets the server auto-assign. The pool
+    /// stays explicit here as well so UUID callers cannot inherit a stale default.
+    public static func slotID(forSession session: UUID?, slotCount: Int) -> Int? {
+        guard let session else { return nil }
+        return slotID(forSessionID: session.uuidString, slotCount: slotCount)
+    }
+}
+
 /// Minimal shared client for OpenAI-compatible backends.
 struct OpenAICompatibleHTTPClient: Sendable {
     /// API root ending in `/v1` (no trailing slash).
@@ -597,6 +744,10 @@ struct OpenAICompatibleHTTPClient: Sendable {
     let apiStyle: APIStyle
     /// Chat session identifier sent as `x-opencode-session`, when set.
     let sessionID: String?
+    /// llama.cpp-only prompt-cache hint; nil omits the key so cloud providers are unaffected.
+    let cachePrompt: Bool?
+    /// llama.cpp-only sticky slot; nil omits the key so the server auto-assigns.
+    let slotID: Int?
     /// User-Agent sent on every request. Single-sourced through
     /// `RuneWeaverVersion` so providers, tools, and health cannot drift.
     static var userAgent: String {
@@ -604,13 +755,15 @@ struct OpenAICompatibleHTTPClient: Sendable {
     }
 
     /// Creates a client.
-    init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil) {
+    init(baseURL: String, apiKey: String? = nil, model: String, apiStyle: APIStyle = .chatCompletions, sessionID: String? = nil, cachePrompt: Bool? = nil, slotID: Int? = nil) {
         let normalized = openAIBaseURL(from: baseURL)
         self.baseURL = normalized
         self.apiKey = apiKey
         self.model = model
         self.apiStyle = apiStyle
         self.sessionID = sessionID
+        self.cachePrompt = cachePrompt
+        self.slotID = slotID
         // Intent: Resolve multi-label cleartext HTTP LAN hostnames (e.g.
         // http://nas.int.example.com:11434/v1) to their RFC 1918 / RFC 4193 private IP addresses
         // once at client initialization time.
@@ -719,20 +872,36 @@ struct OpenAICompatibleHTTPClient: Sendable {
         if apiStyle == .responses {
             return streamResponsesChunks(messages: messages, tools: tools)
         }
+        let cacheHint = cachePrompt
+        let slotHint = slotID
         return makeStreamingChunks(
             path: "/chat/completions",
             label: "Chat",
-            makeBody: { try openAIChatRequestBody(model: model, messages: messages, tools: tools, stream: true) },
+            makeBody: { try openAIChatRequestBody(model: model, messages: messages, tools: tools, stream: true, cachePrompt: cacheHint, slotID: slotHint) },
             pump: OpenAISSEPump.pumpSSE
         )
     }
 
     /// Streams chunks via the Responses API for the given history and tools.
+    /// Forwards the same prefix hints as the chat wire so llama.cpp keeps the
+    /// cached system prompt and sticky slot on both endpoints.
     func streamResponsesChunks(messages: [Message], tools: [ToolDefinition]) -> AsyncStream<LLMResponseChunk> {
-        makeStreamingChunks(
+        let cacheHint = cachePrompt
+        let slotHint = slotID
+        let responsesBody: () throws -> Data = {
+            try openAIResponsesRequestBody(
+                model: model,
+                messages: messages,
+                tools: tools,
+                stream: true,
+                cachePrompt: cacheHint,
+                slotID: slotHint
+            )
+        }
+        return makeStreamingChunks(
             path: "/responses",
             label: "Responses",
-            makeBody: { try openAIResponsesRequestBody(model: model, messages: messages, tools: tools, stream: true) },
+            makeBody: responsesBody,
             pump: OpenAISSEPump.pumpResponsesSSE
         )
     }
@@ -838,11 +1007,20 @@ enum OpenAISSEPump {
             let prompt = usage.promptTokens ?? 0
             let completion = usage.completionTokens ?? 0
             let total = usage.totalTokens ?? (prompt + completion)
+            let cached = usage.effectiveCachedTokens
             lastUsage = TokenUsage(
                 promptTokens: prompt,
                 completionTokens: completion,
-                totalTokens: total
+                totalTokens: total,
+                cachedTokens: cached
             )
+            // Surface prefix reuse where the server reports it: a growing cached
+            // count beside a stable prompt count proves the leading bytes (system
+            // prompt plus tools plus early history) hit the KV cache instead of
+            // re-evaluating. Missing fields stay silent to preserve current behavior.
+            if let cached {
+                RuneWeaverLog.server.info("Chat usage: prompt \(prompt) tokens (\(cached) cached)")
+            }
         }
         guard let choice = chunk.choices?.first else { return nil }
         if let reason = choice.finishReason {
@@ -1000,11 +1178,19 @@ enum OpenAISSEPump {
         }
         let prompt = dto.inputTokens ?? 0
         let completion = dto.outputTokens ?? 0
-        return TokenUsage(
+        let cached = dto.effectiveCachedTokens
+        let usage = TokenUsage(
             promptTokens: prompt,
             completionTokens: completion,
-            totalTokens: dto.totalTokens ?? (prompt + completion)
+            totalTokens: dto.totalTokens ?? (prompt + completion),
+            cachedTokens: cached
         )
+        // Same prefix-reuse signal as the chat wire: log only when the server
+        // reports a cache count so absent fields degrade to current behavior.
+        if let cached {
+            RuneWeaverLog.server.info("Responses usage: prompt \(prompt) tokens (\(cached) cached)")
+        }
+        return usage
     }
 
     /// Pumps Responses SSE lines into chunk events.

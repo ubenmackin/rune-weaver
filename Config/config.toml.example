@@ -29,6 +29,8 @@ enabled = false
 provider_type = "llamacpp"
 server_url = "http://localhost:8081"
 # context_length = 4096  # Context window in tokens (llama.cpp backend default 4096)
+# slot_count = 4  # sticky id_slot pool size; match llama-server --parallel to opt into prefix reuse (omit for server auto-assign)
+# cache_prompt = true  # prefix-cache hint (omit for default enabled; set false to disable)
 
 [memory]
 vector_db_path = "~/.runeweaver/memory/vectors"

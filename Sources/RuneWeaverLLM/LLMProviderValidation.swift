@@ -56,11 +56,16 @@ func validatedDefinitions(_ tools: [ToolDefinition], logSkips: Bool = true) -> V
 }
 
 /// Builds a JSON request body for `/chat/completions`.
+/// - Parameters:
+///   - cachePrompt: llama.cpp-only KV-cache hint; nil omits the key so cloud providers are unaffected.
+///   - slotID: llama.cpp-only sticky slot; nil omits the key so the server auto-assigns.
 func openAIChatRequestBody(
     model: String,
     messages: [Message],
     tools: [ToolDefinition],
-    stream: Bool
+    stream: Bool,
+    cachePrompt: Bool? = nil,
+    slotID: Int? = nil
 ) throws -> Data {
     var wireMessages: [[String: Any]] = messages.map { message in
         var entry: [String: Any] = [
@@ -83,11 +88,24 @@ func openAIChatRequestBody(
     if stream {
         body["stream_options"] = ["include_usage": true]
     }
+    // llama.cpp-only prefix hints live behind explicit optionals so cloud wires
+    // never see them; absent values omit the keys and preserve current behavior.
+    if let cachePrompt {
+        body["cache_prompt"] = cachePrompt
+    }
+    if let slotID {
+        body["id_slot"] = slotID
+    }
     if !tools.isEmpty {
         // Omit invalid entries so a single bad schema degrades to fewer tools, not a failed turn.
         let filtered = validatedDefinitions(tools)
-        if !filtered.valid.isEmpty {
-            body["tools"] = try filtered.valid.map { tool -> [String: Any] in
+        // Canonical wire sort lives here at the request-body boundary: it mirrors
+        // the prompt's sorted order so leading bytes stay identical across rounds
+        // and the server can reuse the cached prefix. Earlier helpers pass
+        // definitions through unsorted so this stays the single ordering site.
+        let ordered = VisionSchemaFilter.sortedByName(filtered.valid, name: { $0.name })
+        if !ordered.isEmpty {
+            body["tools"] = try ordered.map { tool -> [String: Any] in
                 let parsed = try encodeToolParameters(tool)
                 return [
                     "type": "function",
@@ -134,11 +152,16 @@ func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], le
 }
 
 /// Builds a JSON request body for `/responses`.
+/// - Parameters:
+///   - cachePrompt: llama.cpp-only KV-cache hint; nil omits the key so cloud providers are unaffected.
+///   - slotID: llama.cpp-only sticky slot; nil omits the key so the server auto-assigns.
 func openAIResponsesRequestBody(
     model: String,
     messages: [Message],
     tools: [ToolDefinition],
-    stream: Bool
+    stream: Bool,
+    cachePrompt: Bool? = nil,
+    slotID: Int? = nil
 ) throws -> Data {
     let systemMessages = messages.filter { $0.role == .system }
     let conversationMessages = messages.filter { $0.role != .system }
@@ -193,11 +216,22 @@ func openAIResponsesRequestBody(
         "input": wireInput,
         "stream": stream
     ]
+    // Same llama.cpp-only prefix hints as the chat wire, behind the same
+    // optionals so cloud requests never see them; absent values omit the keys.
+    if let cachePrompt {
+        body["cache_prompt"] = cachePrompt
+    }
+    if let slotID {
+        body["id_slot"] = slotID
+    }
     if !tools.isEmpty {
         // Omit invalid entries so a turn with zero valid tools proceeds text-only instead of throwing.
         let filtered = validatedDefinitions(tools)
-        if !filtered.valid.isEmpty {
-            body["tools"] = try filtered.valid.map { tool -> [String: Any] in
+        // Same canonical sort as the chat wire so both endpoints share one prefix
+        // from this boundary layer; callers arrive unsorted by contract.
+        let ordered = VisionSchemaFilter.sortedByName(filtered.valid, name: { $0.name })
+        if !ordered.isEmpty {
+            body["tools"] = try ordered.map { tool -> [String: Any] in
                 let parsed = try encodeToolParameters(tool)
                 return [
                     "type": "function",

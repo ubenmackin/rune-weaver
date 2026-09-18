@@ -16,6 +16,7 @@ import {
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { mergeApprovalFrame } from "../approvalsSession";
+import { formatRelativeAgo, formatRelativeIn } from "../relativeTime";
 import Modal from "./Modal";
 import { CloseIcon, RefreshIcon } from "./icons";
 
@@ -61,23 +62,12 @@ function grantExpiryDate(grant: TrustGrant): Date | null {
   return parseTrustGrantExpiry(grant.expiresAt);
 }
 
-// Shared threshold ladder for grant recency so expiry countdowns and last-use
-// recency read with identical granularity. Future renders "in Nx", past renders
-// "Nx ago"; callers handle their own empty/expired/just-now sentinels.
-// Sub-second deltas collapse so fresh uses never render "0s ago" and imminent
-// expiries never render "in 0s".
+// Grant recency routing both tenses through the shared ladders so expiry
+// countdowns, last-use recency, and chat footers agree by construction.
+// Callers handle their own empty/expired/just-now sentinels.
 function formatDuration(diffMs: number, future: boolean): string {
-  const diffSec = Math.floor(diffMs / 1000);
-  if (diffSec < 60) {
-    if (diffSec < 1) return future ? "in 1s" : "just now";
-    return future ? `in ${diffSec}s` : `${diffSec}s ago`;
-  }
-  const diffMin = Math.floor(diffSec / 60);
-  if (diffMin < 60) return future ? `in ${diffMin}m` : `${diffMin}m ago`;
-  const diffHour = Math.floor(diffMin / 60);
-  if (diffHour < 24) return future ? `in ${diffHour}h` : `${diffHour}h ago`;
-  const diffDays = Math.floor(diffHour / 24);
-  return future ? `in ${diffDays}d` : `${diffDays}d ago`;
+  if (!future) return formatRelativeAgo(diffMs);
+  return formatRelativeIn(diffMs);
 }
 
 // Relative countdown for a timed grant ("in 5m"); forever grants have no
@@ -112,9 +102,7 @@ function grantLastUsedDate(grant: TrustGrant): Date | null {
 // "0s ago".
 function grantLastUsedRelativeLabel(lastUsed: Date | null, nowMs: number): string {
   if (!lastUsed) return "Never";
-  const diffMs = nowMs - lastUsed.getTime();
-  if (diffMs < 1000) return "just now";
-  return formatDuration(diffMs, false);
+  return formatRelativeAgo(nowMs - lastUsed.getTime());
 }
 
 // Hit count tolerating payloads minted before usage tracking, so older grants degrade to

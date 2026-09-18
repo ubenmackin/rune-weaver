@@ -38,7 +38,7 @@ struct SandboxCleanerTests {
         try Data("keep me".utf8).write(to: candidate)
 
         let config = SandboxConfig()
-        let summary = SandboxCleaner.cleanup(config: config, now: Date())
+        _ = SandboxCleaner.cleanup(config: config, now: Date())
 
         #expect(FileManager.default.fileExists(atPath: candidate.path) == true)
     }

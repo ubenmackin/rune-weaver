@@ -351,13 +351,30 @@ public actor ConversationManager {
     // MARK: - History
 
     /// Appends a message to a session, truncating when over budget.
-    public func append(_ message: Message, to sessionID: UUID) async {
+    /// Returns the stored message so callers stamp from the persisted instant instead of a
+    /// pre-persistence sample. The timestamp is quantized to whole milliseconds so the
+    /// in-memory instant survives SQLite REAL plus JSON Double reloads without
+    /// sub-millisecond drift, keeping live completion stamps and history reloads in agreement.
+    @discardableResult
+    public func append(_ message: Message, to sessionID: UUID) async -> Message {
         var session = await ensureSession(id: sessionID)
-        session.messages.append(message)
+        // Copy through the message-owned helper so the stored row keeps every field
+        // even as the shape grows; only the timestamp is quantized here.
+        let stored = message.withCreatedAt(Self.persistedInstant(message.createdAt))
+        session.messages.append(stored)
         session.updatedAt = Date()
         truncateIfNeeded(messages: &session.messages, summary: &session.summary)
         sessions[session.id] = session
         await persist(session)
+        return stored
+    }
+
+    /// Quantizes a timestamp to whole-millisecond precision.
+    /// Whole milliseconds survive the persisted Double round-trip exactly while finer
+    /// fractions drift, so flooring here keeps the stored instant identical on both
+    /// sides of persistence without disturbing chronological order (ties break by row order).
+    private static func persistedInstant(_ date: Date) -> Date {
+        Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded(.down) / 1000)
     }
 
     /// Returns context-ready history for a session.

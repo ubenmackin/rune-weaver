@@ -1,6 +1,8 @@
 // Rune Weaver Core — Dynamic system prompt composition from the live tool registry.
 
+import CryptoKit
 import Foundation
+import os
 
 /// Validated tool set after prompt schema filtering.
 /// Groups prompt-safe tools with skipped names so one corrupt plugin degrades to fewer entries.
@@ -205,9 +207,102 @@ public enum VisionSchemaFilter: Sendable {
         }
         return stripped
     }
+
+    /// Deterministic name ordering shared by prompt composition and wire encoding.
+    /// Single-sourcing the sort keeps the prompt text and the wire tool list on one
+    /// prefix: backends only reuse cached prefixes when leading bytes are identical,
+    /// so registry iteration order must never leak into either shape.
+    public static func sortedByName<Entry>(_ entries: [Entry], name: (Entry) -> String) -> [Entry] {
+        entries.sorted { name($0) < name($1) }
+    }
+}
+
+/// Lock-guarded prompt cache state for prefix-stable reuse.
+private struct PromptCacheState: Sendable {
+    /// Rendered prompts keyed by registry version plus vision and scheduled branches.
+    var prompts: [String: String] = [:]
+    /// Insertion order for deterministic eviction, oldest first.
+    var order: [String] = []
 }
 
 public enum SystemPromptComposer {
+    /// Shared prefix-stable prompt cache; bounded so toggling tools cannot grow memory.
+    private static let promptCache = OSAllocatedUnfairLock(initialState: PromptCacheState())
+    /// Maximum cached variants kept; two vision branches times two scheduled branches plus headroom.
+    private static let maxCachedPrompts = 8
+
+    /// Provenance marker embedded on the second line of every composed prompt.
+    /// Stored prompts carrying the marker on that line recompose live so tool toggles take effect;
+    /// any operator custom prompt without the marker there bypasses composition verbatim, even
+    /// when it starts with the same identity words or quotes the marker elsewhere. Anchoring
+    /// by position keeps pasted examples from reading as snapshots and losing the override,
+    /// where substring sniffing would misclassify and silently discard it.
+    public static let composedMarker = "<!-- rune-weaver:composed-prompt v1 -->"
+
+    /// Whether a stored prompt is a composed registry snapshot rather than an explicit override.
+    /// Provenance is position-anchored to the second line so an operator prompt that
+    /// merely quotes or pastes the marker elsewhere keeps its override instead of
+    /// being mistaken for a snapshot and silently recomposed.
+    public static func isComposedPrompt(_ prompt: String) -> Bool {
+        let normalized = prompt
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n")
+        guard lines.count >= 2 else {
+            return false
+        }
+        return lines[1] == composedMarker
+    }
+
+    /// Registry version fingerprint for one composition.
+    /// Sorted by name so registry iteration order never affects the key; includes
+    /// description, schema, permission, vision, and scheduled branches so any
+    /// byte-affecting change misses the cache and recomposes.
+    private static func cacheKey(for tools: [any Tool], supportsVision: Bool, scheduled: Bool) -> String {
+        let sorted = VisionSchemaFilter.sortedByName(tools, name: { $0.name })
+        // Length-frame every field before hashing so a separator byte inside a
+        // description or schema can never merge distinct registries into one key;
+        // hashing the framed stream then bounds the key no matter how large the
+        // registry grows. Mirrors the plugin tree-hash framing discipline.
+        var framed = Data()
+        func appendFramed(_ string: String) {
+            let bytes = Array(string.utf8)
+            var length = UInt64(bytes.count).bigEndian
+            withUnsafeBytes(of: &length) { framed.append(contentsOf: $0) }
+            framed.append(contentsOf: bytes)
+            framed.append(0x1F)
+        }
+        appendFramed(scheduled ? "scheduled" : "base")
+        appendFramed(supportsVision ? "vision" : "text")
+        for tool in sorted {
+            appendFramed(tool.name)
+            appendFramed(tool.description)
+            appendFramed(tool.inputSchema.rawValue)
+            appendFramed(tool.permissionLevel.rawValue)
+        }
+        let digest = SHA256.hash(data: framed)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Cached prompt when the registry version is unchanged, nil on miss.
+    private static func cachedPrompt(forKey key: String) -> String? {
+        promptCache.withLock { $0.prompts[key] }
+    }
+
+    /// Stores one rendered prompt, evicting the oldest variant at capacity.
+    private static func storeCachedPrompt(_ prompt: String, forKey key: String) {
+        promptCache.withLock { state in
+            if state.prompts[key] == nil {
+                state.order.append(key)
+                while state.order.count > maxCachedPrompts, !state.order.isEmpty {
+                    let victim = state.order.removeFirst()
+                    state.prompts.removeValue(forKey: victim)
+                }
+            }
+            state.prompts[key] = prompt
+        }
+    }
+
     /// Composes the default system prompt for the given tools.
     public static func compose(tools: [any Tool]) -> String {
         compose(tools: tools, supportsVision: true)
@@ -224,7 +319,7 @@ public enum SystemPromptComposer {
     /// - Returns: Valid entries in prompt order.
     private static func sortedValidEntries(tools: [any Tool], supportsVision: Bool, logSkips: Bool) -> [PromptToolEntry] {
         // Omit invalid schemas so one bad plugin degrades to fewer prompt entries, not a corrupt prompt.
-        let sorted = tools.sorted { $0.name < $1.name }
+        let sorted = VisionSchemaFilter.sortedByName(tools, name: { $0.name })
         var validEntries: [PromptToolEntry] = []
         validEntries.reserveCapacity(sorted.count)
         for tool in sorted {
@@ -239,10 +334,18 @@ public enum SystemPromptComposer {
     /// Composes the default system prompt honoring the model's vision capability.
     /// Disabled tools never reach the prompt because the ToolBus overloads snapshot
     /// availableTools, which already omits anything the operator turned off via ToolStateStore.
+    /// The rendered string is cached per registry version so repeated rounds with an
+    /// unchanged registry reuse identical leading bytes for server KV-cache hits.
     public static func compose(tools: [any Tool], supportsVision: Bool) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: false)
+        if let cached = cachedPrompt(forKey: key) {
+            return cached
+        }
         // Logging path: invalid schemas warn once here so operators see the skip.
         let validEntries = sortedValidEntries(tools: tools, supportsVision: supportsVision, logSkips: true)
-        return renderPrompt(from: validEntries, supportsVision: supportsVision)
+        let prompt = renderPrompt(from: validEntries, supportsVision: supportsVision)
+        storeCachedPrompt(prompt, forKey: key)
+        return prompt
     }
 
     /// Renders the full prompt text from already-validated entries.
@@ -255,6 +358,9 @@ public enum SystemPromptComposer {
     private static func renderPrompt(from validEntries: [PromptToolEntry], supportsVision: Bool) -> String {
         var lines: [String] = []
         lines.append("You are Rune Weaver, a helpful personal assistant.")
+        // Provenance marker travels with the composed text so stored prompts can be
+        // classified without sniffing the identity line; custom overrides lack it.
+        lines.append(composedMarker)
         lines.append("")
         lines.append(
             "You help the user across mail, memory, files, and the web. "
@@ -401,7 +507,13 @@ public enum SystemPromptComposer {
     }
 
     /// Composes the scheduled prompt honoring the model's vision capability.
+    /// Shares the base prompt cache so scheduled and interactive turns agree on the
+    /// prefix; the scheduled suffix is static so the combined string stays stable.
     public static func composeScheduled(tools: [any Tool], supportsVision: Bool) -> String {
+        let key = cacheKey(for: tools, supportsVision: supportsVision, scheduled: true)
+        if let cached = cachedPrompt(forKey: key) {
+            return cached
+        }
         var base = compose(tools: tools, supportsVision: supportsVision)
         base += "\n\n"
         base += """
@@ -410,6 +522,7 @@ public enum SystemPromptComposer {
         - Persist critical run outcomes, updates, timestamps, or state changes into memory via remember_fact so subsequent runs or user chats can recall them.
         - Proactively query recall_memories to check prior run state, baselines, or preferences when relevant to the task.
         """
+        storeCachedPrompt(base, forKey: key)
         return base
     }
 

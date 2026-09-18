@@ -87,6 +87,14 @@ extension RuneWeaverConfig {
                 field: "\(prefix).context_length", message: "must be positive"
             )
         }
+        // Sticky ids outside the server's slot pool are rejected, so a
+        // non-positive pool can never pin safely and fails at load instead
+        // of mid-turn.
+        if let slotCount = provider.slotCount, slotCount <= 0 {
+            throw ConfigError.validationError(
+                field: "\(prefix).slot_count", message: "must be positive"
+            )
+        }
         if let serverURL = provider.serverURL {
             try Self.validateURLField(serverURL, field: "\(prefix).server_url")
         }

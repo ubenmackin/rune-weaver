@@ -85,14 +85,11 @@ public enum ToolPromptDisplay: Sendable {
             }
             if text[range.lowerBound] == "." {
                 let prefix = String(text[..<range.upperBound]).lowercased()
-                // Suffix alone over-matches word endings ("first." ends with "st. ",
-                // "forms." ends with "ms. "), so require a word boundary: the
-                // abbreviation must stand alone after start or whitespace.
-                if neverEnding.contains(where: { prefix == $0 + " " || prefix.hasSuffix(" " + $0 + " ") }) {
+                if neverEnding.contains(where: { isStandaloneAbbreviation(prefix: prefix, abbreviation: $0) }) {
                     searchFrom = range.upperBound
                     continue
                 }
-                if sometimesEnding.contains(where: { prefix == $0 + " " || prefix.hasSuffix(" " + $0 + " ") }) {
+                if sometimesEnding.contains(where: { isStandaloneAbbreviation(prefix: prefix, abbreviation: $0) }) {
                     // Abbreviation period doubles as the sentence stop here.
                     return range.lowerBound
                 }
@@ -100,5 +97,26 @@ public enum ToolPromptDisplay: Sendable {
             return range.lowerBound
         }
         return nil
+    }
+
+    /// Determines whether a candidate shorthand stands alone rather than ending a longer word.
+    /// - Parameters:
+    ///   - prefix: Lowercased text through the trailing space after the candidate terminator.
+    ///   - abbreviation: Lowercased dotted shorthand including its period (e.g. `"e.g."`).
+    /// - Returns: True when the shorthand is delimited rather than embedded in a word.
+    private static func isStandaloneAbbreviation(prefix: String, abbreviation: String) -> Bool {
+        // A missing suffix means no match at all, so there is nothing to delimit.
+        guard prefix.hasSuffix(abbreviation + " ") else { return false }
+        // Strip the shorthand plus its trailing space to inspect what precedes it.
+        // An empty remainder means the description opens with the shorthand.
+        let remainder = prefix.dropLast(abbreviation.count + 1)
+        guard let preceding = remainder.last else { return true }
+        // A bare suffix check would mistake word endings for shorthands ("first."
+        // ends with "st."), so the preceding character must delimit. Examples
+        // often open with brackets, braces, quotes, or dashes ("[e.g. Foo]",
+        // "{i.e. Bar}", ": e.g. Baz"), so any punctuation boundary counts
+        // except a period, which would otherwise treat a word-internal dot as
+        // a delimiter ("foo.e.g." is embedded, not standalone).
+        return preceding.isWhitespace || (preceding.isPunctuation && preceding != ".")
     }
 }

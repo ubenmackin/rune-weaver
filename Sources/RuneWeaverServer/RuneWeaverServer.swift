@@ -642,11 +642,16 @@ private func registerChatRoute(_ app: Application) {
                 ),
                 onEvent: { event in
                     // REST has no stream, but dashboard WebSocket clients still deserve
-                    // mid-turn degraded-tool notices. Forward session-tagged warnings through the
-                    // shared broadcast helper so REST and resume share one session-filtered path
-                    // and clients ignore other sessions; failures never fail the turn.
-                    if case .warning = event {
+                    // mid-turn progress. Forward session-tagged warnings and per-round
+                    // token usage through the shared broadcast helper so REST and resume
+                    // share one session-filtered path and clients ignore other sessions;
+                    // failures never fail the turn. The terminal response stays
+                    // authoritative for reconciliation.
+                    switch event {
+                    case .warning, .turnTokens:
                         await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
+                    default:
+                        break
                     }
                 }
             )
@@ -973,7 +978,9 @@ private func registerSessionRoutes(_ app: Application) {
         let grouped = await context.conversations.toolActionsByMessage(for: id)
         let actions = session.messages.compactMap { message -> SessionMessageToolActions? in
             guard let list = grouped[message.id] else { return nil }
-            return SessionMessageToolActions(messageID: message.id, actions: list)
+            // Carry the parent note's persisted creation time so reloads reconcile
+            // to the same server instant that live done frames advertise.
+            return SessionMessageToolActions(messageID: message.id, actions: list, completedAt: message.createdAt.timeIntervalSince1970)
         }
         return SessionToolActionsResponse(sessionID: id, actions: actions)
     }

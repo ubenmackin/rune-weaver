@@ -805,11 +805,16 @@ public struct SessionMessageToolActions: Content, Equatable {
     public let messageID: UUID
     /// Tool calls derived from that message, in stored order.
     public let actions: [ToolAction]
+    /// Parent message completion time as Unix seconds since 1970 (server clock).
+    /// Optional so older engines that omit it still decode; clients fall back
+    /// to the sibling chat history timestamp for the same message.
+    public var completedAt: Double?
 
     /// Creates a per-message actions row.
-    public init(messageID: UUID, actions: [ToolAction]) {
+    public init(messageID: UUID, actions: [ToolAction], completedAt: Double? = nil) {
         self.messageID = messageID
         self.actions = actions
+        self.completedAt = completedAt
     }
 }
 

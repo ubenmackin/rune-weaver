@@ -669,6 +669,7 @@ private func drainChunkedStream(
     provider: any ChunkStreamingProvider,
     definitions: [ToolDefinition],
     history: [Message],
+    session: UUID?,
     interrupt: ChatInterruptState
 ) async -> ChunkedTurnDraft {
     var text = ""
@@ -676,7 +677,9 @@ private func drainChunkedStream(
     var streamError: String?
     var usage: TokenUsage?
     var servedModel = ""
-    for await chunk in provider.chatChunks(messages: history, tools: definitions) {
+    // Pin the turn to the chat session so sticky-slot backends reuse the
+    // cached prefix instead of falling back to server auto-assignment.
+    for await chunk in provider.chatChunks(messages: history, tools: definitions, session: session) {
         if ChatTurnInterrupt.isCancelled(interrupt) {
             break
         }
@@ -833,12 +836,13 @@ private func runChunkedTurn(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
-        let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
+        let history = Orchestrator.stableHistoryWithRecall(baseHistory, recall: recall)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         let draft = await drainChunkedStream(
             provider: provider,
             definitions: definitions,
             history: history,
+            session: context.sessionID,
             interrupt: interrupt
         )
         // Abort the in-flight request immediately: breaking the `for await` releases the provider
@@ -948,12 +952,15 @@ private func drainTextStream(
     provider: any LLMProvider,
     history: [Message],
     tools: [any Tool],
+    session: UUID?,
     interrupt: ChatInterruptState
 ) async -> TextTurnDraft {
     var text = ""
     var streamError: String?
     var billedTokens: Int?
-    for await part in provider.chat(messages: history, tools: tools) {
+    // Pin the turn to the chat session so sticky-slot backends reuse the
+    // cached prefix instead of falling back to server auto-assignment.
+    for await part in provider.chat(messages: history, tools: tools, session: session) {
         if ChatTurnInterrupt.isCancelled(interrupt) {
             break
         }
@@ -1010,12 +1017,13 @@ private func runTextTurn(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
-        let history = MemoryEngine.historyWithRecall(baseHistory, recall: recall)
+        let history = Orchestrator.stableHistoryWithRecall(baseHistory, recall: recall)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         let draft = await drainTextStream(
             provider: provider,
             history: history,
             tools: validTextTools,
+            session: context.sessionID,
             interrupt: interrupt
         )
         let text = draft.text

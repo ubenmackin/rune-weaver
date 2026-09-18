@@ -30,7 +30,11 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     /// Whether a `tool`-role message represents a failure.
     public let isError: Bool?
     /// Creation timestamp.
-    public let createdAt: Date
+    /// The conversation store quantizes this to whole milliseconds on append so the live
+    /// stamp and the reloaded history share one instant across persistence round-trips.
+    /// Mutation stays confined to this type so timestamp requantization can copy the whole
+    /// value instead of re-listing fields, keeping future fields on the stored copy.
+    public private(set) var createdAt: Date
 
     /// Creates a new message.
     public init(
@@ -47,6 +51,18 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         self.toolCallID = toolCallID
         self.isError = isError
         self.createdAt = createdAt
+    }
+
+    /// Returns a copy stamped with the given creation instant.
+    /// Copies the whole value and moves only the timestamp so persistence can quantize
+    /// without reconstructing the message at each call site, where a new field would
+    /// otherwise be silently dropped from the stored copy.
+    /// - Parameter createdAt: Creation instant for the copy.
+    /// - Returns: An equal message except for the creation instant.
+    public func withCreatedAt(_ createdAt: Date) -> Message {
+        var copy = self
+        copy.createdAt = createdAt
+        return copy
     }
 }
 

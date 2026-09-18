@@ -86,6 +86,9 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public var isParked: Bool = false
     /// Degraded-tool notices for tools omitted this turn. Nil when absent for back-compat.
     public var warnings: [String]?
+    /// Completion time as Unix seconds since 1970 on the server clock. Optional so
+    /// older dashboards that omit it still decode; clients fall back to receipt time.
+    public var completedAt: Double?
 
     /// Creates a stream done frame.
     public init(
@@ -98,7 +101,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         sessionTokens: Int? = nil,
         isParked: Bool = false,
         warnings: [String]? = nil,
-        roundIndex: Int? = nil
+        roundIndex: Int? = nil,
+        completedAt: Double? = nil
     ) {
         self.type = "done"
         self.text = text
@@ -110,6 +114,10 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.sessionTokens = sessionTokens
         self.isParked = isParked
         self.warnings = warnings
+        // Callers stamp the persisted assistant note's creation time so live frames and
+        // history reloads share one instant; nil keeps equality deterministic and lets
+        // clients fall back to receipt time when no note persisted.
+        self.completedAt = completedAt
         // Derive the turn's highest round from its actions when the caller omits it,
         // so multi-round turns advertise their boundary count without extra bookkeeping.
         if let roundIndex {
@@ -143,9 +151,15 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case isParked
         /// Degraded-tool notices.
         case warnings
+        /// Completion time as Unix seconds.
+        case completedAt
     }
 
-    /// Decodes a terminal frame, defaulting a missing parked flag for back-compat.
+    /// Decodes a terminal frame, defaulting a missing parked flag for back-compat
+    /// while rejecting negative token counters so a drifted payload fails here
+    /// exactly where the live progress frame drops it, instead of reconciling to
+    /// a negative total. Integer decoding already rejects fractional counters; the
+    /// explicit guards below reject negatives to match `WSTurnTokensFrame`.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -154,12 +168,21 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
         self.toolActions = try container.decodeIfPresent([ToolAction].self, forKey: .toolActions)
         self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex) ?? toolActions?.compactMap(\.roundIndex).max()
-        self.totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        let totalTokens = try container.decodeIfPresent(Int.self, forKey: .totalTokens)
+        if let totalTokens, totalTokens < 0 {
+            throw DecodingError.dataCorruptedError(forKey: .totalTokens, in: container, debugDescription: "totalTokens must be non-negative")
+        }
+        self.totalTokens = totalTokens
         self.modelName = try container.decodeIfPresent(String.self, forKey: .modelName)
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
-        self.sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
+        let sessionTokens = try container.decodeIfPresent(Int.self, forKey: .sessionTokens)
+        if let sessionTokens, sessionTokens < 0 {
+            throw DecodingError.dataCorruptedError(forKey: .sessionTokens, in: container, debugDescription: "sessionTokens must be non-negative")
+        }
+        self.sessionTokens = sessionTokens
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings)
+        self.completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
     }
 
     /// Encodes a terminal frame, omitting an absent round so older decoders see no new key.
@@ -177,9 +200,13 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
         try container.encode(isParked, forKey: .isParked)
         try container.encodeIfPresent(warnings, forKey: .warnings)
+        // Omit an absent completion so older decoders see no new key.
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
     }
 
     /// Creates a terminal frame from an orchestrator response.
+    /// Carries the response's persisted completion instant through without re-stamping
+    /// so live frames and history reloads reconcile to the same server instant.
     public init(from response: OrchestratorResponse) {
         self.init(
             text: response.text,
@@ -190,7 +217,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             contextLength: response.contextLength,
             sessionTokens: response.sessionTokens,
             isParked: response.isParked,
-            warnings: response.warnings.isEmpty ? nil : response.warnings
+            warnings: response.warnings.isEmpty ? nil : response.warnings,
+            completedAt: response.completedAt
         )
     }
 }
@@ -536,5 +564,80 @@ public enum WSTurnAlive: Sendable {
               let text = String(data: data, encoding: .utf8)
         else { return nil }
         return text
+    }
+}
+
+/// Per-round token usage progress for the in-flight turn. Lets dashboards show a
+/// running turn total and a live session estimate without waiting for the terminal
+/// done frame, which stays authoritative for reconciliation. Session-tagged like
+/// the heartbeat so multiplexed views only apply their own turn and older clients
+/// drop the unknown `type` without rendering. Counters stay required so a partial
+/// payload never renders as zeroed progress. Lives here so REST and WebSocket
+/// turns share one encoding; the TypeScript `WSTurnTokensFrame` mirrors this shape
+/// with the same required integer counters and drops frames missing any of them.
+public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
+    /// Always `"turn_tokens"`.
+    public let type: String
+    /// Owning session so multiplexed views only apply their own turn.
+    public var sessionID: UUID?
+    /// Zero-based LLM round that produced this usage, oldest first. Required so
+    /// dashboards never attribute usage to the wrong round when a key goes missing.
+    public var roundIndex: Int
+    /// Billed tokens for this round alone, from the provider usage. Required so a
+    /// missing key drops the frame instead of rendering a zeroed round.
+    public var roundTokens: Int
+    /// Cumulative billed tokens for this turn so far. Required so a missing key
+    /// drops the frame instead of resetting the live footer.
+    public var turnTotalTokens: Int
+
+    /// Creates a token progress frame.
+    public init(sessionID: UUID? = nil, roundIndex: Int, roundTokens: Int, turnTotalTokens: Int) {
+        self.type = "turn_tokens"
+        self.sessionID = sessionID
+        self.roundIndex = roundIndex
+        self.roundTokens = roundTokens
+        self.turnTotalTokens = turnTotalTokens
+    }
+
+    /// Coding keys for the token progress frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Owning session.
+        case sessionID
+        /// Zero-based LLM round.
+        case roundIndex
+        /// Billed tokens for this round.
+        case roundTokens
+        /// Cumulative billed tokens for the turn.
+        case turnTotalTokens
+    }
+
+    /// Decodes a token progress frame, defaulting a missing discriminator for back-compat
+    /// while requiring every counter so a partial payload throws and the caller drops
+    /// it instead of rendering zeroed progress.
+    /// Counters must stay non-negative integers so a drifted fractional or negative
+    /// payload fails here exactly where the dashboard guard drops it, instead of
+    /// decoding in tests while vanishing live.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "turn_tokens"
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        let roundIndex = try container.decode(Int.self, forKey: .roundIndex)
+        guard roundIndex >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .roundIndex, in: container, debugDescription: "roundIndex must be non-negative")
+        }
+        self.roundIndex = roundIndex
+        let roundTokens = try container.decode(Int.self, forKey: .roundTokens)
+        guard roundTokens >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .roundTokens, in: container, debugDescription: "roundTokens must be non-negative")
+        }
+        self.roundTokens = roundTokens
+        let turnTotalTokens = try container.decode(Int.self, forKey: .turnTotalTokens)
+        guard turnTotalTokens >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .turnTotalTokens, in: container, debugDescription: "turnTotalTokens must be non-negative")
+        }
+        self.turnTotalTokens = turnTotalTokens
     }
 }
