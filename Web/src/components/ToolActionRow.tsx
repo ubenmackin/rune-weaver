@@ -3,7 +3,7 @@
 // and 'card' (run log detail modal) variants with collapsible arguments and outputs.
 
 import { useState, useEffect, useRef } from "react";
-import type { ToolAction } from "../api";
+import type { ToolAction, ToolResult } from "../api";
 import { ChevronDownIcon, ChevronRightIcon, WrenchIcon } from "./icons";
 
 export interface ToolActionRowProps {
@@ -521,6 +521,27 @@ function BrowserDetails({ browser }: { browser: BrowserNavigate }) {
   );
 }
 
+// Semantic status for a finished tool result, mirrored by both the chat pill
+// and the card variant. `kind` is variant-neutral: each surface prefixes it
+// with its own class namespace (`tool-badge-*` for cards, bare for pills), so
+// classification and labels live in exactly one branch and the two surfaces
+// cannot drift on errorKind handling.
+type ToolResultStatusKind = "invalid-tool" | "invalid-syntax" | "error" | "ok";
+
+function resolveResultStatus(result: ToolResult): {
+  kind: ToolResultStatusKind;
+  label: string;
+} {
+  if (!result.isError) return { kind: "ok", label: "Done" };
+  if (result.errorKind === "invalid_tool") {
+    return { kind: "invalid-tool", label: "Unknown Tool" };
+  }
+  if (result.errorKind === "invalid_syntax") {
+    return { kind: "invalid-syntax", label: "Invalid Syntax" };
+  }
+  return { kind: "error", label: "Error" };
+}
+
 export default function ToolActionRow({
   action,
   variant = "chat",
@@ -537,6 +558,9 @@ export default function ToolActionRow({
     action.toolName === "browser.navigate" && result && !result.isError
       ? parseBrowserNavigate(result.content)
       : null;
+  // One classification shared by both variants, rendered below with
+  // surface-specific class prefixes.
+  const status = result ? resolveResultStatus(result) : null;
 
   if (variant === "card") {
     return (
@@ -555,16 +579,14 @@ export default function ToolActionRow({
             </span>
           </div>
           <div className="tool-action-badge">
-            {result ? (
-              result.isError ? (
-                <span className="tool-badge-error">Error</span>
-              ) : (
-                <span className="tool-badge-ok">Done</span>
-              )
+            {status ? (
+              <span className={`tool-badge tool-badge-${status.kind}`}>
+                {status.label}
+              </span>
             ) : isLive ? (
-              <span className="tool-badge-pending">Running</span>
+              <span className="tool-badge tool-badge-pending">Running</span>
             ) : (
-              <span className="tool-badge-pending">Pending</span>
+              <span className="tool-badge tool-badge-pending">Pending</span>
             )}
             {browser?.authRequired ? (
               <span
@@ -625,13 +647,9 @@ export default function ToolActionRow({
         <span className="chat-tool-call-id" title={action.callID || ""}>
           {action.callID || ""}
         </span>
-        {result ? (
-          <span
-            className={`chat-tool-status ${
-              result.isError ? "error" : "ok"
-            }`}
-          >
-            {result.isError ? "Error" : "Done"}
+        {status ? (
+          <span className={`chat-tool-status ${status.kind}`}>
+            {status.label}
           </span>
         ) : isLive ? (
           <span className="chat-tool-status running">Running</span>

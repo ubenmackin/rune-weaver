@@ -46,10 +46,13 @@ export interface HealthResponse {
   maxConcurrentChatTurns?: number | null;
 }
 
+export type ToolErrorKind = "invalid_tool" | "invalid_syntax" | "execution_error";
+
 export interface ToolResult {
   toolCallID: string;
   content: string;
   isError: boolean;
+  errorKind?: ToolErrorKind | null;
 }
 
 export interface ToolAction {

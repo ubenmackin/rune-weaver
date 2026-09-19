@@ -29,6 +29,10 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
     public let toolCallID: String?
     /// Whether a `tool`-role message represents a failure.
     public let isError: Bool?
+    /// Category of a `tool`-role failure, mirroring the bus taxonomy so history reloads
+    /// render the same status badge as the live turn. Nil for successes and for rows
+    /// written before the category was persisted, which degrade to the generic error badge.
+    public let errorKind: ToolErrorKind?
     /// Creation timestamp.
     /// The conversation store quantizes this to whole milliseconds on append so the live
     /// stamp and the reloaded history share one instant across persistence round-trips.
@@ -43,6 +47,7 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         content: String,
         toolCallID: String? = nil,
         isError: Bool? = nil,
+        errorKind: ToolErrorKind? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
@@ -50,6 +55,7 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         self.content = content
         self.toolCallID = toolCallID
         self.isError = isError
+        self.errorKind = errorKind
         self.createdAt = createdAt
     }
 
@@ -65,7 +71,7 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
         return copy
     }
 
-    /// Returns a copy with updated content, preserving id, role, toolCallID, isError, and createdAt.
+    /// Returns a copy with updated content, preserving id, role, toolCallID, isError, errorKind, and createdAt.
     public func withContent(_ content: String) -> Message {
         Message(
             id: id,
@@ -73,6 +79,7 @@ public struct Message: Sendable, Codable, Equatable, Identifiable {
             content: content,
             toolCallID: toolCallID,
             isError: isError,
+            errorKind: errorKind,
             createdAt: createdAt
         )
     }

@@ -67,7 +67,17 @@ func openAIChatRequestBody(
     cachePrompt: Bool? = nil,
     slotID: Int? = nil
 ) throws -> Data {
-    var wireMessages: [[String: Any]] = messages.map { message in
+    // OpenAI-compatible endpoints reject an assistant `tool_calls` entry that no
+    // following tool-role message answers. Parked/approval-gated placeholders persist
+    // an assistant note with no results until the approval resumes, so restrict
+    // promotion to call IDs that already have a result in this request.
+    let answeredCallIDs = answeredToolCallIDs(in: messages)
+    // Track identifiers across the whole request so a call ID re-persisted in a
+    // later note cannot reach the wire twice beside its single answer.
+    var emittedCallIDs = Set<String>()
+    var wireMessages: [[String: Any]] = []
+    wireMessages.reserveCapacity(messages.count)
+    for message in messages {
         var entry: [String: Any] = [
             "role": OpenAIWireRole.string(for: message.role),
             "content": message.content
@@ -75,7 +85,33 @@ func openAIChatRequestBody(
         if let callID = message.toolCallID {
             entry["tool_call_id"] = callID
         }
-        return entry
+        if message.role == .assistant {
+            let split = splitResponsesAssistantContent(
+                message.content,
+                answeredCallIDs: answeredCallIDs,
+                excludingCallIDs: emittedCallIDs
+            )
+            if !split.toolCalls.isEmpty {
+                emittedCallIDs.formUnion(split.toolCalls.map(\.id))
+                entry["tool_calls"] = split.toolCalls.map { call in
+                    [
+                        "id": call.id,
+                        "type": "function",
+                        "function": [
+                            "name": call.name,
+                            "arguments": call.argumentsJSON
+                        ]
+                    ]
+                }
+            }
+            // Plumbing notes carry only their leftover prose, so a scrubbed
+            // dangling line or an excluded twin collapses to empty instead of
+            // leaking `Calling …` upstream as request content.
+            if split.recognizedPlumbing {
+                entry["content"] = split.leftover
+            }
+        }
+        wireMessages.append(entry)
     }
     if wireMessages.isEmpty {
         wireMessages = [["role": "user", "content": ""]]
@@ -132,22 +168,76 @@ func parseResponsesPlaceholderLine(_ line: String) -> ToolCall? {
     return ToolCall(id: parsed.callID, name: parsed.toolName, argumentsJSON: parsed.argumentsJSON)
 }
 
+/// Collects the call IDs that already have a tool-role result among `messages`.
+/// Single-sources the answer set for both wires so an assistant placeholder is
+/// promoted to a native call only once its result exists in the same request.
+func answeredToolCallIDs(in messages: [Message]) -> Set<String> {
+    Set(messages.compactMap { $0.role == .tool ? $0.toolCallID : nil })
+}
+
+/// Outcome of splitting one assistant message into wire-ready calls plus text.
+/// Named fields replace a multi-member tuple so each of the split's three
+/// outcomes stays self-documenting at both request-body call sites.
+struct ResponsesAssistantContentSplit: Sendable {
+    /// Promoted placeholders, in first-seen order.
+    let toolCalls: [ToolCall]
+    /// Non-placeholder text retained verbatim alongside the promoted calls.
+    let leftover: String
+    /// Whether any placeholder line was recognized; callers use this to replace the
+    /// raw note with its leftover prose while dropping a fully scrubbed plumbing note.
+    let recognizedPlumbing: Bool
+}
+
 /// Splits an assistant message into structured calls plus leftover text.
-func splitResponsesAssistantContent(_ content: String) -> (calls: [ToolCall], leftover: String) {
+/// - Parameter answeredCallIDs: When provided, a parsed placeholder whose call ID
+///   has no matching tool result is scrubbed from the wire entirely instead of
+///   becoming a call, so dangling parked/gated placeholders neither reach the wire
+///   as unmatched calls nor leak their raw `Calling …` text as content. Passing nil
+///   promotes every parsed placeholder, preserving the result-free split used by
+///   callers that validate placeholders in isolation.
+/// - Parameter excludingCallIDs: Identifiers already emitted earlier in this request.
+///   A placeholder carrying one drops entirely so a single call ID never maps to two
+///   wire entries; a repeat inside this note collapses the same way.
+/// - Returns: The split result carrying structured calls, leftover text, and whether
+///   any placeholder line was recognized.
+func splitResponsesAssistantContent(
+    _ content: String,
+    answeredCallIDs: Set<String>? = nil,
+    excludingCallIDs: Set<String> = []
+) -> ResponsesAssistantContentSplit {
     // Shared split keeps wire validation on the same line boundaries as narration
     // parsing; a trailing newline stays a terminator, not an extra blank.
+    var emitted = excludingCallIDs
     var calls: [ToolCall] = []
     var leftoverLines: [String] = []
+    var recognizedPlumbing = false
     for rawLine in NormalizedText.splitLines(content) {
         let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !line.isEmpty else { continue }
         if let call = parseResponsesPlaceholderLine(line) {
+            recognizedPlumbing = true
+            // One call ID yields exactly one wire call. A repeated line is the
+            // narration plus its previously emitted twin, so drop it outright
+            // rather than leaking plumbing back into the leftover text.
+            guard emitted.insert(call.id).inserted else { continue }
+            if let answeredCallIDs, !answeredCallIDs.contains(call.id) {
+                // Dangling placeholder: a parked or approval-gated call has no
+                // result in this request, so promoting it would send an unmatched
+                // call. Scrub the line entirely rather than re-emitting the raw
+                // `Calling …` plumbing as request content; genuine prose on this
+                // same note still survives through the else branch below.
+                continue
+            }
             calls.append(call)
         } else {
             leftoverLines.append(rawLine)
         }
     }
-    return (calls, leftoverLines.joined(separator: "\n"))
+    return ResponsesAssistantContentSplit(
+        toolCalls: calls,
+        leftover: leftoverLines.joined(separator: "\n"),
+        recognizedPlumbing: recognizedPlumbing
+    )
 }
 
 /// Builds a JSON request body for `/responses`.
@@ -165,6 +255,13 @@ func openAIResponsesRequestBody(
     let systemMessages = messages.filter { $0.role == .system }
     let conversationMessages = messages.filter { $0.role != .system }
     let ordered = systemMessages + conversationMessages
+    // Responses shares the chat wire's dangling-call hazard: a `function_call`
+    // item with no matching `function_call_output` is rejected, and parked/gated
+    // notes persist without results until approval. Gate promotion on the same set.
+    let answeredCallIDs = answeredToolCallIDs(in: messages)
+    // Same cross-note guard as the chat wire: one call ID produces one
+    // `function_call` item even when a later note re-persists its placeholder.
+    var emittedCallIDs = Set<String>()
     var wireInput: [[String: Any]] = []
     wireInput.reserveCapacity(ordered.count * 2)
     for message in ordered {
@@ -177,9 +274,14 @@ func openAIResponsesRequestBody(
             continue
         }
         if message.role == .assistant {
-            let split = splitResponsesAssistantContent(message.content)
-            if !split.calls.isEmpty {
-                for call in split.calls {
+            let split = splitResponsesAssistantContent(
+                message.content,
+                answeredCallIDs: answeredCallIDs,
+                excludingCallIDs: emittedCallIDs
+            )
+            if !split.toolCalls.isEmpty {
+                emittedCallIDs.formUnion(split.toolCalls.map(\.id))
+                for call in split.toolCalls {
                     wireInput.append([
                         "type": "function_call",
                         "call_id": call.id,
@@ -187,6 +289,11 @@ func openAIResponsesRequestBody(
                         "arguments": call.argumentsJSON
                     ])
                 }
+            }
+            if split.recognizedPlumbing {
+                // A plumbing note contributes only its leftover prose, so a scrubbed
+                // dangling line or an excluded twin vanishes rather than leaking
+                // `Calling …` upstream as request content.
                 let leftover = split.leftover.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !leftover.isEmpty {
                     wireInput.append([

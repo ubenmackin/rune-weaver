@@ -246,6 +246,7 @@ struct ChatCommand: AsyncParsableCommand {
         await permissionGate.startPeriodicCleanup()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
             sandboxConfig: loaded.config.sandbox,
@@ -788,17 +789,16 @@ private func handleChunkedStructuredTurn(
     if ChatTurnInterrupt.isCancelled(interrupt) {
         return await cancelChunkedTurn(context: context, snapshot: progress.snapshot, withLeadingNewline: false)
     }
-    // Fail-closed per tool: withhold hallucinated names for omitted schemas so invalid tools
-    // never reach execution. Silent partition keeps the prompt and wire filters as the single log sites.
-    let validNames = await Set(VisionSchemaFilter.partitionValidSchemas(
-        entries: context.toolBus.availableTools(),
-        name: { $0.name },
-        rawSchema: { $0.inputSchema.rawValue },
-        logSkips: false
-    ).valid.map(\.name))
-    let inputs = calls.filter { validNames.contains($0.name) }
+    // Fail-closed only for schema-degraded registered tools: a call naming a tool whose schema
+    // was omitted for this turn must not execute. Unknown names pass through to `ToolBus.execute`
+    // so the bus answers `invalid_tool` with available-tool names for self-correction. Shares the
+    // orchestrator's denylist helper so the native-call paths cannot drift. Silent partition keeps
+    // the prompt and wire filters as the single log sites.
+    let availableTools = await context.toolBus.availableTools()
+    let degradedNames = OrchestratorToolLoop.degradedSchemaNames(for: availableTools)
+    let inputs = calls.filter { !degradedNames.contains($0.name) }
         .map { ToolInput(toolName: $0.name, argumentsJSON: $0.argumentsJSON, callID: $0.id) }
-    // All calls withheld: end as text-only so the turn stays honest without looping for another round.
+    // All calls withheld for degraded schemas: end as text-only so the turn stays honest without looping for another round.
     if inputs.isEmpty {
         guard OrchestratorToolLoop.shouldStoreAssistantText(text) else { return .completed }
         if ChatTurnInterrupt.isCancelled(interrupt) {

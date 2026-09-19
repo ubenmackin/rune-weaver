@@ -385,29 +385,22 @@ extension Orchestrator {
     }
 
     /// Resolves valid tool calls for the latest assistant turn.
+    /// Fail-closed on schema-degraded registered tools: a native call naming a tool whose
+    /// schema was omitted for this turn must not execute. Unknown or unregistered names pass
+    /// through to `ToolBus.execute`, which answers `invalid_tool` with available-tool names
+    /// for self-correction; the shared denylist keeps this identical to the CLI and to the
+    /// narration path.
     private func resolveCallsForTurn(
         collected: TurnDraft,
-        validToolNames: Set<String>,
         workingMessages: [Message],
         finalText: String,
         tools: [any Tool]
     ) async throws -> [ToolInput] {
-        var calls = collected.toolCalls.filter { validToolNames.contains($0.toolName) }
-        if calls.isEmpty {
-            calls = try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
-            calls = calls.filter { validToolNames.contains($0.toolName) }
+        if !collected.toolCalls.isEmpty {
+            let degradedNames = OrchestratorToolLoop.degradedSchemaNames(for: tools)
+            return collected.toolCalls.filter { !degradedNames.contains($0.toolName) }
         }
-        return calls
-    }
-
-    /// Extracts valid tool names from available tools for schema filtering.
-    private static func validToolNames(for tools: [any Tool]) -> Set<String> {
-        Set(VisionSchemaFilter.partitionValidSchemas(
-            entries: tools,
-            name: { $0.name },
-            rawSchema: { $0.inputSchema.rawValue },
-            logSkips: false
-        ).valid.map(\.name))
+        return try await resolveToolCalls(messages: workingMessages, assistantText: finalText, tools: tools)
     }
 
     /// Collects one turn from the LLM, emits live token progress, and increments the round counter.
@@ -460,7 +453,8 @@ extension Orchestrator {
         text: String,
         actions: [ToolAction],
         toolRounds: Int,
-        tokens: (Int?, Int?)
+        tokens: (Int?, Int?),
+        narrationAlreadyPersisted: Bool = false
     ) -> ParkTurnContext {
         ParkTurnContext(
             gated: gated,
@@ -468,7 +462,8 @@ extension Orchestrator {
             toolActions: actions,
             billedTokens: tokens.0,
             toolRounds: toolRounds,
-            contextTokens: tokens.1
+            contextTokens: tokens.1,
+            narrationAlreadyPersisted: narrationAlreadyPersisted
         )
     }
 
@@ -521,7 +516,6 @@ extension Orchestrator {
         var toolRounds = request.initialToolRounds
         var billedTokens: Int?
         var llmRoundIndex = request.initialLlmRoundIndex
-        let validNames = Self.validToolNames(for: request.tools)
 
         while true {
             try Task.checkCancellation()
@@ -549,7 +543,6 @@ extension Orchestrator {
 
             let calls = try await resolveCallsForTurn(
                 collected: collected,
-                validToolNames: validNames,
                 workingMessages: workingMessages,
                 finalText: finalText,
                 tools: request.tools
@@ -575,8 +568,11 @@ extension Orchestrator {
                     calls: calls, finalText: finalText, toolRounds: toolRounds, request: request, pendingEpisodic: &pendingEpisodic
                 )
                 toolActions.append(contentsOf: executed)
+                // The executed call already wrote this turn's narration note, so the
+                // sibling gated calls must park without persisting it a second time.
                 let updatedContext = makeParkContext(
-                    gated: gated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
+                    gated: gated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens,
+                    narrationAlreadyPersisted: true
                 )
                 if let parked = await parkTurnIfGated(context: updatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
                     return parked

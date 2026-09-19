@@ -456,7 +456,8 @@ extension Orchestrator {
             recall: request.recall,
             onEvent: request.onEvent,
             gatedRoundIndex: turn.toolRounds,
-            contextTokens: turn.contextTokens
+            contextTokens: turn.contextTokens,
+            narrationAlreadyPersisted: turn.narrationAlreadyPersisted
         )
         let parked = await parkGatedCalls(context, pendingEpisodic: &pendingEpisodic)
         return .parked(parked)
@@ -516,7 +517,12 @@ extension Orchestrator {
             }
         }
         let waiting = OrchestratorToolLoop.waitingOnApprovalMessage(for: context.gated)
-        await conversations.append(assistantNoteMessage(text: context.narratedText, calls: context.gated), to: context.sessionID)
+        // Mixed turns persisted the narration before executing their structured
+        // calls, so only pure park turns (and limit continuations) own this write.
+        // Appending again would duplicate the note and its call-ID placeholders.
+        if !context.narrationAlreadyPersisted {
+            await conversations.append(assistantNoteMessage(text: context.narratedText, calls: context.gated), to: context.sessionID)
+        }
         let waitingNote = Message(role: .assistant, content: waiting)
         let persistedWaiting = await conversations.append(waitingNote, to: context.sessionID)
         pendingEpisodic.append((waiting, .assistant))

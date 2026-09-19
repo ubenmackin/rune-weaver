@@ -880,17 +880,11 @@ public extension MemoryEngine {
         episodicToolRecord(toolName: toolName, content: result.content, isError: result.isError)
     }
 
-    /// Whether a line looks like persisted tool-call plumbing.
-    static func isToolPlumbingLine(_ line: String) -> Bool {
-        ToolInput.parsePlaceholderLine(line) != nil
-    }
-
     /// Removes tool-call plumbing lines from text.
+    /// Delegates to the shared tool-loop scrubber so history cleaning keeps one
+    /// placeholder grammar instead of a drifting per-store copy.
     static func strippingToolPlumbing(from text: String) -> String {
-        // Shared split keeps memory stripping on the same line boundaries as
-        // narration parsing; a trailing newline stays a terminator, not a blank.
-        let kept = NormalizedText.splitLines(text).filter { !isToolPlumbingLine($0) }
-        return kept.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        OrchestratorToolLoop.scrubPlaceholderPlumbing(from: text)
     }
 
     /// Stores one fact preferring vectors, falling back to keyword-only.
@@ -991,6 +985,22 @@ public extension MemoryEngine {
             return nil
         }
         return Message(role: .system, content: text)
+    }
+}
+
+// MARK: - MemoryEngine Tool Plumbing Compatibility
+
+public extension MemoryEngine {
+    /// Whether one raw line is persisted tool-call plumbing.
+    /// Retained as a forwarding shim for external callers of the former
+    /// `MemoryEngine` predicate: history cleaning now agrees on the shared
+    /// tool-loop grammar, so this delegates there instead of holding a copy
+    /// that could drift.
+    /// - Parameter line: One raw line from a persisted assistant note.
+    /// - Returns: True when the line parses as a placeholder plumbing line.
+    @available(*, deprecated, message: "Use OrchestratorToolLoop.isPlaceholderPlumbingLine(_:) instead.")
+    static func isToolPlumbingLine(_ line: String) -> Bool {
+        OrchestratorToolLoop.isPlaceholderPlumbingLine(line)
     }
 }
 

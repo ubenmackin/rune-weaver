@@ -39,6 +39,28 @@ private struct ApprovalStubTool: Tool, Sendable {
     }
 }
 
+/// Fails with a caller-supplied message so the bus fallback classification is exercised.
+private struct FailingStubTool: Tool, Sendable {
+    /// Stable stub name.
+    let name = "stub.fail"
+    /// When the stub should be used.
+    let description = "Always-failing stub."
+    /// Empty-object schema.
+    let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+    /// Always allowed without prompts.
+    let permissionLevel = PermissionLevel.readOnly
+    /// Failure content returned to the bus.
+    let message: String
+    /// Explicit category forwarded to the bus, or nil to exercise the fallback sniff.
+    var errorKind: ToolErrorKind?
+
+    /// Returns the canned failure, forwarding the explicit category when set so the
+    /// bus-precedence path is covered alongside the sniffing path.
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .failure(message, callID: input.callID, errorKind: errorKind)
+    }
+}
+
 @Suite("Tool Bus")
 struct ToolBusTests {
     @Test
@@ -174,5 +196,131 @@ struct ToolBusTests {
             context: ToolContext(conversationID: UUID())
         )
         #expect(result.isError == false)
+    }
+
+    @Test
+    func `Invalid JSON arguments return invalidSyntax errorKind`() async {
+        let bus = ToolBus()
+        await bus.register(tool: ReadOnlyStubTool())
+        let input = ToolInput(toolName: "stub.read", argumentsJSON: "{not valid json}")
+        let context = ToolContext(conversationID: UUID())
+        let result = await bus.execute(toolCall: input, context: context)
+        #expect(result.isError == true)
+        #expect(result.errorKind == .invalidSyntax)
+        #expect(result.content.contains("Invalid arguments JSON"))
+    }
+
+    @Test
+    func `Tool argument failure content classifies as invalidSyntax`() async {
+        let bus = ToolBus()
+        await bus.register(tool: FailingStubTool(message: "Invalid stub.fail arguments: 'x' must not be empty."))
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.fail", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == true)
+        #expect(result.errorKind == .invalidSyntax)
+    }
+
+    @Test
+    func `Tool runtime failure defaults to executionError`() async {
+        let bus = ToolBus()
+        await bus.register(tool: FailingStubTool(message: "Runtime exploded"))
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.fail", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == true)
+        #expect(result.errorKind == .executionError)
+    }
+
+    @Test
+    func `Explicit tool errorKind overrides the content sniff`() async {
+        let bus = ToolBus()
+        // Configuration and runtime messages can share the "Invalid ..." wording the
+        // fallback sniffs for; an explicit kind is the tool's contract, so the bus
+        // must report execution_error rather than mask it as invalid_syntax.
+        await bus.register(tool: FailingStubTool(
+            message: "Invalid browser.searxng_url 'nope': must be an absolute URL.",
+            errorKind: .executionError
+        ))
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.fail", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError == true)
+        #expect(result.errorKind == .executionError)
+    }
+
+    @Test
+    func `Unknown tool returns invalidTool errorKind and available tools`() async {
+        let bus = ToolBus()
+        await bus.register(tool: ReadOnlyStubTool())
+        let input = ToolInput(toolName: "missing.tool", argumentsJSON: "{}")
+        let context = ToolContext(conversationID: UUID())
+        let result = await bus.execute(toolCall: input, context: context)
+        #expect(result.isError == true)
+        #expect(result.errorKind == .invalidTool)
+        #expect(result.content.contains("stub.read"))
+    }
+
+    @Test
+    func `BuiltinToolPlugins makeAllTools includes files email and web tools`() {
+        let tools = BuiltinToolPlugins.makeAllTools(
+            emailConfig: EmailConfig(),
+            filesConfig: FilesConfig(),
+            browserConfig: BrowserConfig()
+        )
+        let names = Set(tools.map(\.name))
+        #expect(names.contains("files.read"))
+        #expect(names.contains("files.grep"))
+        #expect(names.contains("files.glob"))
+        #expect(names.contains("web.search"))
+        #expect(names.contains("email.search"))
+    }
+
+    @Test
+    func `BuiltinToolPlugins forwards files policy to email attachment exports`() async throws {
+        let realHome = FilesAccessGuard.resolvedHomeURL()
+        let exportPath = realHome
+            .appendingPathComponent("runeweaver-email-policy-\(UUID().uuidString).txt")
+            .path
+        // The path lives inside the default home root, so the default policy
+        // permits it and only a forwarded restrictive policy can deny it.
+        #expect(FilesAccessGuard.evaluate(path: exportPath, filesConfig: FilesConfig()).allowed)
+
+        let restrictive = FilesConfig(
+            denyPatterns: [],
+            allowRoots: ["/tmp/runeweaver-email-policy-unused-root"],
+            requireApprovalOnDeny: false
+        )
+        let tools = BuiltinToolPlugins.makeAllTools(
+            emailConfig: EmailConfig(),
+            filesConfig: restrictive,
+            browserConfig: BrowserConfig()
+        )
+        guard let attachment = tools.first(where: { $0.name == "email.attachment" }) else {
+            Issue.record("email.attachment was not registered")
+            return
+        }
+        let payload = "{\"account\":\"personal\",\"id\":\"42\",\"index\":0,\"saveToPath\":\"\(exportPath)\"}"
+        let output = try await attachment.execute(
+            input: ToolInput(toolName: "email.attachment", argumentsJSON: payload),
+            context: ToolContext(conversationID: UUID())
+        )
+        // Denial at the workspace guard precedes account lookup, so no account
+        // or credential setup is needed to prove the forwarded policy is live.
+        #expect(output.isError == true)
+        #expect(output.content.contains("outside the allowed roots"))
+    }
+
+    @Test
+    func `BuiltinToolPlugins allToolNames contains files and email names`() {
+        let allNames = Set(BuiltinToolPlugins.allToolNames)
+        #expect(allNames.contains("files.read"))
+        #expect(allNames.contains("files.grep"))
+        #expect(allNames.contains("files.glob"))
+        #expect(allNames.contains("email.search"))
+        #expect(allNames.contains("web.search"))
     }
 }

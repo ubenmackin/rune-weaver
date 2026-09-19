@@ -141,8 +141,8 @@ struct EpisodicToolPlumbingTests {
             ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"lighthouse"}"#, callID: "call_fixture_aaa111")
         ]
         let placeholder = ToolInput.placeholderContent(for: calls)
-        #expect(MemoryEngine.isToolPlumbingLine(placeholder))
-        #expect(!MemoryEngine.isToolPlumbingLine("I found two emails."))
+        #expect(OrchestratorToolLoop.isPlaceholderPlumbingLine(placeholder))
+        #expect(!OrchestratorToolLoop.isPlaceholderPlumbingLine("I found two emails."))
         let mixed = "I will check.\n" + placeholder + "\nDone."
         let stripped = MemoryEngine.strippingToolPlumbing(from: mixed)
         #expect(stripped.contains("I will check."))
@@ -239,6 +239,53 @@ struct EpisodicToolPlumbingTests {
 
         let summaries = await reader.listSessions()
         #expect(summaries.contains { $0.id == sessionID })
+    }
+
+    @Test
+    func `Tool error kind survives disk reload`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+
+        let writer = ConversationManager(episodesDBPath: dbPath)
+        let sessionID = UUID()
+        let syntaxCall = ToolInput(toolName: "email.search", argumentsJSON: "{}", callID: "call-syntax")
+        let toolCall = ToolInput(toolName: "calendar.list", argumentsJSON: "{}", callID: "call-tool")
+        await writer.append(Message(role: .user, content: "check mail"), to: sessionID)
+        await writer.append(
+            Message(role: .assistant, content: ToolInput.placeholderContent(for: [syntaxCall, toolCall])),
+            to: sessionID
+        )
+        await writer.append(
+            Message(
+                role: .tool,
+                content: "Invalid email.search arguments.",
+                toolCallID: "call-syntax",
+                isError: true,
+                errorKind: .invalidSyntax
+            ),
+            to: sessionID
+        )
+        await writer.append(
+            Message(
+                role: .tool,
+                content: "Tool 'calendar.list' is not recognized or not available.",
+                toolCallID: "call-tool",
+                isError: true,
+                errorKind: .invalidTool
+            ),
+            to: sessionID
+        )
+        try await writer.saveAll()
+
+        // A fresh manager reads the persisted rows back, mirroring a dashboard reload.
+        // Both categories must survive so the badges do not degrade to the generic error.
+        let reader = ConversationManager(episodesDBPath: dbPath)
+        let grouped = await reader.toolActionsByMessage(for: sessionID)
+        let actions = grouped.values.flatMap(\.self)
+        #expect(actions.first { $0.callID == "call-syntax" }?.result?.errorKind == .invalidSyntax)
+        #expect(actions.first { $0.callID == "call-tool" }?.result?.errorKind == .invalidTool)
     }
 
     @Test

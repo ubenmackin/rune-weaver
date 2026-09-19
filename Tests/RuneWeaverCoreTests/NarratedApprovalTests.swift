@@ -274,4 +274,48 @@ struct NarratedApprovalTests {
         #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_read" })
         #expect(history.contains { $0.role == .assistant && $0.content == synthesis })
     }
+
+    @Test
+    func `Mixed narrated turn persists its assistant narration exactly once`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedReadTool(name: "email.search", output: "Found lighthouse email"))
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "must not run"))
+        let narrated = "Checking and writing.\n" + ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"lighthouse"}"#, callID: "call_mixed_read"),
+            ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hi"}"#, callID: "call_mixed_gated")
+        ])
+        let llm = ParkedApprovalLLM(texts: [narrated])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Run both", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(parked.toolActions.contains { $0.toolName == "email.search" && $0.result != nil })
+        #expect(parked.toolActions.contains { $0.toolName == "stub.write" && $0.result == nil })
+        #expect(await queue.count() == 1)
+
+        let history = await conversations.history(for: sessionID)
+        // One assistant note must carry both call-ID placeholders; a second note
+        // duplicates the pairing and corrupts the next model round.
+        let narrationNotes = history.filter { message in
+            guard message.role == .assistant else { return false }
+            return NormalizedText.splitLines(message.content)
+                .contains { ToolInput.parsePlaceholderLine($0) != nil }
+        }
+        #expect(narrationNotes.count == 1)
+        let persistedCallIDs = NormalizedText.splitLines(narrationNotes.first?.content ?? "")
+            .compactMap { ToolInput.parsePlaceholderLine($0)?.callID }
+        #expect(persistedCallIDs.filter { $0 == "call_mixed_read" }.count == 1)
+        #expect(persistedCallIDs.filter { $0 == "call_mixed_gated" }.count == 1)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_mixed_read" })
+        #expect(!history.contains { $0.role == .tool && $0.toolCallID == "call_mixed_gated" })
+    }
 }

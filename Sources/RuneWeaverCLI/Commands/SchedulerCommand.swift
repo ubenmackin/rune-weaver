@@ -196,6 +196,7 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         )
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
             approvalHandler: headlessHandler,
