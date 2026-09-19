@@ -112,14 +112,19 @@ public actor ApprovalQueue {
             return false
         }
         let wasTimedOut = timedOutIDs.remove(id) != nil
-        let decision = ApprovalQueueDecision(approved: approved, duration: duration)
+        // Continuation approvals resume a single parked batch, so they stay
+        // one-shot: coerce any durable or widened tier back to thisTime so a
+        // direct decide call cannot mint a dead forever grant for engine.continue.
+        let effectiveDuration: TrustDuration = request.toolName == "engine.continue" ? .thisTime : duration
+        let effectiveWiden: Bool = request.toolName == "engine.continue" ? false : widen
+        let decision = ApprovalQueueDecision(approved: approved, duration: effectiveDuration)
         timeoutTasks.removeValue(forKey: id)?.cancel()
         if let waiter = waiters.removeValue(forKey: id) {
             waiter.resume(returning: decision)
         } else if !wasTimedOut {
             earlyDecisions[id] = decision
         }
-        if approved, duration != .thisTime {
+        if approved, effectiveDuration != .thisTime {
             // The durable grant must store the same descriptor the gate derives
             // for the next call, so narrow grants route through the shared
             // tool-aware derivation instead of a generic target extraction that
@@ -128,10 +133,10 @@ public actor ApprovalQueue {
             // grant path enforces the never-shorten invariant for that scope, so
             // a shorter decision here cannot truncate an existing tool-wide
             // grant and both widen entry points agree on the same trust floor.
-            let descriptor = widen
+            let descriptor = effectiveWiden
                 ? ActionDescriptor(toolName: request.toolName, target: "")
                 : ActionDescriptor.descriptor(for: request.input, toolName: request.toolName)
-            await permissionGate?.grantTrust(for: descriptor, duration: duration)
+            await permissionGate?.grantTrust(for: descriptor, duration: effectiveDuration)
         }
         return true
     }

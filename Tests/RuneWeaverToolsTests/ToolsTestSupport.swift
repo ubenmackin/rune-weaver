@@ -246,15 +246,80 @@ enum ToolsTestSupport {
             mailboxCapture?.set(mailbox)
             if let hitsByMailbox, let canned = hitsByMailbox[mailbox] {
                 return Array(canned.prefix(limit)).map {
-                    EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: mailbox)
+                    EmailSearchHit(
+                        id: $0.id,
+                        subject: $0.subject,
+                        from: $0.from,
+                        date: $0.date,
+                        snippet: $0.snippet,
+                        mailbox: mailbox,
+                        hasAttachments: $0.hasAttachments,
+                        attachmentCount: $0.attachmentCount
+                    )
                 }
             }
             if hitsByMailbox != nil {
                 return []
             }
             return Array(hits.prefix(limit)).map {
-                EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: mailbox)
+                EmailSearchHit(
+                    id: $0.id,
+                    subject: $0.subject,
+                    from: $0.from,
+                    date: $0.date,
+                    snippet: $0.snippet,
+                    mailbox: mailbox,
+                    hasAttachments: $0.hasAttachments,
+                    attachmentCount: $0.attachmentCount
+                )
             }
+        }
+
+        /// Returns canned per-mailbox hits honoring the attachment filter.
+        func search(
+            credentials _: ResolvedEmailCredentials,
+            mailbox: String,
+            query: String,
+            limit: Int,
+            hasAttachment: Bool?
+        ) async throws -> [EmailSearchHit] {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            capture?.set(query)
+            mailboxCapture?.set(mailbox)
+            let unfiltered: [EmailSearchHit] = if let hitsByMailbox, let canned = hitsByMailbox[mailbox] {
+                canned.map {
+                    EmailSearchHit(
+                        id: $0.id,
+                        subject: $0.subject,
+                        from: $0.from,
+                        date: $0.date,
+                        snippet: $0.snippet,
+                        mailbox: mailbox,
+                        hasAttachments: $0.hasAttachments,
+                        attachmentCount: $0.attachmentCount
+                    )
+                }
+            } else if hitsByMailbox != nil {
+                []
+            } else {
+                hits.map {
+                    EmailSearchHit(
+                        id: $0.id,
+                        subject: $0.subject,
+                        from: $0.from,
+                        date: $0.date,
+                        snippet: $0.snippet,
+                        mailbox: mailbox,
+                        hasAttachments: $0.hasAttachments,
+                        attachmentCount: $0.attachmentCount
+                    )
+                }
+            }
+            // Apply the filter locally so filtered callers exercise the same contract as the live bridge.
+            let filtered = unfiltered.filter { $0.matches(hasAttachment: hasAttachment) }
+            return Array(filtered.prefix(limit))
         }
 
         /// Returns the canned message for one mailbox.

@@ -81,6 +81,19 @@ export function normalizeRoundIndex(value: unknown): number | undefined {
   return Math.floor(value);
 }
 
+// Single non-negative integer contract shared by live token frames, terminal
+// counters, and cached bases so a fractional or negative payload degrades to
+// absent instead of rendering a floored value on one path and rejecting on
+// another. Mirrors the engine decoder so footers and persistence agree.
+export function toNonNegativeInt(value: unknown): number | undefined {
+  return typeof value === "number" &&
+    Number.isFinite(value) &&
+    Number.isInteger(value) &&
+    value >= 0
+    ? value
+    : undefined;
+}
+
 // Compares two actions chronologically: numbered rounds ascend oldest-first with
 // untracked rounds partitioning after tracked so mixed legacy+tracked history
 // holds a total order. Untracked pairs keep stored order through sort stability,
@@ -145,6 +158,8 @@ export interface OrchestratorResponse {
   modelName?: string | null;
   contextLength?: number | null;
   sessionTokens?: number | null;
+  // Active context window tokens used in the latest round (KV cache occupancy).
+  contextTokens?: number | null;
   // Per-turn parked flag mirroring the engine response: true when the turn
   // filed gated approvals and waits on the inbox. Optional for back-compat
   // with older engines; absent or null decodes to not parked.
@@ -356,6 +371,13 @@ export function resolveMaxConcurrentChatTurns(
 export function concurrentTurnsBusyMessage(limit: number = MAX_CONCURRENT_CHAT_TURNS): string {
   return `Already running ${limit} chat turns — wait for one to finish or cancel it, then retry.`;
 }
+
+// Single web source for the chat text bound, pinned to the engine
+// ChatRequest.maxTextLength (which delegates to MemoryEngine.maxContentLength).
+// Chat input, steering guards, and pre-send checks share this instead of
+// mirroring the magic number per call site so client refusal agrees with
+// server enforcement instead of drifting when the engine bound moves.
+export const MAX_CHAT_TEXT_LENGTH = 10000;
 
 // Single source for run-log polling so live badges and history views agree on
 // page size and cadence instead of drifting per call site. The shared
@@ -1091,6 +1113,7 @@ export interface SettingsResponse {
   engineName: string;
   logLevel: string;
   compactionThresholdPercent?: number;
+  maxToolIterations?: number;
   defaultProvider: string;
   fallbackProvider?: string;
   providers: Record<string, ProviderConfigData>;
@@ -1132,6 +1155,7 @@ export interface UpdateSettingsInput {
   engineName?: string;
   logLevel?: string;
   compactionThresholdPercent?: number;
+  maxToolIterations?: number;
   defaultProvider?: string;
   fallbackProvider?: string;
   // Provider entries carry the prefix-reuse knobs (slot_count/slotCount/cache_prompt/cachePrompt)

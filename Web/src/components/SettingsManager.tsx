@@ -196,6 +196,7 @@ export default function SettingsManager() {
   const [engineName, setEngineName] = useState("");
   const [logLevel, setLogLevel] = useState("info");
   const [compactionThresholdPercent, setCompactionThresholdPercent] = useState(80);
+  const [maxToolIterations, setMaxToolIterations] = useState<number | string>(10);
   const [defaultProvider, setDefaultProvider] = useState("");
   const [fallbackProvider, setFallbackProvider] = useState("");
   const [providersList, setProvidersList] = useState<ProviderEntry[]>([]);
@@ -799,6 +800,7 @@ export default function SettingsManager() {
     setEngineName(data.engineName);
     setLogLevel(data.logLevel);
     setCompactionThresholdPercent(data.compactionThresholdPercent ?? 80);
+    setMaxToolIterations(data.maxToolIterations ?? 10);
     setDefaultProvider(data.defaultProvider);
     setFallbackProvider(data.fallbackProvider ?? "");
 
@@ -1213,10 +1215,18 @@ export default function SettingsManager() {
       // loaded value untouched to keep older configs valid (never blank it).
       const preservedEmbeddingModel =
         memoryEmbeddingModel || settings?.memoryEmbeddingModel || "";
+      // Blank means default; explicit values clamp into range.
+      const rawMaxToolIterations = String(maxToolIterations ?? "").trim();
+      const maxToolIterationsValue =
+        rawMaxToolIterations === "" ? 10 : Number(rawMaxToolIterations);
+      const clampedMaxToolIterations = Number.isFinite(maxToolIterationsValue)
+        ? Math.max(1, Math.min(100, Math.floor(maxToolIterationsValue)))
+        : 10;
       const updated = await updateSettings({
         engineName,
         logLevel,
         compactionThresholdPercent: Number(compactionThresholdPercent),
+        maxToolIterations: clampedMaxToolIterations,
         defaultProvider,
         // Empty string clears the fallback server-side; omitting the field
         // would preserve the previous value instead.
@@ -2058,6 +2068,26 @@ export default function SettingsManager() {
                 </div>
                 <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
                   When session token usage reaches this percentage of the model&apos;s context limit, older tool outputs and turns are compacted to prevent overflow. Default is 80%.
+                </p>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="max-tool-iterations">
+                  Max Tool Rounds per Turn
+                </label>
+                <input
+                  id="max-tool-iterations"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={100}
+                  step={1}
+                  value={maxToolIterations}
+                  onChange={(e) => setMaxToolIterations(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Maximum number of consecutive tool rounds the agent may execute before pausing for user approval to continue. Range: 1–100. Default is 10.
                 </p>
               </div>
             </div>

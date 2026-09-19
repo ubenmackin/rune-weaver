@@ -125,6 +125,11 @@ public actor ActiveTurnTracker {
         return TurnRegistration(token: token, replaced: replaced)
     }
 
+    /// Returns true if an active turn is currently running for the session.
+    public func isActive(sessionID: UUID) -> Bool {
+        entries[sessionID] != nil
+    }
+
     /// Unregisters the turn for a session when it completes.
     public func unregister(sessionID: UUID, token: UUID) {
         guard entries[sessionID]?.token == token else { return }
@@ -237,6 +242,8 @@ public final class ServerContext: Sendable {
     public let runLock: SchedulerRunLock
     /// Active in-flight chat turn tasks for cancellation.
     public let activeTurns: ActiveTurnTracker
+    /// Pending mid-turn steering queue for active multi-round turns.
+    public let steeringQueue: SteeringQueue
     /// In-process background scheduler worker.
     public let schedulerWorker: ServerSchedulerWorker
     /// Durable plugin registry store tracking discovered runes.
@@ -253,6 +260,15 @@ public final class ServerContext: Sendable {
     public let browserConfig: BrowserConfig
 
     /// Creates a server context.
+    /// The `steeringQueue` must be the identical instance handed to
+    /// `orchestrator` at its creation: routes enqueue through the context
+    /// while the turn loop dequeues through the orchestrator, so a mismatched
+    /// pair accepts steering yet never delivers it. Prefer `make`, which wires
+    /// one shared queue into both; direct callers sharing a queue by hand can
+    /// verify with `await orchestrator.sharedSteeringQueue === steeringQueue`.
+    /// - Precondition: When the orchestrator was built with a steering queue,
+    ///   the queue passed here is that same instance (identity, not equality).
+    ///   An orchestrator built without a queue leaves steering inert.
     public init(
         config: ServerConfig = .default,
         conversations: ConversationManager,
@@ -267,6 +283,7 @@ public final class ServerContext: Sendable {
         hub: WSHub = WSHub(),
         runLock: SchedulerRunLock = SchedulerRunLock(),
         activeTurns: ActiveTurnTracker = ActiveTurnTracker(),
+        steeringQueue: SteeringQueue = SteeringQueue(),
         schedulerWorker: ServerSchedulerWorker? = nil,
         pluginStore: ToolRegistryStore? = nil,
         pluginDiscovery: PluginDiscoveryService? = nil,
@@ -288,6 +305,7 @@ public final class ServerContext: Sendable {
         self.hub = hub
         self.runLock = runLock
         self.activeTurns = activeTurns
+        self.steeringQueue = steeringQueue
         self.schedulerWorker = schedulerWorker ?? ServerSchedulerWorker(
             scheduler: scheduler,
             runs: runs,
@@ -305,6 +323,13 @@ public final class ServerContext: Sendable {
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
+        // Fail fast when the context would enqueue through a different queue than
+        // the turn loop dequeues through; such a pair accepts steering yet never
+        // delivers it, so surface the wiring mistake at construction.
+        precondition(
+            orchestrator.sharedSteeringQueue == nil || orchestrator.sharedSteeringQueue === steeringQueue,
+            "ServerContext steeringQueue must be identical instance handed to orchestrator"
+        )
     }
 
     /// Reapplies every persisted tool toggle onto the live bus.
@@ -364,15 +389,18 @@ public final class ServerContext: Sendable {
         // The orchestrator shares the approvals queue so narrated gated
         // calls file parked requests tagged with their session instead of
         // dropping, with resume continuing the same session on decision.
+        let steeringQueue = SteeringQueue()
         let orchestrator = Orchestrator(
             conversations: conversations,
             toolBus: bus,
             llm: llm,
             systemPrompt: systemPrompt,
+            maxToolIterations: engineConfig.maxToolIterations,
             memoryEngine: memoryEngine,
             approvalQueue: approvals,
             embedder: embedder,
-            compactionThresholdPercent: engineConfig.compactionThresholdPercent
+            compactionThresholdPercent: engineConfig.compactionThresholdPercent,
+            steeringQueue: steeringQueue
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: scheduler,
@@ -397,6 +425,8 @@ public final class ServerContext: Sendable {
             runs: runs,
             hub: hub,
             runLock: runLock,
+            activeTurns: ActiveTurnTracker(),
+            steeringQueue: steeringQueue,
             schedulerWorker: schedulerWorker,
             pluginStore: pStore,
             pluginDiscovery: pDiscovery,
@@ -449,7 +479,8 @@ public final class ServerContext: Sendable {
                 []
             }
         }
-        let orch = Orchestrator(conversations: conv, toolBus: bus, llm: FallbackDummyLLM())
+        let steering = SteeringQueue()
+        let orch = Orchestrator(conversations: conv, toolBus: bus, llm: FallbackDummyLLM(), steeringQueue: steering)
         let appq = ApprovalQueue(permissionGate: gate)
         return ServerContext(
             conversations: conv,
@@ -457,7 +488,8 @@ public final class ServerContext: Sendable {
             orchestrator: orch,
             memoryEngine: mem,
             permissionGate: gate,
-            approvals: appq
+            approvals: appq,
+            steeringQueue: steering
         )
     }()
 }
@@ -797,6 +829,8 @@ private func registerChatRoute(_ app: Application) {
             return response
         } catch is CancellationError {
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            // Clear queued steering on cancel so stale guidance does not leak into the next turn.
+            await context.steeringQueue.clear(for: sessionID)
             await updateRESTChatRunAndBroadcast(
                 context: context,
                 initialEntry: initialEntry,
@@ -870,6 +904,8 @@ private func registerChatCancelRoute(_ app: Application) {
     app.post(PathComponent.constant(ServerPaths.chat), PathComponent.constant("cancel")) { req async throws -> CancelChatResponse in
         let body = try req.content.decode(CancelChatRequest.self)
         let cancelled = await req.application.runeWeaver.activeTurns.cancel(sessionID: body.sessionID)
+        // Clear queued steering on cancel so stale guidance does not leak into the next turn.
+        await req.application.runeWeaver.steeringQueue.clear(for: body.sessionID)
         return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
     }
 }
@@ -1013,8 +1049,11 @@ private func registerApprovalRoutes(_ app: Application) {
             }
             // Durable approvals create a stored grant inside `decide`, so
             // dashboards need a refresh signal; one-shot approvals store
-            // nothing and leave the grants list untouched.
-            if body.approved, body.resolvedDuration != .thisTime {
+            // nothing and leave the grants list untouched. Continuation
+            // approvals stay one-shot inside `decide` (coerced to thisTime
+            // with no stored grant), so a durable vote on engine.continue
+            // must not fire a refresh when nothing changed.
+            if body.approved, body.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
                 await context.hub.broadcastTrustGrantsChanged()
             }
             if pending?.sessionID != nil {
@@ -1154,7 +1193,19 @@ private func registerSettingsRoutes(_ app: Application) {
         }
         do {
             try body.apply(to: &config)
+            // Validate the merged config before persisting so a single bad
+            // field cannot corrupt the stored file or live engine state.
+            try config.validate()
             try config.save(to: url)
+            if let maxToolIterations = body.maxToolIterations {
+                await req.application.runeWeaver.orchestrator.updateMaxToolIterations(maxToolIterations)
+            }
+            // Push the persisted compaction threshold into the live engine so
+            // the saved value takes effect immediately instead of staying stale
+            // until the next restart.
+            if let compactionThresholdPercent = body.compactionThresholdPercent {
+                await req.application.runeWeaver.orchestrator.updateCompactionPercent(compactionThresholdPercent)
+            }
         } catch let error as ConfigError {
             throw Abort(.badRequest, reason: String(describing: error))
         } catch {

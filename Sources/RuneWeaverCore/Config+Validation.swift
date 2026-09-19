@@ -41,6 +41,12 @@ extension RuneWeaverConfig {
                 message: "must be between 10 and 100 (got \(engine.compactionThresholdPercent))"
             )
         }
+        if engine.maxToolIterations < 1 || engine.maxToolIterations > 100 {
+            throw ConfigError.validationError(
+                field: "engine.max_tool_iterations",
+                message: "must be between 1 and 100 (got \(engine.maxToolIterations))"
+            )
+        }
     }
 
     private func validateLLMSection() throws {

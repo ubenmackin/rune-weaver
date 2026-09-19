@@ -97,6 +97,9 @@ public enum OrchestratorToolLoop {
 
     /// Builds the parked-turn message ending a narration that needs approval.
     public static func waitingOnApprovalMessage(for calls: [ToolInput]) -> String {
+        if calls.contains(where: { $0.toolName == "engine.continue" }) {
+            return "The agent has completed its allocated tool rounds. Awaiting continuation approval."
+        }
         let names = Array(Set(calls.map(\.toolName))).sorted()
         let joined = names.isEmpty ? "the requested tool" : names.joined(separator: ", ")
         return "Waiting for approval to run \(joined). Approve in the approvals inbox to continue."
@@ -105,6 +108,9 @@ public enum OrchestratorToolLoop {
     /// Builds the session notice recording a denied narrated approval.
     public static func deniedApprovalMessage(for toolName: String) -> String {
         let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "engine.continue" {
+            return "Continuation stopped by user."
+        }
         let name = trimmed.isEmpty ? "the requested tool" : trimmed
         return "Approval denied for \(name); not running it."
     }

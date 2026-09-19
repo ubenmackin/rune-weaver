@@ -152,6 +152,15 @@ public protocol EmailIMAPGateway: Sendable {
     /// Searches one mailbox for `query`.
     func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit]
 
+    /// Searches one mailbox for `query`, optionally filtering by attachment presence.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?
+    ) async throws -> [EmailSearchHit]
+
     /// Fetches one message from one mailbox.
     func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
 
@@ -184,6 +193,19 @@ public protocol EmailIMAPGateway: Sendable {
 }
 
 public extension EmailIMAPGateway {
+    /// Default attachment-filter shim for gateways that only implement base search.
+    /// Applies the filter locally so filtered callers never silently receive unfiltered hits.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?
+    ) async throws -> [EmailSearchHit] {
+        let hits = try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit)
+        return hits.filter { $0.matches(hasAttachment: hasAttachment) }
+    }
+
     /// Default compatibility shim over the single required `mailboxListing`.
     /// `mailboxListing` is the only required listing method so conformers cannot
     /// satisfy the protocol with neither method and recurse between defaults.
@@ -322,9 +344,11 @@ struct EmailIMAPBridgeRequest: Encodable {
     let destination: String?
     /// Whether `move` should set `\Seen` on the resulting message.
     let markAsRead: Bool?
+    /// Optional filter for whether the email has attachments (search only).
+    let hasAttachment: Bool?
 
     /// Creates a search request.
-    static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX") -> Self {
+    static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX", hasAttachment: Bool? = nil) -> Self {
         Self(
             op: "search",
             host: credentials.host,
@@ -338,7 +362,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: nil,
             rawMessageBase64: nil,
             destination: nil,
-            markAsRead: nil
+            markAsRead: nil,
+            hasAttachment: hasAttachment
         )
     }
 
@@ -357,7 +382,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: nil,
             rawMessageBase64: nil,
             destination: nil,
-            markAsRead: nil
+            markAsRead: nil,
+            hasAttachment: nil
         )
     }
 
@@ -381,7 +407,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: attachmentIndex,
             rawMessageBase64: nil,
             destination: nil,
-            markAsRead: nil
+            markAsRead: nil,
+            hasAttachment: nil
         )
     }
 
@@ -402,7 +429,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: nil,
             rawMessageBase64: nil,
             destination: nil,
-            markAsRead: nil
+            markAsRead: nil,
+            hasAttachment: nil
         )
     }
 
@@ -434,7 +462,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: nil,
             rawMessageBase64: nil,
             destination: destination,
-            markAsRead: markAsRead
+            markAsRead: markAsRead,
+            hasAttachment: nil
         )
     }
 
@@ -453,7 +482,8 @@ struct EmailIMAPBridgeRequest: Encodable {
             attachmentIndex: nil,
             rawMessageBase64: rawMessage.base64EncodedString(),
             destination: nil,
-            markAsRead: nil
+            markAsRead: nil,
+            hasAttachment: nil
         )
     }
 }
@@ -481,13 +511,30 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Searches one mailbox via the Python helper.
-    public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+    /// Searches one mailbox via the Python helper, optionally filtering by attachment presence.
+    public func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?
+    ) async throws -> [EmailSearchHit] {
+        // Reject out-of-range limits before touching the subprocess so an unchecked
+        // value can never reach the Python slice and widen the result window.
+        guard (1 ... EmailSearchArgs.maxLimit).contains(limit) else {
+            throw EmailIMAPError.bridgeFailed("Invalid search limit: limit must be 1...\(EmailSearchArgs.maxLimit)")
+        }
         try EmailIMAPValidation.validateSearchQuery(query)
         try EmailIMAPValidation.validateMailbox(mailbox)
         let effectiveQuery = EmailIMAPValidation.isAllQuery(query) ? "" : query.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
-        let request = EmailIMAPBridgeRequest.search(credentials: credentials, query: effectiveQuery, limit: limit, mailbox: trimmedMailbox)
+        let request = EmailIMAPBridgeRequest.search(
+            credentials: credentials,
+            query: effectiveQuery,
+            limit: limit,
+            mailbox: trimmedMailbox,
+            hasAttachment: hasAttachment
+        )
         let data = try await run(request: request)
         do {
             let hits = try EmailBridgeParsing.parseSearchPayload(data)
@@ -498,7 +545,9 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
                     from: $0.from,
                     date: $0.date,
                     snippet: $0.snippet,
-                    mailbox: trimmedMailbox
+                    mailbox: trimmedMailbox,
+                    hasAttachments: $0.hasAttachments,
+                    attachmentCount: $0.attachmentCount
                 )
             }
         } catch let error as EmailIMAPError {
@@ -506,6 +555,11 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         } catch {
             throw EmailIMAPError.decodeFailed(error.localizedDescription)
         }
+    }
+
+    /// Searches one mailbox via the Python helper.
+    public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+        try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit, hasAttachment: nil)
     }
 
     /// Lists selectable mailboxes plus the common hierarchy delimiter.

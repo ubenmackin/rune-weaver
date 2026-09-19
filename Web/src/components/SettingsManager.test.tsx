@@ -1013,5 +1013,55 @@ describe("SettingsManager", () => {
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
     expect(screen.getByText(/approvals inbox instead of failing silently/i)).toBeDefined();
   });
+
+  it("edits max tool rounds per turn in engine tab and saves", async () => {
+    const user = userEvent.setup();
+    let savedBody: Record<string, any> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        if (typeof url === "string" && url.endsWith("/settings") && init?.method === "PUT") {
+          savedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+          return jsonResponse({ ...mockSettings, ...savedBody, configPath: "/path/config.toml" });
+        }
+        if (typeof url === "string" && url.endsWith("/settings")) {
+          return jsonResponse({
+            ...mockSettings,
+            maxToolIterations: 12,
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<SettingsManager />);
+
+    // Wait for initial load
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Switch to Engine tab
+    const engineTabBtn = screen.getByRole("tab", { name: /Engine and Logs/i });
+    await user.click(engineTabBtn);
+
+    // Verify loaded value
+    const input = await screen.findByLabelText(/Max Tool Rounds per Turn/i);
+    expect(input).toHaveValue(12);
+
+    // Edit value
+    await user.clear(input);
+    await user.type(input, "15");
+    expect(input).toHaveValue(15);
+
+    // Save
+    await user.click(screen.getByRole("button", { name: /Save Settings/i }));
+
+    await waitFor(() => {
+      expect(savedBody).not.toBeNull();
+    });
+    expect((savedBody as unknown as Record<string, unknown>)?.maxToolIterations).toBe(15);
+  });
 });
+
 

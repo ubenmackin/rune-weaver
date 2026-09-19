@@ -112,6 +112,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     public let contextLength: Int?
     /// Cumulative billed tokens for this session, if tracked.
     public let sessionTokens: Int?
+    /// Active context tokens in the model's KV cache at turn completion.
+    public let contextTokens: Int?
     /// Whether this turn parked waiting on approval.
     public let isParked: Bool
     /// Degraded-tool notices for tools omitted this turn. Carries only tool names
@@ -137,6 +139,8 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         case contextLength
         /// Cumulative billed tokens.
         case sessionTokens
+        /// Active context tokens in KV cache.
+        case contextTokens
         /// Whether the turn parked waiting on approval.
         case isParked
         /// Degraded-tool notices.
@@ -154,6 +158,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         modelName: String? = nil,
         contextLength: Int? = nil,
         sessionTokens: Int? = nil,
+        contextTokens: Int? = nil,
         isParked: Bool = false,
         warnings: [String] = [],
         completedAt: Double? = nil
@@ -165,6 +170,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         self.modelName = modelName
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
+        self.contextTokens = contextTokens
         self.isParked = isParked
         self.warnings = warnings
         // Callers stamp the persisted assistant note's creation time so live turns and
@@ -196,6 +202,11 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .sessionTokens, in: container, debugDescription: "sessionTokens must be non-negative")
         }
         self.sessionTokens = sessionTokens
+        let contextTokens = try container.decodeIfPresent(Int.self, forKey: .contextTokens)
+        if let contextTokens, contextTokens < 0 {
+            throw DecodingError.dataCorruptedError(forKey: .contextTokens, in: container, debugDescription: "contextTokens must be non-negative")
+        }
+        self.contextTokens = contextTokens
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
         self.completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
@@ -212,6 +223,7 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
         try container.encodeIfPresent(modelName, forKey: .modelName)
         try container.encodeIfPresent(contextLength, forKey: .contextLength)
         try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
+        try container.encodeIfPresent(contextTokens, forKey: .contextTokens)
         try container.encode(isParked, forKey: .isParked)
         // Omit empty warnings so older decoders see an absent key and degrade to no banner,
         // mirroring WSStreamDone which nils empty lists for back-compat.
@@ -296,6 +308,8 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
     public let priorActions: [ToolAction]
     /// Tool round counter accumulated before parking.
     public let toolRounds: Int
+    /// Active context tokens in KV cache before parking.
+    public let contextTokens: Int?
 
     /// Creates a parked approval.
     public init(
@@ -308,7 +322,8 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         billedTokens: Int? = nil,
         synthesisRoundIndex: Int? = nil,
         priorActions: [ToolAction] = [],
-        toolRounds: Int = 0
+        toolRounds: Int = 0,
+        contextTokens: Int? = nil
     ) {
         self.sessionID = sessionID
         self.toolCall = toolCall
@@ -322,6 +337,7 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         self.billedTokens = billedTokens
         self.priorActions = priorActions
         self.toolRounds = toolRounds
+        self.contextTokens = contextTokens
     }
 }
 
@@ -355,6 +371,7 @@ struct ParkGatedCallsContext {
     /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
     /// identically to live.
     let gatedRoundIndex: Int
+    var contextTokens: Int?
 }
 
 /// Inputs for one bounded tool-loop run.
@@ -373,7 +390,7 @@ struct TurnLoopRequest {
 
 /// Outcome of one bounded tool-loop run.
 enum TurnLoopOutcome {
-    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?)
+    case finished(finalText: String, toolActions: [ToolAction], billedTokens: Int?, contextTokens: Int? = nil)
     case parked(OrchestratorResponse)
 }
 
@@ -395,6 +412,7 @@ struct ParkTurnContext {
     let toolActions: [ToolAction]
     let billedTokens: Int?
     let toolRounds: Int
+    var contextTokens: Int?
 }
 
 /// Intermediate result of an LLM round.

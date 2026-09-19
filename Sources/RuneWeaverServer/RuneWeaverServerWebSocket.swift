@@ -210,6 +210,41 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
     let sessionID = message.sessionID ?? UUID()
     let source = (message.source ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
+    // Steering frames never start a fresh turn: they either join the live turn
+    // or fail honestly so the dashboard can roll back its optimistic bubble.
+    // The liveness probe and the enqueue are separate actor hops, so a finish
+    // or cancel can land between them; probing again after the enqueue keeps
+    // that window honest instead of silently queuing into a dead session.
+    // A joint tracker-plus-queue hop would close the window entirely, but the
+    // double probe is the narrowest honest shape without one: text that loses
+    // the race is withdrawn so the miss error and the queue agree, leaving no
+    // orphaned copy to answer the next turn as a duplicate.
+    if message.steer == true {
+        guard await context.activeTurns.isActive(sessionID: sessionID) else {
+            await sendWSError(
+                "No active turn for this session — steering was not applied. Send as a new message.",
+                connectionID: connectionID,
+                context: context,
+                sessionID: sessionID
+            )
+            return
+        }
+        await context.steeringQueue.enqueue(text: trimmed, sessionID: sessionID)
+        guard await context.activeTurns.isActive(sessionID: sessionID) else {
+            // Drop just-enqueued steering on miss so error and queue agree; prevents duplicate next turn.
+            // Withdraw newest to match client pop; keeps error and queue in agreement.
+            await context.steeringQueue.remove(text: trimmed, sessionID: sessionID)
+            await sendWSError(
+                "Turn ended before steering arrived — it missed the in-flight turn. Send as a new message.",
+                connectionID: connectionID,
+                context: context,
+                sessionID: sessionID
+            )
+            return
+        }
+        return
+    }
+
     // Bound parallel turns so slow local inference never stacks silently: the
     // acquire and the registration happen in one tracker hop, so concurrent
     // fresh sessions cannot both slip past the cap. A replacement turn for
@@ -323,6 +358,7 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
                 await context.hub.send(id: connectionID, text: frame)
             }
             await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            await context.steeringQueue.clear(for: sessionID)
             return
         }
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -349,41 +385,38 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
         await context.hub.broadcastRun(entry)
         // Live warning frames already streamed mid-turn; the terminal done frame repeats them
         // for polling clients, so no per-warning resend here that would double-count the bell.
-        let done = WSStreamDone(from: response)
+        // Late steering stays queued above, so report its depth on done: the dashboard
+        // keeps exactly that many newest bubbles for the next turn and releases the
+        // consumed ones answered here instead of retaining them to the cap.
+        var done = WSStreamDone(from: response)
+        done.retainedSteerCount = await context.steeringQueue.pendingCount(for: sessionID)
         if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
             await context.hub.send(id: connectionID, text: frame)
         }
         await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+        // Late steering stays queued for the next turn so guidance arriving after
+        // the final ingest still gets answered instead of vanishing after its
+        // optimistic render.
+        // Preserve late steering for next turn; dashboard retains pending list and re-attaches to next timeline.
     } catch is CancellationError {
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        let entry = await context.runs.update(
-            id: initialEntry.id,
-            status: "cancelled",
-            durationMs: durationMs
-        ) ?? initialEntry
-        await context.hub.broadcastRun(entry)
-        let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
-        if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
-            await context.hub.send(id: connectionID, text: frame)
-        }
-        await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+        await handleWebSocketTurnCancellation(
+            context: context,
+            connectionID: connectionID,
+            sessionID: sessionID,
+            registrationToken: registration.token,
+            initialEntry: initialEntry,
+            startTime: startTime
+        )
     } catch {
         guard !Task.isCancelled else {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            // A failure racing cancellation still leaves the owning socket
-            // waiting, so it needs the same targeted terminal frame as the
-            // other cancelled paths to clear its pending state promptly.
-            let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
-            if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
-                await context.hub.send(id: connectionID, text: frame)
-            }
-            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+            await handleWebSocketTurnCancellation(
+                context: context,
+                connectionID: connectionID,
+                sessionID: sessionID,
+                registrationToken: registration.token,
+                initialEntry: initialEntry,
+                startTime: startTime
+            )
             return
         }
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
@@ -395,7 +428,32 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
         await context.hub.broadcastRun(entry)
         await sendWSError(error.localizedDescription, connectionID: connectionID, context: context, sessionID: sessionID)
         await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
+        // Failed turns keep late steering queued so the retry can still answer
+        // guidance that arrived after the final ingest.
     }
+}
+
+private func handleWebSocketTurnCancellation(
+    context: ServerContext,
+    connectionID: UUID,
+    sessionID: UUID,
+    registrationToken: UUID,
+    initialEntry: RunLogEntry,
+    startTime: Date
+) async {
+    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    let entry = await context.runs.update(
+        id: initialEntry.id,
+        status: "cancelled",
+        durationMs: durationMs
+    ) ?? initialEntry
+    await context.hub.broadcastRun(entry)
+    let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
+    if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
+        await context.hub.send(id: connectionID, text: frame)
+    }
+    await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
+    await context.steeringQueue.clear(for: sessionID)
 }
 
 /// Spawns a background liveness heartbeat task for long inference turns.
@@ -422,6 +480,7 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
     var cancelled = false
     if let sid = message.sessionID {
         cancelled = await context.activeTurns.cancel(sessionID: sid)
+        await context.steeringQueue.clear(for: sid)
     }
     let cancelledFrame = WSCancelledFrame(sessionID: message.sessionID, cancelled: cancelled)
     if let data = try? JSONEncoder().encode(cancelledFrame),
@@ -449,8 +508,11 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
     }
     // Durable approvals create a stored grant inside `decide`, so
     // dashboards need a refresh signal; one-shot approvals store
-    // nothing and leave the grants list untouched.
-    if message.approved, message.resolvedDuration != .thisTime {
+    // nothing and leave the grants list untouched. Continuation
+    // approvals stay one-shot inside `decide` (coerced to thisTime
+    // with no stored grant), so a durable vote on engine.continue
+    // must not fire a refresh when nothing changed.
+    if message.approved, message.resolvedDuration != .thisTime, pending?.toolName != "engine.continue" {
         await context.hub.broadcastTrustGrantsChanged()
     }
     if pending?.sessionID != nil {
