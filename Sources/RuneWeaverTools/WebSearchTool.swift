@@ -836,23 +836,32 @@ public struct WebSearchTool: Tool, Sendable {
         } catch {
             return .failure(
                 "Invalid web.search arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>}.",
-                callID: input.callID
+                callID: input.callID,
+                errorKind: .invalidSyntax
             )
         }
         let query = args.trimmedQuery
         guard !query.isEmpty else {
-            return .failure("Invalid web.search arguments: 'query' must not be empty.", callID: input.callID)
+            return .failure(
+                "Invalid web.search arguments: 'query' must not be empty.",
+                callID: input.callID,
+                errorKind: .invalidSyntax
+            )
         }
         // Bound N up front so every path below (live or stubbed) honors the
         // same ceiling: caller limit, config cap, and the hard 50 cap.
         let effectiveLimit = Self.effectiveLimit(requested: args.limit, browserConfig: browserConfig)
         // Fail fast on a misconfigured base URL before burning the ensure
         // budget or attempting a container start for a request that can never
-        // build.
+        // build. This is an environment failure, not a caller argument-shape
+        // failure, so it carries an explicit execution kind: the wording is
+        // deliberately not "Invalid ...", which the bus's legacy content sniff
+        // would otherwise mask as invalid_syntax.
         guard let request = Self.searchRequest(baseURL: browserConfig.searxngURL, query: query, timeout: browserConfig.searchTimeoutSeconds) else {
             return .failure(
-                "Invalid browser.searxng_url '\(browserConfig.searxngURL)': must be an absolute URL.",
-                callID: input.callID
+                "web.search configuration error: browser.searxng_url '\(browserConfig.searxngURL)' must be an absolute URL.",
+                callID: input.callID,
+                errorKind: .executionError
             )
         }
         do {
@@ -861,18 +870,19 @@ public struct WebSearchTool: Tool, Sendable {
             // Single guidance: the ensurer error already carries the one
             // actionable cause (install guidance for a missing runtime, or the
             // last cascade detail otherwise), so surface it verbatim instead
-            // of nesting it inside a second unreachable message.
-            return .failure(error.localizedDescription, callID: input.callID)
+            // of nesting it inside a second unreachable message. The engine
+            // being down is a runtime failure, never an argument-shape one.
+            return .failure(error.localizedDescription, callID: input.callID, errorKind: .executionError)
         }
         do {
             let (data, response) = try await transport.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return .failure("SearXNG returned no HTTP response.", callID: input.callID)
+                return .failure("SearXNG returned no HTTP response.", callID: input.callID, errorKind: .executionError)
             }
             guard (200 ..< 300).contains(http.statusCode) else {
                 let detail = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 let suffix = detail.isEmpty ? "" : ": \(String(detail.prefix(300)))"
-                return .failure("SearXNG search failed (HTTP \(http.statusCode))\(suffix).", callID: input.callID)
+                return .failure("SearXNG search failed (HTTP \(http.statusCode))\(suffix).", callID: input.callID, errorKind: .executionError)
             }
             let parsed = try Self.parseSearchPayload(data)
             let capped = Array(parsed.prefix(effectiveLimit))
@@ -882,9 +892,9 @@ public struct WebSearchTool: Tool, Sendable {
         } catch is CancellationError {
             throw CancellationError()
         } catch let error as DecodingError {
-            return .failure("Could not decode SearXNG response: \(error.localizedDescription)", callID: input.callID)
+            return .failure("Could not decode SearXNG response: \(error.localizedDescription)", callID: input.callID, errorKind: .executionError)
         } catch {
-            return .failure("web.search failed: \(error.localizedDescription)", callID: input.callID)
+            return .failure("web.search failed: \(error.localizedDescription)", callID: input.callID, errorKind: .executionError)
         }
     }
 

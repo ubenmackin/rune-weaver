@@ -10,15 +10,68 @@ public typealias OrchestratorToolResolver = @Sendable ([Message], [any Tool]) as
 /// Single shared tool-loop policy for the orchestrator and the CLI chat loop.
 public enum OrchestratorToolLoop {
     /// Returns the assistant content to persist for a tool round.
+    /// Narration already carries the model's own placeholder lines, so regenerating
+    /// them would persist each call twice — the narration plus its generated twin.
+    /// Only calls with no placeholder line yet get an appended line, and repeated
+    /// call identifiers collapse so one call ID maps to one persisted line.
     public static func assistantNoteContent(text: String, calls: [ToolInput]) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let uniqueCalls = deduplicatedCalls(calls)
         if trimmed.isEmpty {
-            return ToolInput.placeholderContent(for: calls)
+            return ToolInput.placeholderContent(for: uniqueCalls)
         }
-        if calls.isEmpty {
+        if uniqueCalls.isEmpty {
             return text
         }
-        return text + "\n" + ToolInput.placeholderContent(for: calls)
+        let narratedCallIDs = Set(
+            NormalizedText.splitLines(text)
+                .compactMap { ToolInput.parsePlaceholderLine($0)?.callID }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        )
+        let pending = uniqueCalls.filter {
+            !narratedCallIDs.contains($0.callID.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        guard !pending.isEmpty else { return text }
+        return text + "\n" + ToolInput.placeholderContent(for: pending)
+    }
+
+    /// Collapses calls that share one call identifier, first occurrence winning.
+    /// Duplicate identifiers would otherwise emit two wire calls answered by a
+    /// single result, which strict OpenAI-compatible endpoints reject. Blank
+    /// identifiers stay distinct because they cannot correlate to a result, so
+    /// collapsing them would merge unrelated calls under one empty key.
+    private static func deduplicatedCalls(_ calls: [ToolInput]) -> [ToolInput] {
+        var seen = Set<String>()
+        var unique: [ToolInput] = []
+        for call in calls {
+            let callID = call.callID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !callID.isEmpty else {
+                unique.append(call)
+                continue
+            }
+            guard seen.insert(callID).inserted else { continue }
+            unique.append(call)
+        }
+        return unique
+    }
+
+    /// Whether one line is persisted tool-call plumbing.
+    /// The parser trims each line itself, so raw lines stay on the same
+    /// boundaries `NormalizedText.splitLines` already folded for narration.
+    /// - Parameter line: One raw line from a persisted assistant note.
+    /// - Returns: True when the line parses as a `Calling <tool> ... [<callID>]` placeholder.
+    public static func isPlaceholderPlumbingLine(_ line: String) -> Bool {
+        ToolInput.parsePlaceholderLine(line) != nil
+    }
+
+    /// Strips any `Calling <tool> ... [<callID>]` lines from text.
+    /// Single source for history cleaning so episodic stripping and narration
+    /// parsing cannot drift on what counts as plumbing.
+    /// - Parameter text: Persisted assistant text, possibly carrying placeholders.
+    /// - Returns: Remaining text, trimmed, with placeholder lines removed.
+    public static func scrubPlaceholderPlumbing(from text: String) -> String {
+        let cleanLines = NormalizedText.splitLines(text).filter { !isPlaceholderPlumbingLine($0) }
+        return cleanLines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Whether final assistant text is worth storing and returning.
@@ -115,6 +168,22 @@ public enum OrchestratorToolLoop {
         return "Approval denied for \(name); not running it."
     }
 
+    /// Names of registered tools whose schema was omitted for this turn.
+    /// Fail-closed denylist shared by the orchestrator and the CLI chat loop so a native
+    /// or narrated call naming a degraded tool is withheld identically in both paths.
+    /// Unknown or unregistered names stay absent, so they reach `ToolBus.execute` and the
+    /// bus answers `invalid_tool` with available-tool names for model self-correction.
+    /// - Parameter tools: Registered tools for this turn.
+    /// - Returns: Skipped tool names as a set for O(1) membership tests.
+    public static func degradedSchemaNames(for tools: [any Tool]) -> Set<String> {
+        Set(VisionSchemaFilter.partitionValidSchemas(
+            entries: tools,
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: false
+        ).skipped)
+    }
+
     /// Builds the degraded-tool warning for one skipped tool name.
     /// - Parameter toolName: Tool omitted for this turn.
     /// - Returns: Warning carrying only the tool name plus a static reason.
@@ -130,13 +199,7 @@ public enum OrchestratorToolLoop {
     public static func degradedToolWarnings(for tools: [any Tool]) -> [String] {
         // Silent partition: the prompt and wire filters already log each skip,
         // so warning collection stays quiet to keep one log site per turn.
-        let skipped = VisionSchemaFilter.partitionValidSchemas(
-            entries: tools,
-            name: { $0.name },
-            rawSchema: { $0.inputSchema.rawValue },
-            logSkips: false
-        ).skipped
-        return skipped.sorted().map { degradedToolWarning(for: $0) }
+        degradedSchemaNames(for: tools).sorted().map { degradedToolWarning(for: $0) }
     }
 
     /// Whether raw narration arguments are a JSON object.

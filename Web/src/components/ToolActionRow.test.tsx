@@ -107,4 +107,186 @@ describe("ToolActionRow honest status", () => {
     expect(screen.getByTestId("browser-final-url")).toBeInTheDocument();
     expect(screen.getByText("https://developer.apple.com/xcode/")).toBeInTheDocument();
   });
+
+  it("renders Unknown Tool badge when errorKind is invalid_tool", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Unknown tool",
+            isError: true,
+            errorKind: "invalid_tool",
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Unknown Tool");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("invalid-tool");
+  });
+
+  it("renders Invalid Syntax badge when errorKind is invalid_syntax", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Invalid syntax",
+            isError: true,
+            errorKind: "invalid_syntax",
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Invalid Syntax");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("invalid-syntax");
+  });
+
+  it("renders Error badge when errorKind is execution_error or unspecified", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Execution failed",
+            isError: true,
+            errorKind: "execution_error",
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("error");
+  });
+
+  it("renders Done badge when result succeeded", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Success",
+            isError: false,
+          },
+        }}
+      />,
+    );
+    const badge = screen.getByText("Done");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("ok");
+  });
+});
+
+// The card variant shares the errorKind classification with the chat pill but
+// renders its own prefixed class namespace, so it needs its own coverage to
+// catch a drift between the two surfaces.
+describe("ToolActionRow card variant badges", () => {
+  it("renders Unknown Tool badge when errorKind is invalid_tool", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Unknown tool",
+            isError: true,
+            errorKind: "invalid_tool",
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Unknown Tool");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-invalid-tool");
+  });
+
+  it("renders Invalid Syntax badge when errorKind is invalid_syntax", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Invalid syntax",
+            isError: true,
+            errorKind: "invalid_syntax",
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Invalid Syntax");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-invalid-syntax");
+  });
+
+  it("renders Error badge on generic failure", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Execution failed",
+            isError: true,
+            errorKind: "execution_error",
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Error");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-error");
+  });
+
+  it("renders Done badge when result succeeded", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...baseAction,
+          result: {
+            toolCallID: "call-debug-123",
+            content: "Success",
+            isError: false,
+          },
+        }}
+        variant="card"
+      />,
+    );
+    const badge = screen.getByText("Done");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveClass("tool-badge-ok");
+  });
+
+  it("shows Running for a live result-less card", () => {
+    render(
+      <ToolActionRow
+        action={{ ...baseAction, result: null }}
+        variant="card"
+        isLive
+      />,
+    );
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.queryByText("Pending")).not.toBeInTheDocument();
+  });
+
+  it("shows Pending instead of Running for a completed result-less card", () => {
+    render(
+      <ToolActionRow
+        action={{ ...baseAction, result: null }}
+        variant="card"
+      />,
+    );
+    expect(screen.getByText("Pending")).toBeInTheDocument();
+    expect(screen.queryByText("Running")).not.toBeInTheDocument();
+  });
 });

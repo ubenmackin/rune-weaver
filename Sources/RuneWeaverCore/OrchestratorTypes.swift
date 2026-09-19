@@ -29,6 +29,16 @@ public struct UserInput: Sendable, Codable, Equatable {
     }
 }
 
+/// Category of tool error for reporting and UI distinction.
+public enum ToolErrorKind: String, Sendable, Codable, Equatable {
+    /// Attempted invocation of an unknown, unregistered, or disabled tool name.
+    case invalidTool = "invalid_tool"
+    /// Tool exists, but arguments failed JSON parsing or schema validation.
+    case invalidSyntax = "invalid_syntax"
+    /// Valid tool and arguments, but runtime execution failed.
+    case executionError = "execution_error"
+}
+
 /// One tool invocation performed while answering.
 public struct ToolAction: Sendable, Codable, Equatable {
     /// Name of the tool that ran.
@@ -372,6 +382,11 @@ struct ParkGatedCallsContext {
     /// identically to live.
     let gatedRoundIndex: Int
     var contextTokens: Int?
+    /// Whether this turn's assistant narration note was already persisted before
+    /// filing. Mixed turns execute their structured calls first, which writes the
+    /// note once; filing must stay a no-op then or the narration and its
+    /// placeholders land in history twice.
+    let narrationAlreadyPersisted: Bool
 }
 
 /// Inputs for one bounded tool-loop run.
@@ -413,6 +428,9 @@ struct ParkTurnContext {
     let billedTokens: Int?
     let toolRounds: Int
     var contextTokens: Int?
+    /// Whether the assistant narration note was already persisted earlier in this
+    /// turn, telling the filing path to skip its own persist.
+    var narrationAlreadyPersisted: Bool = false
 }
 
 /// Intermediate result of an LLM round.

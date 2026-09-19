@@ -267,16 +267,12 @@ public final class AppModel {
 
             // Keep the menu-bar registry identical to the serve command's shared
             // plugin set so served turns see the same tools as terminal use.
-            var plugins: [any Tool] = []
-            plugins += EmailTools.makeTools(emailConfig: config.email, sandboxConfig: config.sandbox)
-            plugins += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
-            // One `[browser]` policy feeds every web-facing tool via the shared
-            // registration surface; `api.request` additionally exempts the
-            // configured LLM origins from the SSRF deny.
-            let appLLMOrigins = config.llm.providers.values.compactMap(\.serverURL)
-                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            plugins += BuiltinToolPlugins.makeTools(browserConfig: config.browser, llmServerURLs: appLLMOrigins)
+            let plugins = BuiltinToolPlugins.makeAllTools(
+                config: config,
+                memoryEngine: memoryEngine,
+                embedder: embedder
+            )
+            let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
 
             let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
                 plugins: plugins,
@@ -303,7 +299,9 @@ public final class AppModel {
                 sandboxConfig: config.sandbox,
                 browserConfig: config.browser,
                 llmServerURLs: appLLMOrigins,
-                engineConfig: config.engine
+                engineConfig: config.engine,
+                emailConfig: config.email,
+                filesConfig: config.files
             )
 
             for tool in plugins {

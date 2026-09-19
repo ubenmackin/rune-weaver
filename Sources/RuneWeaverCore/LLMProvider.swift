@@ -113,6 +113,7 @@ public enum VisionGate: Sendable {
                 content: stripped,
                 toolCallID: message.toolCallID,
                 isError: message.isError,
+                errorKind: message.errorKind,
                 createdAt: message.createdAt
             )
         }

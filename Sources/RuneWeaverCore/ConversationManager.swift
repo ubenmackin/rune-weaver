@@ -538,12 +538,18 @@ private func nonEmptyCallID(_ raw: String) -> String? {
 
 /// Indexes tool results by trimmed call identifier.
 /// Persisted error flags distinguish failures from successes; rows written before the
-/// flag default to success.
+/// flag default to success. The persisted category rides along so a reloaded action
+/// keeps its badge instead of degrading to the generic error case.
 private func collectToolResults(from messages: [Message]) -> [String: ToolResult] {
     var resultsByCallID: [String: ToolResult] = [:]
     for message in messages where message.role == .tool {
         guard let rawCallID = message.toolCallID, let callID = nonEmptyCallID(rawCallID) else { continue }
-        resultsByCallID[callID] = ToolResult(toolCallID: callID, content: message.content, isError: message.isError ?? false)
+        resultsByCallID[callID] = ToolResult(
+            toolCallID: callID,
+            content: message.content,
+            isError: message.isError ?? false,
+            errorKind: message.errorKind
+        )
     }
     return resultsByCallID
 }
@@ -955,6 +961,7 @@ enum SessionStoreIO {
                     tool_call_id TEXT,
                     is_error INTEGER,
                     created_at REAL NOT NULL,
+                    error_kind TEXT,
                     FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
@@ -967,8 +974,8 @@ enum SessionStoreIO {
             // open is safe because the probe plus conditional `ALTER` is idempotent.
             let needsMigration = !migratedPaths.contains(cacheKey)
             if needsMigration {
-                // Best-effort migration for existing databases created without title, source, or
-                // error-flag columns.
+                // Best-effort migration for existing databases created without title, source,
+                // error-flag, or error-category columns.
                 let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
                 let sessionColumnsToAdd: [(name: String, sql: String)] = [
                     ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
@@ -996,6 +1003,20 @@ enum SessionStoreIO {
                     } catch {
                         let code = sqlite3_errcode(handle)
                         RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column 'is_error' (code \(code)): \(error)")
+                    }
+                }
+                // Category backfill: history written before the taxonomy existed keeps
+                // NULL here and degrades to the generic error badge on reload.
+                if !SQLiteHelpers.columnNames(handle: handle, table: .messages).contains("error_kind") {
+                    do {
+                        try SQLiteHelpers.exec(
+                            handle: handle,
+                            sql: "ALTER TABLE messages ADD COLUMN error_kind TEXT;",
+                            failure: ConversationManagerError.persistenceFailed
+                        )
+                    } catch {
+                        let code = sqlite3_errcode(handle)
+                        RuneWeaverLog.stores.warning("SQLiteSessionStore: Migration failed for column 'error_kind' (code \(code)): \(error)")
                     }
                 }
                 // Record through the lock-guarded box so only the cache
@@ -1076,7 +1097,8 @@ enum SessionStoreIO {
 
         /// Inserts one message row.
         private static func insertMessage(_ message: Message, sessionID: UUID, handle: OpaquePointer?) throws {
-            let messageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at) VALUES(?, ?, ?, ?, ?, ?, ?);"
+            let messageSQL = "INSERT INTO messages(id, session_id, role, content, tool_call_id, is_error, created_at, error_kind) "
+                + "VALUES(?, ?, ?, ?, ?, ?, ?, ?);"
             var messageStatement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, messageSQL, -1, &messageStatement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
@@ -1094,6 +1116,7 @@ enum SessionStoreIO {
                 sqlite3_bind_null(messageStatement, 6)
             }
             sqlite3_bind_double(messageStatement, 7, message.createdAt.timeIntervalSince1970)
+            bindText(messageStatement, index: 8, value: message.errorKind?.rawValue)
             guard sqlite3_step(messageStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write message \(message.id)")
             }

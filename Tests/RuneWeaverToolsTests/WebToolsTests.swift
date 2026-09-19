@@ -165,6 +165,71 @@ struct WebSearchParsingTests {
     }
 }
 
+/// Guards the failure taxonomy at the boundary the finding lived on: a runtime or
+/// configuration failure must never present as an argument-syntax failure, while
+/// genuine argument-shape and unknown-tool failures keep their distinct kinds.
+@Suite("Web Search Error Taxonomy")
+struct WebSearchTaxonomyTests {
+    /// Builds a tool whose configured base URL can never form a request, so the
+    /// configuration guard is the failure under test rather than a network path.
+    private func configFailingTool() -> WebSearchTool {
+        WebSearchTool(
+            browserConfig: BrowserConfig(searxngURL: "not a url"),
+            transport: WebTestSupport.StubSearchTransport(body: Data(), statusCode: 200),
+            ensurer: WebTestSupport.SucceedEnsurer()
+        )
+    }
+
+    @Test
+    func `Configuration failure classifies as executionError through the bus`() async throws {
+        let tool = configFailingTool()
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.search", argumentsJSON: #"{"query":"taxonomy"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError)
+        #expect(output.errorKind == .executionError)
+        // The bus must preserve the tool's explicit kind instead of re-sniffing the
+        // message wording, which is what masked this failure as invalid_syntax.
+        let bus = ToolBus()
+        await bus.register(tool: tool)
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "web.search", argumentsJSON: #"{"query":"taxonomy"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError)
+        #expect(result.errorKind == .executionError)
+    }
+
+    @Test
+    func `Argument shape failure classifies as invalidSyntax`() async throws {
+        // A JSON object that decodes but omits the required query keeps this on the
+        // argument-validation path, so invalid_syntax stays reachable.
+        let tool = WebSearchTool(
+            browserConfig: BrowserConfig(),
+            transport: WebTestSupport.StubSearchTransport(body: Data(), statusCode: 200),
+            ensurer: WebTestSupport.SucceedEnsurer()
+        )
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "web.search", argumentsJSON: #"{"limit":5}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError)
+        #expect(output.errorKind == .invalidSyntax)
+    }
+
+    @Test
+    func `Unknown tool still classifies as invalidTool`() async {
+        let bus = ToolBus()
+        let result = await bus.execute(
+            toolCall: ToolInput(toolName: "web.search", argumentsJSON: #"{"query":"x"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(result.isError)
+        #expect(result.errorKind == .invalidTool)
+    }
+}
+
 /// Serialized plus per-test DNS stub: `testDNSResolver` is process-global canned proof, so parallel
 /// fetch tests would publish and clear under each other mid-chain and fail closed on real DNS.
 @Suite("Web Fetch Safety and Outcomes", .serialized)

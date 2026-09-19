@@ -47,7 +47,7 @@ import Foundation
             sessionsByID: inout [String: ConversationSession]
         ) throws {
             var statement: OpaquePointer?
-            let messageSelectSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at "
+            let messageSelectSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind "
                 + "FROM messages ORDER BY created_at ASC, rowid ASC;"
             guard sqlite3_prepare_v2(handle, messageSelectSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read messages")
@@ -70,6 +70,7 @@ import Foundation
                     content: contentText,
                     toolCallID: toolCallID,
                     isError: outcome.isError,
+                    errorKind: outcome.errorKind,
                     createdAt: outcome.createdAt
                 ))
                 sessionsByID[sessionIDText] = session
@@ -110,7 +111,7 @@ import Foundation
         ) throws {
             let sessionID = session.id
             var statement: OpaquePointer?
-            let messageSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at FROM messages "
+            let messageSQL = "SELECT id, session_id, role, content, tool_call_id, is_error, created_at, error_kind FROM messages "
                 + "WHERE session_id = ? ORDER BY created_at ASC, rowid ASC;"
             guard sqlite3_prepare_v2(handle, messageSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read messages for session \(sessionID)")
@@ -132,6 +133,7 @@ import Foundation
                     content: contentText,
                     toolCallID: toolCallID,
                     isError: outcome.isError,
+                    errorKind: outcome.errorKind,
                     createdAt: outcome.createdAt
                 ))
             }
@@ -156,17 +158,28 @@ import Foundation
             return SessionFields(title: title, summary: summary, createdAt: createdAt, updatedAt: updatedAt, source: source)
         }
 
-        /// Decodes error-flag and timestamp columns for one message row.
+        /// Decoded error-flag, timestamp, and category columns for one message row.
+        /// A named shape keeps the decode result self-describing at the call sites.
+        struct MessageOutcome {
+            let isError: Bool?
+            let createdAt: Date
+            let errorKind: ToolErrorKind?
+        }
+
+        /// Decodes error-flag, timestamp, and category columns for one message row.
+        /// An absent or unrecognized category decodes to nil so legacy rows and future
+        /// values both fall back to the generic client badge instead of failing the read.
         /// - Parameter statement: Stepped statement positioned on a message row.
-        /// - Returns: Decoded error flag and creation date.
-        static func messageOutcome(from statement: OpaquePointer?) -> (isError: Bool?, createdAt: Date) {
+        /// - Returns: Decoded error flag, creation date, and failure category.
+        static func messageOutcome(from statement: OpaquePointer?) -> MessageOutcome {
             let isError: Bool? = if sqlite3_column_type(statement, 5) == SQLITE_NULL {
                 nil
             } else {
                 sqlite3_column_int64(statement, 5) != 0
             }
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
-            return (isError, createdAt)
+            let errorKind = columnText(statement, index: 7).flatMap { ToolErrorKind(rawValue: $0) }
+            return MessageOutcome(isError: isError, createdAt: createdAt, errorKind: errorKind)
         }
 
         /// Reads a nullable text column, preserving nil for SQL NULL.

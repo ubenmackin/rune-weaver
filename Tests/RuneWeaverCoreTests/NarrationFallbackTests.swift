@@ -235,6 +235,38 @@ struct NarrationFallbackTests {
     }
 
     @Test
+    func `Narrated call persists one placeholder line without a twin`() async throws {
+        let conversations = ConversationManager()
+        let bus = ToolBus()
+        await bus.register(tool: makeNarrationReadTool(
+            name: "email.search",
+            output: "Found lighthouse email"
+        ))
+        let narratedID = "call_narrated_single_twin"
+        let narrated = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"lighthouse"}"#, callID: narratedID)
+        ])
+        let llm = ScriptedNarrationLLM(texts: [narrated, "Done."])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] }
+        )
+        let sessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(text: "Find it", sessionID: sessionID))
+        // The narrated text already carried the placeholder, so the persisted note
+        // must hold exactly one line for the call rather than the narration plus a twin.
+        let history = await conversations.history(for: sessionID)
+        let persistedLines = history
+            .filter { $0.role == .assistant }
+            .flatMap { NormalizedText.splitLines($0.content) }
+            .compactMap { ToolInput.parsePlaceholderLine($0) }
+            .filter { $0.callID == narratedID }
+        #expect(persistedLines.count == 1)
+    }
+
+    @Test
     func `Orchestrator executes multiple narrated calls in one turn`() async throws {
         let conversations = ConversationManager()
         let bus = ToolBus()

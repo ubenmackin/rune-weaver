@@ -361,7 +361,9 @@ public final class ServerContext: Sendable {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
         llmServerURLs: [String] = [],
-        engineConfig: EngineConfig = EngineConfig()
+        engineConfig: EngineConfig = EngineConfig(),
+        emailConfig: EmailConfig? = nil,
+        filesConfig: FilesConfig = FilesConfig()
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -372,12 +374,17 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
-        // One `[browser]` policy feeds every web-facing tool so serve shares
-        // the same five-tool set as the CLI via the shared registration
-        // surface; `api.request` additionally exempts the configured LLM
-        // origins. Late builtin registration in the serve path replaces these
-        // same names, so registering here keeps direct `make` callers covered.
-        await BuiltinToolPlugins.register(on: bus, browserConfig: browserConfig, llmServerURLs: llmServerURLs)
+        // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, and API tools.
+        await BuiltinToolPlugins.registerAll(
+            on: bus,
+            emailConfig: emailConfig,
+            filesConfig: filesConfig,
+            sandboxConfig: sandboxConfig,
+            browserConfig: browserConfig,
+            llmServerURLs: llmServerURLs,
+            memoryEngine: memoryEngine,
+            embedder: embedder
+        )
         let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
         let tStates = ToolStateStore(dbPath: resolvedDBPath)

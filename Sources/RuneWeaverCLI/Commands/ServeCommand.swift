@@ -172,6 +172,7 @@ struct ServeCommand: AsyncParsableCommand {
         // --system-prompt still overrides it verbatim.
         let plugins = CLIShared.pluginTools(
             emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
             memoryEngine: memoryEngine,
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder,
@@ -183,6 +184,7 @@ struct ServeCommand: AsyncParsableCommand {
         // directory again on boot, keeping both views consistent.
         let previewBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
             memoryEngine: memoryEngine,
             permissionGate: permissionGate,
             sandboxConfig: loaded.config.sandbox,
@@ -212,7 +214,9 @@ struct ServeCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             browserConfig: loaded.config.browser,
             llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm),
-            engineConfig: loaded.config.engine
+            engineConfig: loaded.config.engine,
+            emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)

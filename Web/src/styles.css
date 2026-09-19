@@ -1102,6 +1102,16 @@ a {
   color: #f87171;
 }
 
+.chat-tool-status.invalid-tool {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.chat-tool-status.invalid-syntax {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+
 .chat-tool-status.running {
   background: rgba(245, 158, 11, 0.15);
   color: #fbbf24;
@@ -1436,10 +1446,9 @@ a {
 
 /* Shared badge states for the run-log card variant: single stylesheet source
  * so card and chat rows stay visually consistent without inline styles.
- * Green/red/amber map to the global status tokens. */
-.tool-badge-ok,
-.tool-badge-error,
-.tool-badge-pending {
+ * Green/red/amber/purple mirror the chat pill taxonomy (Done / Error /
+ * Unknown Tool / Invalid Syntax) with the same token hues. */
+.tool-badge {
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
@@ -1453,6 +1462,18 @@ a {
 .tool-badge-error {
   background: rgba(239, 68, 68, 0.15);
   color: var(--status-red);
+}
+
+/* An unknown tool call (amber) and malformed call syntax (purple) are
+ * distinct outcomes from a runtime error, not error variants. */
+.tool-badge-invalid-tool {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+}
+
+.tool-badge-invalid-syntax {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
 }
 
 .tool-badge-pending {

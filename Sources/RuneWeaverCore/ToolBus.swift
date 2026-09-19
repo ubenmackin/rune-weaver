@@ -10,22 +10,25 @@ public struct ToolResult: Sendable, Codable, Equatable {
     public let content: String
     /// Whether the execution failed or was denied.
     public let isError: Bool
+    /// Category of tool error, if failed.
+    public let errorKind: ToolErrorKind?
 
     /// Creates a tool result.
-    public init(toolCallID: String, content: String, isError: Bool = false) {
+    public init(toolCallID: String, content: String, isError: Bool = false, errorKind: ToolErrorKind? = nil) {
         self.toolCallID = toolCallID
         self.content = content
         self.isError = isError
+        self.errorKind = isError ? (errorKind ?? .executionError) : nil
     }
 
     /// Convenience success result.
     public static func success(toolCallID: String, content: String) -> ToolResult {
-        ToolResult(toolCallID: toolCallID, content: content, isError: false)
+        ToolResult(toolCallID: toolCallID, content: content, isError: false, errorKind: nil)
     }
 
     /// Convenience failure result.
-    public static func failure(toolCallID: String, content: String) -> ToolResult {
-        ToolResult(toolCallID: toolCallID, content: content, isError: true)
+    public static func failure(toolCallID: String, content: String, errorKind: ToolErrorKind? = nil) -> ToolResult {
+        ToolResult(toolCallID: toolCallID, content: content, isError: true, errorKind: errorKind)
     }
 
     /// Creates a result from a raw ``ToolOutput``.
@@ -33,17 +36,40 @@ public struct ToolResult: Sendable, Codable, Equatable {
         self.toolCallID = toolCallID ?? output.callID ?? ""
         self.content = output.content
         self.isError = output.isError
+        if output.isError {
+            if let kind = output.errorKind {
+                // An explicit kind is authoritative: a tool that can tell a
+                // configuration or runtime failure from a bad-argument failure
+                // must say so, and the bus never second-guesses it. Without this
+                // precedence a runtime message that merely reads "Invalid ..."
+                // would be masked as invalid_syntax.
+                self.errorKind = kind
+            } else if output.content.lowercased().hasPrefix("invalid ") {
+                // Legacy best-effort sniff for tools that predate explicit kinds
+                // and phrase argument validation as "Invalid <tool> arguments: ...".
+                // It cannot separate a genuine argument failure from an environment
+                // failure that happens to share the wording, so tools with runtime
+                // or configuration failure modes must set `errorKind` themselves.
+                self.errorKind = .invalidSyntax
+            } else {
+                self.errorKind = .executionError
+            }
+        } else {
+            self.errorKind = nil
+        }
     }
 
     /// Converts this result back to a ``ToolOutput``.
     /// - Returns: Equivalent tool output.
     public func asToolOutput() -> ToolOutput {
-        ToolOutput(content: content, isError: isError, callID: toolCallID)
+        ToolOutput(content: content, isError: isError, callID: toolCallID, errorKind: errorKind)
     }
 
     /// Converts this result to a `tool`-role ``Message`` for LLM history.
+    /// Carries the error category alongside the failure flag so a reloaded history
+    /// preserves the badge taxonomy instead of collapsing to a generic error.
     public func asMessage() -> Message {
-        Message(role: .tool, content: content, toolCallID: toolCallID, isError: isError)
+        Message(role: .tool, content: content, toolCallID: toolCallID, isError: isError, errorKind: errorKind)
     }
 }
 
@@ -159,10 +185,32 @@ public actor ToolBus {
     /// Executes a tool call with permission checking.
     public func execute(toolCall: ToolInput, context: ToolContext) async -> ToolResult {
         guard let tool = tools[toolCall.toolName] else {
-            return .failure(toolCallID: toolCall.callID, content: "Unknown tool: \(toolCall.toolName)")
+            let available = availableTools().map(\.name).sorted()
+            let hint = available.isEmpty ? "No tools are currently registered." : "Available tools: \(available.joined(separator: ", "))"
+            return .failure(
+                toolCallID: toolCall.callID,
+                content: "Error: Tool '\(toolCall.toolName)' is not recognized or not available. \(hint)",
+                errorKind: .invalidTool
+            )
         }
         guard isToolEnabled(named: toolCall.toolName) else {
-            return .failure(toolCallID: toolCall.callID, content: "Tool '\(toolCall.toolName)' is currently disabled.")
+            return .failure(
+                toolCallID: toolCall.callID,
+                content: "Error: Tool '\(toolCall.toolName)' is currently disabled.",
+                errorKind: .invalidTool
+            )
+        }
+        let trimmedArgs = toolCall.argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedArgs.isEmpty, trimmedArgs != "{}" {
+            guard let data = trimmedArgs.data(using: .utf8),
+                  (try? JSONSerialization.jsonObject(with: data, options: [])) is [String: Any]
+            else {
+                return .failure(
+                    toolCallID: toolCall.callID,
+                    content: "Error: Invalid arguments JSON for tool '\(toolCall.toolName)': \(toolCall.argumentsJSON). Expected a JSON object.",
+                    errorKind: .invalidSyntax
+                )
+            }
         }
         switch tool.permissionLevel {
         case .readOnly, .trusted:
@@ -173,7 +221,8 @@ public actor ToolBus {
                 case let .denied(reason):
                     return .failure(
                         toolCallID: toolCall.callID,
-                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
+                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)",
+                        errorKind: .executionError
                     )
                 case .requiresApproval:
                     // Defense in depth: the gate never returns this verdict for these levels today,
@@ -203,7 +252,8 @@ public actor ToolBus {
                 case let .denied(reason):
                     return .failure(
                         toolCallID: toolCall.callID,
-                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)"
+                        content: "Tool '\(toolCall.toolName)' was denied: \(reason)",
+                        errorKind: .executionError
                     )
                 case .requiresApproval:
                     if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
@@ -218,7 +268,11 @@ public actor ToolBus {
             let output = try await tool.execute(input: toolCall, context: context)
             return ToolResult(output, toolCallID: toolCall.callID)
         } catch {
-            return .failure(toolCallID: toolCall.callID, content: "Tool '\(toolCall.toolName)' failed: \(error.localizedDescription)")
+            return .failure(
+                toolCallID: toolCall.callID,
+                content: "Tool '\(toolCall.toolName)' failed: \(error.localizedDescription)",
+                errorKind: .executionError
+            )
         }
     }
 

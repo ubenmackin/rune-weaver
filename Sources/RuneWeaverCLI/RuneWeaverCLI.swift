@@ -181,25 +181,19 @@ enum CLIShared {
     }
 
     /// Configured LLM `server_url` values exempted from the SSRF loopback deny.
-    /// Single canonical helper for config-derived origins; all call sites
-    /// resolve through this name so the helper surface cannot drift.
+    /// Thin passthrough to the canonical `LLMOrigins` helper in `RuneWeaverCore`
+    /// so the CLI resolves the same trimmed, de-duplicated origin list as the
+    /// app and serve paths instead of deriving a second copy.
     /// - Parameter llmConfig: `[llm]` section carrying provider endpoints.
     /// - Returns: Non-empty trimmed server URLs.
     static func llmServerURLs(from llmConfig: LLMConfig?) -> [String] {
-        guard let llmConfig else { return [] }
-        var seen = Set<String>()
-        var ordered: [String] = []
-        for raw in llmConfig.providers.values.compactMap(\.serverURL) {
-            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, seen.insert(trimmed).inserted else { continue }
-            ordered.append(trimmed)
-        }
-        return ordered
+        LLMOrigins.serverURLs(from: llmConfig)
     }
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
+        filesConfig: FilesConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
         sandboxConfig: SandboxConfig? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -207,29 +201,24 @@ enum CLIShared {
         llmConfig: LLMConfig? = nil,
         llmServerURLs: [String] = []
     ) -> [any Tool] {
-        var tools: [any Tool] = []
-        if let emailConfig {
-            tools += EmailTools.makeTools(emailConfig: emailConfig, sandboxConfig: sandboxConfig ?? SandboxConfig())
-        }
-        if let memoryEngine {
-            tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
-        }
-        // One `[browser]` policy feeds every web-facing tool so CLI and serve
-        // share the same five-tool set via the shared registration surface;
-        // `api.request` additionally exempts the configured LLM origins.
         let browser = browserConfig ?? BrowserConfig()
-        // The explicit allowlist stays first so config-derived origins only
-        // fill gaps; the distinct local names keep the array value from
-        // shadowing the type-level origin helper in this scope.
         let baseOrigins = llmServerURLs
         let combinedOrigins = baseOrigins + Self.llmServerURLs(from: llmConfig).filter { !baseOrigins.contains($0) }
-        tools += BuiltinToolPlugins.makeTools(browserConfig: browser, llmServerURLs: combinedOrigins)
-        return tools
+        return BuiltinToolPlugins.makeAllTools(
+            emailConfig: emailConfig,
+            filesConfig: filesConfig,
+            sandboxConfig: sandboxConfig,
+            browserConfig: browser,
+            llmServerURLs: combinedOrigins,
+            memoryEngine: memoryEngine,
+            embedder: embedder
+        )
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
+        filesConfig: FilesConfig? = nil,
         memoryEngine: MemoryEngine? = nil,
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil,
@@ -244,6 +233,7 @@ enum CLIShared {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
         for tool in pluginTools(
             emailConfig: emailConfig,
+            filesConfig: filesConfig,
             memoryEngine: memoryEngine,
             sandboxConfig: sandboxConfig,
             embedder: embedder,

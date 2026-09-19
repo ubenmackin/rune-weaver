@@ -209,6 +209,192 @@ struct ResponsesRequestBodyTests {
     }
 
     @Test
+    func `Chat request body maps assistant placeholder to tool_calls and scrubs content`() throws {
+        let callID = "call_abc123"
+        let args = #"{"query":"test"}"#
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "files.glob", argumentsJSON: args, callID: callID)
+        ])
+        let assistantMessageContent = "Now let me test the files tools.\n\n" + placeholder
+        let messages = [
+            Message(role: .user, content: "Find files"),
+            Message(role: .assistant, content: assistantMessageContent),
+            Message(role: .tool, content: #"{"matches":[]}"#, toolCallID: callID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "files.glob",
+                description: "Glob files",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+        let body = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let wireMessages = try #require(json["messages"] as? [[String: Any]])
+        try #require(wireMessages.count == 3)
+
+        let assistantWire = wireMessages[1]
+        #expect((assistantWire["role"] as? String) == "assistant")
+        #expect((assistantWire["content"] as? String) == "Now let me test the files tools.")
+
+        let toolCalls = try #require(assistantWire["tool_calls"] as? [[String: Any]])
+        try #require(toolCalls.count == 1)
+        #expect((toolCalls[0]["id"] as? String) == callID)
+        #expect((toolCalls[0]["type"] as? String) == "function")
+        let function = try #require(toolCalls[0]["function"] as? [String: Any])
+        #expect((function["name"] as? String) == "files.glob")
+        #expect((function["arguments"] as? String) == args)
+    }
+
+    @Test
+    func `Chat wire scrubs parked placeholder without tool_calls`() throws {
+        // A parked/approval-gated turn persists an assistant note but no tool result
+        // until the approval resumes; promoting it to tool_calls would reach the wire
+        // as an unmatched call and be rejected. The plumbing line must be scrubbed
+        // entirely rather than re-emitted as raw `Calling …` request content.
+        let callID = "call_parked_1"
+        let args = #"{"action":"send"}"#
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.send", argumentsJSON: args, callID: callID)
+        ])
+        let messages = [
+            Message(role: .user, content: "Send the draft"),
+            Message(role: .assistant, content: placeholder),
+            Message(role: .assistant, content: "Waiting on your approval.")
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+        let body = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let wireMessages = try #require(json["messages"] as? [[String: Any]])
+        try #require(wireMessages.count == 3)
+
+        let parkedWire = wireMessages[1]
+        #expect(parkedWire["tool_calls"] == nil)
+        #expect((parkedWire["content"] as? String) == "")
+        #expect((parkedWire["content"] as? String)?.contains("Calling ") != true)
+        // Genuine prose on its own note survives verbatim.
+        #expect((wireMessages[2]["content"] as? String) == "Waiting on your approval.")
+    }
+
+    @Test
+    func `Chat wire promotes answerable calls and scrubs dangling placeholder`() throws {
+        // One assistant note can carry several placeholders; only the call whose
+        // result is present may become tool_calls, and the dangling line is scrubbed
+        // rather than leaking back onto the wire as raw `Calling …` text.
+        let answeredID = "call_answered"
+        let danglingID = "call_parked"
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"hello"}"#, callID: answeredID),
+            ToolInput(toolName: "email.send", argumentsJSON: #"{"to":"a@b.c"}"#, callID: danglingID)
+        ])
+        let messages = [
+            Message(role: .user, content: "Search then send"),
+            Message(role: .assistant, content: placeholder),
+            Message(role: .tool, content: #"{"results":[]}"#, toolCallID: answeredID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.search",
+                description: "Search email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            ),
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+        let body = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let json = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let wireMessages = try #require(json["messages"] as? [[String: Any]])
+        try #require(wireMessages.count == 3)
+
+        let assistantWire = wireMessages[1]
+        let toolCalls = try #require(assistantWire["tool_calls"] as? [[String: Any]])
+        try #require(toolCalls.count == 1)
+        #expect((toolCalls[0]["id"] as? String) == answeredID)
+        let content = try #require(assistantWire["content"] as? String)
+        #expect(!content.contains(danglingID))
+        #expect(!content.contains("Calling "))
+        #expect(!content.contains(answeredID))
+    }
+
+    @Test
+    func `Responses wire scrubs parked placeholder without function_call`() throws {
+        // Same parked hazard on the responses wire: an unpaired function_call item is
+        // rejected, so the plumbing line is scrubbed entirely and never re-emitted as
+        // assistant output text.
+        let callID = "call_parked_2"
+        let args = #"{"action":"send"}"#
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.send", argumentsJSON: args, callID: callID)
+        ])
+        let messages = [
+            Message(role: .user, content: "Send the draft"),
+            Message(role: .assistant, content: placeholder)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+        let body = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: body)
+        // An all-plumbing note contributes nothing beyond the user turn.
+        try #require(input.count == 1)
+        #expect((input[0]["role"] as? String) == "user")
+        #expect(input.allSatisfy { ($0["type"] as? String) != "function_call" })
+        assertNoCallingText(input)
+    }
+
+    @Test
+    func `Mixed prose and dangling placeholder keeps only real prose on both wires`() throws {
+        // A parked note can mix genuine prose with a gated placeholder. The prose
+        // survives verbatim on both wires while the plumbing line is scrubbed.
+        let danglingID = "call_parked_mixed"
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.send", argumentsJSON: #"{"action":"send"}"#, callID: danglingID)
+        ])
+        let prose = "I'll send that once you approve."
+        let mixed = prose + "\n" + placeholder
+        let messages = [
+            Message(role: .user, content: "Send the draft"),
+            Message(role: .assistant, content: mixed)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let chatJSON = try #require(try JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatMessages = try #require(chatJSON["messages"] as? [[String: Any]])
+        let assistantWire = try #require(chatMessages.first { ($0["role"] as? String) == "assistant" })
+        #expect(assistantWire["tool_calls"] == nil)
+        #expect((assistantWire["content"] as? String) == prose)
+
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: responsesBody)
+        let assistantItem = try #require(input.first { ($0["role"] as? String) == "assistant" })
+        let assistantContent = try #require(assistantItem["content"] as? [[String: Any]])
+        try #require(!assistantContent.isEmpty)
+        #expect((assistantContent[0]["text"] as? String) == prose)
+        #expect(input.allSatisfy { ($0["type"] as? String) != "function_call" })
+        assertNoCallingText(input)
+    }
+
+    @Test
     func `Degraded definitions skip broken schemas on both wires`() throws {
         // One corrupt plugin must not fail the turn: bulk builders omit it
         // while direct encoding stays loud for isolated callers.
@@ -288,10 +474,121 @@ struct ResponsesRequestBodyTests {
         #expect(responsesBytes1 == responsesBytes2)
     }
 
+    @Test
+    func `Duplicate placeholder lines collapse to one wire call on both wires`() throws {
+        // Narration persisted the placeholder line beside its generated twin; neither
+        // wire may emit two calls for one identifier or leak the twin back as text.
+        let callID = "call_twin_1"
+        let args = #"{"query":"hello"}"#
+        let line = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.search", argumentsJSON: args, callID: callID)
+        ])
+        let duplicated = line + "\n" + line
+        let messages = [
+            Message(role: .user, content: "Find emails"),
+            Message(role: .assistant, content: duplicated),
+            Message(role: .tool, content: #"{"results":[]}"#, toolCallID: callID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.search",
+                description: "Search email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let chatJSON = try #require(try JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatMessages = try #require(chatJSON["messages"] as? [[String: Any]])
+        let chatCalls = chatMessages.flatMap { ($0["tool_calls"] as? [[String: Any]]) ?? [] }
+        #expect(chatCalls.count == 1)
+        #expect((chatCalls[0]["id"] as? String) == callID)
+        let chatToolEntries = chatMessages.filter { ($0["role"] as? String) == "tool" }
+        #expect(chatToolEntries.count == 1)
+        #expect((chatToolEntries[0]["tool_call_id"] as? String) == callID)
+        let assistantEntry = try #require(chatMessages.first { ($0["role"] as? String) == "assistant" })
+        #expect((assistantEntry["content"] as? String) == "")
+
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: responsesBody)
+        let calls = input.filter { ($0["type"] as? String) == "function_call" }
+        let outputs = input.filter { ($0["type"] as? String) == "function_call_output" }
+        #expect(calls.count == 1)
+        #expect((calls[0]["call_id"] as? String) == callID)
+        #expect(outputs.count == 1)
+        #expect((outputs[0]["call_id"] as? String) == callID)
+    }
+
+    @Test
+    func `Call ID repeated across assistant notes emits once per wire`() throws {
+        // A call identifier answers exactly one invocation, so a re-persisted note
+        // must not reach the wire twice beside its single result.
+        let callID = "call_repeat_1"
+        let line = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.search", argumentsJSON: #"{"query":"hello"}"#, callID: callID)
+        ])
+        let messages = [
+            Message(role: .user, content: "Find emails"),
+            Message(role: .assistant, content: line),
+            Message(role: .assistant, content: line),
+            Message(role: .tool, content: #"{"results":[]}"#, toolCallID: callID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.search",
+                description: "Search email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let chatJSON = try #require(try JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatMessages = try #require(chatJSON["messages"] as? [[String: Any]])
+        let chatCallIDs = chatMessages
+            .flatMap { ($0["tool_calls"] as? [[String: Any]]) ?? [] }
+            .compactMap { $0["id"] as? String }
+        #expect(chatCallIDs == [callID])
+        let chatToolIDs = chatMessages
+            .filter { ($0["role"] as? String) == "tool" }
+            .compactMap { $0["tool_call_id"] as? String }
+        #expect(chatToolIDs == [callID])
+
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: responsesBody)
+        let callIDs = input
+            .filter { ($0["type"] as? String) == "function_call" }
+            .compactMap { $0["call_id"] as? String }
+        let outputIDs = input
+            .filter { ($0["type"] as? String) == "function_call_output" }
+            .compactMap { $0["call_id"] as? String }
+        #expect(callIDs == [callID])
+        #expect(outputIDs == [callID])
+        // The second assistant note contributes no leaked `Calling …` text item.
+        for item in input where (item["role"] as? String) == "assistant" {
+            let content = (item["content"] as? [[String: Any]]) ?? []
+            for part in content {
+                #expect((part["text"] as? String)?.contains("Calling ") != true)
+            }
+        }
+    }
+
     private func responsesInputItems(from body: Data) throws -> [[String: Any]] {
         let object = try JSONSerialization.jsonObject(with: body)
         let json = try #require(object as? [String: Any])
         return try #require(json["input"] as? [[String: Any]])
+    }
+
+    /// Asserts no emitted item carries raw `Calling …` placeholder plumbing as text.
+    private func assertNoCallingText(_ input: [[String: Any]]) {
+        for item in input {
+            let content = (item["content"] as? [[String: Any]]) ?? []
+            for part in content {
+                #expect((part["text"] as? String)?.contains("Calling ") != true)
+            }
+            if let text = item["output"] as? String {
+                #expect(!text.contains("Calling "))
+            }
+        }
     }
 
     private func assertNoInputTextOnAssistantOrToolItems(_ input: [[String: Any]]) {
