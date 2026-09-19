@@ -2,6 +2,7 @@
 // Keeps a single persistent connection across the entire dashboard to avoid duplicate connections.
 
 import { useEffect, useRef } from "react";
+import { toNonNegativeInt } from "../api";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
@@ -53,6 +54,8 @@ export interface WSStreamDone {
   modelName?: string;
   contextLength?: number;
   sessionTokens?: number;
+  // Active context window tokens used in the latest round (KV cache occupancy).
+  contextTokens?: number;
   // Per-turn parked flag mirroring the engine terminal frame: true when the
   // turn filed gated approvals and waits on the inbox, absent on older
   // engines where it defaults to not parked.
@@ -65,6 +68,11 @@ export interface WSStreamDone {
   // engines predate completion footers; absent renders no footer so live cards
   // agree with history reloads that derive the same instant from persistence.
   completedAt?: string | number | null;
+  // Late steering still queued server-side at completion. Mirrors the engine
+  // terminal frame so the view keeps exactly that many newest bubbles for the
+  // next turn and releases the consumed ones answered here; absent on older
+  // engines where the view clears consumed tracking as answered.
+  retainedSteerCount?: number;
 }
 
 export interface WSCancelledFrame {
@@ -211,17 +219,9 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       return (
         (value.sessionID === undefined ||
           typeof value.sessionID === "string") &&
-        typeof value.roundIndex === "number" &&
-        Number.isInteger(value.roundIndex) &&
-        value.roundIndex >= 0 &&
-        typeof value.roundTokens === "number" &&
-        Number.isFinite(value.roundTokens) &&
-        Number.isInteger(value.roundTokens) &&
-        value.roundTokens >= 0 &&
-        typeof value.turnTotalTokens === "number" &&
-        Number.isFinite(value.turnTotalTokens) &&
-        Number.isInteger(value.turnTotalTokens) &&
-        value.turnTotalTokens >= 0
+        toNonNegativeInt(value.roundIndex) !== undefined &&
+        toNonNegativeInt(value.roundTokens) !== undefined &&
+        toNonNegativeInt(value.turnTotalTokens) !== undefined
       );
     case "approval":
       return isApprovalFrame(value);

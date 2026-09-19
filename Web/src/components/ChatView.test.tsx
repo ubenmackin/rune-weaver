@@ -144,10 +144,10 @@ describe("ChatView", () => {
     await user.type(screen.getByLabelText("Chat input"), "start long query");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
-    // Send button transforms into Cancel button
+    // Send button transforms into Cancel button while input stays enabled for steering
     const cancelBtn = await screen.findByRole("button", { name: "Cancel turn" });
     expect(cancelBtn).toBeInTheDocument();
-    expect(screen.getByLabelText("Chat input")).toBeDisabled();
+    expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
 
     // Click Cancel
     await user.click(cancelBtn);
@@ -1465,6 +1465,115 @@ describe("Concurrent turn cap follows the health advertisement", () => {
       expect(screen.getByText(/Already running 1 chat turns/)).toBeInTheDocument();
     });
     expect(capture.sentFrames).toHaveLength(1);
+  });
+});
+
+describe("Mid-turn steering", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("unlocks input while pending and sends steer message over WebSocket", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    // Start turn
+    await user.type(screen.getByLabelText("Chat input"), "start long task");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    // Input stays enabled during turn
+    const inputEl = screen.getByLabelText("Chat input");
+    expect(inputEl).not.toBeDisabled();
+
+    // Cancel button shows when input is empty
+    expect(screen.getByRole("button", { name: "Cancel turn" })).toBeInTheDocument();
+
+    // Type steering message
+    await user.type(inputEl, "please focus on tests");
+
+    // Steer button appears
+    const steerBtn = screen.getByRole("button", { name: "Steer turn" });
+    expect(steerBtn).toBeInTheDocument();
+
+    // Click Steer
+    await user.click(steerBtn);
+
+    // Steer frame sent over WebSocket
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(2);
+    });
+    const steerFrame = JSON.parse(capture.sentFrames[1]);
+    expect(steerFrame.text).toBe("please focus on tests");
+    expect(steerFrame.steer).toBe(true);
+
+    // Input is cleared and user message is rendered
+    expect(inputEl).toHaveValue("");
+    expect(screen.getByText("please focus on tests")).toBeInTheDocument();
+  });
+});
+
+describe("Token metrics status bar", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("renders Turn, Context, and Session tokens distinctly", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    const sessionID = localStorage.getItem("rw_active_session_id") || "s1";
+
+    await user.type(screen.getByLabelText("Chat input"), "hello");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      sessionID,
+      text: "hello there",
+      totalTokens: 150,
+      sessionTokens: 130000,
+      contextTokens: 4800,
+      contextLength: 32768,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText("hello there")).toBeInTheDocument();
+    });
+
+    // Check status bar items
+    expect(screen.getByText("150 tokens")).toBeInTheDocument();
+    expect(screen.getByText("4,800 / 32,768 tokens (15%)")).toBeInTheDocument();
+    expect(screen.getByText("130,000 tokens")).toBeInTheDocument();
   });
 });
 

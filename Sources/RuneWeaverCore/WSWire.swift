@@ -10,12 +10,15 @@ public struct WSChatMessage: Codable, Sendable, Equatable {
     public var sessionID: UUID?
     /// Input origin. Defaults to `"websocket"` when omitted.
     public var source: String?
+    /// Whether this message is a mid-turn steering injection.
+    public var steer: Bool?
 
     /// Creates a WebSocket chat message.
-    public init(text: String, sessionID: UUID? = nil, source: String? = nil) {
+    public init(text: String, sessionID: UUID? = nil, source: String? = nil, steer: Bool? = nil) {
         self.text = text
         self.sessionID = sessionID
         self.source = source
+        self.steer = steer
     }
 }
 
@@ -94,6 +97,8 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     public var contextLength: Int?
     /// Cumulative tokens for session.
     public var sessionTokens: Int?
+    /// Active context tokens in the model's KV cache at turn completion.
+    public var contextTokens: Int?
     /// Whether this turn parked waiting on approval.
     public var isParked: Bool = false
     /// Degraded-tool notices for tools omitted this turn. Nil when absent for back-compat.
@@ -101,6 +106,12 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
     /// Completion time as Unix seconds since 1970 on the server clock. Optional so
     /// older dashboards that omit it still decode; clients fall back to receipt time.
     public var completedAt: Double?
+    /// Late steering still queued server-side at turn completion. Lets dashboards
+    /// keep exactly the newest retained bubbles for the next turn and release the
+    /// consumed ones answered here; nil on older engines where clients clear as
+    /// answered. Counted at done construction so the terminal frame and the queue
+    /// agree without an extra round trip.
+    public var retainedSteerCount: Int?
 
     /// Creates a stream done frame.
     public init(
@@ -111,10 +122,12 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         modelName: String? = nil,
         contextLength: Int? = nil,
         sessionTokens: Int? = nil,
+        contextTokens: Int? = nil,
         isParked: Bool = false,
         warnings: [String]? = nil,
         roundIndex: Int? = nil,
-        completedAt: Double? = nil
+        completedAt: Double? = nil,
+        retainedSteerCount: Int? = nil
     ) {
         self.type = "done"
         self.text = text
@@ -124,12 +137,20 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         self.modelName = modelName
         self.contextLength = contextLength
         self.sessionTokens = sessionTokens
+        self.contextTokens = contextTokens
         self.isParked = isParked
         self.warnings = warnings
         // Callers stamp the persisted assistant note's creation time so live frames and
         // history reloads share one instant; nil keeps equality deterministic and lets
         // clients fall back to receipt time when no note persisted.
         self.completedAt = completedAt
+        // Only non-negative counts cross the wire so a drifted negative never asks
+        // the dashboard to retain a negative slice; nil degrades to clear-as-answered.
+        self.retainedSteerCount = if let retainedSteerCount, retainedSteerCount < 0 {
+            nil
+        } else {
+            retainedSteerCount
+        }
         // Derive the turn's highest round from its actions when the caller omits it,
         // so multi-round turns advertise their boundary count without extra bookkeeping.
         if let roundIndex {
@@ -159,12 +180,16 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         case contextLength
         /// Cumulative tokens for session.
         case sessionTokens
+        /// Active context tokens in KV cache.
+        case contextTokens
         /// Whether the turn parked waiting on approval.
         case isParked
         /// Degraded-tool notices.
         case warnings
         /// Completion time as Unix seconds.
         case completedAt
+        /// Late steering still queued at completion.
+        case retainedSteerCount
     }
 
     /// Decodes a terminal frame, defaulting a missing parked flag for back-compat
@@ -192,9 +217,23 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .sessionTokens, in: container, debugDescription: "sessionTokens must be non-negative")
         }
         self.sessionTokens = sessionTokens
+        let contextTokens = try container.decodeIfPresent(Int.self, forKey: .contextTokens)
+        if let contextTokens, contextTokens < 0 {
+            throw DecodingError.dataCorruptedError(forKey: .contextTokens, in: container, debugDescription: "contextTokens must be non-negative")
+        }
+        self.contextTokens = contextTokens
         self.isParked = try container.decodeIfPresent(Bool.self, forKey: .isParked) ?? false
         self.warnings = try container.decodeIfPresent([String].self, forKey: .warnings)
         self.completedAt = try container.decodeIfPresent(Double.self, forKey: .completedAt)
+        // A drifted negative count degrades to absent so the terminal frame still
+        // settles the turn; the dashboard clears consumed tracking as answered
+        // instead of dropping the reply on a malformed count.
+        let retainedSteerCount = try container.decodeIfPresent(Int.self, forKey: .retainedSteerCount)
+        self.retainedSteerCount = if let retainedSteerCount, retainedSteerCount < 0 {
+            nil
+        } else {
+            retainedSteerCount
+        }
     }
 
     /// Encodes a terminal frame, omitting an absent round so older decoders see no new key.
@@ -210,16 +249,19 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
         try container.encodeIfPresent(modelName, forKey: .modelName)
         try container.encodeIfPresent(contextLength, forKey: .contextLength)
         try container.encodeIfPresent(sessionTokens, forKey: .sessionTokens)
+        try container.encodeIfPresent(contextTokens, forKey: .contextTokens)
         try container.encode(isParked, forKey: .isParked)
         try container.encodeIfPresent(warnings, forKey: .warnings)
         // Omit an absent completion so older decoders see no new key.
         try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        // Omit an absent retained count so older dashboards see no new key.
+        try container.encodeIfPresent(retainedSteerCount, forKey: .retainedSteerCount)
     }
 
     /// Creates a terminal frame from an orchestrator response.
     /// Carries the response's persisted completion instant through without re-stamping
     /// so live frames and history reloads reconcile to the same server instant.
-    public init(from response: OrchestratorResponse) {
+    public init(from response: OrchestratorResponse, retainedSteerCount: Int? = nil) {
         self.init(
             text: response.text,
             sessionID: response.sessionID,
@@ -228,9 +270,11 @@ public struct WSStreamDone: Codable, Sendable, Equatable {
             modelName: response.modelName,
             contextLength: response.contextLength,
             sessionTokens: response.sessionTokens,
+            contextTokens: response.contextTokens,
             isParked: response.isParked,
             warnings: response.warnings.isEmpty ? nil : response.warnings,
-            completedAt: response.completedAt
+            completedAt: response.completedAt,
+            retainedSteerCount: retainedSteerCount
         )
     }
 }

@@ -26,18 +26,22 @@ public struct EngineConfig: Sendable, Codable, Equatable {
     public var logLevel: String
     /// Context compaction threshold percentage (10-100). Default is 80%.
     public var compactionThresholdPercent: Int
+    /// Maximum tool loop iterations before requesting continuation approval (1-100). Default is 10.
+    public var maxToolIterations: Int
 
     /// Creates an engine config.
-    public init(name: String = "Rune Weaver", logLevel: String = "info", compactionThresholdPercent: Int = 80) {
+    public init(name: String = "Rune Weaver", logLevel: String = "info", compactionThresholdPercent: Int = 80, maxToolIterations: Int = 10) {
         self.name = name
         self.logLevel = logLevel
         self.compactionThresholdPercent = compactionThresholdPercent
+        self.maxToolIterations = maxToolIterations
     }
 
     private enum CodingKeys: String, CodingKey {
         case name
         case logLevel = "log_level"
         case compactionThresholdPercent = "compaction_threshold_percent"
+        case maxToolIterations = "max_tool_iterations"
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +49,7 @@ public struct EngineConfig: Sendable, Codable, Equatable {
         self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? "Rune Weaver"
         self.logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
         self.compactionThresholdPercent = try container.decodeIfPresent(Int.self, forKey: .compactionThresholdPercent) ?? 80
+        self.maxToolIterations = try container.decodeIfPresent(Int.self, forKey: .maxToolIterations) ?? 10
     }
 }
 

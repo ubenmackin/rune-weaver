@@ -427,6 +427,9 @@ extension RuneWeaverConfig {
         if let compaction = try engine.strictInt("compaction_threshold_percent", field: "engine.compaction_threshold_percent") {
             config.engine.compactionThresholdPercent = compaction
         }
+        if let maxIter = try engine.strictInt("max_tool_iterations", field: "engine.max_tool_iterations") {
+            config.engine.maxToolIterations = maxIter
+        }
     }
 
     private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

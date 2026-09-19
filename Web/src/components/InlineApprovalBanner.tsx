@@ -146,6 +146,47 @@ export default function InlineApprovalBanner({
     onDecide(request.id, true, option.value, option.widen);
   }
 
+  const isContinuation = request.toolName === "engine.continue";
+  if (isContinuation) {
+    return (
+      <div
+        className="card inline-approval-banner"
+        data-testid={`inline-approval-${request.id}`}
+      >
+        <div className="inline-approval-header">
+          <span className="badge approval-tool-badge">Continuation</span>
+          <span className="approval-desc">
+            {request.description || "The agent has completed its allocated tool rounds. Continue?"}
+          </span>
+        </div>
+
+        <div className="inline-approval-actions">
+          <button
+            type="button"
+            className="primary"
+            disabled={deciding}
+            onClick={() => onDecide(request.id, true, "thisTime", false)}
+          >
+            Continue
+          </button>
+          <button
+            type="button"
+            className="danger"
+            disabled={deciding}
+            onClick={() => onDecide(request.id, false, "thisTime", false)}
+          >
+            Stop
+          </button>
+          {deciding ? (
+            <span className="text-xs muted inline-approval-deciding">
+              Deciding…
+            </span>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="card inline-approval-banner"

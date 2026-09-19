@@ -13,6 +13,7 @@ import {
   groupToolActionsByRound,
   isActiveRunStatus,
   listApprovals,
+  MAX_CHAT_TEXT_LENGTH,
   newSessionId,
   normalizeLineEndings,
   normalizeRoundIndex,
@@ -22,6 +23,7 @@ import {
   resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
   textContainsPlaceholderForCall,
+  toNonNegativeInt,
   updateSessionTitle,
   type ChatSegment,
   type HealthResponse,
@@ -537,26 +539,133 @@ function buildRestSegments(actions: ToolAction[], text: string): ChatSegment[] {
 
 const MAX_MESSAGES = 200;
 
+// Maximum steering texts tracked for retraction. Mirrors the engine
+// SteeringQueue.maxPendingPerSession so the optimistic list sheds the same
+// oldest entry the server queue drops on overflow.
+const MAX_PENDING_STEERS = 20;
+
+// Counts user-visible characters with the same grapheme discipline the engine
+// enforces, so emoji-heavy drafts meet one bound on both sides instead of
+// passing a UTF-16 length check locally and failing the server limit.
+function chatTextLength(text: string): number {
+  try {
+    const segmenterCtor = (
+      Intl as unknown as {
+        Segmenter?: new () => { segment(input: string): Iterable<unknown> };
+      }
+    ).Segmenter;
+    if (typeof segmenterCtor === "function") {
+      return Array.from(new segmenterCtor().segment(text)).length;
+    }
+  } catch {
+    // Segmenter unavailable; fall through to the code-point count below.
+  }
+  return [...text].length;
+}
+
+// Distinguishes a steering rejection from a turn-wide failure so only guidance
+// the engine never received rolls back; received guidance stays visible for
+// the retry instead of vanishing behind an unrelated failure.
+function isSteerMissText(message: string): boolean {
+  return (
+    message.includes("Turn ended before steering") ||
+    message.includes("steering was not applied") ||
+    message.includes("No active turn")
+  );
+}
+
+// Recognizes the authoritative length refusal in either transport shape so an
+// optimistic bubble the server never stored can roll back instead of lingering
+// as if it had been received.
+function isTooLongText(message: string): boolean {
+  const lowered = message.toLowerCase();
+  return (
+    lowered.includes("too long") ||
+    lowered.includes("exceeds") ||
+    lowered.includes("payload too large")
+  );
+}
+
+// Matches a steering-miss error frame across engine vintages: an explicit miss
+// code or steering identity wins when present, with the miss copy as the
+// fallback for frames that carry only human-readable text.
+function isSteerMissFrame(frame: Record<string, unknown>): boolean {
+  const code = frame.code ?? frame.errorCode;
+  if (typeof code === "string" && (code === "steer-miss" || code === "steer_miss")) {
+    return true;
+  }
+  if (typeof frame.steerId === "string" && frame.steerId.length > 0) {
+    return true;
+  }
+  if (typeof frame.steerID === "string" && (frame.steerID as string).length > 0) {
+    return true;
+  }
+  const text =
+    typeof frame.message === "string"
+      ? (frame.message as string)
+      : typeof frame.text === "string"
+        ? (frame.text as string)
+        : "";
+  return typeof text === "string" && text.length > 0 && isSteerMissText(text);
+}
+
+// Matches an authoritative length refusal across transports: a numeric 413
+// signal wins when present, with the refusal copy as the fallback.
+function isTooLongFrame(frame: Record<string, unknown>): boolean {
+  if (frame.code === 413 || frame.status === 413) return true;
+  const text =
+    typeof frame.message === "string"
+      ? (frame.message as string)
+      : typeof frame.text === "string"
+        ? (frame.text as string)
+        : "";
+  return typeof text === "string" && text.length > 0 && isTooLongText(text);
+}
+
 // Interim waiting placeholder prefix for parked approval turns. The engine composes parked text
 // without a structured history flag (`waitingOnApprovalMessage`: "Waiting for approval to run
 // ..."), so live updates and history reconstruction key interim detection on this prefix.
 const WAITING_PREFIX = "Waiting for approval";
 
+// Single storage key builder for per-session token caches so session and
+// context totals share one prefix shape; the authoritative done frame always
+// overwrites whatever was cached here.
+function tokenStoreKey(kind: "session" | "context", id: string): string {
+  return kind === "session"
+    ? `rw_session_tokens_${id}`
+    : `rw_context_tokens_${id}`;
+}
+
+// Single loader for cached token totals so reload hydration shares the live
+// integer contract instead of flooring a fractional payload one path would
+// reject on another.
+function loadTokens(kind: "session" | "context", id: string): number {
+  try {
+    const raw = localStorage.getItem(tokenStoreKey(kind, id));
+    const parsed = raw != null ? Number(raw) : 0;
+    return toNonNegativeInt(parsed) ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 // Per-session cached cumulative token total so a reload hydrates the status
 // bar instead of resetting to zero; the authoritative `sessionTokens` from
 // the next done frame always overwrites it.
 function sessionTokensKey(id: string): string {
-  return `rw_session_tokens_${id}`;
+  return tokenStoreKey("session", id);
 }
 
 function loadSessionTokens(id: string): number {
-  try {
-    const raw = localStorage.getItem(sessionTokensKey(id));
-    const parsed = raw != null ? Number(raw) : 0;
-    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 0;
-  } catch {
-    return 0;
-  }
+  return loadTokens("session", id);
+}
+
+function contextTokensKey(id: string): string {
+  return tokenStoreKey("context", id);
+}
+
+function loadContextTokens(id: string): number {
+  return loadTokens("context", id);
 }
 
 // Validates a tool result before it enters turn state: the engine always
@@ -960,6 +1069,7 @@ export default function ChatView({ health }: ChatViewProps) {
   // Status bar metrics
   const [lastTurnTokens, setLastTurnTokens] = useState<number | null>(null);
   const [sessionTokens, setSessionTokens] = useState<number>(0);
+  const [contextTokens, setContextTokens] = useState<number>(0);
   const [activeModel, setActiveModel] = useState<string>(
     () => health?.model || "Local LLM",
   );
@@ -984,6 +1094,15 @@ export default function ChatView({ health }: ChatViewProps) {
   // window and the close handler below surfaces a retry immediately.
   const turnTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingRef = useRef(false);
+  // Tracks optimistic steering bubbles so a server rejection can retract
+  // the right one and restore the draft instead of showing guidance never
+  // received. A list because rapid steers queue server-side: a single slot
+  // would let the second steer overwrite the first and orphan it on error.
+  const pendingSteerRef = useRef<Array<{ id: string; text: string }>>([]);
+  // Tracks the latest normal optimistic send so an authoritative length refusal
+  // can retract exactly that bubble; steering misses never touch it because
+  // they belong to the steering list above.
+  const pendingNormalRef = useRef<{ id: string; text: string } | null>(null);
   // Snapshot of the live turn for terminal frames: updaters must stay pure,
   // so the done handler reads this ref instead of nesting a message append
   // inside a turn updater, which would duplicate under double-invoke.
@@ -1567,13 +1686,9 @@ export default function ChatView({ health }: ChatViewProps) {
         } else if (frameType === "turn_tokens") {
           const rawTotal: unknown = (data as unknown as Record<string, unknown>)
             .turnTotalTokens;
-          if (
-            typeof rawTotal === "number" &&
-            Number.isFinite(rawTotal) &&
-            Number.isInteger(rawTotal) &&
-            rawTotal >= 0
-          ) {
-            flight.turnTokens = rawTotal;
+          const turnTotal = toNonNegativeInt(rawTotal);
+          if (turnTotal != null) {
+            flight.turnTokens = turnTotal;
           }
         }
         // Heartbeats carry no payload while hidden; the parked turn simply
@@ -1603,21 +1718,12 @@ export default function ChatView({ health }: ChatViewProps) {
           // instead of resetting to zero mid-history.
           const rawSessionTokens: unknown = (data as unknown as Record<string, unknown>)
             .sessionTokens;
+          const rawContextTokens: unknown = (data as unknown as Record<string, unknown>)
+            .contextTokens;
           const rawTotal: unknown = (data as unknown as Record<string, unknown>).totalTokens;
-          const authoritative =
-            typeof rawSessionTokens === "number" &&
-            Number.isFinite(rawSessionTokens) &&
-            Number.isInteger(rawSessionTokens) &&
-            rawSessionTokens >= 0
-              ? rawSessionTokens
-              : undefined;
-          const turnTotal =
-            typeof rawTotal === "number" &&
-            Number.isFinite(rawTotal) &&
-            Number.isInteger(rawTotal) &&
-            rawTotal >= 0
-              ? rawTotal
-              : undefined;
+          const authoritative = toNonNegativeInt(rawSessionTokens);
+          const authContextTokens = toNonNegativeInt(rawContextTokens);
+          const turnTotal = toNonNegativeInt(rawTotal);
           try {
             if (authoritative != null) {
               localStorage.setItem(
@@ -1628,6 +1734,12 @@ export default function ChatView({ health }: ChatViewProps) {
               localStorage.setItem(
                 sessionTokensKey(frameSessionID),
                 String(flight.base + turnTotal),
+              );
+            }
+            if (authContextTokens != null) {
+              localStorage.setItem(
+                contextTokensKey(frameSessionID),
+                String(authContextTokens),
               );
             }
           } catch {
@@ -1751,6 +1863,8 @@ export default function ChatView({ health }: ChatViewProps) {
     // session-scoped for the same reason so one turn's proof of life never
     // re-arms another session's timer. Token progress stays session-scoped so
     // one turn's running sum never leaks into another session's footer.
+    // Terminal failures stay session-scoped as well so a session-less error
+    // never retracts the current session's steering bubble.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
@@ -1759,7 +1873,9 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "done" ||
         frameType === "warning" ||
         frameType === "turn_alive" ||
-        frameType === "turn_tokens")
+        frameType === "turn_tokens" ||
+        frameType === "error" ||
+        frameType === "cancelled")
     ) {
       return;
     }
@@ -1779,29 +1895,16 @@ export default function ChatView({ health }: ChatViewProps) {
       // Turn and round counters share the hub and engine integer contract so a
       // fractional payload drops here instead of rendering floored live while
       // failing the engine decoder.
-      if (
-        typeof rawTurnTotal !== "number" ||
-        !Number.isFinite(rawTurnTotal) ||
-        !Number.isInteger(rawTurnTotal) ||
-        rawTurnTotal < 0
-      ) {
+      const parsedTurnTotal = toNonNegativeInt(rawTurnTotal);
+      if (parsedTurnTotal == null) {
         return;
       }
       // Round counters share the hub's non-negative integer contract so a drifted engine
       // cannot smuggle a negative or fractional round sum past the turn-total check above.
-      if (
-        typeof rawRoundIndex !== "number" ||
-        !Number.isInteger(rawRoundIndex) ||
-        rawRoundIndex < 0
-      ) {
+      if (toNonNegativeInt(rawRoundIndex) == null) {
         return;
       }
-      if (
-        typeof rawRoundTokens !== "number" ||
-        !Number.isFinite(rawRoundTokens) ||
-        !Number.isInteger(rawRoundTokens) ||
-        rawRoundTokens < 0
-      ) {
+      if (toNonNegativeInt(rawRoundTokens) == null) {
         return;
       }
       // Token progress is session-tagged like heartbeats, so a frame for
@@ -1818,18 +1921,14 @@ export default function ChatView({ health }: ChatViewProps) {
         }
       }
       if (cancelledRef.current) return;
-      const turnTotal = rawTurnTotal;
+      const turnTotal = parsedTurnTotal;
       setLastTurnTokens(turnTotal);
       const base = sessionBaseRef.current;
       // The cumulative base shares the integer contract, so a drifted base
       // degrades to no session update instead of rendering a floored sum.
-      if (
-        typeof base === "number" &&
-        Number.isFinite(base) &&
-        Number.isInteger(base) &&
-        base >= 0
-      ) {
-        setSessionTokens(base + turnTotal);
+      const safeBase = toNonNegativeInt(base);
+      if (safeBase != null) {
+        setSessionTokens(safeBase + turnTotal);
       }
       // Re-arm the inactivity timer while this turn is in flight so long
       // multi-round inference never looks like a dropped socket; idle viewers
@@ -2155,6 +2254,21 @@ export default function ChatView({ health }: ChatViewProps) {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
+      // Late guidance stays queued server-side for the next turn, so only the
+      // server-confirmed retained count survives: consumed steers were answered
+      // in this turn and release, while the newest retained entries re-attach
+      // to the next timeline. An absent signal means an older engine with no
+      // late-steering report, so consumed tracking clears as answered.
+      const doneRecord = data as unknown as Record<string, unknown>;
+      const rawRetained = doneRecord.retainedSteerCount;
+      const retained = toNonNegativeInt(rawRetained);
+      if (retained != null) {
+        pendingSteerRef.current =
+          retained === 0 ? [] : pendingSteerRef.current.slice(-retained);
+      } else {
+        pendingSteerRef.current = [];
+      }
+      pendingNormalRef.current = null;
       // Terminal warnings repeat every mid-turn notice for polling clients,
       // so merge them even on a cancelled turn: the banner is informational
       // and must not depend on the reply surviving cancellation.
@@ -2180,6 +2294,7 @@ export default function ChatView({ health }: ChatViewProps) {
       const rawContextLength: unknown = data.contextLength;
       const rawTotalTokens: unknown = data.totalTokens;
       const rawSessionTokens: unknown = data.sessionTokens;
+      const rawContextTokens: unknown = data.contextTokens;
       const rawDoneText: unknown = data.text;
       const rawToolActions: unknown = data.toolActions;
       const rawIsParked: unknown = data.isParked;
@@ -2193,20 +2308,9 @@ export default function ChatView({ health }: ChatViewProps) {
       // non-negative integers): a fractional or otherwise malformed done frame
       // drops to absent instead of flooring, so live and terminal footers agree
       // with the hub and engine decoders and never corrupt the persisted base.
-      const totalTokens =
-        typeof rawTotalTokens === "number" &&
-        Number.isFinite(rawTotalTokens) &&
-        Number.isInteger(rawTotalTokens) &&
-        rawTotalTokens >= 0
-          ? rawTotalTokens
-          : undefined;
-      const sessionTokensValue =
-        typeof rawSessionTokens === "number" &&
-        Number.isFinite(rawSessionTokens) &&
-        Number.isInteger(rawSessionTokens) &&
-        rawSessionTokens >= 0
-          ? rawSessionTokens
-          : undefined;
+      const totalTokens = toNonNegativeInt(rawTotalTokens);
+      const sessionTokensValue = toNonNegativeInt(rawSessionTokens);
+      const contextTokensValue = toNonNegativeInt(rawContextTokens);
       const doneText = typeof rawDoneText === "string" ? rawDoneText : undefined;
       // Drop malformed entries so only well-shaped actions enter history; a
       // non-array tag defaults to absent like engines that omit it.
@@ -2217,6 +2321,14 @@ export default function ChatView({ health }: ChatViewProps) {
       if (contextLength) setContextLimit(contextLength);
       if (typeof totalTokens === "number") {
         setLastTurnTokens(totalTokens);
+      }
+      if (typeof contextTokensValue === "number") {
+        setContextTokens(contextTokensValue);
+        try {
+          localStorage.setItem(contextTokensKey(currentSid), String(contextTokensValue));
+        } catch {
+          // Storage is best-effort only.
+        }
       }
       // Authoritative cumulative total wins when present so reloads,
       // multi-client turns, and retries never drift from local sums. Live token
@@ -2245,12 +2357,7 @@ export default function ChatView({ health }: ChatViewProps) {
         // The derived base keeps the integer contract: a drifted stored base
         // falls back to the live total instead of flooring into the sum.
         const fallbackBase =
-          typeof base === "number" &&
-          Number.isFinite(base) &&
-          Number.isInteger(base) &&
-          base >= 0
-            ? base
-            : sessionTokensRef.current;
+          toNonNegativeInt(base) ?? sessionTokensRef.current;
         const next = fallbackBase + turnTotal;
         setSessionTokens(next);
         if (!isParked) {
@@ -2358,9 +2465,65 @@ export default function ChatView({ health }: ChatViewProps) {
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
+      // A cancelled turn ends tracking so a later error cannot retract an
+      // already-settled steering bubble from history.
+      pendingSteerRef.current = [];
+      pendingNormalRef.current = null;
       setInFlightTurn(null);
       setPending(false);
     } else if (frameType === "error") {
+      // Only guidance the engine never stored rolls back: a steering miss or
+      // an authoritative length refusal retracts its optimistic bubble, while
+      // turn-wide failures leave received guidance visible for the retry. The
+      // engine withdraws the newest queued text on a race loss, so the newest
+      // tracked bubble goes first and the frame must own this session.
+      const errorRecord = data as unknown as Record<string, unknown>;
+      const ownsSession =
+        !!frameSessionID &&
+        (normalizeSessionID(frameSessionID) ===
+          normalizeSessionID(sessionIDRef.current) ||
+          (turnSessionIDRef.current != null &&
+            normalizeSessionID(frameSessionID) ===
+              normalizeSessionID(turnSessionIDRef.current)));
+      if (ownsSession) {
+        if (isSteerMissFrame(errorRecord) || isTooLongFrame(errorRecord)) {
+          if (pendingSteerRef.current.length > 0) {
+            const rejectedSteer = pendingSteerRef.current.pop();
+            if (rejectedSteer) {
+              const rejectedId = rejectedSteer.id;
+              const rejectedText = rejectedSteer.text;
+              setMessages((prev) => prev.filter((m) => m.id !== rejectedId));
+              setInput((prev) =>
+                prev ? `${prev}\n${rejectedText}` : rejectedText,
+              );
+            }
+            pendingNormalRef.current = null;
+          } else if (pendingNormalRef.current) {
+            const rejectedNormal = pendingNormalRef.current;
+            pendingNormalRef.current = null;
+            setMessages((prev) =>
+              prev.filter((m) => m.id !== rejectedNormal.id),
+            );
+            setInput((prev) =>
+              prev ? `${prev}\n${rejectedNormal.text}` : rejectedNormal.text,
+            );
+          } else if (isTooLongFrame(errorRecord)) {
+            // Authoritative refusal with no tracked bubble (older optimistic
+            // send): drop nothing but keep the refusal visible below.
+          }
+        } else {
+          // Turn-wide failure leaves received guidance queued server-side for
+          // the retry, so tracking persists while the normal send settles.
+          pendingNormalRef.current = null;
+        }
+      }
+      // Foreign-session failures must leave the foreground turn alone: hidden
+      // sessions already settle into parked flights above, so reaching here
+      // without ownership means the timer, pending flag, and banner below
+      // all belong to another turn.
+      if (!ownsSession) {
+        return;
+      }
       clearTurnTimeout();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
@@ -2491,6 +2654,8 @@ export default function ChatView({ health }: ChatViewProps) {
     const hydrated = loadSessionTokens(activeID);
     setSessionTokens(hydrated);
     sessionBaseRef.current = hydrated;
+    const hydratedContext = loadContextTokens(activeID);
+    setContextTokens(hydratedContext);
     setLastTurnTokens(null);
 
     // If this session is a local draft (not yet sent or persisted to the server),
@@ -2712,10 +2877,70 @@ export default function ChatView({ health }: ChatViewProps) {
     target.style.height = `${Math.min(target.scrollHeight, maxHeight)}px`;
   };
 
+  const handleSteer = () => {
+    const text = input.trim();
+    if (!text || !pending) return;
+    // Reject oversize steering locally so the timeline never shows guidance
+    // the engine must refuse; matches the server ChatRequest.maxTextLength.
+    if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
+      setError(
+        `Message too long — keep steering under ${MAX_CHAT_TEXT_LENGTH} characters.`,
+      );
+      return;
+    }
+    // The timeline must never show guidance the engine never received, so a
+    // dropped socket keeps the draft in the input with an honest error
+    // instead of clearing it behind a silent loss.
+    const sent = sendMessage({
+      text,
+      sessionID,
+      steer: true,
+      source: "dashboard",
+    });
+    if (!sent) {
+      setError(
+        "Connection is closed — steering was not sent. Wait for reconnect, then try again.",
+      );
+      return;
+    }
+    setInput("");
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+    }
+    const steerId = newSessionId();
+    const userMsg: MessageItem = {
+      id: steerId,
+      role: "user",
+      text,
+    };
+    // Queue every optimistic bubble so a rejection retracts exactly one entry
+    // in send order instead of the last send overwriting earlier ones. Sheds
+    // the oldest like the engine queue when rapid taps exceed its bound, and
+    // removes its bubble so the timeline never shows guidance the engine
+    // already dropped.
+    pendingSteerRef.current.push({ id: steerId, text });
+    let shedSteerId: string | null = null;
+    if (pendingSteerRef.current.length > MAX_PENDING_STEERS) {
+      const shed = pendingSteerRef.current.shift();
+      if (shed) shedSteerId = shed.id;
+    }
+    setMessages((prev) => {
+      const withSteer = [...prev, userMsg];
+      const withoutShed = shedSteerId
+        ? withSteer.filter((m) => m.id !== shedSteerId)
+        : withSteer;
+      return withoutShed.slice(-MAX_MESSAGES);
+    });
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void send();
+      if (pending) {
+        handleSteer();
+      } else {
+        void send();
+      }
     }
   };
 
@@ -2729,6 +2954,10 @@ export default function ChatView({ health }: ChatViewProps) {
     clearTurnTimeout();
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
+    // A cancelled turn settles steering, so a late error cannot retract an
+    // already-settled bubble from history.
+    pendingSteerRef.current = [];
+    pendingNormalRef.current = null;
     // A cancelled active turn must never resurrect as a background badge.
     parkedFlightsRef.current.delete(parkedFlightKey(cancelSID));
     markBackgroundRunning(parkedFlightKey(cancelSID), false);
@@ -2751,6 +2980,14 @@ export default function ChatView({ health }: ChatViewProps) {
   async function send() {
     const text = input.trim();
     if (!text || pending) return;
+    // Reject oversize sends locally so the timeline never shows a message the
+    // engine must refuse with an authoritative length error.
+    if (chatTextLength(text) > MAX_CHAT_TEXT_LENGTH) {
+      setError(
+        `Message too long — keep messages under ${MAX_CHAT_TEXT_LENGTH} characters.`,
+      );
+      return;
+    }
     // Bound parallel turns so slow local inference never stacks silently:
     // the active turn plus every parked background turn counts toward the
     // server-advertised cap, and a full house refuses with an honest busy
@@ -2785,6 +3022,9 @@ export default function ChatView({ health }: ChatViewProps) {
       role: "user",
       text,
     };
+    // Remember the optimistic bubble so an authoritative length refusal can
+    // retract exactly this send; turn-wide failures leave it visible.
+    pendingNormalRef.current = { id: userMessage.id, text };
 
     setMessages((prev) => [...prev, userMessage].slice(-MAX_MESSAGES));
     setInput("");
@@ -2820,6 +3060,8 @@ export default function ChatView({ health }: ChatViewProps) {
     // Fallback to REST postChat
     try {
       const response = await postChat(text, sessionID, "dashboard");
+      // The server stored the optimistic bubble, so no retraction remains.
+      pendingNormalRef.current = null;
       // A cancel racing the REST round-trip must not append the late
       // reply, matching the WebSocket path that guards cancelledRef.
       if (cancelledRef.current) return;
@@ -2839,22 +3081,19 @@ export default function ChatView({ health }: ChatViewProps) {
       // REST counters share the streaming integer contract: fractional totals
       // drop instead of flooring so polling and streaming footers agree with
       // the hub and engine decoders.
-      const total =
-        typeof response.totalTokens === "number" &&
-        Number.isFinite(response.totalTokens) &&
-        Number.isInteger(response.totalTokens) &&
-        response.totalTokens >= 0
-          ? response.totalTokens
-          : undefined;
-      const restSessionTokens =
-        typeof response.sessionTokens === "number" &&
-        Number.isFinite(response.sessionTokens) &&
-        Number.isInteger(response.sessionTokens) &&
-        response.sessionTokens >= 0
-          ? response.sessionTokens
-          : undefined;
+      const total = toNonNegativeInt(response.totalTokens);
+      const restSessionTokens = toNonNegativeInt(response.sessionTokens);
+      const restContextTokens = toNonNegativeInt(response.contextTokens);
       if (typeof total === "number") {
         setLastTurnTokens(total);
+      }
+      if (typeof restContextTokens === "number") {
+        setContextTokens(restContextTokens);
+        try {
+          localStorage.setItem(contextTokensKey(currentSid), String(restContextTokens));
+        } catch {
+          // Storage is best-effort only.
+        }
       }
       if (typeof restSessionTokens === "number") {
         setSessionTokens(restSessionTokens);
@@ -2874,12 +3113,7 @@ export default function ChatView({ health }: ChatViewProps) {
         // a fractional sum.
         const restBase = sessionBaseRef.current;
         const restFallbackBase =
-          typeof restBase === "number" &&
-          Number.isFinite(restBase) &&
-          Number.isInteger(restBase) &&
-          restBase >= 0
-            ? restBase
-            : sessionTokensRef.current;
+          toNonNegativeInt(restBase) ?? sessionTokensRef.current;
         const next = restFallbackBase + total;
         setSessionTokens(next);
         if (!isParked) {
@@ -2945,6 +3179,21 @@ export default function ChatView({ health }: ChatViewProps) {
       if (cancelledRef.current) return;
       const message =
         failure instanceof ApiError ? failure.message : "Chat failed";
+      // The server stays authoritative on length: an oversize refusal rolls
+      // back its optimistic bubble while turn-wide failures leave received
+      // messages visible.
+      const isLengthRefusal =
+        (failure instanceof ApiError &&
+          (failure.status === 413 || isTooLongText(failure.message))) ||
+        (!(failure instanceof ApiError) && isTooLongText(message));
+      if (isLengthRefusal) {
+        const optimisticId = userMessage.id;
+        pendingNormalRef.current = null;
+        setMessages((prev) => prev.filter((m) => m.id !== optimisticId));
+        setInput((prev) => (prev ? `${prev}\n${text}` : text));
+      } else {
+        pendingNormalRef.current = null;
+      }
       setError(message);
     } finally {
       // Mirror every streaming terminal path: a heartbeat-armed timer must not
@@ -2982,6 +3231,8 @@ export default function ChatView({ health }: ChatViewProps) {
     const fresh = loadSessionTokens(nextID);
     setSessionTokens(fresh);
     sessionBaseRef.current = fresh;
+    const freshContext = loadContextTokens(nextID);
+    setContextTokens(freshContext);
   }
 
   function handleSelectSession(id: string) {
@@ -3010,12 +3261,14 @@ export default function ChatView({ health }: ChatViewProps) {
     const hydrated = loadSessionTokens(id);
     setSessionTokens(hydrated);
     sessionBaseRef.current = hydrated;
+    const hydratedContext = loadContextTokens(id);
+    setContextTokens(hydratedContext);
     restoreParkedFlight(id);
   }
 
   const usedPercent =
     contextLimit > 0
-      ? Math.round((sessionTokens / contextLimit) * 100)
+      ? Math.round((contextTokens / contextLimit) * 100)
       : 0;
   // Amber badge count for this session only; other sessions' approvals never
   // leak into this header.
@@ -3389,11 +3642,17 @@ export default function ChatView({ health }: ChatViewProps) {
               name="chat_message_prompt"
               rows={3}
               aria-label="Chat input"
-              placeholder="Message Rune Weaver… (Shift+Return for newline)"
+              placeholder={
+                pending
+                  ? "Steer agent mid-turn… (Shift+Return for newline)"
+                  : "Message Rune Weaver… (Shift+Return for newline)"
+              }
               value={input}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
-              disabled={pending}
+              // Grapheme guard in send/steer is authoritative: native maxLength
+              // counts UTF-16 units and would miscount emoji.
+              // always enabled so pending turns accept steering
               autoComplete="off"
               autoCorrect="off"
               autoCapitalize="off"
@@ -3403,14 +3662,25 @@ export default function ChatView({ health }: ChatViewProps) {
               data-form-type="other"
             />
             {pending ? (
-              <button
-                type="button"
-                className="chat-cancel-btn"
-                onClick={() => void handleCancel()}
-                aria-label="Cancel turn"
-              >
-                Cancel
-              </button>
+              input.trim().length > 0 ? (
+                <button
+                  type="button"
+                  className="primary chat-send-btn"
+                  onClick={handleSteer}
+                  aria-label="Steer turn"
+                >
+                  Steer
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="chat-cancel-btn"
+                  onClick={() => void handleCancel()}
+                  aria-label="Cancel turn"
+                >
+                  Cancel
+                </button>
+              )
             ) : (
               <button
                 type="button"
@@ -3445,14 +3715,23 @@ export default function ChatView({ health }: ChatViewProps) {
             <div className="status-bar-divider">•</div>
 
             <div className="status-bar-item">
-              <span className="status-bar-label">Session:</span>
+              <span className="status-bar-label">Context:</span>
               <span
                 className={`status-bar-value ${
-                  usedPercent > 100 ? "status-warning" : ""
+                  usedPercent >= 80 ? "status-warning" : ""
                 }`}
               >
-                {sessionTokens.toLocaleString()} /{" "}
+                {contextTokens.toLocaleString()} /{" "}
                 {contextLimit.toLocaleString()} tokens ({usedPercent}%)
+              </span>
+            </div>
+
+            <div className="status-bar-divider">•</div>
+
+            <div className="status-bar-item">
+              <span className="status-bar-label">Session:</span>
+              <span className="status-bar-value">
+                {sessionTokens.toLocaleString()} tokens
               </span>
             </div>
           </div>

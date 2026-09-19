@@ -13,6 +13,9 @@ public struct EmailSearchTool: Tool, Sendable {
             + "Use when the user asks to find or summarize email. "
             + "Use query \"*\" or empty for the most-recent messages. "
             + "Pass mailbox to narrow to one folder; each hit labels its mailbox for email.read. "
+            + "Pass hasAttachment (true/false) to filter for messages with or without attachments. "
+            + "Attachment filtering scans the newest candidates first (up to five times the requested limit, minimum fifty per mailbox), "
+            + "so older matches outside that newest window are not returned. "
             + "Returns matching message ids, headers, snippets, and mailboxes."
     /// Function-calling contract for `account`, `query`, `limit`, and `mailbox`.
     public let inputSchema =
@@ -23,7 +26,9 @@ public struct EmailSearchTool: Tool, Sendable {
                 + #"lists most-recent messages"},"limit":{"type":"integer","description":"Maximum hits "#
                 + #"(1-50, default 10)","minimum":1,"maximum":50},"mailbox":{"type":"string","description":"Optional folder "#
                 + #"to search (e.g. INBOX, Sent); omitted or blank searches every selectable mailbox"},"#
-                + #""folder":{"type":"string","description":"Alias for mailbox"}}"#
+                + #""folder":{"type":"string","description":"Alias for mailbox"},"#
+                + #""hasAttachment":{"type":"boolean","description":"Optional filter: true for messages with attachments, false for messages without; "#
+                + #"filtered searches scan the newest candidates first (up to 5x limit, minimum 50 per mailbox)"}}"#
                 + #","required":["account","query"],"additionalProperties":false}"#
         )
     /// Always allowed: search never changes mailbox state.
@@ -110,6 +115,7 @@ public struct EmailSearchTool: Tool, Sendable {
                     requested: requested,
                     effectiveQuery: effectiveQuery,
                     limit: args.limit,
+                    hasAttachment: args.hasAttachment,
                     callID: input.callID
                 )
             }
@@ -118,6 +124,7 @@ public struct EmailSearchTool: Tool, Sendable {
                 credentials: credentials,
                 effectiveQuery: effectiveQuery,
                 limit: args.limit,
+                hasAttachment: args.hasAttachment,
                 callID: input.callID
             )
         } catch {
@@ -127,6 +134,11 @@ public struct EmailSearchTool: Tool, Sendable {
 }
 
 extension EmailSearchTool {
+    /// Reapplies the attachment filter locally so gateways that ignore it still honor the request.
+    private func filteredByAttachment(_ hits: [EmailSearchHit], hasAttachment: Bool?) -> [EmailSearchHit] {
+        hits.filter { $0.matches(hasAttachment: hasAttachment) }
+    }
+
     /// Searches one explicit mailbox with a clear unknown-folder error.
     private func singleMailboxOutput(
         account: EmailAccount,
@@ -134,6 +146,7 @@ extension EmailSearchTool {
         requested: String,
         effectiveQuery: String,
         limit: Int,
+        hasAttachment: Bool? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -144,9 +157,24 @@ extension EmailSearchTool {
         } catch {
             return .failure(error.localizedDescription, callID: callID)
         }
-        let hits = try await gateway.search(credentials: credentials, mailbox: canonical, query: effectiveQuery, limit: limit)
-        let labeled = hits.map {
-            EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: canonical)
+        let hits = try await gateway.search(
+            credentials: credentials,
+            mailbox: canonical,
+            query: effectiveQuery,
+            limit: limit,
+            hasAttachment: hasAttachment
+        )
+        let labeled = filteredByAttachment(hits, hasAttachment: hasAttachment).map {
+            EmailSearchHit(
+                id: $0.id,
+                subject: $0.subject,
+                from: $0.from,
+                date: $0.date,
+                snippet: $0.snippet,
+                mailbox: canonical,
+                hasAttachments: $0.hasAttachments,
+                attachmentCount: $0.attachmentCount
+            )
         }
         let capped = Array(labeled.prefix(limit))
         let content = try EmailBridgeParsing.encodeSearchEnvelope(
@@ -165,6 +193,7 @@ extension EmailSearchTool {
         credentials: ResolvedEmailCredentials,
         effectiveQuery: String,
         limit: Int,
+        hasAttachment: Bool? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -177,9 +206,24 @@ extension EmailSearchTool {
         var lastError: Error?
         for box in available {
             do {
-                let hits = try await gateway.search(credentials: credentials, mailbox: box, query: effectiveQuery, limit: limit)
-                let labeled = hits.map {
-                    EmailSearchHit(id: $0.id, subject: $0.subject, from: $0.from, date: $0.date, snippet: $0.snippet, mailbox: box)
+                let hits = try await gateway.search(
+                    credentials: credentials,
+                    mailbox: box,
+                    query: effectiveQuery,
+                    limit: limit,
+                    hasAttachment: hasAttachment
+                )
+                let labeled = filteredByAttachment(hits, hasAttachment: hasAttachment).map {
+                    EmailSearchHit(
+                        id: $0.id,
+                        subject: $0.subject,
+                        from: $0.from,
+                        date: $0.date,
+                        snippet: $0.snippet,
+                        mailbox: box,
+                        hasAttachments: $0.hasAttachments,
+                        attachmentCount: $0.attachmentCount
+                    )
                 }
                 groups.append(labeled)
                 succeeded.append(box)

@@ -974,6 +974,33 @@ struct EmailToolsTests {
     }
 
     @Test
+    func `Search decodes and supports hasAttachment parameter and hit fields`() async throws {
+        let hits = [
+            EmailSearchHit(
+                id: "101",
+                subject: "Invoice attached",
+                from: "billing@example.com",
+                date: "Mon, 18 Sep 2026 12:00:00 +0000",
+                snippet: "Please find your invoice attached.",
+                mailbox: "INBOX",
+                hasAttachments: true,
+                attachmentCount: 1
+            )
+        ]
+        let tool = EmailSearchTool(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: ToolsTestSupport.StubEmailGateway(hits: hits))
+        try await ToolsTestSupport.withTestPassword {
+            let output = try await tool.execute(
+                input: ToolInput(toolName: "email.search", argumentsJSON: #"{"account":"personal","query":"invoice","hasAttachment":true}"#),
+                context: ToolContext(conversationID: UUID())
+            )
+            #expect(output.isError == false)
+            #expect(output.content.contains("hasAttachments"))
+            #expect(output.content.contains("attachmentCount"))
+            #expect(output.content.contains("Invoice attached"))
+        }
+    }
+
+    @Test
     func `List excludes non-selectable flags`() throws {
         let selectable = EmailBridgeParsing.selectableMailboxes(from: [
             (flags: "\\HasNoChildren", mailbox: "INBOX"),

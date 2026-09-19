@@ -135,7 +135,11 @@ public func resumeNarratedApproval(
     guard let resumed else {
         return
     }
-    let done = WSStreamDone(from: resumed)
+    // Late steering stays queued above, so report its depth on done like the live
+    // turn path: the dashboard keeps exactly that many newest bubbles and
+    // releases the consumed ones answered here.
+    var done = WSStreamDone(from: resumed)
+    done.retainedSteerCount = await context.steeringQueue.pendingCount(for: resumed.sessionID)
     if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
         await context.hub.broadcast(text: frame)
     }

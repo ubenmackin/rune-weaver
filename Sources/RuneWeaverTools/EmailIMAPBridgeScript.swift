@@ -532,33 +532,104 @@ private enum EmailIMAPBridgeScriptTail {
                         fail("IMAP search failed")
                         return
                     uids = (data[0] or b"").split() if data else []
-                    wanted = [u.decode("utf-8", errors="replace") for u in uids[-limit:]]
-                    wanted.reverse()
+                    has_att_filter = req.get("hasAttachment")
+                    if has_att_filter is None:
+                        has_att_filter = req.get("hasAttachments")
+                    if has_att_filter is None:
+                        has_att_filter = req.get("has_attachment")
+                    if has_att_filter is None:
+                        has_att_filter = req.get("has_attachments")
+                    if isinstance(has_att_filter, bool):
+                        pass
+                    elif isinstance(has_att_filter, str):
+                        lowered = has_att_filter.strip().lower()
+                        if lowered in ("true", "1", "yes"):
+                            has_att_filter = True
+                        elif lowered in ("false", "0", "no"):
+                            has_att_filter = False
+                        else:
+                            has_att_filter = None
+
+                    if has_att_filter is None:
+                        wanted = [u.decode("utf-8", errors="replace") for u in uids[-limit:]]
+                        wanted.reverse()
+                        scan_uids = wanted
+                    else:
+                        reversed_uids = [u.decode("utf-8", errors="replace") for u in reversed(uids)]
+                        # Intent: bound filtered-search fetch cost. Candidate scan stays capped at
+                        # max(limit*5, 50), i.e. worst-case 250 UIDs per mailbox (limit <= 50), with a
+                        # cheap BODYSTRUCTURE probe per candidate and a full BODY.PEEK[] fetch only
+                        # for probe matches (at most `limit` full fetches). All reads stay read-only
+                        # (BODYSTRUCTURE + BODY.PEEK) so no \Seen flag is set.
+                        scan_uids = reversed_uids[:min(len(reversed_uids), max(limit * 5, 50))]
+
                     messages = []
-                    for uid in wanted:
+                    for uid in scan_uids:
                         try:
+                            if has_att_filter is not None:
+                                try:
+                                    styp, sdata = conn.uid("fetch", uid, "(BODYSTRUCTURE)")
+                                except Exception:
+                                    styp, sdata = "NO", None
+                                if styp == "OK" and sdata:
+                                    try:
+                                        if isinstance(sdata, bytes):
+                                            s_blob = sdata.decode("utf-8", errors="replace").lower()
+                                        else:
+                                            s_chunks = []
+                                            for s_item in sdata:
+                                                if s_item is None:
+                                                    continue
+                                                if isinstance(s_item, tuple):
+                                                    for s_sub in s_item:
+                                                        if isinstance(s_sub, bytes):
+                                                            s_chunks.append(s_sub.decode("utf-8", errors="replace"))
+                                                        elif s_sub is not None:
+                                                            s_chunks.append(str(s_sub))
+                                                elif isinstance(s_item, bytes):
+                                                    s_chunks.append(s_item.decode("utf-8", errors="replace"))
+                                                else:
+                                                    s_chunks.append(str(s_item))
+                                            s_blob = " ".join(s_chunks).lower()
+                                        # Empty probe response is inconclusive: fall through to the
+                                        # authoritative full fetch below instead of skipping.
+                                        if s_blob.strip():
+                                            probe_has = ("attachment" in s_blob or "filename" in s_blob or '"name"' in s_blob)
+                                            if probe_has != bool(has_att_filter):
+                                                continue
+                                    except Exception:
+                                        pass
                             ftyp, fdata = conn.uid("fetch", uid, "(BODY.PEEK[])")
+                            if ftyp != "OK" or not fdata:
+                                continue
+                            raw = None
+                            for chunk in fdata:
+                                if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
+                                    raw = chunk[1]
+                                    break
+                            if not raw:
+                                continue
+                            # Skip malformed message so single bad MIME does not fail entire search
+                            msg = email.message_from_bytes(raw, policy=policy.default)
+                            atts = attachment_parts(msg)
+                            has_atts = bool(atts)
+                            if has_att_filter is not None and has_atts != bool(has_att_filter):
+                                continue
+                            text = body_text(msg)
+                            messages.append({
+                                "id": uid,
+                                "subject": decode_value(msg["Subject"]),
+                                "from": decode_value(msg["From"]),
+                                "date": str(msg["Date"] or ""),
+                                "snippet": snippet_of(text),
+                                "mailbox": mailbox,
+                                "hasAttachments": has_atts,
+                                "attachmentCount": len(atts),
+                            })
+                            if len(messages) >= limit:
+                                break
                         except Exception:
                             continue
-                        if ftyp != "OK" or not fdata:
-                            continue
-                        raw = None
-                        for chunk in fdata:
-                            if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
-                                raw = chunk[1]
-                                break
-                        if not raw:
-                            continue
-                        msg = email.message_from_bytes(raw, policy=policy.default)
-                        text = body_text(msg)
-                        messages.append({
-                            "id": uid,
-                            "subject": decode_value(msg["Subject"]),
-                            "from": decode_value(msg["From"]),
-                            "date": str(msg["Date"] or ""),
-                            "snippet": snippet_of(text),
-                            "mailbox": mailbox,
-                        })
                     sys.stdout.write(json.dumps({"ok": True, "messages": messages}))
                     sys.stdout.flush()
                 except Exception as exc:

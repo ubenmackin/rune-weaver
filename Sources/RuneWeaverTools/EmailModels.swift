@@ -53,6 +53,8 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public let limit: Int
     /// Optional mailbox narrowing the search to one folder (nil means every selectable mailbox).
     public let mailbox: String?
+    /// Optional filter for whether the email has attachments (nil means no filtering).
+    public let hasAttachment: Bool?
 
     /// Default hit count when the caller omits `limit`.
     public static let defaultLimit = 10
@@ -60,11 +62,12 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public static let maxLimit = 50
 
     /// Memberwise initializer with limit clamping.
-    public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil) {
+    public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil, hasAttachment: Bool? = nil) {
         self.account = account
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
         self.mailbox = mailbox
+        self.hasAttachment = hasAttachment
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -73,6 +76,10 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         case limit
         case mailbox
         case folder
+        case hasAttachment
+        case hasAttachments
+        case hasAttachmentSnake = "has_attachment"
+        case hasAttachmentsSnake = "has_attachments"
     }
 
     /// Decodes arguments, trimming whitespace and clamping `limit`.
@@ -84,7 +91,11 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
         let mailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
             ?? container.decodeIfPresent(String.self, forKey: .folder)
-        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox)
+        let hasAttachment = try container.decodeIfPresent(Bool.self, forKey: .hasAttachment)
+            ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachments)
+            ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachmentSnake)
+            ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachmentsSnake)
+        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox, hasAttachment: hasAttachment)
     }
 
     /// Trimmed account nickname.
@@ -185,15 +196,30 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
     public let snippet: String
     /// Mailbox holding the message (e.g. `INBOX`).
     public let mailbox: String
+    /// Whether the message has attachments.
+    public let hasAttachments: Bool?
+    /// Number of attachment parts in the message.
+    public let attachmentCount: Int?
 
     /// Creates a search hit.
-    public init(id: String, subject: String, from: String, date: String, snippet: String, mailbox: String = "INBOX") {
+    public init(
+        id: String,
+        subject: String,
+        from: String,
+        date: String,
+        snippet: String,
+        mailbox: String = "INBOX",
+        hasAttachments: Bool? = nil,
+        attachmentCount: Int? = nil
+    ) {
         self.id = id
         self.subject = subject
         self.from = from
         self.date = date
         self.snippet = snippet
         self.mailbox = EmailMailboxNormalization.normalizedMailbox(mailbox)
+        self.hasAttachments = hasAttachments
+        self.attachmentCount = attachmentCount
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -203,6 +229,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         case date
         case snippet
         case mailbox
+        case hasAttachments
+        case attachmentCount
     }
 
     /// Decodes a hit, defaulting omitted `mailbox` to `INBOX`.
@@ -216,6 +244,8 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         snippet = try container.decode(String.self, forKey: .snippet)
         let rawMailbox = try container.decodeIfPresent(String.self, forKey: .mailbox)
         mailbox = EmailMailboxNormalization.normalizedMailbox(rawMailbox)
+        hasAttachments = try container.decodeIfPresent(Bool.self, forKey: .hasAttachments)
+        attachmentCount = try container.decodeIfPresent(Int.self, forKey: .attachmentCount)
     }
 
     /// Encodes a hit including its mailbox label.
@@ -228,6 +258,18 @@ public struct EmailSearchHit: Sendable, Equatable, Codable {
         try container.encode(date, forKey: .date)
         try container.encode(snippet, forKey: .snippet)
         try container.encode(mailbox, forKey: .mailbox)
+        try container.encodeIfPresent(hasAttachments, forKey: .hasAttachments)
+        try container.encodeIfPresent(attachmentCount, forKey: .attachmentCount)
+    }
+}
+
+public extension EmailSearchHit {
+    /// Whether this hit satisfies an attachment-presence filter.
+    /// Older hits may carry only a count, so presence derives from either signal;
+    /// a nil filter matches every hit so unfiltered callers keep the full list.
+    func matches(hasAttachment: Bool?) -> Bool {
+        guard let hasAttachment else { return true }
+        return (hasAttachments ?? ((attachmentCount ?? 0) > 0)) == hasAttachment
     }
 }
 

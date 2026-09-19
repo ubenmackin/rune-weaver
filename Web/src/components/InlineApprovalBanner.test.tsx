@@ -1,9 +1,9 @@
 // Rune Weaver Dashboard — Tests pinning the inline approval banner's allow
 // options to the shared trust-duration tiers.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { splitAllowOptions } from "./InlineApprovalBanner";
-import { trustDurationOptions } from "../api";
+import { trustDurationOptions, type PermissionRequest } from "../api";
 
 describe("InlineApprovalBanner allow options", () => {
   it("mirrors every shared trust duration in the base option set", () => {
@@ -38,3 +38,44 @@ describe("InlineApprovalBanner allow options", () => {
     }
   });
 });
+
+describe("InlineApprovalBanner continuation approval", () => {
+  it("renders continuation banner with Continue and Stop buttons", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const userEvent = (await import("@testing-library/user-event")).default;
+    const InlineApprovalBanner = (await import("./InlineApprovalBanner")).default;
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-cont-1",
+      toolName: "engine.continue",
+      description: "The agent has completed 10 tool rounds. Continue?",
+      input: { toolName: "engine.continue", argumentsJSON: "{}", callID: "c-cont" },
+      suggestedDurations: ["thisTime"],
+    };
+
+    const user = userEvent.setup();
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText("Continuation")).toBeInTheDocument();
+    expect(
+      screen.getByText("The agent has completed 10 tool rounds. Continue?"),
+    ).toBeInTheDocument();
+    const continueBtn = screen.getByRole("button", { name: "Continue" });
+    const stopBtn = screen.getByRole("button", { name: "Stop" });
+    expect(continueBtn).toBeInTheDocument();
+    expect(stopBtn).toBeInTheDocument();
+
+    await user.click(continueBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-cont-1", true, "thisTime", false);
+
+    await user.click(stopBtn);
+    expect(onDecide).toHaveBeenCalledWith("app-cont-1", false, "thisTime", false);
+  });
+});
+
