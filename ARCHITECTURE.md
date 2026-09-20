@@ -58,7 +58,7 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 │         └─────────────────┼─────────────────────┘                │
 │                           │                                      │
 │                    WebSocket / REST                               │
-│              (loopback only in v1; remote via VPN deferred)         │
+│         (loopback always; non-loopback requires owner auth)       │
 ├───────────────────────────┼──────────────────────────────────────┤
 │                    CORE ENGINE (Swift)                            │
 │                           │                                      │
@@ -136,10 +136,10 @@ The core engine is shifting from a CLI-only tool to a local service that other U
 - **WebSocket event hub & real-time streaming**: The service maintains a persistent WebSocket endpoint (`/ws`) managed by `WSHub`. Chat turns stream live text deltas, tool invocations, and tool outcomes, tagged with `sessionID` so frontend views multiplex over a single shared connection (`useSharedWebSocket`) without cross-session leakage. In-flight turns support mid-turn cancellation via WebSocket frame (`{"type": "cancel"}`) or REST (`POST /chat/cancel`), which aborts the underlying Swift task via `ActiveTurnTracker`.
 - **Authoritative concurrent-turn cap**: `ActiveTurnTracker.maxConcurrentTurns = 3` bounds simultaneous chat turns across REST and WebSocket (a replacement turn for the same session supersedes its slot; a fresh session past the cap fails with an honest busy notice). Every `GET /health` probe advertises the cap in the `X-RuneWeaver-Max-Concurrent-Turns` header alongside the JSON body so the dashboard prefers the server value and only falls back to its mirrored constant for older engines. `GET /health` also carries the live SearXNG Start flight stage (nil when idle).
 - **Durable SQLite persistence for scheduler & run history**: Scheduled jobs (`scheduler_jobs`) and execution audit logs (`run_logs`) persist in SQLite (`episodes.db`). The `config.toml` `[[scheduler.jobs]]` table is used solely as an initial bootstrap seed when the database has zero jobs. Runtime edits persist immediately to SQLite, and run states (`running` → `ok`/`error`/`cancelled`, plus `awaiting_approval` → `ok`/`error`/`denied` for approval-gated parked turns) are tracked live, with interrupted runs reconciled on restart. Every `run_logs` row carries a nullable `session_id` column (backfilled via migration for older databases) linking the turn to its owning chat or per-run scheduler session (fresh `UUID()` per execution) so parked approvals resume in the same session.
-- **Static dashboard bundle**: The web dashboard ships as a static bundle served by the engine itself. It chats, browses memory, inspects run history, manages schedules, and surfaces the approvals inbox in a browser with no separate frontend host process.
+- **Static dashboard bundle**: The web dashboard ships as a static bundle served by the engine itself. It chats, browses memory, inspects run history, manages schedules, and surfaces the approvals inbox in a browser with no separate frontend host process. When owner auth is active the bundle is still served publicly — a browser cannot attach a bearer header to a navigation or an asset fetch — and renders its own owner-token gate before any data request, so an unauthenticated visitor reaches the sign-in view instead of a dead end.
 - **Same trust boundary**: Every service-triggered write still flows through the permission gate with graduated trust, sandbox staging, and the local audit trail. The service layer adds transport; it does not bypass approvals.
-- **Localhost-only, no-auth v1**: The v1 service binds loopback (`127.0.0.1`) only with no auth, relying on local-process access for protection.
-- **Auth-before-exposure rule**: Authentication must land before the service binds a non-loopback interface or leaves the machine. No VPN, tunnel, or port-forward exposure without auth. Remote access over WireGuard (or any non-loopback transport) is deferred until auth lands; the service refuses non-loopback binds in v1.
+- **Single-owner bearer auth (shipped)**: Exactly one owner token guards the engine HTTP surface, whether it is launched through `rune-weaver serve` or the menu-bar app's embedded service. The token is a 256-bit URL-safe value minted by `rune-weaver auth token generate` and resolved at boot from `token_env`, then the Keychain account, then a `0600` `token_file`. It is verified in constant time, and failed non-loopback attempts throttle per client with `Retry-After`. Middleware gates every data path — REST and the WebSocket upgrade — returning the same uniform `401`; only the static dashboard bundle (which renders its own owner-token gate) and a minimal liveness shape are public, because a browser cannot attach a bearer header to a navigation or an asset fetch. The WebSocket query-token fallback requires a genuine `/ws` upgrade handshake (`Sec-WebSocket-Key` plus `Connection: upgrade` and `Upgrade: websocket`) and is stripped before any downstream log. Rotation persists the replacement before it goes live, but the two entry points differ in reach. The dashboard Settings pane rotates inside the running engine, so the previous token stops working immediately and established WebSockets are dropped. The CLI `rune-weaver auth token rotate` runs in a separate process and can only rewrite the stored credential, so a running engine keeps accepting the previous token until it is restarted; use the dashboard path when live revocation is required.
+- **Fail-closed binding (shipped)**: Loopback (`127.0.0.1`, `localhost`, `::1`) always serves. A non-loopback bind — `serve --hostname <lan-ip>` or a non-loopback bind from the menu-bar app's embedded service — is accepted only when a token resolves (`ServerConfig.requireBindable`); otherwise boot is refused rather than silently downgraded to an unauthenticated LAN bind. WireGuard (or equivalent) remains the recommended transport off-LAN: it keeps the engine off the physical LAN while the bearer token still guards every request.
 - **Service auto-fire plus per-process single-flight**: The service auto-fires scheduler cron and poll triggers in-process, sharing one lock with the manual run route so overlapping fires inside the service process skip with `409` instead of stacking. The CLI `scheduler run` foreground loop is a second auto-fire runner in a separate process with no shared state, so the same job name can still run concurrently via service plus CLI in v1 — run one auto-fire runner at a time.
 
 ---
@@ -283,11 +283,11 @@ The permission system is the trust boundary between the agent and the real world
 
 ### 9. Client Layer
 
-**macOS App — shipped**: Menu-bar app (always accessible) with chat window, approval notifications, scheduler summary, and dashboard/settings shortcuts.
+**macOS App — shipped**: Menu-bar app (always accessible) with chat window, approval notifications, scheduler summary, and dashboard/settings shortcuts. Its embedded service defaults to loopback (`127.0.0.1`) and resolves the same owner token as `serve`: it enforces the shared fail-closed bind policy (`ServerConfig.requireBindable`) and installs the bearer verifier once a token resolves, passing it into the served context so the bind posture and the request gate agree. Without a resolved token the service stays the loopback no-auth shape, so it never exposes an unauthenticated LAN bind. Dashboard and settings shortcuts open only a loopback address because the app never places the owner token in a URL.
 
-**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; loopback only.
+**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; when owner auth is active, the publicly served bundle renders its own in-bundle sign-in gate while every data route stays behind the uniform `401`. The live token is held in memory and mirrored only to `sessionStorage` (never persistent storage), logout or a uniform `401` returns to the gate, and the shared WebSocket presents the token as a query ticket restricted to the `/ws` upgrade.
 
-**iOS App — planned**: SwiftUI client with push-to-talk and approval prompts, deferred until auth lands (remote access requires auth first).
+**iOS App — planned**: SwiftUI client with push-to-talk and approval prompts. Remote engine access is gated by the owner token (presented as a bearer credential), with WireGuard recommended for off-LAN transport.
 
 ---
 
@@ -365,9 +365,9 @@ The permission system is the trust boundary between the agent and the real world
 ### Phase 7: Self-Improvement — partial
 - Plugin discovery, disabled-by-default holding pen, tamper detection, and marketplace UI shipped; registry install/update/remove flow planned
 
-### Phase 8: Service & Runtime — shipped except launchd / iOS / remote
-- Vapor loopback service, static dashboard bundle, scheduler engine, approvals inbox shipped
-- `launchd` daemon, iOS client, and remote/VPN access planned (remote requires auth first)
+### Phase 8: Service & Runtime — shipped except launchd / iOS
+- Vapor service (loopback by default, owner-auth LAN binds opt-in), single-owner bearer auth, static dashboard bundle, scheduler engine, approvals inbox shipped
+- `launchd` daemon and iOS client planned; remote/VPN access uses the owner-token gate, with WireGuard recommended off-LAN
 
 ---
 
@@ -379,6 +379,14 @@ The permission system is the trust boundary between the agent and the real world
 [engine]
 name = "Rune Weaver"
 log_level = "info"
+
+[auth]
+# Single-owner bearer token sources. The value never lives in this file.
+# Resolution order: token_env, then the macOS Keychain account
+# RUNEWEAVER_AUTH_TOKEN, then the 0600 token_file. A non-loopback bind
+# requires a resolvable token.
+# token_env = "RUNEWEAVER_AUTH_TOKEN"
+# token_file = "~/.runeweaver/auth_token"
 
 [llm]
 default_provider = "mlx"
@@ -489,7 +497,7 @@ auto_rescan = true
 
 1. **Swift over Python for core**: Performance, type safety, native Apple integration. Python is for plugins only.
 2. **Actor model for concurrency**: Each subsystem (LLM, tools, memory) is a Swift actor, preventing data races.
-3. **WebSocket for client-server**: Low-latency, bidirectional. Local clients connect over loopback in v1; remote access over WireGuard VPN is deferred until auth lands.
+3. **WebSocket for client-server**: Low-latency, bidirectional. Clients connect over loopback by default, and a non-loopback bind requires the owner token. The WebSocket upgrade presents the token as a query ticket (browsers cannot set an `Authorization` header on a handshake) that the engine validates and strips before logging; REST and dashboard requests use the bearer header. WireGuard (or equivalent) is the recommended transport for off-LAN access.
 4. **JSON vector store (LanceDB-compatible shape) with pluggable embeddings**: Semantic memory persists as JSON rows carrying optional embedding vectors scored by cosine similarity, falling back to keyword-only token overlap when no vector is available. The store exposes the LanceDB table shape (append facts, cosine similarity, metadata filtering) so a native LanceDB binding can replace the file backend without changing callers, and the `EmbeddingsBackend` seam (`apple` on-device default, `provider` opt-in, `none` keyword-only) lets new models land without touching callers. ChromaDB rejected (server process, heavier footprint).
 5. **Playwright over Selenium**: Modern API, better async support, multi-browser, cleaner subprocess model.
 6. **Graduated trust over binary permissions**: More nuanced than "always ask" or "never ask." Respects user's comfort level.
@@ -506,10 +514,10 @@ auto_rescan = true
 ### Constraints
 
 - **Apple Silicon required** for MLX provider. Intel Macs can use llama.cpp/vLLM/cloud only.
-- **Remote access deferred until auth lands**: Phone-to-Mac Studio communication over WireGuard (or any non-loopback transport) is a deferred post-v1 path. V1 serves loopback only with no remote exposure.
-- **Single-user design** (v1): No multi-user auth. The agent serves one person.
-- **Localhost-only, no-auth v1**: The Vapor API layer and static dashboard bundle bind loopback (`127.0.0.1`) only with no auth in v1; local-process access is the protection boundary.
-- **Auth-before-exposure**: Authentication must land before the service binds a non-loopback interface or is exposed beyond the machine (VPN, tunnel, or port forward).
+- **Owner-auth-gated remote access**: Phone-to-Mac Studio communication is enabled over LAN or WireGuard once an owner token is configured. The token guards every non-public path; WireGuard (or equivalent) is recommended so the engine stays off the physical LAN.
+- **Single-owner design**: Exactly one bearer token serves one person. There are no per-user accounts and no per-user data split; multi-user auth is out of scope.
+- **Fail-closed binding**: The engine binds loopback (`127.0.0.1`) by default. A non-loopback interface is accepted only when an owner token resolves, and the service never silently downgrades to an unauthenticated LAN bind. The macOS menu-bar app's embedded service shares this policy: it defaults to loopback, resolves the same owner token, and installs the bearer verifier when one resolves.
+- **Auth-before-exposure**: A non-loopback interface, VPN, tunnel, or port-forward exposure requires the owner token; no unauthenticated exposure is permitted.
 - **ATS Local Networking Only**: The packaged macOS app enables only `NSAllowsLocalNetworking` under App Transport Security. All public internet communication must use HTTPS.
 - **Local-first**: No data leaves the machine unless the user explicitly configures a cloud LLM provider.
 - **macOS Sequoia or later** for full framework access.

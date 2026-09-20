@@ -38,6 +38,8 @@ extension RuneWeaverConfig {
     public func renderTOML() -> String {
         var lines: [String] = ["# Rune Weaver configuration", ""]
         lines += renderEngineTOML()
+        lines += renderServerTOML()
+        lines += renderAuthTOML()
         lines += renderLLMTOML()
         lines += renderServicesTOML()
         lines += renderFilesTOML()
@@ -58,6 +60,30 @@ extension RuneWeaverConfig {
             "max_tool_iterations = \(engine.maxToolIterations)",
             ""
         ]
+    }
+
+    private func renderServerTOML() -> [String] {
+        [
+            "[server]",
+            "hostname = \(Self.tomlQuoted(server.hostname))",
+            "port = \(server.port)",
+            ""
+        ]
+    }
+
+    private func renderAuthTOML() -> [String] {
+        var lines = ["[auth]"]
+        // Only declared source names render. The token value is never a TOML
+        // key, and unset sources stay omitted so a round-trip cannot invent a
+        // blank entry that would read as configured.
+        if let tokenEnv = auth.tokenEnv, !tokenEnv.isEmpty {
+            lines.append("token_env = \(Self.tomlQuoted(tokenEnv))")
+        }
+        if let tokenFile = auth.tokenFile, !tokenFile.isEmpty {
+            lines.append("token_file = \(Self.tomlQuoted(tokenFile))")
+        }
+        lines.append("")
+        return lines
     }
 
     private func renderLLMTOML() -> [String] {

@@ -403,6 +403,8 @@ extension RuneWeaverConfig {
     init(decoding root: TOMLNode) throws {
         var config = RuneWeaverConfig.default
         try Self.decodeEngine(root, into: &config)
+        try Self.decodeServer(root, into: &config)
+        try Self.decodeAuth(root, into: &config)
         try Self.decodeLLM(root, into: &config)
         try Self.decodeMemory(root, into: &config)
         try Self.decodeVoice(root, into: &config)
@@ -430,6 +432,27 @@ extension RuneWeaverConfig {
         if let maxIter = try engine.strictInt("max_tool_iterations", field: "engine.max_tool_iterations") {
             config.engine.maxToolIterations = maxIter
         }
+    }
+
+    private static func decodeServer(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let server = root.tables["server"] else { return }
+        // Absent keys keep the loopback default; the strict accessors reject
+        // present-but-wrong-typed values instead of silently defaulting, and
+        // range checks land in validation so decode stays type-only.
+        if let hostname = try server.strictString("hostname", field: "server.hostname") {
+            config.server.hostname = hostname
+        }
+        if let port = try server.strictInt("port", field: "server.port") {
+            config.server.port = port
+        }
+    }
+
+    private static func decodeAuth(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let auth = root.tables["auth"] else { return }
+        // Only source names are stored; a resolved token value never reaches
+        // the config document or a log line.
+        config.auth.tokenEnv = try auth.strictString("token_env", field: "auth.token_env")
+        config.auth.tokenFile = try auth.strictString("token_file", field: "auth.token_file")
     }
 
     private static func decodeLLM(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

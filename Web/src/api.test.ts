@@ -3,7 +3,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  AUTH_TOKEN_STORAGE_KEY,
+  authHeaders,
+  authenticateWithToken,
   cancelChat,
+  clearAuthToken,
   concurrentTurnsBusyMessage,
   createJob,
   decideApproval,
@@ -14,10 +18,12 @@ import {
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteFact,
   deleteJob,
+  getAuthToken,
   getFacts,
   getHealth,
   getJob,
   getRun,
+  isAuthenticatedHealth,
   listApprovals,
   listJobs,
   listRuns,
@@ -30,11 +36,14 @@ import {
   postChat,
   resolveMaxConcurrentChatTurns,
   revokeTrustGrant,
+  rotateToken,
   runJobNow,
   RUN_LOG_POLL_LIMIT,
   RUN_POLL_INTERVAL_MS,
   searchMemory,
+  setAuthToken,
   storeFact,
+  subscribeAuthState,
   textContainsPlaceholderForCall,
   updateJob,
 } from "./api";
@@ -699,5 +708,140 @@ describe("dashboard api client", () => {
     expect(ids.has("call_10")).toBe(true);
     expect(ids.has("call_missing")).toBe(false);
     expect(placeholderCallIDsInText("Prose [call_9] only").size).toBe(0);
+  });
+});
+
+describe("owner bearer auth client", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+    window.sessionStorage.clear();
+  });
+
+  it("attaches the bearer on every fetch and mirrors it for direct calls", async () => {
+    setAuthToken("owner-token");
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ status: "ok", engine: "Rune Weaver", version: "0.1.0" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await getHealth();
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe("Bearer owner-token");
+    // Direct same-origin fetch calls use the shared helper so a lifecycle probe
+    // never bypasses the gate; caller headers merge last.
+    expect(
+      authHeaders({ "Content-Type": "application/json" }),
+    ).toMatchObject({
+      Authorization: "Bearer owner-token",
+      "Content-Type": "application/json",
+    });
+  });
+
+  it("retires the token on a uniform 401 without echoing it", async () => {
+    setAuthToken("secret-token-value");
+    const transitions: boolean[] = [];
+    const unsubscribe = subscribeAuthState((authenticated) =>
+      transitions.push(authenticated),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ error: "unauthorized" }), {
+            status: 401,
+            headers: { "Content-Type": "application/json" },
+          }),
+      ),
+    );
+    const failure = await getHealth().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(401);
+    // The rejected credential is dropped from memory and the tab mirror, and
+    // holders fall back to the login gate without the value appearing anywhere.
+    expect(getAuthToken()).toBeNull();
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(transitions).toEqual([false]);
+    expect((failure as ApiError).message).not.toContain("secret-token-value");
+    unsubscribe();
+  });
+
+  it("rotates the token and adopts the replacement before revealing it", async () => {
+    setAuthToken("old-token");
+    const fetchMock = vi.fn(async () => jsonResponse({ token: "new-token" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const rotated = await rotateToken();
+    expect(rotated).toBe("new-token");
+    expect(getAuthToken()).toBe("new-token");
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBe("new-token");
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/auth/rotate");
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer old-token",
+    );
+  });
+
+  it("clears memory and the tab mirror on logout and never gates the no-auth posture", () => {
+    setAuthToken("session-token");
+    expect(getAuthToken()).toBe("session-token");
+    clearAuthToken();
+    expect(getAuthToken()).toBeNull();
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
+    // A logout with no credential present reports no transition, so the
+    // loopback no-auth posture is never flipped to a login gate it does not
+    // need; the value must not be recoverable from the session mirror either.
+    const transitions: boolean[] = [];
+    const unsubscribe = subscribeAuthState((authenticated) =>
+      transitions.push(authenticated),
+    );
+    clearAuthToken();
+    expect(transitions).toEqual([]);
+    unsubscribe();
+  });
+
+  it("probes a login candidate against the protected settings route", async () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const accepted = await authenticateWithToken("  candidate-token  ");
+    expect(accepted).toBe("ok");
+    expect(getAuthToken()).toBe("candidate-token");
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/settings");
+    expect((init.headers as Record<string, string>).Authorization).toBe(
+      "Bearer candidate-token",
+    );
+  });
+
+  it("classifies rejected, throttled, and unreachable logins", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 401 })));
+    expect(await authenticateWithToken("bad-token")).toBe("invalid");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 429 })));
+    expect(await authenticateWithToken("bad-token")).toBe("throttled");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("engine down");
+      }),
+    );
+    expect(await authenticateWithToken("bad-token")).toBe("unreachable");
+  });
+
+  it("treats only a full health payload as an authenticated session", () => {
+    // The boot gate reads the health shape: a minimal liveness object proves the
+    // probe never cleared the owner gate, while a populated engine label means
+    // the session is authenticated or the engine serves no auth.
+    expect(
+      isAuthenticatedHealth({
+        status: "ok",
+        engine: "Rune Weaver",
+        version: "0.1.0",
+      }),
+    ).toBe(true);
+    expect(
+      isAuthenticatedHealth({ status: "ok", engine: "", version: "0.1.0" }),
+    ).toBe(false);
+    expect(isAuthenticatedHealth(null)).toBe(false);
+    expect(isAuthenticatedHealth(undefined)).toBe(false);
   });
 });

@@ -2,7 +2,7 @@
 // Keeps a single persistent connection across the entire dashboard to avoid duplicate connections.
 
 import { useEffect, useRef } from "react";
-import { toNonNegativeInt } from "../api";
+import { getAuthToken, subscribeAuthState, toNonNegativeInt } from "../api";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
@@ -241,6 +241,16 @@ class SharedWebSocketClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isConnecting = false;
 
+  constructor() {
+    // The socket follows the owner-auth gate: a login or rotation must present
+    // the new token at the next upgrade, and a logout or uniform 401 must drop a
+    // socket the engine no longer honors. The subscription reports changes only,
+    // so construction stays side-effect free.
+    subscribeAuthState((authenticated) => {
+      this.handleAuthStateChange(authenticated);
+    });
+  }
+
   public connect() {
     if (typeof window === "undefined" || typeof WebSocket === "undefined") return;
     // Never dial for an idle client: a direct connect with no subscribers
@@ -254,7 +264,14 @@ class SharedWebSocketClient {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws`;
+    // The browser cannot attach an Authorization header to a WebSocket
+    // handshake, so the owner token travels as a query ticket the engine
+    // accepts only on the `/ws` upgrade (a full handshake shape) and strips
+    // before anything downstream can log it. The dial still proceeds without a
+    // token for the no-auth loopback posture, where the upgrade is public.
+    const token = getAuthToken();
+    const ticket = token ? `?token=${encodeURIComponent(token)}` : "";
+    const wsUrl = `${protocol}//${host}/ws${ticket}`;
 
     try {
       const ws = new WebSocket(wsUrl);
@@ -387,6 +404,55 @@ class SharedWebSocketClient {
         this.connect();
       }
     }, 3000);
+  }
+
+  // Reacts to an authentication transition by releasing a socket the engine
+  // would now reject or redialing with a newly adopted credential. A rotation
+  // swaps the token while the old socket is still open server-side, so the
+  // socket is closed and redialed rather than left running on a stale upgrade.
+  private handleAuthStateChange(authenticated: boolean): void {
+    if (!authenticated) {
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
+      const closing = this.ws;
+      this.ws = null;
+      this.isConnecting = false;
+      if (closing) {
+        try {
+          closing.close();
+        } catch {
+          // Teardown is best-effort; a stubbed socket may throw on close.
+        }
+      }
+      return;
+    }
+    // A login with no live interest stays idle, matching connect()'s
+    // subscriber gate instead of resurrecting a released socket.
+    if (!this.hasSubscribers()) return;
+    this.reconnectNow();
+  }
+
+  // Forces a fresh upgrade so the new token is presented immediately. The old
+  // handle is detached before close so its asynchronous onclose cannot clobber
+  // the replacement socket.
+  private reconnectNow(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const closing = this.ws;
+    this.ws = null;
+    this.isConnecting = false;
+    if (closing) {
+      try {
+        closing.close();
+      } catch {
+        // Teardown is best-effort; a stubbed socket may throw on close.
+      }
+    }
+    this.connect();
   }
 
   public subscribe(

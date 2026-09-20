@@ -15,8 +15,11 @@ import Vapor
 public final class AppModel {
     public var serverStatus: String = "Starting..."
     public var isRunning: Bool = false
-    public var hostname: String = "127.0.0.1"
-    public var port: Int = 8082
+    /// Bind address for the embedded service. The published values start at the
+    /// built-in loopback default; `[server]` config supplies the operative
+    /// defaults at boot unless a caller changes these fields first.
+    public var hostname: String = ServerEndpointConfig.defaultHostname
+    public var port: Int = ServerEndpointConfig.defaultPort
     public var providerName: String = "Detecting..."
     public var pendingApprovals: [PermissionRequest] = []
     public var nextScheduleText: String = "No jobs scheduled"
@@ -34,6 +37,10 @@ public final class AppModel {
     /// The menu label can appear again each time the menu opens, so startup
     /// must be idempotent instead of binding the loopback port twice.
     private var hasStartedBoot = false
+    /// Effective endpoint adopted at boot, so dashboard links follow a
+    /// `[server]`-supplied host or port instead of the published override
+    /// fields. Nil before a successful bind.
+    private var boundEndpoint: ServerEndpointConfig?
 
     public init() {
         notificationManager.configure()
@@ -88,20 +95,19 @@ public final class AppModel {
         return (permissionGate, effectiveSystemPrompt)
     }
 
-    /// Snapshots the published bind values so a later edit cannot change the
-    /// address halfway through startup; loopback stays the only permitted
-    /// interface until authentication exists.
-    private func validatedBootBind() -> ServerConfig? {
-        let bindHost = hostname
-        let bindPort = port
-        guard ServerConfig.validPortRange.contains(bindPort) else {
-            self.serverStatus = "Failed: port \(bindPort) is out of range."
-            self.hasStartedBoot = false
-            return nil
-        }
-        let bindConfig = ServerConfig(hostname: bindHost, port: bindPort)
-        guard bindConfig.isLoopbackOnly else {
-            self.serverStatus = "Failed: refusing non-loopback bind without authentication."
+    /// Preconditions a snapshot of the published bind values against the
+    /// resolved owner-auth posture.
+    ///
+    /// The policy itself lives in `ServerConfig.requireBindable`: loopback always
+    /// serves, a non-loopback endpoint serves only once an owner token resolved,
+    /// and an unauthenticated LAN bind is refused rather than silently
+    /// downgraded to an open surface.
+    private func validatedBootBind(host: String, port: Int, authConfigured: Bool) -> ServerConfig? {
+        let bindConfig = ServerConfig(hostname: host, port: port, authConfigured: authConfigured)
+        do {
+            try bindConfig.requireBindable(authConfigured: authConfigured)
+        } catch {
+            self.serverStatus = "Failed: \(error.localizedDescription)"
             self.hasStartedBoot = false
             return nil
         }
@@ -125,6 +131,9 @@ public final class AppModel {
 
         self.isRunning = true
         self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
+        // Record the endpoint actually bound so dashboard links follow it even
+        // when `[server]` supplied the values.
+        self.boundEndpoint = ServerEndpointConfig(hostname: serverConfig.hostname, port: serverConfig.port)
 
         startPolling()
     }
@@ -210,7 +219,6 @@ public final class AppModel {
     }
 
     private func bootServer() async {
-        guard let bindConfig = validatedBootBind() else { return }
         // Retained outside the do so the catch can stop the trust reaper
         // when Application.make or configure throws after the gate started it.
         var bootGate: PermissionGate?
@@ -226,6 +234,34 @@ public final class AppModel {
                 self.hasStartedBoot = false
                 return
             }
+
+            // `[server]` supplies the bind defaults while the published fields
+            // stay the override channel: a field left at its built-in default
+            // adopts the configured value, and an explicit change wins. Snapshot
+            // both once so an edit mid-boot cannot produce a half-old address;
+            // the policy is applied after auth resolves.
+            let bindHost = hostname == ServerEndpointConfig.defaultHostname ? config.server.hostname : hostname
+            let bindPort = port == ServerEndpointConfig.defaultPort ? config.server.port : port
+
+            // Resolve the owner token before the bind check so the bind policy
+            // and the request gate share one posture, matching `serve`. A
+            // declared but unreadable token (for example a loose-permissioned
+            // file) fails boot here instead of surfacing at the gate; the
+            // resolved value is never logged or rendered.
+            let auth: ServerAuth?
+            do {
+                auth = try await ServerAuth.resolve(authConfig: config.auth)
+            } catch {
+                self.serverStatus = "Failed: owner auth could not be resolved: \(error.localizedDescription)"
+                self.hasStartedBoot = false
+                return
+            }
+
+            guard let bindConfig = validatedBootBind(
+                host: bindHost,
+                port: bindPort,
+                authConfigured: auth != nil
+            ) else { return }
 
             let secrets = SecretsManager()
             var keysByEntry: [String: String] = [:]
@@ -301,7 +337,8 @@ public final class AppModel {
                 llmServerURLs: appLLMOrigins,
                 engineConfig: config.engine,
                 emailConfig: config.email,
-                filesConfig: config.files
+                filesConfig: config.files,
+                auth: auth
             )
 
             for tool in plugins {
@@ -419,12 +456,15 @@ public final class AppModel {
         await refreshPendingApprovals()
     }
 
-    /// Builds a dashboard URL from a snapshot of the bind values so host text can never inject a
-    /// scheme or path, and so a concurrent edit cannot produce a half-old address. Refuses non-
-    /// loopback hosts because the service has no authentication yet.
+    /// Builds a dashboard URL from the effective bind values so host text can never inject a
+    /// scheme or path, and so a concurrent edit cannot produce a half-old address. Only loopback
+    /// hosts are opened: the app never puts the owner token in a URL, so a non-loopback engine
+    /// address is left for the owner to open directly.
     private func dashboardURL(fragment: String? = nil) -> URL? {
-        let host = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
-        let portValue = port
+        // Follow the endpoint actually bound at boot (which may come from
+        // `[server]`), falling back to the published fields before boot.
+        let host = (boundEndpoint?.hostname ?? hostname).trimmingCharacters(in: .whitespacesAndNewlines)
+        let portValue = boundEndpoint?.port ?? port
         guard ServerConfig.validPortRange.contains(portValue), !host.isEmpty else { return nil }
         guard ServerConfig(hostname: host, port: portValue).isLoopbackOnly else { return nil }
         var components = URLComponents()

@@ -1,6 +1,7 @@
 // Rune Weaver Server — Loopback HTTP and WebSocket API service application.
 
 import Foundation
+import NIOWebSocket
 import os
 import RuneWeaverCore
 import RuneWeaverTools
@@ -258,6 +259,8 @@ public final class ServerContext: Sendable {
     public let sandboxCleanup: SandboxCleanupScheduler
     /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
     public let browserConfig: BrowserConfig
+    /// Owner bearer verifier, or nil for the no-auth loopback posture.
+    public let auth: ServerAuth?
 
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
@@ -290,7 +293,8 @@ public final class ServerContext: Sendable {
         toolStates: ToolStateStore? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
-        browserConfig: BrowserConfig = BrowserConfig()
+        browserConfig: BrowserConfig = BrowserConfig(),
+        auth: ServerAuth? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -323,6 +327,7 @@ public final class ServerContext: Sendable {
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
+        self.auth = auth
         // Fail fast when the context would enqueue through a different queue than
         // the turn loop dequeues through; such a pair accepts steering yet never
         // delivers it, so surface the wiring mistake at construction.
@@ -363,7 +368,8 @@ public final class ServerContext: Sendable {
         llmServerURLs: [String] = [],
         engineConfig: EngineConfig = EngineConfig(),
         emailConfig: EmailConfig? = nil,
-        filesConfig: FilesConfig = FilesConfig()
+        filesConfig: FilesConfig = FilesConfig(),
+        auth: ServerAuth? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -439,7 +445,8 @@ public final class ServerContext: Sendable {
             pluginDiscovery: pDiscovery,
             toolStates: tStates,
             sandboxConfig: sandboxConfig,
-            browserConfig: browserConfig
+            browserConfig: browserConfig,
+            auth: auth
         )
         // Reclaim crash-orphaned detonation machines once at boot so restarts
         // never inherit leaked VMs; the periodic lifecycle below keeps
@@ -610,8 +617,25 @@ final class BrowserWarmupLifecycle: LifecycleHandler {
 }
 
 /// Configures loopback binding plus every engine route.
-public func configureRuneWeaver(_ app: Application, context: ServerContext) throws {
-    try context.config.requireLoopback()
+///
+/// The resolved owner verifier is the single source of truth for the auth
+/// posture: the bind policy and the gate must agree, so a context that claims
+/// auth without a verifier (or the reverse) fails closed instead of silently
+/// serving an unauthenticated or unenforced surface.
+/// - Parameters:
+///   - app: Application receiving configuration.
+///   - context: Shared engine collaborators.
+///   - auth: Resolved owner verifier, overriding `context.auth` when supplied.
+public func configureRuneWeaver(_ app: Application, context: ServerContext, auth: ServerAuth? = nil) throws {
+    let resolvedAuth = auth ?? context.auth
+    guard context.config.authConfigured == (resolvedAuth != nil) else {
+        throw ServerAuthError.misconfigured(
+            reason: context.config.authConfigured
+                ? "authConfigured is true but no bearer verifier was supplied"
+                : "a bearer verifier was supplied but authConfigured is false"
+        )
+    }
+    try context.config.requireBindable(authConfigured: resolvedAuth != nil)
     app.http.server.configuration.hostname = context.config.hostname
     app.http.server.configuration.port = context.config.port
     app.http.server.configuration.shutdownTimeout = .seconds(2)
@@ -620,11 +644,24 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext) thro
     app.lifecycle.use(SandboxCleanupLifecycle(scheduler: context.sandboxCleanup, config: context.sandboxConfig))
     app.lifecycle.use(BrowserWarmupLifecycle())
     app.runeWeaver = context
+    app.runeWeaverAuth = resolvedAuth
     registerRuneWeaverRoutes(app)
 }
 
 /// Registers every engine route on the application.
+///
+/// When a verifier is installed, the auth middleware wraps the whole router so
+/// every non-public path is gated before it can 404 or leak existence. With no
+/// verifier the surface stays the v1 loopback-no-auth shape exactly, including
+/// the absence of the rotation route.
 public func registerRuneWeaverRoutes(_ app: Application) {
+    // Resolve the bundle once so the public-path gate and the delivery handler
+    // agree on exactly which bytes are real static artifacts.
+    let dashboardBundle = DashboardBundle.resolve()
+    if let auth = app.runeWeaverAuth {
+        app.middleware.use(ServerAuthMiddleware(auth: auth, dashboardBundle: dashboardBundle))
+        registerAuthRotateRoute(app, auth: auth)
+    }
     registerHealthRoute(app)
     registerChatRoute(app)
     registerSessionRoutes(app)
@@ -639,7 +676,37 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerBrowserRoutes(app)
     registerSettingsRoutes(app)
     registerWebSocketRoute(app)
-    registerDashboardRoutes(app)
+    registerDashboardRoutes(app, bundle: dashboardBundle)
+}
+
+/// Registers the owner token rotation route.
+///
+/// Rotation is itself gated by the auth middleware, so a caller reaching this
+/// handler has already presented the current token. The handler never echoes
+/// the credential into logs or audit entries, only into the one-time response
+/// body the owner must capture.
+/// - Parameters:
+///   - app: Application receiving the route.
+///   - auth: Live owner verifier performing the rotation.
+private func registerAuthRotateRoute(_ app: Application, auth: ServerAuth) {
+    app.post(PathComponent.constant(ServerPaths.auth), PathComponent.constant(ServerPaths.rotate)) { req async throws -> Response in
+        let token = try await auth.rotate()
+        // Rotation retires the previous credential for every client. Established
+        // sockets upgraded under the old token would otherwise keep receiving run
+        // events and approval prompts and could still send chat/decision frames,
+        // so retire them by generation rather than a blind drain: a registration
+        // racing this sweep is refused by the same watermark, leaving no socket
+        // that can linger passive and keep broadcasting under a dead credential.
+        // The watermark is read after the swap so overlapping rotations only ever
+        // raise it. Clients reconnect with the replacement.
+        let liveGeneration = await auth.currentGeneration()
+        await req.application.runeWeaver.hub.retire(liveGeneration: liveGeneration)
+        // Encoded through the request's configured encoder for contract parity,
+        // then marked no-store so a one-time credential is never cached.
+        let response = try await ServerAuthRotateResponse(token: token).encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store")
+        return response
+    }
 }
 
 /// Bounds an integer limit to the closed range `minLimit...maxLimit`.
@@ -725,18 +792,6 @@ func validatedChatText(_ raw: String) throws -> String {
     }
     guard trimmed.count <= ChatRequest.maxTextLength else {
         throw Abort(.payloadTooLarge, reason: "text exceeds \(ChatRequest.maxTextLength) characters")
-    }
-    return trimmed
-}
-
-/// Validates a session title once for the rename route.
-func validatedSessionTitle(_ raw: String) throws -> String {
-    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else {
-        throw Abort(.badRequest, reason: "title must not be empty")
-    }
-    guard trimmed.count <= UpdateSessionRequest.maxTitleLength else {
-        throw Abort(.payloadTooLarge, reason: "title exceeds \(UpdateSessionRequest.maxTitleLength) characters")
     }
     return trimmed
 }
@@ -1078,40 +1133,6 @@ private func registerApprovalRoutes(_ app: Application) {
         }
 }
 
-/// Registers run-log list plus entry routes.
-private func registerRunRoutes(_ app: Application) {
-    app.get(PathComponent.constant(ServerPaths.runs)) { req async throws -> RunLogsResponse in
-        let limit = try parseQueryLimit(req, default: 50, min: 1, max: 200)
-        let jobID = req.query[String.self, at: "jobID"].flatMap { UUID(uuidString: $0) }
-        let sessionID = req.query[String.self, at: "sessionID"]
-            .flatMap { UUID(uuidString: $0) }
-            ?? req.query[String.self, at: "sessionId"].flatMap { UUID(uuidString: $0) }
-            ?? req.query[String.self, at: "session_id"].flatMap { UUID(uuidString: $0) }
-        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID, sessionID: sessionID)
-        return RunLogsResponse(runs: entries)
-    }
-    app.get(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> RunLogEntry in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        guard let entry = await req.application.runeWeaver.runs.entry(id: id) else {
-            throw Abort(.notFound, reason: "Unknown run \(raw)")
-        }
-        return entry
-    }
-    app.delete(PathComponent.constant(ServerPaths.runs)) { req async throws -> Response in
-        await req.application.runeWeaver.runs.clear()
-        return Response(status: .noContent)
-    }
-    app.delete(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> Response in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        await req.application.runeWeaver.runs.delete(id: id)
-        return Response(status: .noContent)
-    }
-}
-
 /// Registers the managed browser Python lifecycle routes backing browser settings.
 /// Thin HTTP adapters over `PlaywrightPythonEnsurer`: health reports the
 /// effective interpreter plus the live provision stage so the dashboard can
@@ -1222,104 +1243,107 @@ private func registerSettingsRoutes(_ app: Application) {
     }
 }
 
-/// Registers session listing, retrieval, renaming, and deletion routes.
-/// - Parameter app: Application receiving the routes.
-private func registerSessionRoutes(_ app: Application) {
-    let sessions = app.grouped(PathComponent.constant(ServerPaths.sessions))
-    sessions.get { req async throws -> SessionsResponse in
-        let list = await req.application.runeWeaver.conversations.listSessions()
-        return SessionsResponse(sessions: list)
-    }
-    sessions.get(PathComponent.parameter("id")) { req async throws -> ConversationSession in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        guard let session = await req.application.runeWeaver.conversations.session(id: id) else {
-            throw Abort(.notFound, reason: "Unknown session \(raw)")
-        }
-        return session
-    }
-    sessions.get(PathComponent.parameter("id"), PathComponent.constant(ServerPaths.toolActions)) { req async throws -> SessionToolActionsResponse in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let context = req.application.runeWeaver
-        guard let session = await context.conversations.session(id: id) else {
-            throw Abort(.notFound, reason: "Unknown session \(raw)")
-        }
-        // Authoritative per-message records derived server-side with the
-        // shared placeholder parser, ordered oldest message first so
-        // clients never regex-parse placeholder lines themselves.
-        let grouped = await context.conversations.toolActionsByMessage(for: id)
-        let actions = session.messages.compactMap { message -> SessionMessageToolActions? in
-            guard let list = grouped[message.id] else { return nil }
-            // Carry the parent note's persisted creation time so reloads reconcile
-            // to the same server instant that live done frames advertise.
-            return SessionMessageToolActions(messageID: message.id, actions: list, completedAt: message.createdAt.timeIntervalSince1970)
-        }
-        return SessionToolActionsResponse(sessionID: id, actions: actions)
-    }
-    sessions.patch(PathComponent.parameter("id")) { req async throws -> Response in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        let body = try req.content.decode(UpdateSessionRequest.self)
-        let title = try validatedSessionTitle(body.title)
-        // Renaming an unknown session is a 404 like `GET /sessions/:id`,
-        // not a silent no-op: `updateTitle` skips missing sessions.
-        guard await req.application.runeWeaver.conversations.session(id: id) != nil else {
-            throw Abort(.notFound, reason: "Unknown session \(raw)")
-        }
-        await req.application.runeWeaver.conversations.updateTitle(id: id, title: title)
-        return Response(status: .noContent)
-    }
-    sessions.delete(PathComponent.parameter("id")) { req async throws -> Response in
-        guard let raw = req.parameters.get("id"), let id = UUID(uuidString: raw) else {
-            throw Abort(.badRequest, reason: "id must be a UUID")
-        }
-        // Single orchestrator entry point drops working memory and the
-        // billed total together so deletes never leak token totals.
-        await req.application.runeWeaver.orchestrator.removeSession(id: id)
-        return Response(status: .noContent)
-    }
-}
-
 /// Registers the chat WebSocket with live approval prompts.
+///
+/// The upgrade re-checks the auth marker at the route boundary in addition to
+/// the global middleware, so a socket can never be handed out without passing
+/// the owner gate even if the middleware is not installed.
 private func registerWebSocketRoute(_ app: Application) {
-    app.webSocket(PathComponent.constant(ServerPaths.websocket)) { req, webSocket in
-        let context = req.application.runeWeaver
-        let connectionID = UUID()
-        let box = WSSocketBox(webSocket)
-        let connectionTasks = ConnectionChatTasks()
-        let (stream, continuation) = AsyncStream<String>.makeStream()
-        let connectionTask = Task { [box, context, connectionID, stream, connectionTasks] in
-            await context.hub.add(id: connectionID, box: box)
-            for await text in stream {
-                if Task.isCancelled {
-                    break
+    app.webSocket(
+        PathComponent.constant(ServerPaths.websocket),
+        shouldUpgrade: { request in
+            await authorizeWebSocketUpgrade(request)
+        },
+        onUpgrade: { req, webSocket in
+            let context = req.application.runeWeaver
+            let auth = req.application.runeWeaverAuth
+            let connectionID = UUID()
+            let box = WSSocketBox(webSocket)
+            let connectionTasks = ConnectionChatTasks()
+            // Bind the socket to the token generation it upgraded under so a
+            // later rotation revokes it at the frame boundary as well as through
+            // the hub teardown, closing the window where a buffered frame could
+            // still be answered after the swap.
+            let generation = req.runeWeaverTokenGeneration
+            let (stream, continuation) = AsyncStream<String>.makeStream()
+            let connectionTask = Task { [box, context, connectionID, stream, connectionTasks, generation, auth, continuation] in
+                // Register bound to the upgrade generation, then re-validate it
+                // immediately: the middleware authenticates and `onUpgrade`
+                // registers on separate hops, so a rotation can land in between.
+                // A registration the hub already knows is retired is refused, and
+                // one that slipped in before the sweep is caught by the auth
+                // re-check. Either path removes the socket and closes it with the
+                // policy violation instead of letting a passive socket linger to
+                // receive broadcasts under a dead credential.
+                let registered = await context.hub.add(id: connectionID, box: box, generation: generation)
+                // Evaluate the retirement check outside the boolean expression:
+                // its right operand is a non-async autoclosure, so an `await`
+                // cannot appear there. Either a refused registration or a
+                // retired generation must tear the socket down.
+                let retired = await webSocketGenerationIsRetired(auth: auth, generation: generation)
+                if !registered || retired {
+                    connectionTasks.cancelAll()
+                    await context.hub.remove(id: connectionID)
+                    continuation.finish()
+                    _ = try? await box.close(code: .policyViolation)
+                    return
                 }
-                await handleWebSocketText(text, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
-                if Task.isCancelled {
-                    break
+                for await text in stream {
+                    if Task.isCancelled {
+                        break
+                    }
+                    if await webSocketGenerationIsRetired(auth: auth, generation: generation) {
+                        break
+                    }
+                    await handleWebSocketText(text, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
+                    if Task.isCancelled {
+                        break
+                    }
+                }
+                connectionTasks.cancelAll()
+                await context.hub.remove(id: connectionID)
+                if await webSocketGenerationIsRetired(auth: auth, generation: generation) {
+                    _ = try? await box.close(code: .policyViolation)
                 }
             }
-            connectionTasks.cancelAll()
-            await context.hub.remove(id: connectionID)
+            webSocket.onText { _, text in
+                continuation.yield(text)
+            }
+            webSocket.onClose.whenComplete { _ in
+                connectionTasks.cancelAll()
+                continuation.finish()
+                connectionTask.cancel()
+            }
         }
-        webSocket.onText { _, text in
-            continuation.yield(text)
-        }
-        webSocket.onClose.whenComplete { _ in
-            connectionTasks.cancelAll()
-            continuation.finish()
-            connectionTask.cancel()
-        }
-    }
+    )
+}
+
+/// Whether a socket's upgrade generation has been retired by a rotation.
+///
+/// A socket that upgraded without a verifier (the loopback no-auth posture)
+/// carries no generation and is never revoked; an authenticated upgrade always
+/// records one, so a live rotation retires every socket that holds it.
+/// - Parameters:
+///   - auth: Installed owner verifier, or nil for the ungated posture.
+///   - generation: Generation captured at upgrade, or nil when unauthenticated.
+/// - Returns: True when the token that authorized the socket is no longer live.
+private func webSocketGenerationIsRetired(auth: ServerAuth?, generation: Int?) async -> Bool {
+    guard let auth, let generation else { return false }
+    return await !auth.isCurrentGeneration(generation)
 }
 
 /// Registers the static dashboard bundle routes.
-public func registerDashboardRoutes(_ app: Application) {
-    let bundle = DashboardBundle.resolve()
+///
+/// The bundle is served without the owner credential because a browser cannot
+/// attach a bearer header to navigation or asset fetches; the bundle renders its
+/// own login gate and every data route stays behind the uniform 401. The auth
+/// middleware forwards these GET paths through to this handler, and both share
+/// the same resolved bundle so the gate's public-path classifier and this
+/// delivery path cannot disagree.
+/// - Parameters:
+///   - app: Application receiving the routes.
+///   - bundle: Resolved bundle to serve, or a fresh resolution when omitted.
+public func registerDashboardRoutes(_ app: Application, bundle: DashboardBundle = .resolve()) {
     app.get { req async throws -> Response in
         try await bundle.response(for: req, requestPath: "")
     }

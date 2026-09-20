@@ -765,17 +765,230 @@ function validateTurnResponse(
   return response;
 }
 
+// ---------------------------------------------------------------------------
+// Single-owner bearer authentication
+// ---------------------------------------------------------------------------
+
+// sessionStorage key naming the single owner-token slot. The engine serves the
+// dashboard bundle publicly, so the in-bundle login gate and the running
+// authenticated session share this one slot instead of competing stores; the key
+// is never written to persistent storage.
+export const AUTH_TOKEN_STORAGE_KEY = "runeWeaverToken";
+
+// The live token lives in memory; sessionStorage is a same-tab mirror only.
+// Memory is authoritative because every request and socket dial must read the
+// credential synchronously, and a storage-only read would leave a window where a
+// cleared slot still authenticates. The mirror survives a reload without ever
+// writing the credential to persistent storage.
+let authToken: string | null = null;
+
+// Whether the in-memory value has been hydrated from the session mirror yet.
+let authTokenHydrated = false;
+
+// Listeners awaiting authentication transitions. The boot gate and the shared
+// WebSocket subscribe here so a login, logout, rotation, or uniform 401 reaches
+// every holder in one pass instead of each polling storage.
+type AuthStateListener = (authenticated: boolean) => void;
+const authStateListeners = new Set<AuthStateListener>();
+
+// Reads the session mirror, treating an unreadable or blank slot as absent so a
+// privacy-mode storage failure degrades to "no token" instead of throwing on
+// every request.
+function readStoredAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+    return raw && raw.trim() ? raw.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Mirrors the in-memory token to sessionStorage. A storage failure keeps the
+// in-memory credential (the safe direction is to stay authenticated for this
+// page) and only forfeits reload recovery.
+function writeStoredAuthToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) {
+      window.sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+    } else {
+      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore: the in-memory value remains authoritative for this page.
+  }
+}
+
+// Notifies auth-state listeners without letting one throwing listener starve the
+// others.
+function notifyAuthState(): void {
+  const authenticated = authToken !== null;
+  for (const listener of authStateListeners) {
+    try {
+      listener(authenticated);
+    } catch {
+      // Isolate listener failures.
+    }
+  }
+}
+
+// Returns the live token, hydrating from the session mirror on first read so a
+// reload re-adopts the tab session without a network round trip.
+export function getAuthToken(): string | null {
+  if (!authTokenHydrated) {
+    authToken = readStoredAuthToken();
+    authTokenHydrated = true;
+  }
+  return authToken;
+}
+
+// Builds request headers for a direct same-origin fetch made outside the shared
+// JSON helper (for example a non-JSON lifecycle probe), so those calls carry the
+// owner credential too instead of bypassing the gate. Extra headers are merged
+// last so a caller can still set Content-Type.
+export function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const token = getAuthToken();
+  return {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(extra ?? {}),
+  };
+}
+
+// Adopts a token as the live credential and mirrors it to the tab session.
+// Called on login and after rotation; blank input is ignored so an empty form can
+// never clear a working session.
+export function setAuthToken(token: string): void {
+  const trimmed = token.trim();
+  if (!trimmed) return;
+  authToken = trimmed;
+  authTokenHydrated = true;
+  writeStoredAuthToken(trimmed);
+  notifyAuthState();
+}
+
+// Clears the live token from memory and the session mirror together so a logout
+// cannot leave a reload-recoverable credential behind. A transition is reported
+// only when a credential was actually present: the loopback no-auth posture has
+// no token to clear, so a stray logout there must not flip the gate to a login
+// form the engine would accept any value for. When it fires, the transition
+// drives the login gate and closes the shared socket.
+export function clearAuthToken(): void {
+  // Hydrate first so a stored token is seen even if this is the first auth call.
+  const hadToken = getAuthToken() !== null;
+  authToken = null;
+  authTokenHydrated = true;
+  writeStoredAuthToken(null);
+  if (hadToken) {
+    notifyAuthState();
+  }
+}
+
+// Subscribes to authentication transitions. The current state is intentionally
+// not emitted synchronously so a caller mounting before the boot probe does not
+// briefly believe the session is unauthenticated; callers read getAuthToken()
+// for the present value and this only reports changes.
+export function subscribeAuthState(listener: AuthStateListener): () => void {
+  authStateListeners.add(listener);
+  return () => {
+    authStateListeners.delete(listener);
+  };
+}
+
+// Retires a credential the engine rejected. The token is dropped and holders are
+// told to fall back to login; the value is never logged, echoed in an error, or
+// included in the notification, so a rejected credential stays unobserved.
+function handleUnauthorized(): void {
+  if (authToken === null) return;
+  authToken = null;
+  authTokenHydrated = true;
+  writeStoredAuthToken(null);
+  notifyAuthState();
+}
+
+// Outcome of presenting a candidate token at login. Kept as a small union so the
+// login view can render one honest message per case without distinguishing a
+// missing credential from a wrong one beyond throttle and transport.
+export type AuthenticationResult = "ok" | "invalid" | "throttled" | "unreachable";
+
+// Validates a candidate token against a protected route and adopts it only on
+// success. The probe deliberately reads no body: the engine's uniform 401 is the
+// proof, and parsing the response would tempt logging payload detail that must
+// never carry the credential. `/settings` is the same protected probe the engine
+// uses for its own token check, so the gate accepts exactly the tokens the
+// engine accepts.
+export async function authenticateWithToken(token: string): Promise<AuthenticationResult> {
+  const candidate = token.trim();
+  if (!candidate) return "invalid";
+  let response: Response;
+  try {
+    response = await fetch("/settings", {
+      headers: { Authorization: `Bearer ${candidate}` },
+    });
+  } catch {
+    return "unreachable";
+  }
+  if (response.ok) {
+    setAuthToken(candidate);
+    return "ok";
+  }
+  if (response.status === 429) return "throttled";
+  // 401 is the uniform rejection; any other status cannot be trusted as a
+  // successful login either, so it degrades to the same invalid outcome.
+  if (response.status === 401) return "invalid";
+  return "unreachable";
+}
+
+// One-time rotation response carrying the freshly minted owner token.
+export interface RotateTokenResponse {
+  token: string;
+}
+
+// Rotates the owner bearer through the authenticated route and adopts the
+// returned token before handing it back for the one-time reveal. The old token is
+// invalid the instant rotation returns, so the swap happens here rather than
+// after the owner acknowledges saving: delaying it would strand every background
+// poll on a dead credential. A refused rotation leaves the current token
+// untouched so the session never lands on a value that was not persisted. The
+// token is never logged.
+export async function rotateToken(): Promise<string> {
+  const response = await fetchJson<RotateTokenResponse>("/auth/rotate", {
+    method: "POST",
+  });
+  const token = typeof response.token === "string" ? response.token.trim() : "";
+  if (!token) {
+    throw new ApiError("Rotation response did not include a token", 0);
+  }
+  setAuthToken(token);
+  return token;
+}
+
+// Whether a health payload proves the request cleared the owner gate. With auth
+// active the unauthenticated shape is the minimal liveness object, so a missing
+// engine label means the probe never reached the full route; with auth inactive
+// every probe carries the full shape.
+export function isAuthenticatedHealth(health: HealthResponse | null | undefined): boolean {
+  if (!health) return false;
+  return typeof health.engine === "string" && health.engine.length > 0;
+}
+
 async function fetchJsonWithHeaders<T>(
   path: string,
   init?: RequestInit,
 ): Promise<{ data: T; headers: Headers }> {
   const hasBody = init?.body != null;
+  // The owner token rides every request because auth is enforced uniformly
+  // across the engine surface: without it a protected route answers the same
+  // uniform 401 as a wrong one. Caller-supplied headers stay last so a probe can
+  // present a candidate credential without adopting it first.
+  const token = getAuthToken();
   let response: Response;
   try {
     response = await fetch(path, {
       ...init,
       headers: {
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...(init?.headers ?? {}),
       },
     });
@@ -786,6 +999,13 @@ async function fetchJsonWithHeaders<T>(
     );
   }
   if (!response.ok) {
+    if (response.status === 401) {
+      // Uniform 401: retire the rejected credential and route the session back
+      // to the login gate. The token value never appears in the error body, a
+      // log line, or the transition notification, so a rejected credential
+      // stays unobserved.
+      handleUnauthorized();
+    }
     let detail = `${response.status} ${response.statusText}`.trim();
     try {
       const text = await response.text();

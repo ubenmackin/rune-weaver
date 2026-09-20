@@ -13,16 +13,24 @@ import {
 } from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 
-vi.mock("../api", () => ({
-  listSessions: vi.fn(),
-  updateSessionTitle: vi.fn(),
-  deleteSession: vi.fn(),
-  listRuns: vi.fn(),
-  runningSessionIDsFromRuns: vi.fn(),
-  isActiveRunStatus: vi.fn((status: string) => status === "running"),
-  RUN_LOG_POLL_LIMIT: 50,
-  RUN_POLL_INTERVAL_MS: 2500,
-}));
+// Spread the real module so every export the component tree reaches keeps a
+// value — notably the `subscribeAuthState`/`getAuthToken`/`toNonNegativeInt`
+// trio the shared WebSocket singleton reads during construction and dialing.
+// A hand-listed partial mock silently breaks the moment a consumer picks up a
+// new API export, so only the network helpers this suite drives directly are
+// overridden below.
+vi.mock("../api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../api")>();
+  return {
+    ...actual,
+    listSessions: vi.fn(),
+    updateSessionTitle: vi.fn(),
+    deleteSession: vi.fn(),
+    listRuns: vi.fn(),
+    runningSessionIDsFromRuns: vi.fn(),
+    isActiveRunStatus: vi.fn((status: string) => status === "running"),
+  };
+});
 
 const sessionsPayload = {
   sessions: [

@@ -12,8 +12,20 @@ import os
 import RuneWeaverCore
 import Vapor
 
+/// Socket surface the hub needs to move bytes and drop a connection.
+///
+/// Tracking connections behind this seam keeps the hub independent of the
+/// concrete Vapor socket, so revocation (a rotation closing retired sockets)
+/// stays observable in tests without a live network handshake.
+public protocol WSConnectionSocket: Sendable {
+    /// Sends one text frame.
+    func send(_ text: String) async throws
+    /// Closes the connection with a status code.
+    func close(code: WebSocketErrorCode) async throws
+}
+
 /// Actor box for Vapor `WebSocket`.
-public actor WSSocketBox {
+public actor WSSocketBox: WSConnectionSocket {
     /// Wrapped socket.
     public let socket: WebSocket
 
@@ -37,28 +49,59 @@ public actor WSSocketBox {
 /// Serializes outbound frames for one WebSocket connection.
 private actor WSSendQueue {
     /// Sends one frame through the queue, best-effort with timeout.
-    func send(_ text: String, to box: WSSocketBox) async {
+    func send(_ text: String, to box: any WSConnectionSocket) async {
         await wsSendWithTimeout(text, to: box)
     }
+}
+
+/// One registered connection plus the token generation it authenticated under.
+private struct RegisteredConnection: Sendable {
+    /// Socket used to move bytes and drop the connection.
+    let box: any WSConnectionSocket
+    /// Token generation captured at upgrade, or nil for the ungated loopback
+    /// posture where no rotation can ever retire the connection.
+    let generation: Int?
 }
 
 /// Live WebSocket connections for approval broadcasts.
 public actor WSHub {
     /// Connected sockets indexed by connection identifier.
-    private var sockets: [UUID: WSSocketBox] = [:]
+    private var sockets: [UUID: RegisteredConnection] = [:]
     /// Per-connection send queues preserving frame order per socket.
     private var queues: [UUID: WSSendQueue] = [:]
+    /// Lowest token generation still allowed to send or receive.
+    ///
+    /// Rotation raises this watermark in the same hop that sweeps the hub, so a
+    /// socket whose generation is already known to be retired is neither fanned
+    /// out to nor allowed to register late. It only ever advances, so a second
+    /// rotation racing the first cannot lower it back onto a retired credential.
+    private var minimumLiveGeneration: Int?
 
     /// Creates an empty hub.
     public init() {}
 
     /// Registers an already-boxed socket without crossing the actor
     /// boundary with a non-`Sendable` value.
-    public func add(id: UUID, box: WSSocketBox) {
-        sockets[id] = box
+    ///
+    /// A registration that lands after its own generation was retired is
+    /// refused rather than stored: the rotation already swept the hub, so
+    /// accepting it would let a socket holding the retired credential linger
+    /// and keep receiving broadcasts. The caller must close a refused socket.
+    /// - Parameters:
+    ///   - id: Connection identifier.
+    ///   - box: Socket surface used to move bytes and drop the connection.
+    ///   - generation: Generation captured at upgrade, or nil for the ungated
+    ///     loopback posture that rotation never retires.
+    /// - Returns: True when the socket is registered, false when its generation
+    ///   is already retired.
+    @discardableResult
+    public func add(id: UUID, box: any WSConnectionSocket, generation: Int? = nil) -> Bool {
+        guard !isRetired(generation) else { return false }
+        sockets[id] = RegisteredConnection(box: box, generation: generation)
         if queues[id] == nil {
             queues[id] = WSSendQueue()
         }
+        return true
     }
 
     /// Unregisters a socket. Unknown identifiers are a no-op.
@@ -76,12 +119,60 @@ public actor WSHub {
 
     /// Closes and drains all connected sockets cleanly on server shutdown.
     public func closeAll() async {
-        let targets = Array(sockets.values)
+        let targets = sockets.values.map(\.box)
         sockets.removeAll()
         queues.removeAll()
         for box in targets {
             _ = try? await box.close(code: .goingAway)
         }
+    }
+
+    /// Retires every socket bound to a superseded token generation.
+    ///
+    /// Called once the replacement token is live, so a socket that upgraded
+    /// under the retired credential is dropped here even when it would
+    /// otherwise sit passive and never trip the per-frame generation check.
+    /// Raising the watermark and draining in the same actor hop keeps the
+    /// revocation atomic against registration and fan-out: a socket can be
+    /// refused, closed, or filtered, but never both registered and delivered to
+    /// under a generation the hub already knows is retired. The watermark is
+    /// anchored to the generation current *after* the swap and only ever
+    /// advances, so overlapping rotations cannot lower it onto a retired
+    /// credential.
+    /// - Parameter liveGeneration: Generation that is current after the rotation.
+    public func retire(liveGeneration: Int) async {
+        minimumLiveGeneration = max(minimumLiveGeneration ?? 0, liveGeneration)
+        for box in drainRetired() {
+            _ = try? await box.close(code: .policyViolation)
+        }
+    }
+
+    /// Removes and returns every socket whose generation is no longer live.
+    private func drainRetired() -> [any WSConnectionSocket] {
+        let staleIDs = sockets.compactMap { id, connection in
+            isRetired(connection.generation) ? id : nil
+        }
+        var targets: [any WSConnectionSocket] = []
+        for id in staleIDs {
+            if let box = sockets.removeValue(forKey: id)?.box {
+                targets.append(box)
+            }
+            queues.removeValue(forKey: id)
+        }
+        return targets
+    }
+
+    /// Whether a socket generation sits below the live watermark.
+    ///
+    /// Before the first rotation no watermark exists, so every registration is
+    /// live; afterwards a nil generation is the ungated posture, which a hub
+    /// that just retired a token can no longer trust either.
+    /// - Parameter generation: Generation to test, or nil when unauthenticated.
+    /// - Returns: True when the generation is known to be superseded.
+    private func isRetired(_ generation: Int?) -> Bool {
+        guard let minimumLiveGeneration else { return false }
+        guard let generation else { return true }
+        return generation < minimumLiveGeneration
     }
 
     /// Queue for a connection, creating it when missing.
@@ -128,7 +219,13 @@ public actor WSHub {
 
     /// Concurrent best-effort fan-out shared by every broadcast path.
     private func fanOut(_ text: String) async {
-        let targets: [(WSSendQueue, WSSocketBox)] = sockets.map { (queue(for: $0.key), $0.value) }
+        // A socket the hub already knows holds a retired generation is skipped
+        // here, so revocation does not depend on the socket sending a frame to
+        // discover it was dropped.
+        let targets: [(WSSendQueue, any WSConnectionSocket)] = sockets.compactMap { id, connection in
+            guard !isRetired(connection.generation) else { return nil }
+            return (queue(for: id), connection.box)
+        }
         await withTaskGroup(of: Void.self) { group in
             for (queue, box) in targets {
                 group.addTask {
@@ -140,8 +237,8 @@ public actor WSHub {
 
     /// Sends one text frame to the connection with the given identifier.
     public func send(id: UUID, text: String) async {
-        guard let box = sockets[id] else { return }
-        await queue(for: id).send(text, to: box)
+        guard let connection = sockets[id], !isRetired(connection.generation) else { return }
+        await queue(for: id).send(text, to: connection.box)
     }
 }
 
@@ -196,7 +293,7 @@ private final class WSSendGate: Sendable {
 /// socket arriving after a timeout cannot resume twice; the winner drops its loser
 /// so burst sends never stack lingering sleeps. Late arrivals observe the stored
 /// outcome instead of racing.
-private func wsSendWithTimeout(_ text: String, to box: WSSocketBox, timeoutNanoseconds: UInt64 = 5_000_000_000) async {
+private func wsSendWithTimeout(_ text: String, to box: any WSConnectionSocket, timeoutNanoseconds: UInt64 = 5_000_000_000) async {
     let gate = WSSendGate()
     let sendTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
     let timeoutTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
