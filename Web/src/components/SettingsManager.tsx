@@ -23,6 +23,10 @@ import {
   searchStageCopy,
   getSettings,
   updateSettings,
+  rotateToken,
+  clearAuthToken,
+  authHeaders,
+  getAuthToken,
   getPlugins,
   rescanPlugins,
   stopSearch,
@@ -51,6 +55,7 @@ import {
   SettingsIcon,
   StopIcon,
   TrashIcon,
+  UserIcon,
   WrenchIcon,
 } from "./icons";
 import Modal from "./Modal";
@@ -335,6 +340,18 @@ export default function SettingsManager() {
     id: string;
     name: string;
   } | null>(null);
+  // Access-management flow: rotating the single owner token signs out every
+  // other device the moment the engine swaps it, so the dashboard asks twice
+  // before calling the route, then reveals the new token once. The API client
+  // adopts the token as soon as rotation returns because the old one is already
+  // invalid; the reveal stays until the owner acknowledges storing it, since a
+  // false "saved" is the one unrecoverable mistake in this flow.
+  const [rotateConfirmStep, setRotateConfirmStep] = useState<0 | 1 | 2>(0);
+  const [rotating, setRotating] = useState(false);
+  const [rotateError, setRotateError] = useState<string | null>(null);
+  const [newToken, setNewToken] = useState<string | null>(null);
+  const [tokenSavedAck, setTokenSavedAck] = useState(false);
+  const [tokenCopyState, setTokenCopyState] = useState<"idle" | "copied" | "failed">("idle");
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
@@ -404,7 +421,7 @@ export default function SettingsManager() {
   const refreshBrowserHealth = useCallback(async () => {
     setBrowserHealthLoading(true);
     try {
-      const res = await fetch("/browser/health");
+      const res = await fetch("/browser/health", { headers: authHeaders() });
       if (!res.ok) {
         // Older engines predate the browser lifecycle; keep the pill Unknown
         // so the static venv path plus manual fallback still guides setup.
@@ -459,7 +476,7 @@ export default function SettingsManager() {
         void refreshBrowserHealth();
         return;
       }
-      fetch("/browser/health")
+      fetch("/browser/health", { headers: authHeaders() })
         .then((res) => (res.ok ? res.json() : null))
         .then((payload) => {
           if (!payload || typeof payload !== "object") return;
@@ -506,7 +523,7 @@ export default function SettingsManager() {
     try {
       const res = await fetch("/browser/ensure", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({}),
       });
       if (!res.ok) {
@@ -773,6 +790,61 @@ export default function SettingsManager() {
   function cancelUninstallPlugin() {
     setPendingUninstallPlugin(null);
   }
+
+  // Final rotate step: the engine persists the replacement before it goes live
+  // and returns it once. rotateToken adopts it immediately so background polls
+  // and the shared socket keep working on the new credential; only the one-time
+  // display value stays in component state.
+  const handleConfirmRotate = async () => {
+    if (rotating) return;
+    setRotateConfirmStep(0);
+    setRotating(true);
+    setRotateError(null);
+    setTokenCopyState("idle");
+    try {
+      const token = await rotateToken();
+      setNewToken(token);
+      setTokenSavedAck(false);
+    } catch (err) {
+      // A refused rotation leaves the current token valid server-side, so the
+      // session stays usable and the error renders inline.
+      setRotateError(
+        err instanceof ApiError ? err.message : "Failed to rotate access token."
+      );
+    } finally {
+      setRotating(false);
+    }
+  };
+
+  const handleCopyNewToken = async () => {
+    if (!newToken) return;
+    try {
+      // Clipboard access can be denied or absent; report the failure instead of
+      // claiming a copy that never happened.
+      await navigator.clipboard.writeText(newToken);
+      setTokenCopyState("copied");
+    } catch {
+      setTokenCopyState("failed");
+    }
+  };
+
+  const handleDismissNewToken = () => {
+    setNewToken(null);
+    setTokenSavedAck(false);
+    setTokenCopyState("idle");
+  };
+
+  const handleLogout = () => {
+    // Clearing memory and the session mirror together returns the tab to the
+    // login gate; the shared socket closes through the same auth transition.
+    clearAuthToken();
+  };
+
+  // Whether this tab holds an owner credential at all. The loopback no-auth
+  // posture never mints one, so offering "Log Out" there would present a
+  // session-less control whose only effect is a login gate that accepts any
+  // value; the button is omitted until a real token-backed session exists.
+  const hasOwnerSession = getAuthToken() !== null;
 
   // Flips one builtin engine tool without a protected list: every builtin toggles independently so
   // closely related tools (email.read vs email.attachment) never change together.
@@ -2764,6 +2836,59 @@ export default function SettingsManager() {
               </span>
             </div>
             </div>
+            {/* Access management: the single owner token gate. Rotation lives
+                here rather than in a general settings save because it changes a
+                credential and signs other devices out immediately, not a config
+                value. The reveal is one-time and dismissal is acknowledged. */}
+            <div className="settings-section card">
+              <div className="settings-section-header">
+                <div className="settings-section-title-group">
+                  <h3>Access Management</h3>
+                  <p className="settings-section-hint">
+                    Owner token that guards the engine surface. Rotating it signs
+                    out every other device immediately; this tab adopts the new
+                    token. The token is kept in memory and this tab&apos;s session
+                    only, never in persistent storage.
+                  </p>
+                </div>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    data-testid="rotate-token"
+                    onClick={() => {
+                      setRotateError(null);
+                      setRotateConfirmStep(1);
+                    }}
+                    disabled={rotating}
+                  >
+                    <RefreshIcon size={14} className={rotating ? "spin" : ""} />
+                    <span>{rotating ? "Rotating…" : "Rotate Token"}</span>
+                  </button>
+                  {hasOwnerSession ? (
+                    <button
+                      type="button"
+                      className="danger icon-text-btn"
+                      data-testid="logout"
+                      onClick={handleLogout}
+                    >
+                      <UserIcon size={14} />
+                      <span>Log Out</span>
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <p className="muted text-sm" style={{ margin: "0 0 4px 0" }}>
+                The current token is never shown. After a rotation, save the new
+                token from the one-time reveal; if it is lost, re-mint one on the
+                Mac Studio with <code>rune-weaver auth token rotate</code>.
+              </p>
+              {rotateError ? (
+                <div className="error-banner" data-testid="rotate-error">
+                  {rotateError}
+                </div>
+              ) : null}
+            </div>
             {/* Form-local reset confirmations share the modal so destructive
                 rewrites stay explicit: counts show what is lost and the copy
                 stresses nothing persists until Save. */}
@@ -3607,6 +3732,192 @@ export default function SettingsManager() {
               {updatingPluginId === pendingUninstallPlugin.id
                 ? "Uninstalling…"
                 : "Uninstall"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Rotate confirmation step one: name the blast radius (every other device
+          signed out immediately) before anything is minted. */}
+      {rotateConfirmStep === 1 ? (
+        <Modal
+          label="Confirm token rotation"
+          onClose={() => {
+            if (rotating) return;
+            setRotateConfirmStep(0);
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Rotate owner token?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setRotateConfirmStep(0)}
+              disabled={rotating}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              Rotating the owner token invalidates the current token immediately
+              and signs out every other device. This device adopts the new token.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setRotateConfirmStep(0)}
+              disabled={rotating}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => setRotateConfirmStep(2)}
+              disabled={rotating}
+            >
+              Continue
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Rotate confirmation step two: the final gate, spelling out the one-time
+          reveal and the CLI recovery path so the consequence is explicit before
+          the irreversible call. */}
+      {rotateConfirmStep === 2 ? (
+        <Modal
+          label="Confirm token rotation again"
+          onClose={() => {
+            if (rotating) return;
+            setRotateConfirmStep(0);
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Rotate now?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setRotateConfirmStep(0)}
+              disabled={rotating}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              This is the final confirmation. The new token is shown once and
+              cannot be retrieved again from the dashboard. Save it before
+              dismissing; if you lose it, re-mint one on the Mac Studio with
+              <code> rune-weaver auth token rotate</code>.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setRotateConfirmStep(0)}
+              disabled={rotating}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger"
+              onClick={() => void handleConfirmRotate()}
+              disabled={rotating}
+              aria-label="Confirm rotate token"
+            >
+              {rotating ? "Rotating…" : "Rotate token now"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* One-time token reveal. Dismissal is gated on the saved acknowledgement
+          because the value cannot be fetched again; backdrop click and Escape
+          share the same guard so a stray interaction cannot discard it. */}
+      {newToken ? (
+        <Modal
+          label="New owner token"
+          onClose={() => {
+            if (!tokenSavedAck) return;
+            handleDismissNewToken();
+          }}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Save your new token</h3>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ marginTop: 0 }}>
+              This is the only time the new token is shown. Store it somewhere
+              safe now; every other device has already been signed out.
+            </p>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <code
+                data-testid="new-token"
+                style={{
+                  flex: 1,
+                  wordBreak: "break-all",
+                  padding: "8px 10px",
+                  borderRadius: "6px",
+                  background: "var(--bg-secondary, #10131a)",
+                  border: "1px solid var(--border-color, #2d3748)",
+                }}
+              >
+                {newToken}
+              </code>
+              <button
+                type="button"
+                className="ghost icon-text-btn"
+                onClick={() => void handleCopyNewToken()}
+              >
+                {tokenCopyState === "copied" ? <CheckIcon size={14} /> : null}
+                <span>
+                  {tokenCopyState === "copied"
+                    ? "Copied"
+                    : tokenCopyState === "failed"
+                      ? "Copy failed"
+                      : "Copy"}
+                </span>
+              </button>
+            </div>
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                marginTop: "14px",
+                cursor: "pointer",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={tokenSavedAck}
+                onChange={(event) => setTokenSavedAck(event.target.checked)}
+              />
+              <span>
+                I have saved this token and understand it will not be shown
+                again.
+              </span>
+            </label>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="primary"
+              onClick={handleDismissNewToken}
+              disabled={!tokenSavedAck}
+            >
+              Done
             </button>
           </div>
         </Modal>

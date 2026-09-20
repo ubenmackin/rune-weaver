@@ -96,6 +96,22 @@ final class ConnectionChatTasks: Sendable {
     }
 }
 
+/// Authorizes a WebSocket upgrade at the route boundary.
+///
+/// The global auth middleware is the primary gate; this re-checks the marker it
+/// leaves behind so a WebSocket route registered without that middleware fails
+/// closed instead of handing out a live socket. The credential itself is never
+/// read here: the middleware validates it once and strips the upgrade query
+/// token, so this guard cannot reintroduce it into logs.
+/// - Parameter request: Upgrade handshake request.
+/// - Returns: Empty headers to proceed, or nil to refuse the upgrade.
+func authorizeWebSocketUpgrade(_ request: Request) async -> HTTPHeaders? {
+    guard request.application.runeWeaverAuth != nil else {
+        return [:]
+    }
+    return request.runeWeaverAuthenticated ? [:] : nil
+}
+
 /// Handles one inbound WebSocket text frame.
 func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
     guard !Task.isCancelled else { return }

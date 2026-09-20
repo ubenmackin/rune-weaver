@@ -9,6 +9,47 @@ log_level = "info"  # trace | debug | info | notice | warning | error | critical
 # compaction_threshold_percent = 80  # Context compaction threshold in percent (10-100); oldest turns fold into a rolling summary past this budget.
 # max_tool_iterations = 10  # Max consecutive tool rounds per turn before continuation approval (1-100).
 
+[server]
+# Engine HTTP API bind endpoint. Loopback is the v1 default. A non-loopback
+# hostname is refused at boot unless owner auth resolves a token (auth-before-
+# exposure): the service never silently downgrades to an unauthenticated LAN bind.
+#
+# Reaching the engine from a phone or another machine: prefer a WireGuard (or
+# equivalent) tunnel and leave this hostname on 127.0.0.1. The tunnel keeps the
+# engine off the physical LAN while the bearer token still guards every request.
+# Binding a raw LAN address (this Mac's LAN IP, or 0.0.0.0) is allowed only once
+# a token resolves and exposes the service to every host that can route to it,
+# so only do that on a trusted network you control.
+hostname = "127.0.0.1"
+port = 8082
+
+[auth]
+# Single-owner bearer auth. The token value itself must never live in this
+# file. Resolution order: the explicit token_env override below, then the
+# Keychain account RUNEWEAVER_AUTH_TOKEN (service com.runeweaver.secrets,
+# which itself prefers a same-named environment variable for headless runs),
+# then the 0600 file fallback. Resolved tokens are never logged. Non-loopback
+# binds require a resolvable token.
+#
+# Rotating the token (do this after enabling a LAN or tunnel bind):
+#   Settings: use the "Rotate access token" control in the dashboard Settings
+#             pane while signed in. This rotates the running engine in place:
+#             the previous token stops working immediately and every other
+#             signed-in browser or device is logged out on its next request.
+#             The new value is shown exactly once — copy it then; it is never
+#             displayed again.
+#   CLI:      rune-weaver auth token rotate   (add --yes for scripts)
+#             rune-weaver auth token generate (first token; refuses to overwrite)
+#             rune-weaver auth token status   (which source resolves, no secret)
+#             The CLI runs in its own process and only rewrites the stored
+#             credential. A running engine caches its token at boot, so restart
+#             serve (or the menu-bar app) for the replacement to take effect;
+#             until then the previous token still works. Use the dashboard
+#             control above when the live token must be revoked immediately.
+# Store the new value in your password manager.
+# token_env = "RUNEWEAVER_AUTH_TOKEN"
+# token_file = "~/.runeweaver/auth_token"
+
 [llm]
 default_provider = "mlx"
 fallback_provider = "openrouter"

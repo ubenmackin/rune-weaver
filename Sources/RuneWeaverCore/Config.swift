@@ -53,6 +53,104 @@ public struct EngineConfig: Sendable, Codable, Equatable {
     }
 }
 
+// MARK: - Server endpoint & owner auth
+
+/// `[server]` — HTTP API bind endpoint for the engine service.
+///
+/// Distinct from `RuneWeaverServer.ServerConfig`, which carries the runtime
+/// bind policy and resolves auth; this is the file-facing shape only. Keeping
+/// the names apart avoids an ambiguous `ServerConfig` when a module imports
+/// both `RuneWeaverCore` and `RuneWeaverServer`.
+public struct ServerEndpointConfig: Sendable, Codable, Equatable {
+    /// Default loopback hostname; the v1 service is localhost-only.
+    public static let defaultHostname = "127.0.0.1"
+    /// Default engine API port, chosen to avoid MLX (8080) and llama.cpp (8081).
+    public static let defaultPort = 8082
+
+    /// Interface the service binds.
+    public var hostname: String
+    /// TCP port the service binds.
+    public var port: Int
+
+    /// Creates a server endpoint config.
+    public init(hostname: String = defaultHostname, port: Int = defaultPort) {
+        self.hostname = hostname
+        self.port = port
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hostname
+        case port
+    }
+
+    /// Decodes an endpoint, defaulting omitted keys to the loopback default.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.hostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? Self.defaultHostname
+        self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
+    }
+}
+
+/// `[auth]` — single-owner bearer-token source for non-loopback binds.
+///
+/// Rune Weaver is single-owner by design: exactly one bearer token guards the
+/// HTTP surface once it leaves loopback. The token value never lives in
+/// `config.toml`; this section only names where to resolve it, in the order the
+/// auth resolver applies: the environment variable named by `token_env` for
+/// headless runs first, then macOS Keychain via ``SecretsManager`` (account
+/// ``defaultTokenKey``, which itself prefers a same-named environment variable),
+/// then the `0600` file named by `token_file`. Resolved token bytes must never
+/// be logged or rendered into diagnostics.
+public struct AuthConfig: Sendable, Codable, Equatable {
+    /// Keychain account and default environment variable holding the token.
+    public static let defaultTokenKey = "RUNEWEAVER_AUTH_TOKEN"
+    /// Conventional `0600` token file under the app support directory.
+    public static let defaultTokenFile = "~/.runeweaver/auth_token"
+
+    /// Environment variable consulted before the Keychain. Nil keeps the
+    /// default key name for both env and Keychain lookups.
+    public var tokenEnv: String?
+    /// Path (absolute or `~`-prefixed) to a `0600` token file. Nil disables
+    /// the file fallback.
+    public var tokenFile: String?
+
+    /// Creates an auth config.
+    public init(tokenEnv: String? = nil, tokenFile: String? = nil) {
+        self.tokenEnv = tokenEnv
+        self.tokenFile = tokenFile
+    }
+
+    /// Whether this section names an explicit token source.
+    ///
+    /// The Keychain is always an implicit source, so an all-nil section can
+    /// still authenticate when a token is stored there; this reflects only the
+    /// declared env/file overrides. Boot resolves whether a token is actually
+    /// present.
+    public var declaresTokenSource: Bool {
+        tokenEnv != nil || tokenFile != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tokenEnv = "token_env"
+        case tokenFile = "token_file"
+    }
+
+    /// Decodes auth sources, treating absent keys as unset.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.tokenEnv = try container.decodeIfPresent(String.self, forKey: .tokenEnv)
+        self.tokenFile = try container.decodeIfPresent(String.self, forKey: .tokenFile)
+    }
+
+    /// Encodes auth sources, omitting unset keys so a round-trip never invents
+    /// a blank source that would read as configured.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(tokenEnv, forKey: .tokenEnv)
+        try container.encodeIfPresent(tokenFile, forKey: .tokenFile)
+    }
+}
+
 /// OpenAI-compatible request style for a provider entry.
 public enum APIStyle: String, Sendable, Codable, CaseIterable {
     /// Chat Completions API (`POST /chat/completions`). Default.
@@ -725,6 +823,10 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
 public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// Engine identity and logging.
     public var engine: EngineConfig
+    /// HTTP API bind endpoint.
+    public var server: ServerEndpointConfig
+    /// Single-owner bearer-token source for non-loopback binds.
+    public var auth: AuthConfig
     /// LLM provider selection.
     public var llm: LLMConfig
     /// Memory storage locations.
@@ -749,6 +851,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     /// Creates a root config from section configs.
     public init(
         engine: EngineConfig = EngineConfig(),
+        server: ServerEndpointConfig = ServerEndpointConfig(),
+        auth: AuthConfig = AuthConfig(),
         llm: LLMConfig = LLMConfig(),
         memory: MemoryConfig = MemoryConfig(),
         voice: VoiceConfig = VoiceConfig(),
@@ -761,6 +865,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         browser: BrowserConfig = BrowserConfig()
     ) {
         self.engine = engine
+        self.server = server
+        self.auth = auth
         self.llm = llm
         self.memory = memory
         self.voice = voice

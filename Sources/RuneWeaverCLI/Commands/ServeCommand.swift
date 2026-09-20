@@ -9,12 +9,18 @@ import RuneWeaverServer
 import RuneWeaverTools
 import Vapor
 
-/// Starts the local engine API service on loopback.
+/// Starts the local engine API service.
+///
+/// Binding is fail-closed: loopback always serves, while a non-loopback
+/// `--hostname` or `[server] hostname` is allowed only when an owner bearer
+/// token resolves from the configured sources. The resolved verifier is
+/// threaded into the context and config so the bind policy and the request gate
+/// can never disagree.
 struct ServeCommand: AsyncParsableCommand {
     /// Top-level command configuration.
     static let configuration = CommandConfiguration(
         commandName: "serve",
-        abstract: "Start the engine API service (REST, WebSocket, dashboard) on loopback."
+        abstract: "Start the engine API service (REST, WebSocket, dashboard). Loopback by default; LAN binds require owner auth."
     )
 
     /// Config file path override.
@@ -29,24 +35,28 @@ struct ServeCommand: AsyncParsableCommand {
     @ArgumentParser.Option(name: .long, help: "System prompt prepended to served conversations.")
     var systemPrompt: String?
 
-    /// Interface to bind. Loopback only by design (auth-before-exposure).
-    @ArgumentParser.Option(name: .long, help: "Interface to bind (loopback only, defaults to 127.0.0.1).")
-    var hostname: String = ServerConfig.default.hostname
+    /// Interface to bind, overriding `[server] hostname`. Loopback always
+    /// serves; a non-loopback address requires a configured owner token.
+    @ArgumentParser.Option(name: .long, help: "Interface to bind, overriding [server] hostname (a non-loopback address requires a configured owner token).")
+    var hostname: String?
 
-    /// TCP port to bind.
-    @ArgumentParser.Option(name: .long, help: "TCP port to bind (defaults to 8082).")
-    var port: Int = ServerConfig.default.port
+    /// TCP port to bind, overriding `[server] port`.
+    @ArgumentParser.Option(name: .long, help: "TCP port to bind, overriding [server] port.")
+    var port: Int?
 
     /// Loads config, wires the engine context, and serves until stopped.
     mutating func run() async throws {
-        let loaded = try validateAndLoadConfig()
+        let resolved = try await validateAndLoadConfig()
+        let loaded = resolved.loaded
+        let auth = resolved.auth
+        let serverConfig = resolved.serverConfig
         let (selected, allProviders) = try await resolveProvider(loaded: loaded)
-        let serverConfig = ServerConfig(hostname: hostname, port: port)
         let (context, permissionGate) = await buildContext(
             loaded: loaded,
             selected: selected,
             allProviders: allProviders,
-            serverConfig: serverConfig
+            serverConfig: serverConfig,
+            auth: auth
         )
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)
@@ -108,19 +118,48 @@ struct ServeCommand: AsyncParsableCommand {
         )
     }
 
-    private func validateAndLoadConfig() throws -> CLIConfigLoader.LoadedConfig {
-        guard ServerConfig.validPortRange.contains(port) else {
-            throw ValidationError("--port must be \(ServerConfig.validPortRange) (got \(port)).")
-        }
-        let serverConfig = ServerConfig(hostname: hostname, port: port)
-        guard serverConfig.isLoopbackOnly else {
-            throw ValidationError("--hostname must be loopback (127.0.0.1, localhost, or ::1) until auth lands (got '\(hostname)').")
+    /// Loads config, resolves owner auth, and validates the requested bind.
+    ///
+    /// An explicit flag wins; otherwise `[server] hostname`/`port` supply the
+    /// bind defaults so the documented endpoint actually takes effect, and a
+    /// config with no `[server]` block keeps the built-in loopback address.
+    /// Resolution runs before serving so a token that is declared but unreadable
+    /// (for example a loose-permissioned file) fails here instead of surfacing at
+    /// the request gate. A non-loopback hostname is accepted only once a token
+    /// resolves; otherwise the same loopback-only `ValidationError` is thrown,
+    /// never a silent downgrade to an unauthenticated LAN bind.
+    private func validateAndLoadConfig() async throws -> ResolvedServeConfiguration {
+        // Check an explicit flag before the config can supply a fallback; a
+        // configured port was already range-checked by `validate()` at load.
+        if let flagPort = port, !ServerConfig.validPortRange.contains(flagPort) {
+            throw ValidationError("--port must be \(ServerConfig.validPortRange) (got \(flagPort)).")
         }
         let loaded = try CLIConfigLoader.loadConfig(path: config)
         if loaded.isFallback {
             print(TerminalStyle.dim("No config found at \(loaded.url.path); using built-in defaults."))
         }
-        return loaded
+        let bindHostname = hostname ?? loaded.config.server.hostname
+        let bindPort = port ?? loaded.config.server.port
+        let auth: ServerAuth?
+        do {
+            auth = try await ServerAuth.resolve(authConfig: loaded.config.auth)
+        } catch {
+            throw ValidationError("Owner auth could not be resolved: \(error.localizedDescription)")
+        }
+        // The bind policy lives in `ServerConfig`; this only translates a refusal
+        // into the CLI's loopback-only `ValidationError` so the operator gets an
+        // actionable message instead of a bare transport error.
+        let serverConfig = ServerConfig(hostname: bindHostname, port: bindPort, authConfigured: auth != nil)
+        do {
+            try serverConfig.requireBindable(authConfigured: auth != nil)
+        } catch {
+            throw ValidationError(
+                "Hostname must be loopback (127.0.0.1, localhost, or ::1) unless an owner token is configured "
+                    + "(got '\(bindHostname)'). Set [server] hostname or pass --hostname to a loopback address, "
+                    + "or run 'rune-weaver auth token generate' to enable LAN binds."
+            )
+        }
+        return ResolvedServeConfiguration(loaded: loaded, auth: auth, serverConfig: serverConfig)
     }
 
     private func resolveProvider(loaded: CLIConfigLoader.LoadedConfig) async throws -> (selected: any LLMProvider, all: [any LLMProvider]) {
@@ -145,7 +184,8 @@ struct ServeCommand: AsyncParsableCommand {
         loaded: CLIConfigLoader.LoadedConfig,
         selected: any LLMProvider,
         allProviders: [any LLMProvider],
-        serverConfig: ServerConfig
+        serverConfig: ServerConfig,
+        auth: ServerAuth?
     ) async -> (context: ServerContext, permissionGate: PermissionGate) {
         let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
         let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
@@ -216,7 +256,8 @@ struct ServeCommand: AsyncParsableCommand {
             llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm),
             engineConfig: loaded.config.engine,
             emailConfig: loaded.config.email,
-            filesConfig: loaded.config.files
+            filesConfig: loaded.config.files,
+            auth: auth
         )
         for tool in plugins {
             await context.toolBus.register(tool: tool)
@@ -249,7 +290,39 @@ struct ServeCommand: AsyncParsableCommand {
     ) async throws {
         do {
             try configureRuneWeaver(app, context: context)
-            print(TerminalStyle.dim("Serving engine API on \(serverConfig.hostname):\(serverConfig.port) (\(selectedName)). Ctrl+C to stop."))
+            // State the trust posture before the bind: a non-loopback address is
+            // only reachable because a token resolved, and the no-auth loopback
+            // default gets a loud note so unauthenticated serving is never silent.
+            if serverConfig.authConfigured {
+                if serverConfig.isLoopbackOnly {
+                    print(
+                        TerminalStyle.success(
+                            "Serving engine API on \(serverConfig.hostname):\(serverConfig.port) with owner auth "
+                                + "(\(selectedName)). Ctrl+C to stop."
+                        )
+                    )
+                } else {
+                    print(
+                        TerminalStyle.success(
+                            "Serving engine API on \(serverConfig.hostname):\(serverConfig.port) with owner auth — "
+                                + "reachable on your local network (\(selectedName)). Ctrl+C to stop."
+                        )
+                    )
+                }
+            } else {
+                print(
+                    TerminalStyle.dim(
+                        "Serving engine API on \(serverConfig.hostname):\(serverConfig.port) without auth "
+                            + "(\(selectedName)). Ctrl+C to stop."
+                    )
+                )
+                print(
+                    TerminalStyle.error(
+                        "WARNING: no owner token is configured — serving UNAUTHENTICATED on loopback only. "
+                            + "Run 'rune-weaver auth token generate' before binding to a LAN address."
+                    )
+                )
+            }
             try await app.execute()
             await permissionGate.stopPeriodicCleanup()
             await context.sandboxCleanup.stop()
@@ -263,4 +336,19 @@ struct ServeCommand: AsyncParsableCommand {
             throw error
         }
     }
+}
+
+/// Resolved inputs for a single `serve` invocation.
+///
+/// Grouping the loaded config, the optional owner verifier, and the validated
+/// bind policy keeps the auth-to-bind handoff legible at the call site; named
+/// members also make it unambiguous which value is the credential verifier
+/// rather than yet another config field.
+private struct ResolvedServeConfiguration {
+    /// Loaded config plus its source URL for operator messaging.
+    let loaded: CLIConfigLoader.LoadedConfig
+    /// Owner bearer verifier, or nil for the no-auth loopback posture.
+    let auth: ServerAuth?
+    /// Bind policy validated against the resolved auth posture.
+    let serverConfig: ServerConfig
 }

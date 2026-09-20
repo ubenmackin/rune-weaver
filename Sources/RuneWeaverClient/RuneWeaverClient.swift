@@ -1,4 +1,8 @@
-// Rune Weaver Client — WebSocket transport to the localhost-only engine service.
+// Rune Weaver Client — WebSocket transport to the Rune Weaver engine service.
+//
+// Speaks the engine's streaming chat protocol over `/ws`. When an owner token is
+// configured the client presents it as a bearer header on the upgrade handshake,
+// while the loopback no-auth posture connects credential-free.
 
 import Foundation
 import RuneWeaverCore
@@ -46,10 +50,22 @@ public actor RuneWeaverClient {
     /// Live socket, present only while connecting or connected.
     private var socketTask: URLSessionWebSocketTask?
 
+    /// Owner bearer token presented on the WebSocket handshake, or nil for the
+    /// no-auth loopback posture.
+    ///
+    /// Held in memory only and never logged. The handshake carries it as an
+    /// `Authorization` header rather than a `?token=` query ticket so the
+    /// credential cannot leak into a URL, referrer, or access log.
+    private let ownerToken: String?
+
     /// Creates a client for the given engine URL.
-    /// - Parameter baseURL: Engine base URL.
-    public init(baseURL: URL) {
+    /// - Parameters:
+    ///   - baseURL: Engine base URL.
+    ///   - token: Owner bearer token for a token-gated engine. Omit for the
+    ///     loopback no-auth posture, which connects with no credential.
+    public init(baseURL: URL, token: String? = nil) {
         self.baseURL = baseURL
+        self.ownerToken = token
     }
 
     /// Opens the WebSocket connection to the engine.
@@ -64,7 +80,8 @@ public actor RuneWeaverClient {
             lastError = "Cannot derive a WebSocket URL from \(baseURL)"
             return
         }
-        let task = URLSession.shared.webSocketTask(with: socketURL)
+        let request = Self.handshakeRequest(for: socketURL, token: ownerToken)
+        let task = URLSession.shared.webSocketTask(with: request)
         socketTask = task
         task.resume()
         do {
@@ -126,6 +143,28 @@ public actor RuneWeaverClient {
             throw URLError(.cannotParseResponse)
         }
         try await task.send(.string(frame))
+    }
+
+    // MARK: - Handshake
+
+    /// Builds the `/ws` upgrade request, presenting the owner token as a bearer
+    /// header when one is configured.
+    ///
+    /// The header path is preferred over the server's upgrade-only `?token=`
+    /// query fallback so the credential never rides in a URL, and the no-token
+    /// posture stays byte-for-byte the v1 unauthenticated handshake. Exposed to
+    /// the test target so request construction can be asserted without a live
+    /// network handshake.
+    /// - Parameters:
+    ///   - socketURL: Derived `ws`/`wss` endpoint.
+    ///   - token: Owner bearer token, or nil.
+    /// - Returns: Request carrying the optional bearer header.
+    static func handshakeRequest(for socketURL: URL, token: String?) -> URLRequest {
+        var request = URLRequest(url: socketURL)
+        if let token, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        return request
     }
 
     // MARK: - Private

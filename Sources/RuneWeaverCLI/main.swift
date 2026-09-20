@@ -12,6 +12,7 @@ struct RuneWeaverCommand: AsyncParsableCommand {
         abstract: "Rune Weaver personal AI assistant harness.",
         version: RuneWeaverVersion.current,
         subcommands: [
+            AuthCommand.self,
             ChatCommand.self,
             ConfigCommand.self,
             MemoryCommand.self,

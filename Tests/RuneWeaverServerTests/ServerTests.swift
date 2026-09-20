@@ -1454,3 +1454,269 @@ struct TrustGrantsRouteTests {
         #expect(await gate.isTrusted(ActionDescriptor(toolName: "api.request", target: "https://other.com/items")) == true)
     }
 }
+
+/// Canned downstream responder used to observe whether the auth gate forwarded a
+/// request rather than answering it itself.
+private struct SurfaceProbeResponder: AsyncResponder, Sendable {
+    func respond(to request: Request) async throws -> Response {
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: "X-Probe-Authenticated", value: request.runeWeaverAuthenticated ? "true" : "false")
+        return Response(status: .ok, headers: headers, body: .init(string: "surface-probe"))
+    }
+}
+
+/// Makes a verifier for the surface-shape tests. Only `verify` is exercised, so
+/// the backing store never persists and stays off the real Keychain service.
+private func makeSurfaceAuth(token: String = "owner-token") -> ServerAuth {
+    let store = ServerAuthTokenStore(
+        authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET", tokenFile: nil),
+        service: "com.runeweaver.tests.\(UUID().uuidString)"
+    )
+    return ServerAuth(initialToken: token, store: store)
+}
+
+/// Materializes a throwaway on-disk bundle so the public-path gate is exercised
+/// against real static files, matching how a built bundle actually ships.
+private func makeSurfaceBundle() throws -> (bundle: DashboardBundle, directory: URL) {
+    let files = [
+        "index.html",
+        "assets/index-abc123.js",
+        "assets/index-abc123.css",
+        "assets/vendor-chunk.woff2",
+        "favicon.ico",
+        "favicon-32x32.png",
+        "favicon.svg",
+        "apple-touch-icon.png",
+        "site.webmanifest"
+    ]
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("runeweaver-surface-bundle-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    for relative in files {
+        let fileURL = directory.appendingPathComponent(relative)
+        try FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("bundle-fixture".utf8).write(to: fileURL)
+    }
+    return (DashboardBundle(directoryURL: directory), directory)
+}
+
+/// Creates an application for in-process request construction and shutdown.
+private func withSurfaceApp<T>(_ body: (Application) async throws -> T) async throws -> T {
+    let app = try await Application.make(.testing)
+    do {
+        let value = try await body(app)
+        try await app.asyncShutdown()
+        return value
+    } catch {
+        try? await app.asyncShutdown()
+        throw error
+    }
+}
+
+/// Builds a request without touching a socket.
+private func surfaceRequest(
+    app: Application,
+    method: HTTPMethod = .GET,
+    path: String,
+    token: String? = nil
+) -> Request {
+    var headers = HTTPHeaders()
+    if let token {
+        headers.replaceOrAdd(name: "Authorization", value: "Bearer \(token)")
+    }
+    return Request(
+        application: app,
+        method: method,
+        url: URI(string: path),
+        headers: headers,
+        on: app.eventLoopGroup.next()
+    )
+}
+
+@Suite("Authenticated Surfaces")
+struct AuthenticatedSurfaceTests {
+    @Test
+    func `Unauthenticated health returns liveness only`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let response = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/health"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(response.status == .ok)
+            // The public liveness shape must not leak version, model, or engine
+            // detail to a caller who has not authenticated.
+            let body = response.body.string ?? ""
+            #expect(body == #"{"status":"ok"}"#)
+            #expect(body.contains("version") == false)
+            #expect(body.contains("model") == false)
+            #expect(body.contains("engine") == false)
+        }
+    }
+
+    @Test
+    func `Authenticated health reaches the full probe`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let response = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/health", token: "owner-token"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: "X-Probe-Authenticated") == "true")
+            #expect((response.body.string ?? "") == "surface-probe")
+        }
+    }
+
+    @Test
+    func `Unauthenticated dashboard entry point is served publicly`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let response = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            // The SPA entry point is client code with no engine data: it must be
+            // reachable so the in-bundle owner-token gate can render. The
+            // forwarded request carries no authenticated marker.
+            #expect(response.status == .ok)
+            #expect((response.body.string ?? "") == "surface-probe")
+            #expect(response.headers.first(name: "X-Probe-Authenticated") == "false")
+        }
+    }
+
+    @Test
+    func `Dashboard entry points and existing static assets are public`() async throws {
+        try await withSurfaceApp { app in
+            let (bundle, directory) = try makeSurfaceBundle()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth(), dashboardBundle: bundle)
+            for path in ["/index.html", "/login", "/assets/index-abc123.js", "/favicon.svg"] {
+                let response = try await middleware.respond(
+                    to: surfaceRequest(app: app, path: path),
+                    chainingTo: SurfaceProbeResponder()
+                )
+                #expect(response.status == .ok)
+                #expect((response.body.string ?? "") == "surface-probe")
+            }
+        }
+    }
+
+    @Test
+    func `Authenticated dashboard request reaches the bundle`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let response = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/", token: "owner-token"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(response.status == .ok)
+            #expect(response.headers.first(name: "X-Probe-Authenticated") == "true")
+        }
+    }
+
+    @Test
+    func `Non-GET health is not a liveness bypass`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let response = try await middleware.respond(
+                to: surfaceRequest(app: app, method: .POST, path: "/health"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(response.status == .unauthorized)
+        }
+    }
+
+    @Test
+    func `Unknown paths fail closed without revealing existence`() async throws {
+        try await withSurfaceApp { app in
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth())
+            let known = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/settings"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            let unknown = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/definitely-not-a-route"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            // The gate runs before routing, so an unauthenticated caller cannot
+            // map the surface by comparing a protected 401 with a missing 404.
+            #expect(known.status == .unauthorized)
+            #expect(unknown.status == .unauthorized)
+            #expect((known.body.string ?? "") == (unknown.body.string ?? ""))
+        }
+    }
+
+    @Test
+    func `Browser navigation and subresource loads stay public while REST and WS stay gated`() async throws {
+        try await withSurfaceApp { app in
+            let (bundle, directory) = try makeSurfaceBundle()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let middleware = ServerAuthMiddleware(auth: makeSurfaceAuth(), dashboardBundle: bundle)
+            // A browser attaches no bearer to a top-level navigation or a
+            // subresource fetch, so the entry point and every real static bundle
+            // file must forward unauthenticated; otherwise the UI can never boot
+            // to render its own owner-token gate.
+            let navigationAndAssets = [
+                "/",
+                "/index.html",
+                "/assets/index-abc123.js",
+                "/assets/index-abc123.css",
+                "/assets/vendor-chunk.woff2",
+                "/favicon.ico",
+                "/favicon-32x32.png",
+                "/apple-touch-icon.png",
+                "/site.webmanifest"
+            ]
+            for path in navigationAndAssets {
+                let response = try await middleware.respond(
+                    to: surfaceRequest(app: app, path: path),
+                    chainingTo: SurfaceProbeResponder()
+                )
+                #expect(response.status == .ok, "\(path) should be served publicly")
+                #expect((response.body.string ?? "") == "surface-probe")
+                #expect(response.headers.first(name: "X-Probe-Authenticated") == "false")
+            }
+
+            // A public-looking extension alone must not bypass the gate: a
+            // registered data route such as `/plugins/<id>` takes a free-form
+            // identifier, so these paths are data requests even while a bundle
+            // is being served and must answer the uniform 401.
+            for path in ["/plugins/index.html", "/plugins/report.json", "/plugins/theme.js", "/data.json"] {
+                let crafted = try await middleware.respond(
+                    to: surfaceRequest(app: app, path: path),
+                    chainingTo: SurfaceProbeResponder()
+                )
+                // The gate fails closed before forwarding, so the probe
+                // responder never runs and no probe header is attached.
+                #expect(crafted.status == .unauthorized, "\(path) must stay gated")
+                #expect(crafted.headers.first(name: "X-Probe-Authenticated") == nil)
+            }
+
+            // Data routes stay gated: an unauthenticated REST call and a
+            // credential-free WebSocket handshake both answer the uniform 401.
+            let rest = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/settings"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(rest.status == .unauthorized)
+            let socket = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/ws"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(socket.status == .unauthorized)
+
+            // A request that does carry the token still reaches the bundle and is
+            // marked authenticated, so public bytes never erase a credential.
+            let authenticated = try await middleware.respond(
+                to: surfaceRequest(app: app, path: "/assets/index-abc123.js", token: "owner-token"),
+                chainingTo: SurfaceProbeResponder()
+            )
+            #expect(authenticated.status == .ok)
+            #expect(authenticated.headers.first(name: "X-Probe-Authenticated") == "true")
+        }
+    }
+}

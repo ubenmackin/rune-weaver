@@ -12,6 +12,8 @@ extension RuneWeaverConfig {
     ///   ``ConfigError/missingRequired(field:)``.
     public func validate() throws {
         try validateEngineSection()
+        try validateServerSection()
+        try validateAuthSection()
         try validateLLMSection()
         try validateMemorySection()
         try validateVoiceSection()
@@ -46,6 +48,30 @@ extension RuneWeaverConfig {
                 field: "engine.max_tool_iterations",
                 message: "must be between 1 and 100 (got \(engine.maxToolIterations))"
             )
+        }
+    }
+
+    private func validateServerSection() throws {
+        if server.hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(field: "server.hostname", message: "must not be empty")
+        }
+        // Mirrors `ServerConfig.validPortRange` without linking the server
+        // transport into the config layer, so a bad port fails at load.
+        if server.port < 1 || server.port > 65535 {
+            throw ConfigError.validationError(
+                field: "server.port", message: "must be between 1 and 65535"
+            )
+        }
+    }
+
+    private func validateAuthSection() throws {
+        // Fail closed on blank source names: a whitespace typo must not read as
+        // a configured credential for a non-loopback bind.
+        if let env = auth.tokenEnv, env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(field: "auth.token_env", message: "must not be empty when set")
+        }
+        if let file = auth.tokenFile, file.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(field: "auth.token_file", message: "must not be empty when set")
         }
     }
 
