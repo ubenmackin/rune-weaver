@@ -103,6 +103,46 @@ describe("SettingsManager", () => {
     expect(screen.getByText("EMAIL_ICLOUD_PASSWORD")).toBeDefined();
   });
 
+  it("renames the search tab to Web with Web Search and Browser automation subsections", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url.includes("/search/health")) {
+          return jsonResponse({ reachable: false, url: "http://127.0.0.1:8888" });
+        }
+        if (url.includes("/browser/health")) {
+          return jsonResponse({ ready: false });
+        }
+        if (url.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (url.includes("/tools")) {
+          return jsonResponse({ tools: [] });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // The internal tab id stays "search" so the search* API aliases and the
+    // /search/* health routes keep working; only the visible label moves to Web.
+    const webTab = screen.getByRole("tab", { name: /Web/i });
+    expect(screen.queryByRole("tab", { name: /^Search$/i })).toBeNull();
+    await user.click(webTab);
+
+    // One Web card groups the two [browser]-backed surfaces as subsections.
+    expect(screen.getByText("Web Search (SearXNG)")).toBeDefined();
+    expect(screen.getByText("Browser automation")).toBeDefined();
+    expect(screen.getByLabelText(/SearXNG URL/i)).toBeDefined();
+  });
+
   it("allows adding a new provider and saving changes", async () => {
     const user = userEvent.setup();
     let sentPayload: Record<string, unknown> | null = null;

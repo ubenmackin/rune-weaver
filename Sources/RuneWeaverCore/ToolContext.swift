@@ -42,11 +42,35 @@ public struct ToolContext: Sendable, Equatable {
     public let conversationID: UUID
     /// When true, the tool must not mutate external state.
     public let dryRun: Bool
+    /// Sink for indeterminate progress a tool chooses to report mid-execution.
+    /// Defaults to a no-op so callers that never stream (CLI, direct tool calls,
+    /// tests) construct a context with only the fields they care about.
+    public let progress: ToolProgressReporter
+
+    /// No-op reporter used when a caller does not wire a streaming sink.
+    public static let noProgress: ToolProgressReporter = { _ in }
 
     /// Creates an execution context.
-    public init(conversationID: UUID, dryRun: Bool = false) {
+    /// - Parameters:
+    ///   - conversationID: Owning session identifier.
+    ///   - dryRun: Whether the tool must avoid mutating external state.
+    ///   - progress: Optional progress sink; defaults to a no-op.
+    public init(
+        conversationID: UUID,
+        dryRun: Bool = false,
+        progress: @escaping ToolProgressReporter = ToolContext.noProgress
+    ) {
         self.conversationID = conversationID
         self.dryRun = dryRun
+        self.progress = progress
+    }
+
+    /// Equality compares only the value fields: the reporter is a closure with no
+    /// stable identity, so folding it in would make two contexts describing the
+    /// same turn compare unequal and break callers that compare for change.
+    /// - Returns: True when both contexts describe the same execution.
+    public static func == (lhs: ToolContext, rhs: ToolContext) -> Bool {
+        lhs.conversationID == rhs.conversationID && lhs.dryRun == rhs.dryRun
     }
 }
 

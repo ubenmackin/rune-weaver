@@ -18,6 +18,7 @@ import {
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteFact,
   deleteJob,
+  formatToolProgressElapsedMs,
   getAuthToken,
   getFacts,
   getHealth,
@@ -32,6 +33,7 @@ import {
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
   parseMaxConcurrentChatTurns,
   parsePlaceholderCallID,
+  parseToolProgress,
   placeholderCallIDsInText,
   postChat,
   resolveMaxConcurrentChatTurns,
@@ -45,6 +47,7 @@ import {
   storeFact,
   subscribeAuthState,
   textContainsPlaceholderForCall,
+  toolCancel,
   updateJob,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
@@ -94,6 +97,27 @@ describe("dashboard api client", () => {
     expect(path).toBe("/chat/cancel");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toMatchObject({ sessionID: "s1" });
+  });
+
+  it("cancels one tool by call identity with an optional reason", async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse({ sessionID: "s1", callID: "call-1", cancelled: true }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const response = await toolCancel("s1", "call-1", "wrong folder");
+    expect(response.cancelled).toBe(true);
+    const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(path).toBe("/chat/tool_cancel");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      sessionID: "s1",
+      callID: "call-1",
+      reason: "wrong folder",
+    });
+    // A blank reason is omitted so the engine stores absence rather than "".
+    await toolCancel("s1", "call-1", "   ");
+    const [, blankInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(JSON.parse(blankInit.body as string)).not.toHaveProperty("reason");
   });
 
   it("lists approvals and decides with durations", async () => {
@@ -708,6 +732,119 @@ describe("dashboard api client", () => {
     expect(ids.has("call_10")).toBe(true);
     expect(ids.has("call_missing")).toBe(false);
     expect(placeholderCallIDsInText("Prose [call_9] only").size).toBe(0);
+  });
+});
+
+describe("parseToolProgress", () => {
+  const validFrame = {
+    callID: "call-1",
+    toolName: "files.glob",
+    message: "Find *.txt in ~",
+    scanned: 42,
+    matched: 3,
+    elapsedMs: 4200,
+    current: "Documents/notes.txt",
+    sessionID: "s1",
+  };
+
+  it("normalizes a well-formed frame and keeps the relative tail", () => {
+    expect(parseToolProgress(validFrame)).toEqual({
+      callID: "call-1",
+      toolName: "files.glob",
+      message: "Find *.txt in ~",
+      warning: null,
+      scanned: 42,
+      matched: 3,
+      elapsedMs: 4200,
+      current: "Documents/notes.txt",
+    });
+  });
+
+  it("carries a dedicated warning and degrades a blank or drifted one to absent", () => {
+    expect(
+      parseToolProgress({ ...validFrame, warning: "  entire home folder  " }),
+    ).toMatchObject({ warning: "entire home folder" });
+    // A blank warning must not render an empty span, and a non-string payload
+    // must not drop an otherwise complete frame.
+    expect(parseToolProgress({ ...validFrame, warning: "   " })).toMatchObject({
+      warning: null,
+    });
+    expect(parseToolProgress({ ...validFrame, warning: 7 })).toMatchObject({
+      warning: null,
+    });
+  });
+
+  it("degrades a blank or absent relative tail to null", () => {
+    expect(parseToolProgress({ ...validFrame, current: "" })).toMatchObject({
+      current: null,
+    });
+    expect(parseToolProgress({ ...validFrame, current: "   " })).toMatchObject({
+      current: null,
+    });
+    expect(
+      parseToolProgress({ ...validFrame, current: undefined }),
+    ).toMatchObject({ current: null });
+  });
+
+  it("rejects absolute, home-relative, and traversing tails like the engine", () => {
+    // Defense-in-depth: a handcrafted frame must never render a filesystem
+    // location the engine's relativeCurrent would have dropped to nil.
+    expect(
+      parseToolProgress({ ...validFrame, current: "/etc/passwd" }),
+    ).toMatchObject({ current: null });
+    expect(
+      parseToolProgress({ ...validFrame, current: "~/.ssh/id_rsa" }),
+    ).toMatchObject({ current: null });
+    expect(
+      parseToolProgress({ ...validFrame, current: "../../secret" }),
+    ).toMatchObject({ current: null });
+    expect(
+      parseToolProgress({ ...validFrame, current: "Documents/../../secret" }),
+    ).toMatchObject({ current: null });
+    // A ".." inside a filename is not a traversal segment and stays displayable.
+    expect(
+      parseToolProgress({ ...validFrame, current: "notes/a..b.txt" }),
+    ).toMatchObject({ current: "notes/a..b.txt" });
+  });
+
+  it("caps a relative tail at the engine display length", () => {
+    // The engine bounds the tail at 240 chars; mirror it so an over-long
+    // handcrafted path cannot bloat the rendered line.
+    const long = "a".repeat(300);
+    expect(parseToolProgress({ ...validFrame, current: long })?.current).toBe(
+      "a".repeat(240),
+    );
+  });
+
+  it("drops a frame with missing identity, counters, or elapsed", () => {
+    expect(parseToolProgress(null)).toBeNull();
+    expect(parseToolProgress("tool_progress")).toBeNull();
+    expect(parseToolProgress({ ...validFrame, callID: "" })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, toolName: "  " })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, message: 7 })).toBeNull();
+    // Counters and elapsed share the engine's non-negative integer contract, so a
+    // missing, fractional, or negative value drops the whole frame.
+    expect(parseToolProgress({ ...validFrame, scanned: undefined })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, scanned: 1.5 })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, matched: -1 })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, elapsedMs: -1 })).toBeNull();
+    expect(
+      parseToolProgress({ ...validFrame, elapsedMs: Number.NaN }),
+    ).toBeNull();
+    expect(parseToolProgress({ ...validFrame, elapsedMs: 4200.5 })).toBeNull();
+    expect(parseToolProgress({ ...validFrame, elapsedMs: true })).toBeNull();
+  });
+});
+
+describe("formatToolProgressElapsedMs", () => {
+  it("keeps a tenth under ten seconds and rounds to whole seconds from ten", () => {
+    // Pins the documented rule: fast scans keep one decimal for a live feel,
+    // while ten seconds and beyond round away the jittering tenth.
+    expect(formatToolProgressElapsedMs(0)).toBe("0s");
+    expect(formatToolProgressElapsedMs(4200)).toBe("4.2s");
+    expect(formatToolProgressElapsedMs(9500)).toBe("9.5s");
+    expect(formatToolProgressElapsedMs(10000)).toBe("10s");
+    expect(formatToolProgressElapsedMs(12500)).toBe("13s");
   });
 });
 

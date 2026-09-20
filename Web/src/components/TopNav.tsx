@@ -173,7 +173,7 @@ export default function TopNav({
       .catch(() => {
         // Unknown stays unknown (gray) on probe failure, including 404 from
         // engines without search routes; the menu stays usable and the
-        // Settings search pane surfaces the same failure with detail.
+        // Settings Web pane surfaces the same failure with detail.
         if (!cancelled) setSearchError(null);
       });
     return () => {
@@ -379,8 +379,8 @@ export default function TopNav({
                     {health?.provider || "Default"}
                   </span>
                 </div>
-                {/* SearXNG health sits beside Model and Provider so search status is visible
-                    without opening Settings. */}
+                {/* SearXNG health sits beside Model and Provider so web search status is
+                    visible without opening Settings. */}
                 <div
                   className="profile-info-row"
                   title={`SearXNG at ${searchURL} (${searchKnown ? (searchRunning ? "reachable" : "stopped") : "unknown"})`}

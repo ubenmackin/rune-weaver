@@ -18,18 +18,21 @@ import {
   normalizeLineEndings,
   normalizeRoundIndex,
   parseRunTimestamp,
+  parseToolProgress,
   placeholderCallIDsInText,
   postChat,
   resolveMaxConcurrentChatTurns,
   sortToolActionsByRound,
   textContainsPlaceholderForCall,
   toNonNegativeInt,
+  toolCancel,
   updateSessionTitle,
   type ChatSegment,
   type HealthResponse,
   type PermissionRequest,
   type SessionMessageToolActions,
   type ToolAction,
+  type ToolProgress,
   type ToolResult,
   type TrustDuration,
 } from "../api";
@@ -1065,6 +1068,19 @@ export default function ChatView({ health }: ChatViewProps) {
   // was dropped and will rebuild from its next frame; completed-shell trims
   // lose nothing and never land here.
   const [trimmedLiveFlights, setTrimmedLiveFlights] = useState<string[]>([]);
+  // Latest live progress per tool call, keyed by call identity. Keying by callID
+  // rather than tool name keeps sibling executions of one tool distinct, so a
+  // batch of two scans never shows one call's counters on the other's row.
+  const [toolProgressByCallID, setToolProgressByCallID] = useState<
+    Map<string, ToolProgress>
+  >(() => new Map());
+  // Call identities with a cancel in flight. The optimistic mark persists until
+  // the terminal frame (tool_end/done/cancelled/error) proves the stop landed or
+  // a non-terminal `tool_cancel_miss` frame reports the call was never running,
+  // so the row never claims a cancel completed before the engine confirms it.
+  const [cancellingToolCallIDs, setCancellingToolCallIDs] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
 
   // Status bar metrics
   const [lastTurnTokens, setLastTurnTokens] = useState<number | null>(null);
@@ -1218,6 +1234,50 @@ export default function ChatView({ health }: ChatViewProps) {
       current.delete(normalized);
     }
     setBackgroundRunningIDs([...current]);
+  }, []);
+
+  // Drops one call's live progress and cancel mark once its terminal frame
+  // lands. Removing by identity keeps sibling executions of the same tool
+  // untouched, matching how results merge by call identity elsewhere.
+  const forgetToolCall = useCallback((callID: string) => {
+    setToolProgressByCallID((previous) => {
+      if (!previous.has(callID)) return previous;
+      const next = new Map(previous);
+      next.delete(callID);
+      return next;
+    });
+    setCancellingToolCallIDs((previous) => {
+      if (!previous.has(callID)) return previous;
+      const next = new Set(previous);
+      next.delete(callID);
+      return next;
+    });
+  }, []);
+
+  // Retires only one call's optimistic "Cancelling…" mark while leaving its live
+  // progress row in place. A cancel miss can land before the bus registers the
+  // call, so the tool may still be running and only its terminal frame knows the
+  // execution is over; dropping progress here would blank a live row and strand
+  // it behind a settled-looking error. Identity scoping mirrors forgetToolCall.
+  const forgetToolCancelMark = useCallback((callID: string) => {
+    setCancellingToolCallIDs((previous) => {
+      if (!previous.has(callID)) return previous;
+      const next = new Set(previous);
+      next.delete(callID);
+      return next;
+    });
+  }, []);
+
+  // Clears every live progress line and cancel mark at a turn boundary. Called
+  // on terminal frames and session switches so a finished or parked turn never
+  // leaves a stale row bound to a call identity the next turn cannot reuse.
+  const clearAllToolProgress = useCallback(() => {
+    setToolProgressByCallID((previous) =>
+      previous.size === 0 ? previous : new Map<string, ToolProgress>(),
+    );
+    setCancellingToolCallIDs((previous) =>
+      previous.size === 0 ? previous : new Set<string>(),
+    );
   }, []);
 
   // Reaps expired parked flights and surfaces live drops through visible state.
@@ -1569,7 +1629,8 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "tool_end" ||
         frameType === "warning" ||
         frameType === "turn_alive" ||
-        frameType === "turn_tokens"
+        frameType === "turn_tokens" ||
+        frameType === "tool_progress"
       ) {
         const flight = ensureFlight();
         if (!flight.turn) {
@@ -1848,6 +1909,7 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "warning" ||
         frameType === "turn_alive" ||
         frameType === "turn_tokens" ||
+        frameType === "tool_progress" ||
         frameType === "cancelled" ||
         frameType === "error"
       ) {
@@ -1864,7 +1926,9 @@ export default function ChatView({ health }: ChatViewProps) {
     // re-arms another session's timer. Token progress stays session-scoped so
     // one turn's running sum never leaks into another session's footer.
     // Terminal failures stay session-scoped as well so a session-less error
-    // never retracts the current session's steering bubble.
+    // never retracts the current session's steering bubble. Cancel misses stay
+    // session-scoped too so an ownerless frame cannot clear a mark it does not
+    // own.
     if (
       !frameSessionID &&
       (frameType === "delta" ||
@@ -1874,6 +1938,8 @@ export default function ChatView({ health }: ChatViewProps) {
         frameType === "warning" ||
         frameType === "turn_alive" ||
         frameType === "turn_tokens" ||
+        frameType === "tool_progress" ||
+        frameType === "tool_cancel_miss" ||
         frameType === "error" ||
         frameType === "cancelled")
     ) {
@@ -1969,6 +2035,67 @@ export default function ChatView({ health }: ChatViewProps) {
       return;
     }
 
+    if (frameType === "tool_progress") {
+      // Live per-tool progress keeps a long scan observable without waiting for
+      // its terminal frame. The shared guard already dropped malformed payloads,
+      // so a partial frame never zeroes a row; the keyed map replaces the prior
+      // snapshot for the same call so counters stay monotonic instead of
+      // accumulating duplicates across throttled updates.
+      if (cancelledRef.current) return;
+      const progress = parseToolProgress(data);
+      if (!progress) return;
+      // Session-tagged like heartbeats: a frame for another turn must never
+      // repaint this view's rows after a mid-turn session switch, nor keep this
+      // turn's inactivity timer alive. Re-arm only after the ownership check so
+      // a foreign turn's progress cannot extend the current turn, mirroring the
+      // liveness and token-progress branches; idle viewers still repaint below
+      // without arming.
+      if (pendingRef.current && turnSessionIDRef.current != null) {
+        if (
+          !frameSessionID ||
+          normalizeSessionID(frameSessionID) !==
+            normalizeSessionID(turnSessionIDRef.current)
+        ) {
+          return;
+        }
+        armTurnTimeout();
+      }
+      setToolProgressByCallID((previous) => {
+        const next = new Map(previous);
+        next.set(progress.callID, progress);
+        return next;
+      });
+      return;
+    }
+
+    if (frameType === "tool_cancel_miss") {
+      // A per-tool cancel that stopped nothing is non-terminal: the engine sends
+      // this dedicated type instead of an `error` frame precisely so the view
+      // keeps the running turn. Clear only that row's optimistic "Cancelling…"
+      // mark and surface the note, matching the REST fallback; touching the
+      // timer, segments, or in-flight turn here would drop a live reply over a
+      // cancel that never landed. Live progress stays put because a miss can
+      // land before the bus registers the call, where the tool is still running
+      // and only its terminal frame may retire the row. The top-of-handler
+      // filter already proved this frame belongs to the viewed session, so the
+      // identity match is scoped.
+      const rawMissCallID = (data as unknown as Record<string, unknown>).callID;
+      if (typeof rawMissCallID !== "string" || rawMissCallID.length === 0) {
+        return;
+      }
+      forgetToolCancelMark(rawMissCallID);
+      if (!cancelledRef.current) {
+        const rawMissMessage = (data as unknown as Record<string, unknown>)
+          .message;
+        setError(
+          typeof rawMissMessage === "string" && rawMissMessage.length > 0
+            ? rawMissMessage
+            : "Tool cancel missed — the tool call already settled",
+        );
+      }
+      return;
+    }
+
     if (frameType === "tool_start") {
       armTurnTimeout();
       if (cancelledRef.current) return;
@@ -2053,6 +2180,9 @@ export default function ChatView({ health }: ChatViewProps) {
       const endCallID = rawEndCallID;
       const endToolName = rawEndToolName;
       const endResult = isToolResult(rawEndResult) ? rawEndResult : null;
+      // The call settled, so its live progress and any cancel mark are done:
+      // clearing by identity keeps sibling executions of the same tool intact.
+      forgetToolCall(endCallID);
       // Live end frames mirror the start round so resumed batches rejoin the
       // same timeline; absent rounds keep the start value instead of clearing it.
       const endRound = normalizeRoundIndex(
@@ -2252,6 +2382,7 @@ export default function ChatView({ health }: ChatViewProps) {
       );
     } else if (frameType === "done") {
       clearTurnTimeout();
+      clearAllToolProgress();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
       // Late guidance stays queued server-side for the next turn, so only the
@@ -2463,6 +2594,7 @@ export default function ChatView({ health }: ChatViewProps) {
       }
     } else if (frameType === "cancelled") {
       clearTurnTimeout();
+      clearAllToolProgress();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
       // A cancelled turn ends tracking so a later error cannot retract an
@@ -2525,6 +2657,7 @@ export default function ChatView({ health }: ChatViewProps) {
         return;
       }
       clearTurnTimeout();
+      clearAllToolProgress();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
       if (!cancelledRef.current) {
@@ -2639,9 +2772,62 @@ export default function ChatView({ health }: ChatViewProps) {
       }
       refreshApprovals();
     }
-  }, [armTurnTimeout, clearTurnTimeout, refreshApprovals, updateParkedFlightFromFrame, markBackgroundRunning]);
+  }, [armTurnTimeout, clearTurnTimeout, clearAllToolProgress, forgetToolCall, forgetToolCancelMark, refreshApprovals, updateParkedFlightFromFrame, markBackgroundRunning]);
 
   const { sendMessage, isOpen } = useSharedWebSocket(handleWSMessage, handleWSClose, handleWSOpen);
+
+  // Cancels one executing tool by call identity, distinct from the session-wide
+  // turn cancel: this stops a single call and lets the model reason about the
+  // partial result instead of aborting the whole reply. The optimistic mark
+  // flips before the request leaves so the row stops inviting a second click
+  // immediately, and the terminal frame or a non-terminal miss frame clears it.
+  // The WebSocket frame is preferred while the shared socket is open because it
+  // skips a round trip, with the REST route as the fallback so a dropped socket
+  // still stops the tool.
+  const handleCancelTool = useCallback(
+    (callID: string, reason?: string) => {
+      const trimmedCallID = callID.trim();
+      if (!trimmedCallID) return;
+      const cancelSID = turnSessionIDRef.current ?? sessionIDRef.current;
+      const trimmedReason = reason?.trim();
+      setCancellingToolCallIDs((previous) => {
+        if (previous.has(trimmedCallID)) return previous;
+        const next = new Set(previous);
+        next.add(trimmedCallID);
+        return next;
+      });
+      const sent = sendMessage({
+        type: "tool_cancel",
+        sessionID: cancelSID,
+        callID: trimmedCallID,
+        ...(trimmedReason ? { reason: trimmedReason } : {}),
+      });
+      if (!sent) {
+        void toolCancel(cancelSID, trimmedCallID, trimmedReason)
+          .then((response) => {
+            // A resolved miss means the call settled before the request landed,
+            // so no terminal frame is coming to clear the mark. Drop it here and
+            // report the miss rather than leaving the row on a false
+            // "Cancelling…" forever.
+            if (!response.cancelled) {
+              forgetToolCall(trimmedCallID);
+              setError("Tool cancel missed — the tool call already settled");
+            }
+          })
+          .catch((failure) => {
+            // The cancel never reached the engine, so drop the optimistic mark
+            // and surface the failure instead of stranding a false "Cancelling…".
+            forgetToolCall(trimmedCallID);
+            setError(
+              failure instanceof ApiError
+                ? failure.message
+                : "Tool cancel failed",
+            );
+          });
+      }
+    },
+    [sendMessage, forgetToolCall],
+  );
 
   // Load active session messages on initial mount if existing
   useEffect(() => {
@@ -2952,6 +3138,7 @@ export default function ChatView({ health }: ChatViewProps) {
     const cancelSID = sessionID;
     cancelledRef.current = true;
     clearTurnTimeout();
+    clearAllToolProgress();
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
     // A cancelled turn settles steering, so a late error cannot retract an
@@ -3033,6 +3220,9 @@ export default function ChatView({ health }: ChatViewProps) {
     }
 
     setInFlightTurn({ toolActions: [], text: "", segments: [] });
+    // A fresh turn owns a fresh progress map: any prior turn's rows are gone,
+    // so stale call identities never resurface under the new reply.
+    clearAllToolProgress();
     // Remember the owning session so timeout/close cancels this turn even
     // when the user switches sessions before the terminal frame arrives.
     turnSessionIDRef.current = sessionID;
@@ -3199,6 +3389,7 @@ export default function ChatView({ health }: ChatViewProps) {
       // Mirror every streaming terminal path: a heartbeat-armed timer must not
       // outlive the REST turn and fire a spurious cancel after completion.
       clearTurnTimeout();
+      clearAllToolProgress();
       turnSessionIDRef.current = null;
       activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
@@ -3221,6 +3412,7 @@ export default function ChatView({ health }: ChatViewProps) {
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
     cancelledRef.current = false;
+    clearAllToolProgress();
     setError(null);
     // Banners belong to their session, so switching drafts never carries
     // another conversation's skipped-tool lines into the fresh view.
@@ -3253,6 +3445,7 @@ export default function ChatView({ health }: ChatViewProps) {
     turnSessionIDRef.current = null;
     activeTurnStartMsRef.current = null;
     cancelledRef.current = false;
+    clearAllToolProgress();
     setError(null);
     setTurnWarnings([]);
     turnWarningsRef.current = [];
@@ -3469,6 +3662,13 @@ export default function ChatView({ health }: ChatViewProps) {
                               key={action.callID || `live-${segmentIndex}-${i}`}
                               action={action}
                               isLive
+                              progress={
+                                toolProgressByCallID.get(action.callID) ?? null
+                              }
+                              cancelling={cancellingToolCallIDs.has(
+                                action.callID,
+                              )}
+                              onCancelTool={handleCancelTool}
                             />
                           ))}
                         </div>
@@ -3497,6 +3697,11 @@ export default function ChatView({ health }: ChatViewProps) {
                             key={action.callID || i}
                             action={action}
                             isLive
+                            progress={
+                              toolProgressByCallID.get(action.callID) ?? null
+                            }
+                            cancelling={cancellingToolCallIDs.has(action.callID)}
+                            onCancelTool={handleCancelTool}
                           />
                         ))}
                       </div>

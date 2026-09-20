@@ -68,6 +68,27 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     return buildToolInfo(for: tool, isEnabled: isEnabled, recordByPluginID: recordByPluginID)
 }
 
+/// Cancels one in-flight tool call owned by a session.
+///
+/// Per-tool cancellation is a tool concern even though clients trigger it from
+/// the chat surface, so the shared validation and bus call live beside the other
+/// tool routes. REST and WebSocket paths both go through here, keeping the blank
+/// call-ID rejection and the session-scoped lookup in one place.
+/// - Parameters:
+///   - callID: Call identifier supplied by the client.
+///   - sessionID: Session expected to own the running call.
+///   - reason: Optional user reason forwarded to the model.
+///   - context: Server context owning the tool bus.
+/// - Returns: True when a running call was cancelled.
+/// - Throws: `Abort(.badRequest)` when the call identifier is blank.
+func cancelInFlightToolCall(callID: String, sessionID: UUID, reason: String?, context: ServerContext) async throws -> Bool {
+    let trimmed = callID.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else {
+        throw Abort(.badRequest, reason: "callID must not be empty")
+    }
+    return await context.toolBus.cancelToolCall(callID: trimmed, sessionID: sessionID, reason: reason)
+}
+
 /// Registers tool listing plus direct tool-call routes.
 /// - Parameter app: Application receiving the routes.
 func registerToolRoutes(_ app: Application) {

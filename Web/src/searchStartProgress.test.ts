@@ -1,7 +1,7 @@
 // Shared staged Start progress for the SearXNG container lifecycle.
 // Covers the dual-contract stage resolvers, per-stage copy, pulling-cap
-// suspension, and elapsed math so the profile menu and the Settings search
-// pane stay in lockstep on one contract instead of duplicating the logic.
+// suspension, and elapsed math so the profile menu and the Settings Web pane
+// stay in lockstep on one contract instead of duplicating the logic.
 
 import { describe, expect, it } from "vitest";
 import {

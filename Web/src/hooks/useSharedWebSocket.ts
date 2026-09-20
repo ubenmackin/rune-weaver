@@ -2,7 +2,12 @@
 // Keeps a single persistent connection across the entire dashboard to avoid duplicate connections.
 
 import { useEffect, useRef } from "react";
-import { getAuthToken, subscribeAuthState, toNonNegativeInt } from "../api";
+import {
+  getAuthToken,
+  parseToolProgress,
+  subscribeAuthState,
+  toNonNegativeInt,
+} from "../api";
 import type { PermissionRequest, ToolAction, ToolResult } from "../api";
 import { isApprovalFrame, isRecord } from "../approvalsSession";
 import { sanitizeWarnings } from "../warnings";
@@ -123,9 +128,44 @@ export interface WSTurnTokensFrame {
   turnTotalTokens: number;
 }
 
+// Live per-tool progress for one executing call. The engine throttles these
+// (~2 Hz) and tags them with the owning session so multiplexed views only apply
+// their own turn; `current` is relative-only and optional. Counters stay
+// required so a partial payload drops rather than rendering a zeroed tally.
+// TypeScript mirror of the engine's `tool_progress` frame; update both sides
+// together so the wire shape never drifts.
+export interface WSToolProgressFrame {
+  type: "tool_progress";
+  callID: string;
+  toolName: string;
+  message: string;
+  // Advisory broad-scope warning for `message`, when the engine supplies one.
+  // Optional so older frames and narrow scans decode without a warning.
+  warning?: string | null;
+  scanned: number;
+  matched: number;
+  elapsedMs: number;
+  current?: string | null;
+  sessionID?: string;
+}
+
 export interface WSErrorFrame {
   type: "error";
   message: string;
+  sessionID?: string;
+}
+
+// Non-terminal acknowledgement that a per-tool cancel found nothing to stop.
+// The engine emits this instead of `error` because the view treats an owned
+// `error` as a terminal turn failure; a miss must only clear the row's
+// optimistic cancel mark. `callID` stays required so a partial frame can never
+// clear an unrelated row. TypeScript mirror of the engine's `tool_cancel_miss`
+// frame; update both sides together so the wire shape never drifts.
+export interface WSToolCancelMissFrame {
+  type: "tool_cancel_miss";
+  callID: string;
+  // Optional human-readable, non-terminal note for the miss.
+  message?: string | null;
   sessionID?: string;
 }
 
@@ -153,7 +193,9 @@ export type WSIncomingFrame =
   | WSWarningFrame
   | WSApprovalFrame
   | WSTurnAliveFrame
-  | WSTurnTokensFrame;
+  | WSTurnTokensFrame
+  | WSToolProgressFrame
+  | WSToolCancelMissFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
@@ -208,6 +250,27 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // guard only checks the owner so malformed tags drop before re-arming.
       return (
         value.sessionID === undefined || typeof value.sessionID === "string"
+      );
+    case "tool_progress":
+      // Per-tool progress rides the shared non-negative integer contract; the
+      // guard reuses the API parser so a drifted shape drops here exactly as it
+      // would at the keyed-map writer instead of validating twice.
+      return (
+        (value.sessionID === undefined ||
+          typeof value.sessionID === "string") &&
+        parseToolProgress(value) !== null
+      );
+    case "tool_cancel_miss":
+      // A miss carries the call to clear and an optional non-terminal note. The
+      // call identity stays required so a partial frame never clears the wrong
+      // row, matching the engine decoder which throws on a missing key.
+      return (
+        (value.sessionID === undefined ||
+          typeof value.sessionID === "string") &&
+        typeof value.callID === "string" &&
+        (value.message === undefined ||
+          value.message === null ||
+          typeof value.message === "string")
       );
     case "turn_tokens":
       // Token counters are required like the engine frame: a frame missing any

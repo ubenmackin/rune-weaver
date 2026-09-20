@@ -10,6 +10,10 @@ public enum ServerPaths {
     public static let health = "health"
     /// Chat turn.
     public static let chat = "chat"
+    /// Per-tool cancellation subpath under `/chat`.
+    /// Distinct from the turn-wide `/chat/cancel`: this aborts one running tool
+    /// call and leaves its turn alive, so the model can reason about the result.
+    public static let toolCancel = "tool_cancel"
     /// Tool registry and invocation.
     public static let tools = "tools"
     /// Tool invocation subpath under `/tools`.
@@ -716,10 +720,14 @@ public typealias WSToolStartFrame = RuneWeaverCore.WSToolStartFrame
 public typealias WSToolEndFrame = RuneWeaverCore.WSToolEndFrame
 /// Cancel message, single-sourced from core.
 public typealias WSCancelMessage = RuneWeaverCore.WSCancelMessage
+/// Per-tool cancel message, single-sourced from core.
+public typealias WSToolCancelMessage = RuneWeaverCore.WSToolCancelMessage
 /// Cancelled confirmation frame, single-sourced from core.
 public typealias WSCancelledFrame = RuneWeaverCore.WSCancelledFrame
 /// Mid-turn degraded-tool notice, single-sourced from core.
 public typealias WSWarningFrame = RuneWeaverCore.WSWarningFrame
+/// Generic indeterminate tool progress, single-sourced from core.
+public typealias WSToolProgressFrame = RuneWeaverCore.WSToolProgressFrame
 
 /// Classifies one inbound WebSocket text frame.
 public enum WSInboundKind: Sendable, Equatable {
@@ -729,7 +737,9 @@ public enum WSInboundKind: Sendable, Equatable {
     case decision(WSDecisionMessage)
     /// A request to cancel the active turn.
     case cancel(WSCancelMessage)
-    /// A frame that is neither chat, decision, nor cancel.
+    /// A request to cancel one running tool call, leaving its turn alive.
+    case toolCancel(WSToolCancelMessage)
+    /// A frame that is neither chat, decision, cancel, nor tool cancel.
     case unknown
 }
 
@@ -741,7 +751,7 @@ private struct WSCancelFramePeek: Codable, Sendable {
 }
 
 public extension WSInboundKind {
-    /// Classifies raw socket text into a chat, decision, cancel, or unknown kind.
+    /// Classifies raw socket text into a chat, decision, cancel, tool-cancel, or unknown kind.
     /// - Parameter text: Raw socket text frame.
     /// - Returns: The inbound kind, or `unknown` when no shape decodes.
     static func classify(_ text: String) -> WSInboundKind {
@@ -754,6 +764,16 @@ public extension WSInboundKind {
         // would drop the decision so the request stays pending forever.
         if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
             return .decision(decision)
+        }
+        // A per-tool cancel carries an explicit discriminator plus a call
+        // identifier, so it is matched before chat sniffing: its optional
+        // `reason` never masquerades as chat text, and a malformed frame falls
+        // through to unknown instead of aborting a whole turn.
+        if peek?.type == "tool_cancel" {
+            guard let toolCancel = try? JSONDecoder().decode(WSToolCancelMessage.self, from: data) else {
+                return .unknown
+            }
+            return .toolCancel(toolCancel)
         }
         if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data),
            !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -877,6 +897,58 @@ public struct CancelChatResponse: Content, Equatable {
 
     public init(sessionID: UUID, cancelled: Bool) {
         self.sessionID = sessionID
+        self.cancelled = cancelled
+    }
+}
+
+/// Request payload to cancel one in-flight tool call via `POST /chat/tool_cancel`.
+///
+/// Separate from ``CancelChatRequest`` because the two abort different scopes: a
+/// turn cancel stops the whole reply, while this stops exactly one tool and lets
+/// the model re-scope around its injected failure.
+public struct ToolCancelRequest: Content, Equatable {
+    /// Session owning the running call.
+    public let sessionID: UUID
+    /// Correlation identifier of the call to abort.
+    public let callID: String
+    /// Optional user reason forwarded to the model.
+    public var reason: String?
+
+    /// Creates a per-tool cancel request.
+    public init(sessionID: UUID, callID: String, reason: String? = nil) {
+        self.sessionID = sessionID
+        self.callID = callID
+        self.reason = reason
+    }
+
+    /// Trimmed call identifier, or nil when blank so the route can reject it.
+    /// - Returns: Trimmed identifier, or nil when it carries no usable text.
+    public var resolvedCallID: String? {
+        let trimmed = callID.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Trimmed and capped reason, or nil when nothing usable remains.
+    /// Reuses the shared policy normalizer so REST and WebSocket cancellations
+    /// bound the reason identically.
+    /// - Returns: Normalized reason, or nil.
+    public var resolvedReason: String? {
+        OrchestratorToolLoop.normalizedToolCancelReason(reason)
+    }
+}
+
+/// Response payload from `POST /chat/tool_cancel`.
+public struct ToolCancelResponse: Content, Equatable {
+    /// Session owning the call.
+    public let sessionID: UUID
+    /// Call identifier that was targeted.
+    public let callID: String
+    /// Whether a running call was actually cancelled.
+    public let cancelled: Bool
+
+    public init(sessionID: UUID, callID: String, cancelled: Bool) {
+        self.sessionID = sessionID
+        self.callID = callID
         self.cancelled = cancelled
     }
 }

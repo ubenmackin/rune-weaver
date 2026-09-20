@@ -64,7 +64,8 @@ import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
 // Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
 // and file policy share one Security pane so the sidebar stays within the width budget as settings
-// grow.
+// grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
+// the /search/* health routes are keyed to that id, so only the label moves.
 type SettingsTab =
   | "providers"
   | "engine"
@@ -94,7 +95,7 @@ function getEmailPasswordEnv(name: string): string {
 }
 
 // Managed browser Python (Playwright) staged progress, mirroring the search
-// health shape so the Settings search pane stays in lockstep instead of
+// health shape so the Settings Web pane stays in lockstep instead of
 // duplicating timer logic. Homebrew system pythons refuse `pip install`
 // outside a venv while `pipx` and the Homebrew `playwright-cli` formula never
 // satisfy `import playwright`, so the engine provisions `~/.runeweaver/python`
@@ -103,6 +104,10 @@ function getEmailPasswordEnv(name: string): string {
 export const BROWSER_PYTHON_VENV_DISPLAY = "~/.runeweaver/python";
 export const BROWSER_START_POLL_INTERVAL_MS = 1000;
 export const BROWSER_START_CAP_MS = 600_000;
+// Pinned Playwright pip requirement the managed provision installs, mirrored
+// from PlaywrightPythonEnsurer so an operator's manual recovery converges on
+// the same exact release instead of floating across breaking helper APIs.
+export const BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT = "playwright==1.49.1";
 // User copy per managed-browser provision stage. Mirrors the engine provision
 // stage copy so the Preparing line names the same step on both sides; the
 // contract test pins this table to the engine wording so drift fails loudly
@@ -255,7 +260,7 @@ export default function SettingsManager() {
   const [searchMaxResults, setSearchMaxResults] = useState(
     DEFAULT_SEARCH_MAX_RESULTS
   );
-  // Live container health for the Search pane: probed on tab open and updated
+  // Live container health for the Web pane: probed on tab open and updated
   // directly from Start/Stop action responses so the health line stays honest
   // without a page reload or an extra probe round-trip.
   const [searchReachable, setSearchReachable] = useState<boolean | null>(null);
@@ -295,11 +300,12 @@ export default function SettingsManager() {
   const [searchDiagnostics, setSearchDiagnostics] = useState<string | null>(
     null
   );
-  // Managed browser Python health for the Search pane: probed on tab open and
-  // updated directly from the Ensure response so the pill stays honest without
-  // a reload. Pill-only tri-state (Ready/Missing/Unknown) plus a Preparing
-  // pill with stage copy and elapsed while a provision flight runs, mirroring
-  // the search Starting line instead of repeating the venv path.
+  // Managed browser Python health for the Web pane: probed on tab open and
+  // updated directly from the Ensure response so the state stays honest
+  // without a reload. Tri-state (Ready/Missing/Unknown) plus a Preparing
+  // state with stage copy and elapsed while a provision flight runs. The
+  // venv path, resolved interpreter, and manual fallback live behind Advanced
+  // so the common case shows one action rather than setup internals.
   const [browserReady, setBrowserReady] = useState<boolean | null>(null);
   const [browserPythonPath, setBrowserPythonPath] = useState<string>("");
   const [browserVenvPath, setBrowserVenvPath] = useState<string>(
@@ -317,6 +323,10 @@ export default function SettingsManager() {
   const browserTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const browserStageRef = useRef<string | null>(null);
   const browserStartMsRef = useRef(0);
+  // Handle to the Advanced disclosure so a provision error can force it open
+  // while normal toggling stays user-owned; a controlled `open` prop would
+  // instead pin it shut whenever no error is present.
+  const browserAdvancedRef = useRef<HTMLDetailsElement | null>(null);
   const [browserError, setBrowserError] = useState<string | null>(null);
   const [browserDiagnostics, setBrowserDiagnostics] = useState<string | null>(
     null
@@ -372,7 +382,7 @@ export default function SettingsManager() {
     }
   }, []);
 
-  // Refreshes the Search pane health line without touching the settings form: Start/Stop change
+  // Refreshes the Web pane health line without touching the settings form: Start/Stop change
   // container state, not config values, so health stays separate from Save.
   // Honest tri-state: only a boolean reachable flag may move the dot, matching TopNav; empty or
   // shape-drifted payloads keep unknown gray (null) instead of coercing missing to false red Stopped.
@@ -975,7 +985,7 @@ export default function SettingsManager() {
     void refresh();
   }, [refresh]);
 
-  // Loads live container health when the Search pane opens so the health
+  // Loads live container health when the Web pane opens so the health
   // line reflects the running container rather than the saved URL alone.
   // Runs on tab entry only; Start/Stop update directly from their action
   // response without an extra probe so the health line never flashes stale.
@@ -997,6 +1007,16 @@ export default function SettingsManager() {
       }
     };
   }, []);
+
+  // Force Advanced open whenever a provision error lands: the inline banner
+  // names the cause, and the venv path plus manual fallback inside Advanced are
+  // the operator's recovery route. The ref (not a controlled `open` prop) keeps
+  // the disclosure user-togglable the rest of the time.
+  useEffect(() => {
+    if (browserError && browserAdvancedRef.current) {
+      browserAdvancedRef.current.open = true;
+    }
+  }, [browserError]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1750,7 +1770,7 @@ export default function SettingsManager() {
             onClick={() => setActiveTab("search")}
           >
             <SearchIcon size={16} />
-            <span>Search</span>
+            <span>Web</span>
           </button>
 
           <button
@@ -3086,16 +3106,32 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* Search pane: SearXNG URL plus request limits and container
-            lifecycle. Config edits save through the form; Start/Stop act
-            immediately on the container so health stays honest. */}
+        {/* Web pane: private search (SearXNG) plus browser automation under one
+            card because both share the [browser] policy. The internal tab id
+            stays "search" so the search health routes and the search* API
+            aliases keep working; only the display name moves to Web. Config
+            edits save through the form; Start/Stop act immediately on the
+            container so health stays honest. */}
         {activeTab === "search" && (
           <div className="settings-section card">
-            <div className="settings-section-header">
+            <div className="settings-section-title-group">
+              <h3>Web</h3>
+              <p className="settings-section-hint">
+                Private web search and browser automation, backed by the
+                [browser] policy.
+              </p>
+            </div>
+            {/* Web Search subsection: SearXNG endpoint plus request limits and
+                the container lifecycle, with its actions in the subsection
+                header to match the Security pane. */}
+            <div
+              className="settings-section-header"
+              style={{ marginTop: "16px" }}
+            >
               <div className="settings-section-title-group">
-                <h3>Web Search</h3>
+                <h4 style={{ margin: "0 0 4px 0" }}>Web Search (SearXNG)</h4>
                 <p className="settings-section-hint">
-                  SearXNG runs locally for private web search. No Docker needed,
+                  Web search runs locally through SearXNG. No Docker needed,
                   it uses the Apple Container CLI. First start pulls the SearXNG
                   image (about 150 MB), later starts reuse it.
                 </p>
@@ -3295,10 +3331,12 @@ export default function SettingsManager() {
                 boot (venv, pip install playwright, playwright install
                 chromium). Resolution prefers RUNEWEAVER_PYTHON_BIN, then the
                 managed venv, then PATH python3; pipx and Homebrew
-                playwright-cli never satisfy `import playwright`. Health stays
-                pill-only like search with a Preparing line plus elapsed while
-                provisioning, and failures name the venv path plus manual
-                fallback instead of the generic pip hint. */}
+                playwright-cli never satisfy `import playwright`. The header
+                action is state-aware: Ready offers only a health re-probe,
+                Missing installs, Unknown checks then installs, and an
+                in-flight provision disables the action while naming the live
+                stage. Setup internals stay behind Advanced, which opens
+                itself only when a failure banner needs the fallback path. */}
             <div
               style={{
                 marginTop: "20px",
@@ -3308,40 +3346,84 @@ export default function SettingsManager() {
             >
               <div className="settings-section-header">
                 <div className="settings-section-title-group">
-                  <h4 style={{ margin: "0 0 4px 0" }}>
-                    Browser automation (Playwright)
-                  </h4>
+                  <h4 style={{ margin: "0 0 4px 0" }}>Browser automation</h4>
                   <p className="settings-section-hint">
-                    Managed Python at {browserVenvPath} for browser.navigate
-                    and browser.act. First use creates the venv and installs
-                    Playwright plus Chromium; later uses reuse it. Override
-                    with RUNEWEAVER_PYTHON_BIN, then managed venv, then PATH
-                    python3. pipx and brew playwright-cli do not provide import
-                    playwright.
+                    Browser automation for browser.navigate and browser.act
+                    runs through an isolated managed Python environment. First
+                    use provisions Playwright plus Chromium; later uses reuse
+                    it.
                   </p>
                 </div>
                 <div className="row">
-                  <button
-                    type="button"
-                    className="ghost icon-text-btn"
-                    data-testid="browser-ensure"
-                    onClick={() => void handleEnsureBrowser()}
-                    disabled={browserActionBusy}
-                    aria-label="Ensure browser Python"
-                    title="Ensure browser Python"
-                  >
-                    <WrenchIcon size={14} />
-                    <span>
-                      {browserAction === "ensure"
-                        ? "Preparing…"
-                        : "Ensure browser Python"}
-                    </span>
-                  </button>
+                  {browserActionBusy ? (
+                    // In-flight: the disabled action doubles as the progress
+                    // line so the operator sees which step is running without
+                    // reading the pill below.
+                    <button
+                      type="button"
+                      className="ghost icon-text-btn"
+                      data-testid="browser-preparing"
+                      disabled
+                      aria-label="Preparing browser environment"
+                      title="Preparing browser environment"
+                    >
+                      <WrenchIcon size={14} />
+                      <span>
+                        Preparing… {browserStageCopy(browserStage)} ·{" "}
+                        {browserElapsed}s
+                      </span>
+                    </button>
+                  ) : browserReady === true ? (
+                    // Ready hides the install action entirely so an already
+                    // provisioned environment is never re-installed by accident;
+                    // only an explicit health re-probe remains.
+                    <button
+                      type="button"
+                      className="ghost icon-text-btn"
+                      data-testid="browser-recheck"
+                      onClick={() => void refreshBrowserHealth()}
+                      disabled={browserHealthLoading}
+                      aria-label="Re-check browser Python"
+                      title="Re-check browser Python"
+                    >
+                      <RefreshIcon
+                        size={14}
+                        className={browserHealthLoading ? "spin" : ""}
+                      />
+                      <span>Re-check</span>
+                    </button>
+                  ) : browserReady === false ? (
+                    <button
+                      type="button"
+                      className="primary icon-text-btn"
+                      data-testid="browser-ensure"
+                      onClick={() => void handleEnsureBrowser()}
+                      aria-label="Install browser environment"
+                      title="Install browser environment"
+                    >
+                      <WrenchIcon size={14} />
+                      <span>Install browser environment</span>
+                    </button>
+                  ) : (
+                    // Unknown covers a probe that has not returned a boolean yet
+                    // and an older engine without a health route; the action
+                    // checks then installs, matching the ensure path.
+                    <button
+                      type="button"
+                      className="primary icon-text-btn"
+                      data-testid="browser-ensure"
+                      onClick={() => void handleEnsureBrowser()}
+                      aria-label="Check & install"
+                      title="Check & install"
+                    >
+                      <WrenchIcon size={14} />
+                      <span>Check &amp; install</span>
+                    </button>
+                  )}
                 </div>
               </div>
-              {/* Health line stays pill-only: the venv hint above is the single
-                  path display, so repeating it here only duplicates long paths
-                  in narrow panes. */}
+              {/* Health line stays pill-only: one glanceable state for the
+                  pane, while paths and fallback guidance live in Advanced. */}
               <span
                 data-testid="browser-health-text"
                 className="search-health-line"
@@ -3373,12 +3455,6 @@ export default function SettingsManager() {
                   <span className="status-pill error">Missing</span>
                 )}
               </span>
-              {browserPythonPath ? (
-                <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
-                  Python: <code>{browserPythonPath}</code> (venv{" "}
-                  {browserVenvPath})
-                </p>
-              ) : null}
               {browserError ? (
                 <div
                   className="error-banner"
@@ -3398,16 +3474,42 @@ export default function SettingsManager() {
                   </pre>
                 </details>
               ) : null}
-              <p className="muted text-sm" style={{ margin: "8px 0 0 0" }}>
-                Manual fallback:{" "}
-                <code>
-                  {browserVenvPath}/bin/python -m pip install playwright &&{" "}
-                  {browserVenvPath}/bin/python -m playwright install chromium
-                </code>{" "}
-                (on Linux also run {browserVenvPath}/bin/python -m playwright
-                install-deps or install system browser dependencies manually).
-                Offline installs fail closed without changing the existing venv.
-              </p>
+              {/* Advanced carries setup internals that matter only while
+                  troubleshooting: the managed venv location, the resolved
+                  interpreter, and the copy-paste recovery command. It stays
+                  collapsed in normal use and is force-opened by the error
+                  effect above so a failed provision reveals its fallback. */}
+              <details
+                ref={browserAdvancedRef}
+                className="muted text-sm"
+                data-testid="browser-advanced"
+                style={{ margin: "8px 0 0 0" }}
+              >
+                <summary>Advanced</summary>
+                <p style={{ margin: "8px 0 0 0" }}>
+                  Managed Python at {browserVenvPath}. Override with
+                  RUNEWEAVER_PYTHON_BIN, then managed venv, then PATH python3;
+                  pipx and brew playwright-cli do not provide import
+                  playwright.
+                </p>
+                {browserPythonPath ? (
+                  <p style={{ margin: "8px 0 0 0" }}>
+                    Python: <code>{browserPythonPath}</code>
+                  </p>
+                ) : null}
+                <p style={{ margin: "8px 0 0 0" }}>
+                  Manual fallback:{" "}
+                  <code>
+                    {browserVenvPath}/bin/python -m pip install{" "}
+                    {BROWSER_PYTHON_PLAYWRIGHT_REQUIREMENT} &&{" "}
+                    {browserVenvPath}/bin/python -m playwright install chromium
+                  </code>{" "}
+                  (on Linux also run {browserVenvPath}/bin/python -m playwright
+                  install-deps or install system browser dependencies
+                  manually). Offline installs fail closed without changing the
+                  existing venv.
+                </p>
+              </details>
             </div>
             {/* Guarded remove confirmation via the shared modal so the entry is
                 never deleted by an accidental click. */}

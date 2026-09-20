@@ -3,6 +3,194 @@
 import Foundation
 import RuneWeaverCore
 
+/// Cadence gate shared by the `files.grep` and `files.glob` progress emitters.
+///
+/// Progress is advisory and the transport trusts emitters to throttle, so the
+/// two file walkers share one gate instead of each picking its own cadence. Two
+/// independent triggers can open the gate. The spacing floor is time-based: any
+/// new work once the wire-contract window closes reports, so a walk is never
+/// silent for longer than the documented ~2 Hz and a short scan is not held
+/// hostage to a count it will never reach. The file interval is work-based: a
+/// full interval of new visits reports on its own, bounding how much work can
+/// pass between frames on a fast walk even before the clock opens the floor.
+/// Either trigger is sufficient on its own, so every walk — short, slow, or
+/// fast — keeps reporting on time instead of looking hung. Time is read from an
+/// injected monotonic instant so tests advance it deterministically instead of
+/// sleeping.
+struct FilesProgressThrottle {
+    /// Work trigger: visits since the last report that open the gate on their own.
+    static let fileInterval = 250
+    /// Time floor mirrored from `ToolProgress` so both walkers share the wire timing.
+    static let minimumSpacing = Duration.nanoseconds(Int64(ToolProgress.minimumReportIntervalNanoseconds))
+
+    /// Visits counted at the last report; nil until the walk seeds the gate.
+    private var lastReportedScanned: Int?
+    /// Monotonic instant of the last report; nil until the walk seeds the gate.
+    private var lastReportedInstant: ContinuousClock.Instant?
+
+    /// Seeds the gate so the first file cannot report ahead of either threshold.
+    /// - Parameters:
+    ///   - scanned: Visit count at the start of the walk (normally zero).
+    ///   - now: Monotonic instant the walk began.
+    mutating func begin(scanned: Int, now: ContinuousClock.Instant) {
+        lastReportedScanned = scanned
+        lastReportedInstant = now
+    }
+
+    /// Reports whether the walk should emit progress for the visit just completed.
+    ///
+    /// Either trigger is sufficient. The spacing floor needs at least one new
+    /// visit, which keeps a repeated check at the same count from re-emitting
+    /// while still letting a short or slow walk report on time. The file
+    /// interval stands alone so a fast walk cannot run past a full interval of
+    /// work without a frame even when the clock has not opened the floor yet.
+    /// - Parameters:
+    ///   - scanned: Files visited including the current one.
+    ///   - now: Monotonic instant for the current visit.
+    /// - Returns: True when the spacing floor elapsed with new work, or the file interval was crossed.
+    func shouldReport(scanned: Int, now: ContinuousClock.Instant) -> Bool {
+        guard let lastScanned = lastReportedScanned, let lastInstant = lastReportedInstant else {
+            return true
+        }
+        let hasNewWork = scanned > lastScanned
+        let spacingElapsed = now - lastInstant >= Self.minimumSpacing
+        let crossedInterval = scanned - lastScanned >= Self.fileInterval
+        return (spacingElapsed && hasNewWork) || crossedInterval
+    }
+
+    /// Records an emitted report so the next thresholds are measured from it.
+    /// - Parameters:
+    ///   - scanned: Visit count reported.
+    ///   - now: Monotonic instant of the report.
+    mutating func markReported(scanned: Int, now: ContinuousClock.Instant) {
+        lastReportedScanned = scanned
+        lastReportedInstant = now
+    }
+
+    /// Floors a monotonic duration to whole milliseconds for display.
+    /// - Parameter duration: Elapsed monotonic time.
+    /// - Returns: Non-negative whole milliseconds.
+    static func elapsedMilliseconds(_ duration: Duration) -> Int {
+        let components = duration.components
+        let milliseconds = Double(components.seconds) * 1000
+            + Double(components.attoseconds) / 1_000_000_000_000_000
+        return max(0, Int(milliseconds))
+    }
+}
+
+/// Scope copy for `files.glob` progress and prompt guidance.
+///
+/// Single-sources the broad-scan warning so the tool's progress message and the
+/// dashboard's scope line render the same sentence. The warning rides its own
+/// progress field and the message stays a plain `Find … in …` line: no consumer
+/// has to split a separator, so a pattern that itself contains the delimiter can
+/// never be misread as a warning. The warning is heuristic by design — an
+/// omitted `baseDir` widens the walk to the whole home directory even when the
+/// pattern itself matches one level, which is the common cause of a slow,
+/// over-broad scan.
+public enum FilesGlobScopeWarning: Sendable {
+    /// Warning copy describing a home-wide scan.
+    public static let entireHomeCopy = "entire home folder"
+
+    /// Reports whether a pattern is broad enough to call out on its own.
+    /// Matches the `*` and `*.ext` shapes a caller types when they mean
+    /// "find this file name anywhere": a bare star or a single-level extension
+    /// glob with no path, class, or further wildcard.
+    /// - Parameter pattern: Trimmed glob pattern.
+    /// - Returns: True for `*`, `**`, and `*.ext`-shaped patterns.
+    public static func isBroad(_ pattern: String) -> Bool {
+        if pattern == "*" || pattern == "**" {
+            return true
+        }
+        guard !pattern.contains("/"), pattern.hasPrefix("*.") else {
+            return false
+        }
+        let suffix = pattern.dropFirst(2)
+        guard !suffix.isEmpty else { return false }
+        return !suffix.contains { $0 == "*" || $0 == "?" || $0 == "[" || $0 == "]" }
+    }
+
+    /// Warning copy for a scan, or nil when the scan is already narrow.
+    /// - Parameters:
+    ///   - pattern: Trimmed glob pattern.
+    ///   - baseDirOmitted: Whether the caller let `baseDir` default to home.
+    /// - Returns: The warning copy when a broad pattern searches all of home.
+    public static func warningCopy(pattern: String, baseDirOmitted: Bool) -> String? {
+        guard baseDirOmitted, isBroad(pattern) else { return nil }
+        return entireHomeCopy
+    }
+
+    /// Builds the display line carried by progress frames.
+    /// - Parameters:
+    ///   - pattern: Trimmed glob pattern.
+    ///   - scope: Display scope (typically `~` or a home-relative directory), or
+    ///     nil when no safe scope can be named; the line then omits the scope
+    ///     clause rather than rendering a degenerate one.
+    /// - Returns: `Find <pattern> in <scope>`, or `Find <pattern>` when `scope`
+    ///   is nil. The broad-scan warning from
+    ///   ``FilesGlobScopeWarning/warningCopy(pattern:baseDirOmitted:)`` travels
+    ///   as its own progress field rather than a suffix here, so the scope line
+    ///   is never split on a delimiter the pattern itself could contain.
+    public static func findMessage(pattern: String, scope: String?) -> String {
+        guard let scope else {
+            return "Find \(pattern)"
+        }
+        return "Find \(pattern) in \(scope)"
+    }
+}
+
+/// Reduces a raw final path component to a safe progress tail.
+/// A root (`/`) or blank component names no file, so it degrades to nil and the
+/// frame omits its tail rather than rendering an absolute or empty value.
+/// - Parameter component: Candidate final path component.
+/// - Returns: The component, or nil when it names a root or is blank.
+private func filesDisplayTail(_ component: String) -> String? {
+    guard !component.isEmpty, component != "/" else { return nil }
+    return component
+}
+
+/// Renders a resolved path as dashboard-safe scope copy, or nil when no safe
+/// scope can be named.
+/// Home collapses to `~`, descendants stay home-relative, and anything outside
+/// the boundary drops to its last component so an absolute machine path never
+/// reaches a progress frame. A root or blank last component (`/`, `""`) names no
+/// file, so it degrades to nil and the message omits the scope clause instead.
+/// - Parameters:
+///   - resolvedPath: Canonical path from the access guard.
+///   - homeDirectoryURL: Home boundary override, or nil for the real home.
+/// - Returns: `~`, `~/relative`, a bare path component, or nil when none is safe.
+func filesScopeDisplay(resolvedPath: String, homeDirectoryURL: URL?) -> String? {
+    let home = FilesAccessGuard.resolvedHomeURL(overriding: homeDirectoryURL).path
+    if resolvedPath == home {
+        return "~"
+    }
+    let prefix = home.hasSuffix("/") ? home : home + "/"
+    if resolvedPath.hasPrefix(prefix) {
+        return "~/" + String(resolvedPath.dropFirst(prefix.count))
+    }
+    return filesDisplayTail((resolvedPath as NSString).lastPathComponent)
+}
+
+/// Expresses a candidate file relative to the search root for progress display.
+/// A single-file root has no parent to strip, and a resolved candidate outside
+/// the root (for example a symlink target) falls back to its own name so an
+/// absolute machine path never reaches a frame. A root or blank fallback name
+/// degrades to nil, so a degenerate tail is omitted rather than rendered.
+/// - Parameters:
+///   - fileURL: Candidate file the walker is visiting.
+///   - root: Search root the candidate was enumerated under.
+/// - Returns: A root-relative path, the final path component, or nil when none is safe.
+func filesRelativeDisplayPath(for fileURL: URL, root: URL) -> String? {
+    let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+    if fileURL.path.hasPrefix(rootPrefix) {
+        let relative = String(fileURL.path.dropFirst(rootPrefix.count))
+        if !relative.isEmpty {
+            return relative
+        }
+    }
+    return filesDisplayTail(fileURL.lastPathComponent)
+}
+
 /// Read-only `files.read` tool for bounded local file reads.
 public struct FilesReadTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
@@ -382,14 +570,35 @@ public struct FilesGrepTool: Tool, Sendable {
     /// `[files]` policy enforced through the shared guard. Defaults to the built-in defaults.
     private let filesConfig: FilesConfig
 
+    /// Monotonic instant source for progress throttling. Injectable so tests can
+    /// advance the cadence deterministically; production reads the live clock.
+    private let nowProvider: @Sendable () -> ContinuousClock.Instant
+
     /// Creates a grep tool.
     public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
+        self.nowProvider = { ContinuousClock().now }
+    }
+
+    /// Creates a grep tool with an injectable monotonic clock so progress
+    /// cadence can be exercised without sleeping.
+    /// - Parameters:
+    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
+    ///   - filesConfig: `[files]` policy enforced through the shared guard.
+    ///   - nowProvider: Monotonic instant source for the throttle.
+    init(
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
+        nowProvider: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        self.homeDirectoryURL = homeDirectoryURL
+        self.filesConfig = filesConfig
+        self.nowProvider = nowProvider
     }
 
     /// Searches the requested root, enforcing the guard first.
-    public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args: FilesGrepArgs
         do {
             args = try JSONDecoder().decode(FilesGrepArgs.self, from: Data(input.argumentsJSON.utf8))
@@ -449,51 +658,165 @@ public struct FilesGrepTool: Tool, Sendable {
         guard FileManager.default.fileExists(atPath: startURL.path, isDirectory: &isDirectory) else {
             return .failure("Path not found: \(decision.resolvedPath)", callID: input.callID)
         }
-        let candidates: [URL] = if isDirectory.boolValue {
-            prunedFiles(under: startURL)
-        } else {
-            // Single-file roots still pass the descendant check: a file the
-            // guard allows is searchable, anything else already failed above.
-            [startURL]
-        }
-        // Sorted roots keep match order deterministic across filesystems
-        // whose enumeration order is undefined.
-        let ordered = candidates.sorted { $0.path < $1.path }
-        var matches: [FilesGrepMatch] = []
-        var truncated = false
-        outer: for fileURL in ordered {
-            try Task.checkCancellation()
-            if let include = args.trimmedInclude, !includeMatches(include: include, fileURL: fileURL, root: startURL) {
-                continue
-            }
-            guard let lines = searchableLines(at: fileURL) else {
-                continue
-            }
-            for (index, line) in lines.enumerated() {
-                // Cooperative cancel inside the line loop so a costly pattern over a
-                // large file aborts with the turn instead of hanging it; the per-file
-                // check above alone would let one file monopolize the turn. Checked
-                // periodically to keep the fast path cheap while staying responsive.
-                if index & 15 == 0 {
-                    try Task.checkCancellation()
-                }
-                let range = NSRange(line.startIndex ..< line.endIndex, in: line)
-                guard expression.firstMatch(in: line, range: range) != nil else {
-                    continue
-                }
-                if matches.count >= args.maxResults {
-                    truncated = true
-                    break outer
-                }
-                matches.append(FilesGrepMatch(path: fileURL.path, line: index + 1, preview: Self.preview(line)))
-            }
-        }
-        let envelope = FilesGrepEnvelope(matches: matches, truncated: truncated)
+        let scan = try await scanMatches(
+            root: startURL,
+            isDirectory: isDirectory.boolValue,
+            resolvedPath: decision.resolvedPath,
+            expression: expression,
+            args: args,
+            context: context
+        )
+        let envelope = FilesGrepEnvelope(matches: scan.matches, truncated: scan.truncated)
         do {
             let content = try FilesToolEncoding.encodeGrepEnvelope(envelope)
             return .success(content, callID: input.callID)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
+        }
+    }
+
+    /// Walks the root's candidates in one counted pass, matching `expression` and
+    /// emitting advisory progress frames on the shared cadence. Returns the matches
+    /// plus whether the result cap cut them short; cancellation propagates to the
+    /// owning turn.
+    ///
+    /// Matching during the walk (rather than after a pre-built candidate array)
+    /// keeps a home-wide search visible while it enumerates instead of silent until
+    /// the walk returns.
+    private func scanMatches(
+        root: URL,
+        isDirectory: Bool,
+        resolvedPath: String,
+        expression: NSRegularExpression,
+        args: FilesGrepArgs,
+        context: ToolContext
+    ) async throws -> (matches: [FilesGrepMatch], truncated: Bool) {
+        // Progress is advisory and throttled to the shared cadence; the scope copy
+        // renders the search root relative to home so a frame never discloses an
+        // absolute path.
+        let scope = filesScopeDisplay(resolvedPath: resolvedPath, homeDirectoryURL: homeDirectoryURL)
+        let progressMessage = scope.map { "Search \(args.trimmedPattern) in \($0)" }
+            ?? "Search \(args.trimmedPattern)"
+        let startInstant = nowProvider()
+        var throttle = FilesProgressThrottle()
+        throttle.begin(scanned: 0, now: startInstant)
+        var scanned = 0
+        var matches: [FilesGrepMatch] = []
+        var totalMatched = 0
+
+        /// Visits one candidate file: counts the visit, appends any hits, and emits
+        /// progress. Extracted so a single-file root and a walked directory share the
+        /// same counted path.
+        func visit(_ fileURL: URL) async throws {
+            scanned += 1
+            let includesFile = args.trimmedInclude.map {
+                includeMatches(include: $0, fileURL: fileURL, root: root)
+            } ?? true
+            if includesFile, let lines = searchableLines(at: fileURL) {
+                for (index, line) in lines.enumerated() {
+                    // Cooperative cancel inside the line loop so a costly pattern over a
+                    // large file aborts with the turn instead of hanging it; the per-file
+                    // check above alone would let one file monopolize the turn. Checked
+                    // periodically to keep the fast path cheap while staying responsive.
+                    if index & 15 == 0 {
+                        try Task.checkCancellation()
+                    }
+                    let range = NSRange(line.startIndex ..< line.endIndex, in: line)
+                    guard expression.firstMatch(in: line, range: range) != nil else {
+                        continue
+                    }
+                    totalMatched += 1
+                    // An unsorted walk finds files in arbitrary order, so keep only the
+                    // lexicographically first `maxResults` hits; that reproduces the
+                    // sorted prefix the old sorted-candidate scan returned without
+                    // holding every hit from a noisy pattern.
+                    Self.insertBounded(
+                        FilesGrepMatch(path: fileURL.path, line: index + 1, preview: Self.preview(line)),
+                        into: &matches,
+                        limit: args.maxResults
+                    )
+                }
+            }
+            // Emitted after the file so `matched` counts the visit just completed.
+            // The running `totalMatched` is reported rather than `matches.count`:
+            // the bounded array stops growing once `maxResults` is reached, so the
+            // retained count would freeze and understate the true progress of a
+            // noisy pattern. `current` is the root-relative path the guard allowed.
+            let now = nowProvider()
+            if throttle.shouldReport(scanned: scanned, now: now) {
+                throttle.markReported(scanned: scanned, now: now)
+                await context.progress(ToolProgress(
+                    message: progressMessage,
+                    scanned: scanned,
+                    matched: totalMatched,
+                    elapsedMs: FilesProgressThrottle.elapsedMilliseconds(now - startInstant),
+                    current: filesRelativeDisplayPath(for: fileURL, root: root)
+                ))
+            }
+        }
+
+        if isDirectory {
+            guard let enumerator = FileManager.default.enumerator(
+                at: root,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [],
+                errorHandler: { _, _ in true }
+            ) else {
+                return ([], false)
+            }
+            // `DirectoryEnumerator`'s `makeIterator()` is unavailable from async
+            // contexts, so pull entries synchronously; the `await`s in the body
+            // are unaffected and `skipDescendants()` still prunes descendants.
+            while let element = enumerator.nextObject() {
+                try Task.checkCancellation()
+                guard let url = element as? URL else {
+                    continue
+                }
+                // Content-blind prune: the guard never opens the file, so
+                // skipping here cannot leak bytes.
+                let decision = FilesAccessGuard.evaluate(url: url, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+                guard decision.allowed else {
+                    if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                        enumerator.skipDescendants()
+                    }
+                    continue
+                }
+                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    continue
+                }
+                try await visit(URL(fileURLWithPath: decision.resolvedPath))
+            }
+        } else {
+            // Single-file roots still pass the descendant check: a file the
+            // guard allows is searchable, anything else already failed above.
+            try await visit(root)
+        }
+        return (matches, totalMatched > args.maxResults)
+    }
+
+    /// Inserts a hit, keeping `matches` ordered by path then line and capped at
+    /// `limit`. An unsorted walk discovers files in arbitrary order, so the bound
+    /// must evict the lexicographically largest hit rather than the newest; a
+    /// binary insertion point keeps the array ordered without a final sort.
+    /// - Parameters:
+    ///   - match: Hit to place.
+    ///   - matches: Ordered accumulator, updated in place.
+    ///   - limit: Maximum hits to retain.
+    private static func insertBounded(_ match: FilesGrepMatch, into matches: inout [FilesGrepMatch], limit: Int) {
+        var low = 0
+        var high = matches.count
+        while low < high {
+            let mid = (low + high) / 2
+            let candidate = matches[mid]
+            if candidate.path < match.path || (candidate.path == match.path && candidate.line < match.line) {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+        matches.insert(match, at: low)
+        if matches.count > limit {
+            matches.removeLast()
         }
     }
 
@@ -516,38 +839,6 @@ public struct FilesGrepTool: Tool, Sendable {
             }
         }
         return false
-    }
-
-    /// Lists searchable files under a directory, pruning guard denials.
-    private func prunedFiles(under root: URL) -> [URL] {
-        var files: [URL] = []
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [],
-            errorHandler: { _, _ in true }
-        ) else {
-            return []
-        }
-        for element in enumerator {
-            guard let url = element as? URL else {
-                continue
-            }
-            // Content-blind prune: the guard never opens the file, so
-            // skipping here cannot leak bytes.
-            let decision = FilesAccessGuard.evaluate(url: url, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
-            guard decision.allowed else {
-                if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                    enumerator.skipDescendants()
-                }
-                continue
-            }
-            if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-                continue
-            }
-            files.append(URL(fileURLWithPath: decision.resolvedPath))
-        }
-        return files
     }
 
     /// Reads a file's searchable lines, or nil when the file is skipped.
@@ -635,15 +926,17 @@ public struct FilesGlobTool: Tool, Sendable {
     public let description =
         "Lists local paths matching a glob. "
             + "Use when the user asks to find files by name. "
-            + "Pass pattern (glob with *, ?, **, [...], max 500 chars, relative to baseDir, no '..') "
-            + "plus optional baseDir (defaults to home) and maxResults (1-500, default 100). "
+            + "Pass pattern (glob with *, ?, **, [...], max 500 chars, relative to baseDir, no '..'), "
+            + "always pass the narrowest baseDir that covers the target, and maxResults (1-500, default 100). "
+            + "Omitting baseDir searches the entire home directory, so pass it unless a home-wide scan is intended. "
             + "Returns sorted paths with a truncation flag; sensitive paths are pruned, denied bases fail with an approval hint."
     /// Function-calling contract for `pattern`, `baseDir`, and `maxResults`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern "#
                 + #"relative to baseDir (*, ?, **, [...]; max 500 chars; no '..')"},"baseDir":{"type":"string","description":"Base "#
-                + #"directory to search (\"~\" expands to the home directory; omitted means home)"},"maxResults":{"type":"integer","description":"Maximum "#
+                + #"directory to search; prefer the narrowest directory (\"~\" expands to home). "#
+                + #"Omitted searches the entire home directory"},"maxResults":{"type":"integer","description":"Maximum "#
                 + #"paths (1-500, default 100)","minimum":1,"maximum":500}},"required":["pattern"],"additionalProperties":false}"#
         )
     /// Always allowed at the gate level; sensitive paths escalate via the failure hint instead.
@@ -655,14 +948,35 @@ public struct FilesGlobTool: Tool, Sendable {
     /// `[files]` policy enforced through the shared guard. Defaults to the built-in defaults.
     private let filesConfig: FilesConfig
 
+    /// Monotonic instant source for progress throttling. Injectable so tests can
+    /// advance the cadence deterministically; production reads the live clock.
+    private let nowProvider: @Sendable () -> ContinuousClock.Instant
+
     /// Creates a glob tool.
     public init(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) {
         self.homeDirectoryURL = homeDirectoryURL
         self.filesConfig = filesConfig
+        self.nowProvider = { ContinuousClock().now }
+    }
+
+    /// Creates a glob tool with an injectable monotonic clock so progress
+    /// cadence can be exercised without sleeping.
+    /// - Parameters:
+    ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
+    ///   - filesConfig: `[files]` policy enforced through the shared guard.
+    ///   - nowProvider: Monotonic instant source for the throttle.
+    init(
+        homeDirectoryURL: URL? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
+        nowProvider: @escaping @Sendable () -> ContinuousClock.Instant
+    ) {
+        self.homeDirectoryURL = homeDirectoryURL
+        self.filesConfig = filesConfig
+        self.nowProvider = nowProvider
     }
 
     /// Lists paths matching the glob, enforcing the guard first.
-    public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+    public func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput {
         let args: FilesGlobArgs
         do {
             args = try JSONDecoder().decode(FilesGlobArgs.self, from: Data(input.argumentsJSON.utf8))
@@ -714,14 +1028,19 @@ public struct FilesGlobTool: Tool, Sendable {
         guard isDirectory.boolValue else {
             return .failure("Not a directory: \(baseDecision.resolvedPath)", callID: input.callID)
         }
-        let candidates = prunedRelativePaths(under: baseURL)
-        var matched: [String] = []
-        for (relative, canonical) in candidates {
-            try Task.checkCancellation()
-            if FilesGlobMatching.matches(pattern: rawPattern, relativePath: relative) {
-                matched.append(canonical)
-            }
-        }
+        let baseDirOmitted = args.trimmedBaseDir == nil
+        let scope = filesScopeDisplay(resolvedPath: baseDecision.resolvedPath, homeDirectoryURL: homeDirectoryURL)
+        let progressWarning = FilesGlobScopeWarning.warningCopy(pattern: rawPattern, baseDirOmitted: baseDirOmitted)
+        let progressMessage = FilesGlobScopeWarning.findMessage(pattern: rawPattern, scope: scope)
+        let prefix = baseURL.path.hasSuffix("/") ? baseURL.path : baseURL.path + "/"
+        var matched = try await collectGlobMatches(
+            baseURL: baseURL,
+            rawPattern: rawPattern,
+            prefix: prefix,
+            progressMessage: progressMessage,
+            progressWarning: progressWarning,
+            context: context
+        )
         // Lexicographic sort keeps repeated listings deterministic no
         // matter how the filesystem enumerates.
         matched.sort()
@@ -735,22 +1054,45 @@ public struct FilesGlobTool: Tool, Sendable {
         }
     }
 
-    /// Lists pruned descendants as root-relative and canonical pairs.
-    private func prunedRelativePaths(under root: URL) -> [(relative: String, canonical: String)] {
-        var pairs: [(relative: String, canonical: String)] = []
+    /// Walks `baseURL` in one counted pass, matching `rawPattern` and emitting
+    /// advisory progress frames on the shared cadence. Returns the matched absolute
+    /// paths in discovery order; cancellation propagates to the owning turn.
+    ///
+    /// Matching during the walk (rather than after a pre-built candidate list)
+    /// keeps a home-wide scan visible while it enumerates instead of silent until
+    /// the walk returns, which would read as a hang on the slow phase the user is
+    /// actually waiting on.
+    private func collectGlobMatches(
+        baseURL: URL,
+        rawPattern: String,
+        prefix: String,
+        progressMessage: String,
+        progressWarning: String?,
+        context: ToolContext
+    ) async throws -> [String] {
+        let startInstant = nowProvider()
+        var throttle = FilesProgressThrottle()
+        throttle.begin(scanned: 0, now: startInstant)
+        var scanned = 0
+        var matched: [String] = []
         guard let enumerator = FileManager.default.enumerator(
-            at: root,
+            at: baseURL,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [],
             errorHandler: { _, _ in true }
         ) else {
-            return []
+            return matched
         }
-        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        for element in enumerator {
+        // `DirectoryEnumerator`'s `makeIterator()` is unavailable from async
+        // contexts, so pull entries synchronously; the `await`s in the body
+        // are unaffected and `skipDescendants()` still prunes descendants.
+        while let element = enumerator.nextObject() {
+            try Task.checkCancellation()
             guard let url = element as? URL else {
                 continue
             }
+            // Content-blind prune: the guard never opens the entry, so
+            // skipping here cannot leak bytes.
             let decision = FilesAccessGuard.evaluate(url: url, homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
             guard decision.allowed else {
                 if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
@@ -765,9 +1107,27 @@ public struct FilesGlobTool: Tool, Sendable {
             guard !relative.isEmpty else {
                 continue
             }
-            pairs.append((relative: relative, canonical: decision.resolvedPath))
+            scanned += 1
+            if FilesGlobMatching.matches(pattern: rawPattern, relativePath: relative) {
+                matched.append(decision.resolvedPath)
+            }
+            // Emitted after the match so `matched` counts the visit just completed;
+            // `relative` is already root-relative and guard-pruned, so a denied
+            // path can never surface as `current`.
+            let now = nowProvider()
+            if throttle.shouldReport(scanned: scanned, now: now) {
+                throttle.markReported(scanned: scanned, now: now)
+                await context.progress(ToolProgress(
+                    message: progressMessage,
+                    warning: progressWarning,
+                    scanned: scanned,
+                    matched: matched.count,
+                    elapsedMs: FilesProgressThrottle.elapsedMilliseconds(now - startInstant),
+                    current: relative
+                ))
+            }
         }
-        return pairs
+        return matched
     }
 
     /// Builds the approval-escalation failure without file bytes.

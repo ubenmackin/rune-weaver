@@ -466,6 +466,98 @@ public struct WSCancelMessage: Codable, Sendable, Equatable {
     }
 }
 
+/// Per-tool cancellation message sent by a WebSocket client.
+///
+/// Distinct from ``WSCancelMessage``: this aborts exactly one named tool call
+/// while its owning turn keeps running, so the model can re-scope and continue.
+/// The session identifier scopes the request so one session can never cancel
+/// another's in-flight call, even if call identifiers collide.
+public struct WSToolCancelMessage: Codable, Sendable, Equatable {
+    /// Always `"tool_cancel"`.
+    public let type: String
+    /// Session owning the call to abort.
+    public let sessionID: UUID
+    /// Correlation identifier of the running call to abort.
+    public let callID: String
+    /// Optional user reason forwarded to the model; capped server-side before
+    /// it is injected into the tool history.
+    public let reason: String?
+
+    /// Creates a per-tool cancellation message.
+    public init(sessionID: UUID, callID: String, reason: String? = nil) {
+        self.type = "tool_cancel"
+        self.sessionID = sessionID
+        self.callID = callID
+        self.reason = reason
+    }
+
+    /// Coding keys for the per-tool cancellation message.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Owning session.
+        case sessionID
+        /// Correlation identifier of the call.
+        case callID
+        /// Optional user reason.
+        case reason
+    }
+}
+
+/// Non-terminal acknowledgement that a per-tool cancel found nothing to stop.
+///
+/// A successful per-tool cancel needs no acknowledgement: the bus injects the
+/// call's failure result and the normal `tool_end` frame proves the stop landed.
+/// A miss has no such terminal frame, so the engine reports it here rather than
+/// through ``WSErrorFrame``. A session-tagged `error` frame is a terminal turn
+/// failure to the dashboard, so routing a per-tool miss through it tears down a
+/// turn that is still running; this frame only clears the row's optimistic
+/// cancel mark and may carry a non-terminal note. Older clients drop the unknown
+/// `type`, which leaves their mark until the next turn frame instead of failing
+/// a turn that never stopped.
+public struct WSToolCancelMissFrame: Codable, Sendable, Equatable {
+    /// Always `"tool_cancel_miss"`.
+    public let type: String
+    /// Owning session so multiplexed views only clear their own row's mark.
+    public var sessionID: UUID?
+    /// Correlation identifier of the call that could not be cancelled.
+    public var callID: String
+    /// Human-readable, non-terminal explanation for the miss.
+    public var message: String?
+
+    /// Creates a per-tool cancel miss frame.
+    public init(sessionID: UUID? = nil, callID: String, message: String? = nil) {
+        self.type = "tool_cancel_miss"
+        self.sessionID = sessionID
+        self.callID = callID
+        self.message = message
+    }
+
+    /// Coding keys for the miss frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Owning session.
+        case sessionID
+        /// Correlation identifier of the call.
+        case callID
+        /// Non-terminal explanation.
+        case message
+    }
+
+    /// Decodes a miss frame, defaulting a missing discriminator for back-compat.
+    /// The call identity stays required so a partial payload throws here instead
+    /// of clearing an unrelated row in the dashboard.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_cancel_miss"
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.callID = try container.decode(String.self, forKey: .callID)
+        self.message = try container.decodeIfPresent(String.self, forKey: .message)
+    }
+}
+
 /// Cancellation confirmation frame sent by the engine over WebSocket.
 public struct WSCancelledFrame: Codable, Sendable, Equatable {
     /// Always `"cancelled"`.
@@ -695,5 +787,166 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .turnTotalTokens, in: container, debugDescription: "turnTotalTokens must be non-negative")
         }
         self.turnTotalTokens = turnTotalTokens
+    }
+}
+
+/// Generic indeterminate progress reported by any tool while it runs. Session-tagged
+/// like the heartbeat and token frames so multiplexed views only apply their own
+/// turn, and older clients drop the unknown `type` without rendering. Identity must
+/// be a non-blank string and counters non-negative integers so a partial or drifted
+/// payload fails decoding here exactly where the dashboard guard drops it, rather
+/// than rendering zeroed or mis-attributed progress. The display path stays
+/// relative-only so a frame can never disclose an absolute filesystem location.
+/// Lives here so REST and WebSocket turns share one encoding.
+public struct WSToolProgressFrame: Codable, Sendable, Equatable {
+    /// Always `"tool_progress"`.
+    public let type: String
+    /// Owning session so multiplexed views only apply their own turn.
+    public var sessionID: UUID?
+    /// Correlation identifier of the call this progress belongs to.
+    public var callID: String
+    /// Name of the tool reporting progress.
+    public var toolName: String
+    /// Human-readable status line.
+    public var message: String
+    /// Advisory broad-scope warning for ``message``, when the emitter has one.
+    /// A dedicated field keeps the scope line intact for patterns that contain
+    /// the separator the old folded form relied on; optional so older frames
+    /// without a warning decode unchanged.
+    public var warning: String?
+    /// Items examined so far. Required so a missing key drops the frame instead
+    /// of rendering a zeroed count.
+    public var scanned: Int
+    /// Items matched so far. Required for the same reason as ``scanned``.
+    public var matched: Int
+    /// Milliseconds elapsed since the call began, required for the same reason.
+    public var elapsedMs: Int
+    /// Relative display path of the item currently being processed, if any.
+    /// Absolute or traversing candidates degrade to nil rather than leaking.
+    public var current: String?
+
+    /// Creates a progress frame.
+    public init(
+        sessionID: UUID? = nil,
+        callID: String,
+        toolName: String,
+        message: String,
+        warning: String? = nil,
+        scanned: Int,
+        matched: Int,
+        elapsedMs: Int,
+        current: String? = nil
+    ) {
+        self.type = "tool_progress"
+        self.sessionID = sessionID
+        self.callID = callID
+        self.toolName = toolName
+        self.message = message
+        self.warning = ToolProgress.normalizedWarning(warning)
+        self.scanned = max(0, scanned)
+        self.matched = max(0, matched)
+        self.elapsedMs = max(0, elapsedMs)
+        self.current = ToolProgress.relativeCurrent(current)
+    }
+
+    /// Creates a frame from a tool-emitted value, preserving its sanitized path.
+    /// - Parameters:
+    ///   - progress: Emitted progress, already attributed by the bus.
+    ///   - sessionID: Owning session for multiplexed views.
+    public init(_ progress: ToolProgress, sessionID: UUID? = nil) {
+        self.init(
+            sessionID: sessionID,
+            callID: progress.callID,
+            toolName: progress.toolName,
+            message: progress.message,
+            warning: progress.warning,
+            scanned: progress.scanned,
+            matched: progress.matched,
+            elapsedMs: progress.elapsedMs,
+            current: progress.current
+        )
+    }
+
+    /// Coding keys for the progress frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Owning session.
+        case sessionID
+        /// Correlation identifier of the call.
+        case callID
+        /// Name of the reporting tool.
+        case toolName
+        /// Human-readable status line.
+        case message
+        /// Advisory broad-scope warning for the status line.
+        case warning
+        /// Items examined so far.
+        case scanned
+        /// Items matched so far.
+        case matched
+        /// Milliseconds elapsed.
+        case elapsedMs
+        /// Relative display path of the current item.
+        case current
+    }
+
+    /// Decodes a progress frame, defaulting a missing discriminator for back-compat
+    /// while requiring identity and every numeric field so a partial payload throws
+    /// and the caller drops it instead of rendering mis-attributed progress. Identity
+    /// must be a non-blank string, and every numeric field, `elapsedMs` included,
+    /// must stay a non-negative integer, so a blank identity or a drifted fractional
+    /// or negative payload fails here exactly where the dashboard guard drops it. The
+    /// optional display fields (`warning`, `current`) degrade to absent on any drifted
+    /// shape instead of costing an otherwise complete progress line.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_progress"
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        // Identity is the attribution anchor: a frame with a blank call or tool
+        // cannot be matched to a live row, so it fails here exactly where the
+        // dashboard guard rejects blank identity instead of rendering
+        // mis-attributed progress. Padding around a real value is not blank and
+        // survives untouched on both sides.
+        let callID = try container.decode(String.self, forKey: .callID)
+        guard !callID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .callID, in: container, debugDescription: "callID must be non-blank")
+        }
+        self.callID = callID
+        let toolName = try container.decode(String.self, forKey: .toolName)
+        guard !toolName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .toolName, in: container, debugDescription: "toolName must be non-blank")
+        }
+        self.toolName = toolName
+        self.message = try container.decode(String.self, forKey: .message)
+        // Optional like the relative tail: a frame without a warning is valid,
+        // and a blank, drifted, or non-string warning degrades to absent instead
+        // of dropping an otherwise complete progress line. The lenient decode
+        // matches the dashboard, which trims a string warning and treats every
+        // other shape as absent rather than rejecting the frame.
+        let rawWarning = try? container.decode(String.self, forKey: .warning)
+        self.warning = ToolProgress.normalizedWarning(rawWarning)
+        let scanned = try container.decode(Int.self, forKey: .scanned)
+        guard scanned >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .scanned, in: container, debugDescription: "scanned must be non-negative")
+        }
+        self.scanned = scanned
+        let matched = try container.decode(Int.self, forKey: .matched)
+        guard matched >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .matched, in: container, debugDescription: "matched must be non-negative")
+        }
+        self.matched = matched
+        let elapsedMs = try container.decode(Int.self, forKey: .elapsedMs)
+        guard elapsedMs >= 0 else {
+            throw DecodingError.dataCorruptedError(forKey: .elapsedMs, in: container, debugDescription: "elapsedMs must be non-negative")
+        }
+        self.elapsedMs = elapsedMs
+        // Sanitize on the way in as well as out so a peer cannot smuggle an
+        // absolute path into view state through a handcrafted frame. A lenient
+        // decode keeps the frame when `current` arrives as a non-string shape,
+        // matching the dashboard, which degrades such a tail to absent rather
+        // than dropping the otherwise complete line.
+        self.current = ToolProgress.relativeCurrent(try? container.decode(String.self, forKey: .current))
     }
 }

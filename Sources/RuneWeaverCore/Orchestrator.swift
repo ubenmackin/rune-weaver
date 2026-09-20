@@ -676,7 +676,13 @@ extension Orchestrator {
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> [ToolAction] {
         var actions: [ToolAction] = []
-        let context = ToolContext(conversationID: sessionID)
+        // Forward advisory progress as a session-tagged event so the dashboard can
+        // show a slow tool still working. The bus stamps each report with the
+        // authoritative call identity before it reaches this sink, so the closure
+        // only relays; a report never affects the turn's outcome.
+        let context = ToolContext(conversationID: sessionID) { progress in
+            await onEvent?(.toolProgress(progress))
+        }
         for call in calls {
             try Task.checkCancellation()
             await onEvent?(.toolStarted(
@@ -685,6 +691,9 @@ extension Orchestrator {
                 argumentsJSON: call.argumentsJSON,
                 roundIndex: roundIndex
             ))
+            // A per-call cancellation surfaces from the bus as an ordinary failure
+            // result, so the loop records it and keeps going; only turn-level
+            // cancellation throws past the check below and aborts the turn.
             let result = await toolBus.execute(toolCall: call, context: context)
             let action = ToolAction(
                 toolName: call.toolName,

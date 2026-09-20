@@ -21,10 +21,15 @@ public typealias ClientApprovalPrompt = RuneWeaverCore.WSApprovalPrompt
 public typealias ClientErrorFrame = RuneWeaverCore.WSErrorFrame
 /// Degraded-tool notice, single-sourced from core (`WSWarningFrame`).
 public typealias ClientWarningFrame = RuneWeaverCore.WSWarningFrame
+/// Generic indeterminate tool progress, single-sourced from core (`WSToolProgressFrame`).
+public typealias ClientToolProgressFrame = RuneWeaverCore.WSToolProgressFrame
+/// Non-terminal per-tool cancel miss, single-sourced from core (`WSToolCancelMissFrame`).
+public typealias ClientToolCancelMissFrame = RuneWeaverCore.WSToolCancelMissFrame
 
 /// Peek at the `type` discriminator of one inbound engine frame.
 private struct ClientFramePeek: Codable {
-    /// Frame discriminator (`delta`, `done`, `warning`, `tool_start`, `tool_end`, `approval`, `cancelled`, or `error`).
+    /// Frame discriminator (`delta`, `done`, `warning`, `tool_start`, `tool_end`,
+    /// `tool_progress`, `tool_cancel_miss`, `approval`, `cancelled`, or `error`).
     let type: String
 }
 
@@ -315,6 +320,20 @@ public actor RuneWeaverClient {
             return .finished
         case "approval":
             // Broadcast prompt arriving mid-turn; skip and keep streaming.
+            return .continued
+        case "tool_progress":
+            // Indeterminate progress is advisory and has no place in the content
+            // stream this client exposes, but it is still decoded so a malformed
+            // payload is validated locally and dropped rather than surfacing. An
+            // unknown future frame keeps taking the default branch below.
+            _ = try? JSONDecoder().decode(ClientToolProgressFrame.self, from: replyData)
+            return .continued
+        case "tool_cancel_miss":
+            // A per-tool cancel miss is non-terminal by contract: it reports that
+            // a detached call stopped nothing, while the turn keeps streaming.
+            // Decoding and discarding (instead of throwing like an `error` frame)
+            // keeps library turns alive through a cancel that did not land.
+            _ = try? JSONDecoder().decode(ClientToolCancelMissFrame.self, from: replyData)
             return .continued
         case "error":
             if let failure = try? JSONDecoder().decode(ClientErrorFrame.self, from: replyData) {

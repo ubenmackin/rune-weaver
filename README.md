@@ -26,7 +26,7 @@ This is the primary path for most users. You do not need Xcode, Swift, Node, or 
 2. Open the DMG, drag Rune Weaver to Applications, then launch it.
 3. The app lives in the menu bar and starts the engine for you.
 4. Choose Open Web Dashboard from the menu bar icon, then open Settings.
-5. Set your default provider and model, then Save. Open the Search pane and press Start to pull and run SearXNG.
+5. Set your default provider and model, then Save. Open the Web pane and press Start to pull and run SearXNG.
 6. Use the Chat tab in the same dashboard page. Approve or deny writes in the approvals inbox as they come in.
 
 Config is stored at `~/.runeweaver/config.toml`. Edit it from the Settings page. You do not need to hand edit the file.
@@ -47,7 +47,7 @@ make run ARGS="serve"
 # 3. Open the Settings web page first and fill in providers
 # Open http://127.0.0.1:8082 in a browser, go to Settings.
 # Set your default provider and model, then Save.
-# Open the Search pane and press Start to pull and run SearXNG.
+# Open the Web pane and press Start to pull and run SearXNG.
 # Config is stored at ~/.runeweaver/config.toml but edit it from the page.
 
 # 4. Chat
@@ -58,7 +58,7 @@ make run ARGS="chat"
 make run ARGS="status"
 ```
 
-Search status shows in two places. The Profile menu in the top nav has a SearXNG row with a green or red dot, the URL as a tooltip, and Start and Stop buttons. The Settings Search pane has the same Start and Stop buttons plus health text. The `status` command prints `reachable` or `unreachable` for the configured URL.
+Search status shows in two places. The Profile menu in the top nav has a SearXNG row with a green or red dot, the URL as a tooltip, and Start and Stop buttons. The Settings Web pane has the same Start and Stop buttons plus health text. The `status` command prints `reachable` or `unreachable` for the configured URL.
 
 Only three make commands cover daily dev use:
 
@@ -78,7 +78,7 @@ App users can skip the build row. Install only what matches the features you use
 |-------|------------|------------|-------|
 | 1 | Apple Container CLI (`container`) | SearXNG search and sandbox detonation | No Docker needed. The CLI ships the isolation used by search and untrusted files. |
 | 1a | Container system service (`container system start` plus `container list` verify) | SearXNG search and sandbox detonation | Start once with `container system start`, verify with `container list`. The engine and `scripts/searxng-up.sh` heal it automatically when down (XPC/system-service). |
-| 2 | SearXNG image | Local web search | Pulled automatically on first Start from the Settings Search pane or the Profile menu. First pull is about 150 MB, later starts reuse it. |
+| 2 | SearXNG image | Local web search | Pulled automatically on first Start from the Settings Web pane or the Profile menu. First pull is about 150 MB, later starts reuse it. |
 | 3 | Python 3 plus Playwright plus Chromium | Browser automation tools | Needed only if you use browser tools. See install steps below. |
 | 4 | Whisper (optional) | Voice input | Needed only if you use speech to text. Skip it for text chat. See install steps below. |
 | 5 | Xcode plus Swift plus Node plus Vite (contributors only) | Building from source with `make build` | Not needed for the DMG app. The app bundles the built dashboard, so no Node server runs in normal use. |

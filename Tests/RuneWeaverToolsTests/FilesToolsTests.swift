@@ -1,6 +1,7 @@
 // Rune Weaver Tools Tests — File tools (files.read, files.grep, files.glob), shared guard, and Seatbelt staging.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
@@ -82,6 +83,45 @@ private enum FilesTestSupport {
         let paths: [String]
         /// Whether further paths existed past the cap.
         let truncated: Bool
+    }
+}
+
+/// Serializes progress reports captured during a tool call.
+/// Progress closures are `@Sendable` and a walker can emit across suspension
+/// points, so an actor owns the buffer instead of a shared array.
+private actor FilesProgressCollector {
+    /// Reports in emission order.
+    private(set) var reports: [ToolProgress] = []
+
+    /// Appends one emitted report.
+    /// - Parameter report: Progress emitted by the tool under test.
+    func record(_ report: ToolProgress) {
+        reports.append(report)
+    }
+}
+
+/// Monotonic clock seam that advances by a fixed step on every read.
+/// Lets a walker cross the throttle's time floor deterministically without
+/// depending on how long the test machine takes to enumerate.
+private final class SteppingClock: @unchecked Sendable {
+    /// Guards the mutable instant below.
+    private let state: OSAllocatedUnfairLock<ContinuousClock.Instant>
+    /// Duration added to the instant on every read.
+    private let step: Duration
+
+    /// Creates a stepping clock.
+    /// - Parameter step: Duration added on every read.
+    init(step: Duration) {
+        self.step = step
+        self.state = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
+    }
+
+    /// Returns the next instant, advanced by the configured step.
+    func now() -> ContinuousClock.Instant {
+        state.withLock { instant in
+            instant = instant.advanced(by: step)
+            return instant
+        }
     }
 }
 
@@ -632,6 +672,193 @@ struct FilesToolsTests {
         #expect(all.paths.count == 5)
         #expect(all.truncated == false)
         #expect(all.paths == all.paths.sorted())
+    }
+
+    @Test
+    func `Progress throttle fires on the time floor or the file interval`() {
+        let start = ContinuousClock.now
+        // Time trigger: any new visit once the spacing window closes is enough,
+        // so a walk shorter than the work interval still reports instead of
+        // staying silent.
+        var timed = FilesProgressThrottle()
+        timed.begin(scanned: 0, now: start)
+        #expect(timed.shouldReport(scanned: 1, now: start) == false)
+        #expect(timed.shouldReport(scanned: 1, now: start.advanced(by: .milliseconds(499))) == false)
+        let atSpacing = start.advanced(by: .milliseconds(500))
+        #expect(timed.shouldReport(scanned: 1, now: atSpacing) == true)
+        timed.markReported(scanned: 1, now: atSpacing)
+        // No new work: elapsed time alone must not re-report the same count.
+        #expect(timed.shouldReport(scanned: 1, now: atSpacing.advanced(by: .seconds(1))) == false)
+
+        // Work trigger: crossing the interval fires even inside the spacing
+        // window, bounding how much work passes between frames on a fast walk.
+        var worked = FilesProgressThrottle()
+        worked.begin(scanned: 0, now: start)
+        #expect(worked.shouldReport(scanned: FilesProgressThrottle.fileInterval - 1, now: start) == false)
+        #expect(worked.shouldReport(scanned: FilesProgressThrottle.fileInterval, now: start) == true)
+    }
+
+    @Test
+    func `Glob scope warning flags only broad patterns with omitted baseDir`() {
+        #expect(FilesGlobScopeWarning.warningCopy(pattern: "*", baseDirOmitted: true) == "entire home folder")
+        #expect(FilesGlobScopeWarning.warningCopy(pattern: "*.swift", baseDirOmitted: true) == "entire home folder")
+        #expect(FilesGlobScopeWarning.warningCopy(pattern: "*.swift", baseDirOmitted: false) == nil)
+        #expect(FilesGlobScopeWarning.warningCopy(pattern: "src/*.swift", baseDirOmitted: true) == nil)
+        #expect(FilesGlobScopeWarning.warningCopy(pattern: "notes.txt", baseDirOmitted: true) == nil)
+        #expect(FilesGlobScopeWarning.findMessage(pattern: "*.txt", scope: "~") == "Find *.txt in ~")
+        #expect(FilesGlobScopeWarning.findMessage(pattern: "*.txt", scope: nil) == "Find *.txt")
+        // The warning is a distinct field rather than a suffix, so a pattern
+        // that itself contains the old " — " delimiter stays a plain scope line
+        // instead of being misread as a warning.
+        #expect(
+            FilesGlobScopeWarning.findMessage(pattern: "foo — bar", scope: "~")
+                == "Find foo — bar in ~"
+        )
+    }
+
+    @Test
+    func `Display helpers omit degenerate scope and tail`() throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        let resolvedHome = FilesAccessGuard.resolvedHomeURL(overriding: home).path
+        // Home and descendants render dashboard-safe scope copy.
+        #expect(filesScopeDisplay(resolvedPath: resolvedHome, homeDirectoryURL: home) == "~")
+        #expect(filesScopeDisplay(resolvedPath: resolvedHome + "/sub", homeDirectoryURL: home) == "~/sub")
+        // A root or blank component names no file, so the scope degrades to nil
+        // rather than leaking `/` or an empty clause into a progress frame.
+        #expect(filesScopeDisplay(resolvedPath: "/", homeDirectoryURL: home) == nil)
+        #expect(filesScopeDisplay(resolvedPath: "", homeDirectoryURL: home) == nil)
+        // Root-relative tails survive; a degenerate fallback tail does not.
+        let root = URL(fileURLWithPath: resolvedHome)
+        #expect(filesRelativeDisplayPath(for: root.appendingPathComponent("notes.txt"), root: root) == "notes.txt")
+        #expect(filesRelativeDisplayPath(for: URL(fileURLWithPath: "/"), root: root) == nil)
+    }
+
+    @Test
+    func `Glob reports throttled progress with relative current and warning copy`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        // More than one interval of files guarantees the work trigger fires; the
+        // injected stepping clock also carries past the spacing floor so the
+        // report does not depend on how fast the test machine enumerates.
+        for index in 0 ..< (FilesProgressThrottle.fileInterval + 10) {
+            let name = String(format: "notes-%03d.txt", index)
+            try FilesTestSupport.write("x", at: home.appendingPathComponent(name))
+        }
+        // A denied twin proves the emitter never names a pruned path.
+        try FilesTestSupport.write("SUPERSECRET=abc123", at: home.appendingPathComponent(".env"))
+        let clock = SteppingClock(step: .milliseconds(5))
+        let tool = FilesGlobTool(homeDirectoryURL: home, nowProvider: { clock.now() })
+        let collector = FilesProgressCollector()
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "files.glob", argumentsJSON: #"{"pattern":"*.txt","maxResults":500}"#),
+            context: ToolContext(conversationID: UUID()) { report in await collector.record(report) }
+        )
+        #expect(output.isError == false)
+        #expect(!output.content.contains("SUPERSECRET"))
+        let reports = await collector.reports
+        let first = try #require(reports.first)
+        // Omitted baseDir plus a broad pattern carries the home-wide warning on
+        // its own field while the scope line stays a plain find phrase.
+        #expect(first.message == "Find *.txt in ~")
+        #expect(first.warning == "entire home folder")
+        // Either trigger opens the gate; the injected clock reaches the spacing
+        // floor before the walk ends, so the first frame lands inside one work
+        // interval instead of waiting for the count trigger.
+        #expect(first.scanned > 0)
+        #expect(first.scanned <= FilesProgressThrottle.fileInterval)
+        #expect(first.matched == first.scanned)
+        #expect(first.current?.hasPrefix("/") == false)
+        #expect(first.current?.hasPrefix("~") == false)
+        for report in reports {
+            #expect(report.current?.hasSuffix(".env") != true)
+            #expect(report.current?.contains("..") != true)
+        }
+        // An explicit baseDir suppresses the warning even for a broad pattern.
+        let explicitCollector = FilesProgressCollector()
+        let explicit = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.glob",
+                argumentsJSON: #"{"pattern":"*.txt","baseDir":"\#(home.path)","maxResults":500}"#
+            ),
+            context: ToolContext(conversationID: UUID()) { report in await explicitCollector.record(report) }
+        )
+        #expect(explicit.isError == false)
+        let explicitReports = await explicitCollector.reports
+        let explicitFirst = try #require(explicitReports.first)
+        #expect(explicitFirst.message == "Find *.txt in ~")
+        #expect(explicitFirst.warning == nil)
+    }
+
+    @Test
+    func `Glob reports progress for a walk under the file interval`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        // Fewer files than the work interval, so only the time trigger can open
+        // the gate. The injected clock advances past the spacing floor before the
+        // walk ends, proving a short scan still reports instead of sitting silent
+        // until the enumeration returns and looking hung.
+        let fileCount = FilesProgressThrottle.fileInterval / 5
+        for index in 0 ..< fileCount {
+            let name = String(format: "note-%03d.txt", index)
+            try FilesTestSupport.write("x", at: home.appendingPathComponent(name))
+        }
+        let clock = SteppingClock(step: .milliseconds(20))
+        let tool = FilesGlobTool(homeDirectoryURL: home, nowProvider: { clock.now() })
+        let collector = FilesProgressCollector()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.glob",
+                argumentsJSON: #"{"pattern":"*.txt","baseDir":"\#(home.path)","maxResults":500}"#
+            ),
+            context: ToolContext(conversationID: UUID()) { report in await collector.record(report) }
+        )
+        #expect(output.isError == false)
+        let reports = await collector.reports
+        #expect(reports.isEmpty == false)
+        // Every frame describes only work actually done, never the full interval
+        // the walk never reached.
+        #expect(reports.allSatisfy { $0.scanned <= fileCount })
+    }
+
+    @Test
+    func `Grep reports throttled progress with relative current and no denied paths`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        // Half the files match so the result cap stays open past one interval.
+        for index in 0 ..< (FilesProgressThrottle.fileInterval + 10) {
+            let relative = "dir\(index % 4)/notes-\(String(format: "%03d", index)).txt"
+            let body = index % 2 == 0 ? "needle \(index)\n" : "nothing \(index)\n"
+            try FilesTestSupport.write(body, at: home.appendingPathComponent(relative))
+        }
+        try FilesTestSupport.write("needle SUPERSECRET=abc123\n", at: home.appendingPathComponent(".env"))
+        let clock = SteppingClock(step: .milliseconds(5))
+        let tool = FilesGrepTool(homeDirectoryURL: home, nowProvider: { clock.now() })
+        let collector = FilesProgressCollector()
+        let output = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.grep",
+                argumentsJSON: #"{"pattern":"needle","path":"\#(home.path)","maxResults":200}"#
+            ),
+            context: ToolContext(conversationID: UUID()) { report in await collector.record(report) }
+        )
+        #expect(output.isError == false)
+        #expect(!output.content.contains("SUPERSECRET"))
+        let decoded = try JSONDecoder().decode(FilesTestSupport.Grep.self, from: Data(output.content.utf8))
+        #expect(decoded.matches.isEmpty == false)
+        let reports = await collector.reports
+        let first = try #require(reports.first)
+        #expect(first.message.hasPrefix("Search needle in ~"))
+        // Either trigger opens the gate, so the counts form a band rather than a
+        // pinned pair; the result cap stays open past one interval.
+        #expect(first.scanned > 0)
+        #expect(first.scanned <= FilesProgressThrottle.fileInterval)
+        #expect(first.matched <= first.scanned)
+        #expect(first.matched < FilesGrepArgs.maxMaxResults)
+        for report in reports {
+            #expect(report.current?.hasPrefix("/") == false)
+            #expect(report.current?.hasSuffix(".env") != true)
+        }
     }
 }
 

@@ -841,18 +841,7 @@ private func registerChatRoute(_ app: Application) {
                     source: body.resolvedSource
                 ),
                 onEvent: { event in
-                    // REST has no stream, but dashboard WebSocket clients still deserve
-                    // mid-turn progress. Forward session-tagged warnings and per-round
-                    // token usage through the shared broadcast helper so REST and resume
-                    // share one session-filtered path and clients ignore other sessions;
-                    // failures never fail the turn. The terminal response stays
-                    // authoritative for reconciliation.
-                    switch event {
-                    case .warning, .turnTokens:
-                        await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
-                    default:
-                        break
-                    }
+                    await forwardRESTChatEvent(event, sessionID: sessionID, context: context)
                 }
             )
         }
@@ -929,6 +918,27 @@ private func registerChatRoute(_ app: Application) {
     }
 
     registerChatCancelRoute(app)
+    registerChatToolCancelRoute(app)
+}
+
+/// Forwards a REST turn's mid-turn progress to dashboard WebSocket clients.
+///
+/// REST has no stream, but dashboard WebSocket clients still deserve mid-turn
+/// progress. Forward session-tagged warnings, per-round token usage, and generic
+/// tool progress through the shared broadcast helper so REST and resume share one
+/// session-filtered path and clients ignore other sessions; failures never fail the
+/// turn. The terminal response stays authoritative for reconciliation.
+/// - Parameters:
+///   - event: Orchestrator event emitted by the running turn.
+///   - sessionID: Session the turn belongs to, kept for client-side filtering.
+///   - context: Server context owning the broadcast hub.
+private func forwardRESTChatEvent(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
+    switch event {
+    case .warning, .turnTokens, .toolProgress:
+        await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
+    default:
+        break
+    }
 }
 
 /// Moves one REST turn's running audit row to its terminal state and broadcasts it.
@@ -969,6 +979,33 @@ private func registerChatCancelRoute(_ app: Application) {
         // Clear queued steering on cancel so stale guidance does not leak into the next turn.
         await req.application.runeWeaver.steeringQueue.clear(for: body.sessionID)
         return CancelChatResponse(sessionID: body.sessionID, cancelled: cancelled)
+    }
+}
+
+/// Registers the REST per-tool cancellation endpoint.
+///
+/// Distinct from the turn-wide cancel route above: this aborts exactly one
+/// running tool and leaves its turn alive, so the injected failure can steer the
+/// model instead of ending the request. The tool bus owns the call registry and
+/// the injected result, keeping REST and WebSocket cancellations on one path.
+/// - Parameter app: Application receiving the route.
+private func registerChatToolCancelRoute(_ app: Application) {
+    app.post(
+        PathComponent.constant(ServerPaths.chat),
+        PathComponent.constant(ServerPaths.toolCancel)
+    ) { req async throws -> ToolCancelResponse in
+        let body = try req.content.decode(ToolCancelRequest.self)
+        let cancelled = try await cancelInFlightToolCall(
+            callID: body.callID,
+            sessionID: body.sessionID,
+            reason: body.resolvedReason,
+            context: req.application.runeWeaver
+        )
+        return ToolCancelResponse(
+            sessionID: body.sessionID,
+            callID: body.resolvedCallID ?? body.callID,
+            cancelled: cancelled
+        )
     }
 }
 
