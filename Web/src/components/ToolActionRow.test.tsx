@@ -1,10 +1,11 @@
 // Rune Weaver Dashboard — Component tests for honest tool status display.
 // Covers the pending-versus-running distinction so completed turns with no
-// recorded output never claim to be executing.
+// recorded output never claim to be executing, plus live per-tool progress,
+// broad-scope warnings, and the per-call cancel reason wiring.
 
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import ToolActionRow from "./ToolActionRow";
 
 const baseAction = {
@@ -288,5 +289,200 @@ describe("ToolActionRow card variant badges", () => {
     );
     expect(screen.getByText("Pending")).toBeInTheDocument();
     expect(screen.queryByText("Running")).not.toBeInTheDocument();
+  });
+});
+
+const progressAction = {
+  toolName: "files.glob",
+  callID: "call-progress-1",
+  argumentsJSON: '{"pattern":"*.txt"}',
+};
+
+describe("ToolActionRow live progress", () => {
+  it("renders scope, counters, relative tail, and an indeterminate shimmer while live", () => {
+    render(
+      <ToolActionRow
+        action={{ ...progressAction, result: null }}
+        isLive
+        progress={{
+          callID: "call-progress-1",
+          toolName: "files.glob",
+          message: "Find *.txt in ~",
+          scanned: 42,
+          matched: 3,
+          elapsedMs: 4200,
+          current: "Documents/notes.txt",
+        }}
+      />,
+    );
+    expect(screen.getByText("Running")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-progress")).toBeInTheDocument();
+    expect(screen.getByTestId("tool-progress-stats")).toHaveTextContent(
+      "42 files checked · 3 matched · 4.2s",
+    );
+    expect(screen.getByTestId("tool-progress-current")).toHaveTextContent(
+      "current: Documents/notes.txt",
+    );
+    // Indeterminate: the engine never publishes a percentage, so the row proves
+    // liveness with a shimmer rather than a fabricated fraction.
+    expect(screen.getByTestId("tool-progress-shimmer")).toBeInTheDocument();
+  });
+
+  it("pluralizes a single scanned file honestly", () => {
+    render(
+      <ToolActionRow
+        action={{ ...progressAction, result: null }}
+        isLive
+        progress={{
+          callID: "call-progress-1",
+          toolName: "files.glob",
+          message: "Find notes.txt in ~",
+          scanned: 1,
+          matched: 1,
+          elapsedMs: 900,
+        }}
+      />,
+    );
+    expect(screen.getByTestId("tool-progress-stats")).toHaveTextContent(
+      "1 file checked · 1 matched · 0.9s",
+    );
+    // A missing relative tail renders no tail line instead of an empty one.
+    expect(screen.queryByTestId("tool-progress-current")).not.toBeInTheDocument();
+  });
+
+  it("renders a dedicated broad-scope warning beside the scope line", () => {
+    render(
+      <ToolActionRow
+        action={{ ...progressAction, result: null }}
+        isLive
+        progress={{
+          callID: "call-progress-1",
+          toolName: "files.glob",
+          message: "Find *.txt in ~",
+          warning: "entire home folder",
+          scanned: 120,
+          matched: 7,
+          elapsedMs: 12_000,
+        }}
+      />,
+    );
+    const warning = screen.getByTestId("tool-progress-scope-warning");
+    expect(warning).toHaveTextContent("— entire home folder");
+    // The scope description stays on the same line rather than a second banner.
+    expect(screen.getByText("Find *.txt in ~")).toBeInTheDocument();
+  });
+
+  it("keeps a separator inside the scope message instead of inventing a warning", () => {
+    render(
+      <ToolActionRow
+        action={{ ...progressAction, result: null }}
+        isLive
+        progress={{
+          callID: "call-progress-1",
+          toolName: "files.grep",
+          // A pattern containing the old delimiter must render verbatim; only
+          // the dedicated warning field may raise a warning span.
+          message: "Search foo — bar in ~",
+          scanned: 12,
+          matched: 1,
+          elapsedMs: 900,
+        }}
+      />,
+    );
+    expect(screen.getByText("Search foo — bar in ~")).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("tool-progress-scope-warning"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides progress once the call has a result even when the turn is live", () => {
+    render(
+      <ToolActionRow
+        action={{
+          ...progressAction,
+          result: {
+            toolCallID: "call-progress-1",
+            content: "done",
+            isError: false,
+          },
+        }}
+        isLive
+        progress={{
+          callID: "call-progress-1",
+          toolName: "files.glob",
+          message: "Find *.txt in ~",
+          scanned: 42,
+          matched: 3,
+          elapsedMs: 4200,
+        }}
+      />,
+    );
+    expect(screen.getByText("Done")).toBeInTheDocument();
+    expect(screen.queryByTestId("tool-progress")).not.toBeInTheDocument();
+  });
+});
+
+describe("ToolActionRow tool cancel", () => {
+  it("passes the optional reason through when cancelling", async () => {
+    const user = userEvent.setup();
+    const onCancelTool = vi.fn();
+    render(
+      <ToolActionRow
+        action={{ ...baseAction, result: null }}
+        isLive
+        onCancelTool={onCancelTool}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Cancel tool email.search" }),
+    );
+    await user.type(screen.getByLabelText("Cancel reason"), "wrong folder");
+    await user.click(
+      screen.getByRole("button", { name: "Confirm cancel tool email.search" }),
+    );
+    expect(onCancelTool).toHaveBeenCalledWith("call-debug-123", "wrong folder");
+  });
+
+  it("omits the reason when the popover is submitted blank", async () => {
+    const user = userEvent.setup();
+    const onCancelTool = vi.fn();
+    render(
+      <ToolActionRow
+        action={{ ...baseAction, result: null }}
+        isLive
+        onCancelTool={onCancelTool}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Cancel tool email.search" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Confirm cancel tool email.search" }),
+    );
+    expect(onCancelTool).toHaveBeenCalledWith("call-debug-123", undefined);
+  });
+
+  it("marks the row Cancelling… after a cancel is requested", () => {
+    render(
+      <ToolActionRow
+        action={{ ...baseAction, result: null }}
+        isLive
+        cancelling
+        onCancelTool={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("tool-cancelling")).toHaveTextContent(
+      "Cancelling…",
+    );
+    expect(
+      screen.queryByRole("button", { name: "Cancel tool email.search" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers no cancel affordance without a handler", () => {
+    render(<ToolActionRow action={{ ...baseAction, result: null }} isLive />);
+    expect(
+      screen.queryByRole("button", { name: "Cancel tool email.search" }),
+    ).not.toBeInTheDocument();
   });
 });

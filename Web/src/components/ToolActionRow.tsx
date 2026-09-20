@@ -1,9 +1,12 @@
 // Rune Weaver Dashboard — Shared tool execution action row component.
 // Renders interactive tool activity in both 'chat' (in-flight or completed turns)
 // and 'card' (run log detail modal) variants with collapsible arguments and outputs.
+// The chat variant also surfaces live per-tool progress and a per-call cancel
+// affordance while a tool is genuinely executing.
 
 import { useState, useEffect, useRef } from "react";
-import type { ToolAction, ToolResult } from "../api";
+import type { ToolAction, ToolProgress, ToolResult } from "../api";
+import { formatToolProgressCounts } from "../api";
 import { ChevronDownIcon, ChevronRightIcon, WrenchIcon } from "./icons";
 
 export interface ToolActionRowProps {
@@ -13,6 +16,17 @@ export interface ToolActionRowProps {
   // genuinely executing then, while a completed turn with no result is
   // awaiting a decision or was interrupted and must never claim to run.
   isLive?: boolean;
+  // Latest throttled progress for this call, keyed by call identity upstream.
+  // Only the live chat variant renders it; a completed row keeps its result and
+  // never shows a stale progress line.
+  progress?: ToolProgress | null;
+  // True after a cancel was requested for this call but before its terminal
+  // frame settles, so the row reports "Cancelling…" instead of implying the
+  // cancel already finished.
+  cancelling?: boolean;
+  // Requests cancellation of this one call by identity. Optional so card and
+  // history surfaces render a plain row with no cancel affordance.
+  onCancelTool?: (callID: string, reason?: string) => void;
 }
 
 interface BrowserRedirect {
@@ -542,10 +556,174 @@ function resolveResultStatus(result: ToolResult): {
   return { kind: "error", label: "Error" };
 }
 
+// Live progress line rendered under the Running pill. The engine reports
+// counters and a relative tail only, never a completion fraction, so the bar
+// stays indeterminate: a shimmer communicates activity without inventing a
+// percentage the engine cannot supply. The broad-scope warning is a dedicated
+// frame field, so the scope line renders verbatim and a pattern that happens to
+// contain a separator is never split into a false warning.
+function ToolProgressLine({ progress }: { progress: ToolProgress }) {
+  const scope = progress.message.trim();
+  const warning =
+    typeof progress.warning === "string" && progress.warning.trim().length > 0
+      ? progress.warning.trim()
+      : null;
+  return (
+    <div
+      className="chat-tool-progress"
+      data-testid="tool-progress"
+    >
+      <div className="chat-tool-progress-scope">
+        <span>{scope}</span>
+        {warning ? (
+          <span
+            className="tool-progress-scope-warning"
+            data-testid="tool-progress-scope-warning"
+            title="This search spans a broad scope"
+          >
+            — {warning}
+          </span>
+        ) : null}
+      </div>
+      <div className="tool-progress-stats" data-testid="tool-progress-stats">
+        {formatToolProgressCounts(progress)}
+      </div>
+      {progress.current ? (
+        <div
+          className="tool-progress-current"
+          data-testid="tool-progress-current"
+          title={progress.current}
+        >
+          current: {progress.current}
+        </div>
+      ) : null}
+      {/* Indeterminate work: the engine publishes no percentage, so an animated
+          shimmer proves liveness without a fake progress bar. */}
+      <div
+        className="tool-progress-shimmer"
+        data-testid="tool-progress-shimmer"
+        role="progressbar"
+        aria-label={`${progress.toolName} in progress`}
+        aria-valuetext="In progress"
+      />
+    </div>
+  );
+}
+
+// Per-call cancel affordance for the live chat row. The reason is optional, so
+// the popover submits either a trimmed note or nothing at all; Escape dismisses
+// without cancelling so an accidental open never stops a running tool.
+function ToolCancelControl({
+  toolName,
+  callID,
+  cancelling,
+  onCancelTool,
+}: {
+  toolName: string;
+  callID: string;
+  cancelling: boolean;
+  onCancelTool: (callID: string, reason?: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  // Escape closes the popover without submitting so keyboard users can back out
+  // of a cancel the same way they dismiss the browser lightbox.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        setOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [open]);
+  if (cancelling) {
+    return (
+      <span
+        className="chat-tool-cancelling"
+        role="status"
+        data-testid="tool-cancelling"
+      >
+        Cancelling…
+      </span>
+    );
+  }
+  const submit = () => {
+    const trimmed = reason.trim();
+    onCancelTool(callID, trimmed.length > 0 ? trimmed : undefined);
+    setOpen(false);
+    setReason("");
+  };
+  const dismiss = () => {
+    setOpen(false);
+    setReason("");
+  };
+  return (
+    <div className="chat-tool-cancel">
+      <button
+        type="button"
+        className="chat-tool-cancel-btn"
+        aria-label={`Cancel tool ${toolName}`}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen((previous) => !previous)}
+      >
+        ✕ Cancel tool
+      </button>
+      {open ? (
+        <div
+          className="tool-cancel-popover"
+          role="dialog"
+          aria-label={`Cancel ${toolName}`}
+        >
+          <label
+            className="tool-cancel-reason-label"
+            htmlFor={`tool-cancel-reason-${callID}`}
+          >
+            Reason (optional)
+          </label>
+          <input
+            id={`tool-cancel-reason-${callID}`}
+            className="tool-cancel-reason-input"
+            aria-label="Cancel reason"
+            value={reason}
+            onChange={(event) => setReason(event.target.value)}
+            placeholder="Why cancel this tool?"
+            autoComplete="off"
+          />
+          <div className="tool-cancel-popover-actions">
+            <button
+              type="button"
+              className="chat-tool-cancel-confirm"
+              aria-label={`Confirm cancel tool ${toolName}`}
+              onClick={submit}
+            >
+              Cancel tool
+            </button>
+            <button
+              type="button"
+              className="ghost tool-cancel-dismiss"
+              aria-label="Dismiss cancel"
+              onClick={dismiss}
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function ToolActionRow({
   action,
   variant = "chat",
   isLive = false,
+  progress = null,
+  cancelling = false,
+  onCancelTool,
 }: ToolActionRowProps) {
   const [open, setOpen] = useState(false);
   const result = action.result;
@@ -636,35 +814,53 @@ export default function ToolActionRow({
 
   return (
     <div className="chat-tool-pill">
-      <button
-        type="button"
-        className="chat-tool-toggle"
-        onClick={() => setOpen(!open)}
-      >
-        {open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-        <WrenchIcon size={12} className="chat-tool-icon" />
-        <span className="chat-tool-name">{action.toolName}</span>
-        <span className="chat-tool-call-id" title={action.callID || ""}>
-          {action.callID || ""}
-        </span>
-        {status ? (
-          <span className={`chat-tool-status ${status.kind}`}>
-            {status.label}
+      <div className="chat-tool-pill-header">
+        <button
+          type="button"
+          className="chat-tool-toggle"
+          onClick={() => setOpen(!open)}
+        >
+          {open ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
+          <WrenchIcon size={12} className="chat-tool-icon" />
+          <span className="chat-tool-name">{action.toolName}</span>
+          <span className="chat-tool-call-id" title={action.callID || ""}>
+            {action.callID || ""}
           </span>
-        ) : isLive ? (
-          <span className="chat-tool-status running">Running</span>
-        ) : (
-          <span className="chat-tool-status pending">Pending</span>
-        )}
-        {browser?.authRequired ? (
-          <span
-            className="pending-approval-badge auth-required-badge"
-            data-testid="auth-required-badge"
-          >
-            AUTH REQUIRED
-          </span>
+          {status ? (
+            <span className={`chat-tool-status ${status.kind}`}>
+              {status.label}
+            </span>
+          ) : isLive ? (
+            <span className="chat-tool-status running">Running</span>
+          ) : (
+            <span className="chat-tool-status pending">Pending</span>
+          )}
+          {browser?.authRequired ? (
+            <span
+              className="pending-approval-badge auth-required-badge"
+              data-testid="auth-required-badge"
+            >
+              AUTH REQUIRED
+            </span>
+          ) : null}
+        </button>
+        {/* Cancel is offered only for a genuinely executing call: a completed
+            row has nothing to stop, and history surfaces pass no handler. */}
+        {isLive && result == null && onCancelTool ? (
+          <ToolCancelControl
+            toolName={action.toolName}
+            callID={action.callID}
+            cancelling={cancelling}
+            onCancelTool={onCancelTool}
+          />
         ) : null}
-      </button>
+      </div>
+
+      {/* Progress renders whether collapsed or expanded so a long-running scan
+          stays observable without forcing the row open. */}
+      {isLive && result == null && progress ? (
+        <ToolProgressLine progress={progress} />
+      ) : null}
 
       {open ? (
         <div className="chat-tool-details">

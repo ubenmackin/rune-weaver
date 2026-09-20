@@ -221,7 +221,7 @@ public protocol Tool: Sendable {
 
 **Screenshot and vision gate**: `browser.navigate` carries an opt-in `includeScreenshot` flag (default false). Captures are bounded, held in memory for the turn only (never written to disk); only a content hash persists in the audit trail. The gate is model-aware: `VisionGate` strips image payloads for text-only models, `LLMRouter` hides `includeScreenshot` from tool schemas sent to text-only providers, and `SystemPromptComposer` advertises the opt-in only when `supportsVision` is true.
 
-**Search health surfaces**: search health shows in the `status` command, the dashboard Profile menu (TopNav), and the Settings Search pane — all fed by the same probe plus the live Start-flight snapshot, with tri-state Reachable/Stopped/Unknown pills (plus a Starting pill while in flight).
+**Search health surfaces**: search health shows in the `status` command, the dashboard Profile menu (TopNav), and the Settings Web pane — all fed by the same probe plus the live Start-flight snapshot, with tri-state Reachable/Stopped/Unknown pills (plus a Starting pill while in flight).
 
 ### 4. Memory Engine (shipped)
 

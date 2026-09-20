@@ -290,6 +290,11 @@ public enum OrchestratorEvent: Sendable, Codable, Equatable {
     /// authoritative for reconciliation. Missing usage emits nothing so views keep
     /// prior totals instead of zeroing.
     case turnTokens(roundIndex: Int, roundTokens: Int, turnTotalTokens: Int)
+    /// Generic indeterminate progress from a tool that is still running. Emitted
+    /// only when a tool chooses to report through its context, so subscribers must
+    /// treat it as advisory: dropping it never affects the turn's outcome, and the
+    /// terminal tool result remains the authoritative record.
+    case toolProgress(ToolProgress)
 }
 
 /// Parked narrated approval awaiting a later decision.

@@ -86,6 +86,41 @@ public enum OrchestratorToolLoop {
         rounds > max
     }
 
+    /// Longest retained slice of a user-supplied per-tool cancel reason.
+    /// The reason is fed straight back into the model's tool history, so the cap
+    /// bounds prompt growth and keeps a pasted wall of text from crowding the
+    /// conversation context on the very next round.
+    public static let maxToolCancelReasonLength = 500
+
+    /// Trims and caps a per-tool cancel reason.
+    /// - Parameter reason: Raw user reason, if any.
+    /// - Returns: The retained reason, or nil when nothing usable remains so the
+    ///   injected failure reads honestly as "no reason given" instead of trailing
+    ///   whitespace or an empty suffix.
+    public static func normalizedToolCancelReason(_ reason: String?) -> String? {
+        let trimmed = (reason ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return String(trimmed.prefix(maxToolCancelReasonLength))
+    }
+
+    /// Builds the failure injected back to the model when a user cancels one call.
+    /// The model reads this as the tool's own result, so it names the tool and its
+    /// call identifier and states plainly that the user aborted it; that lets the
+    /// loop re-scope and continue the turn instead of failing the whole request.
+    /// - Parameters:
+    ///   - toolName: Tool whose execution was aborted.
+    ///   - callID: Correlation identifier the model used for the call.
+    ///   - reason: Optional user reason, normalized here.
+    /// - Returns: A failure result carrying the cancellation notice.
+    public static func cancelledToolResult(toolName: String, callID: String, reason: String?) -> ToolResult {
+        let detail = normalizedToolCancelReason(reason) ?? "no reason given"
+        return .failure(
+            toolCallID: callID,
+            content: "Tool \(toolName) (\(callID)) cancelled by user: \(detail)",
+            errorKind: .executionError
+        )
+    }
+
     /// Builds the compact episodic record for one tool execution.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         MemoryEngine.episodicToolRecord(toolName: toolName, result: result)

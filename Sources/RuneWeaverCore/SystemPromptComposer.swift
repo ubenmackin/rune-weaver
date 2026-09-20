@@ -426,6 +426,14 @@ public enum SystemPromptComposer {
             "- Auth walls escalate to human login; downloads are manifest-only; never invent credentials "
                 + "or re-fetch with credentials."
         )
+        // Prompt-level files.glob guardrail: the tool description compacts to its
+        // first sentence, so the narrowest-baseDir guidance would otherwise never
+        // reach the model. An omitted baseDir walks the whole home directory, the
+        // usual cause of an over-broad scan.
+        lines.append(
+            "- files.glob searches the entire home directory when baseDir is omitted: pass the narrowest "
+                + "baseDir that covers the target unless a home-wide search is intended."
+        )
         lines.append(
             "- Memory writes auto-allowed and auditable: remember_fact and recall_memories are trusted "
                 + "without prompts and every write is logged; never include secrets. "

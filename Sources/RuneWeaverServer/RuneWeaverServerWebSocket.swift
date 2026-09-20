@@ -120,10 +120,12 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
         await handleWebSocketChat(message, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
     case let .cancel(message):
         await handleWebSocketCancel(message, connectionID: connectionID, context: context)
+    case let .toolCancel(message):
+        await handleWebSocketToolCancel(message, connectionID: connectionID, context: context)
     case let .decision(message):
         await handleWebSocketDecision(message, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
     case .unknown:
-        let hint = "Expected a chat frame {\"text\": \"...\"}, a decision frame, or a cancel frame"
+        let hint = "Expected a chat frame {\"text\": \"...\"}, a decision frame, a cancel frame, or a tool_cancel frame"
         await sendWSError(hint, connectionID: connectionID, context: context)
     }
 }
@@ -176,6 +178,15 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
                     turnTotalTokens: turnTotalTokens
                 )
             ),
+            encoding: .utf8
+        )
+    case let .toolProgress(progress):
+        // Generic indeterminate progress from a running tool: session-tagged so
+        // multiplexed views only apply their own turn and older clients drop the
+        // unknown type. Advisory only, so the terminal tool result stays the
+        // authoritative record.
+        try? String(
+            data: JSONEncoder().encode(WSToolProgressFrame(progress, sessionID: sessionID)),
             encoding: .utf8
         )
     case .approval:
@@ -506,6 +517,56 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
     }
 }
 
+/// Cancels one in-flight tool call over WebSocket, leaving its turn running.
+///
+/// The bus injects the cancellation as the call's failure result so the model
+/// re-scopes and continues; the terminal `tool_end` frame follows the normal
+/// event path, so a successful cancel needs no extra acknowledgement. Every
+/// outcome that stops nothing — a settled call, an unowned call, or a rejected
+/// identifier — reports through the dedicated non-terminal miss frame rather
+/// than ``WSErrorFrame``: a session-tagged `error` is a terminal turn failure to
+/// the dashboard, so reusing it here would tear down a turn that is still
+/// running. The miss frame lets the dashboard roll back only its optimistic
+/// "cancelling" mark, matching the REST fallback.
+/// - Parameters:
+///   - message: Decoded per-tool cancel frame.
+///   - connectionID: Socket that sent the request.
+///   - context: Server context owning the tool bus.
+func handleWebSocketToolCancel(_ message: WSToolCancelMessage, connectionID: UUID, context: ServerContext) async {
+    do {
+        let cancelled = try await cancelInFlightToolCall(
+            callID: message.callID,
+            sessionID: message.sessionID,
+            reason: message.reason,
+            context: context
+        )
+        guard !cancelled else { return }
+        await sendToolCancelMiss(
+            "No in-flight tool call '\(message.callID)' for this session",
+            callID: message.callID,
+            connectionID: connectionID,
+            context: context,
+            sessionID: message.sessionID
+        )
+    } catch let abort as Abort {
+        await sendToolCancelMiss(
+            abort.reason,
+            callID: message.callID,
+            connectionID: connectionID,
+            context: context,
+            sessionID: message.sessionID
+        )
+    } catch {
+        await sendToolCancelMiss(
+            error.localizedDescription,
+            callID: message.callID,
+            connectionID: connectionID,
+            context: context,
+            sessionID: message.sessionID
+        )
+    }
+}
+
 /// Resolves an approval decision received over WebSocket.
 func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
     guard !Task.isCancelled else {
@@ -565,6 +626,36 @@ func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, 
         return
     }
     guard let data = try? JSONEncoder().encode(WSErrorFrame(message: message, sessionID: sessionID)),
+          let frame = String(data: data, encoding: .utf8)
+    else { return }
+    await context.hub.send(id: connectionID, text: frame)
+}
+
+/// Sends one non-terminal per-tool cancel miss frame through the hub, best-effort.
+///
+/// Kept separate from ``sendWSError`` because the dashboard treats an owned
+/// `error` as a terminal turn failure: routing a per-tool miss through that path
+/// would drop a live turn's accumulated segments over a cancel that stopped
+/// nothing. The dedicated shape only clears the target row's optimistic mark,
+/// so this helper must never carry a turn-ending meaning.
+/// - Parameters:
+///   - message: Human-readable, non-terminal explanation.
+///   - callID: Correlation identifier of the call that could not be cancelled.
+///   - connectionID: Socket that requested the cancel.
+///   - context: Server context owning the hub.
+///   - sessionID: Owning session, when the request was scoped to one.
+func sendToolCancelMiss(
+    _ message: String,
+    callID: String,
+    connectionID: UUID,
+    context: ServerContext,
+    sessionID: UUID? = nil
+) async {
+    if Task.isCancelled {
+        return
+    }
+    let miss = WSToolCancelMissFrame(sessionID: sessionID, callID: callID, message: message)
+    guard let data = try? JSONEncoder().encode(miss),
           let frame = String(data: data, encoding: .utf8)
     else { return }
     await context.hub.send(id: connectionID, text: frame)

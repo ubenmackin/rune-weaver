@@ -1,6 +1,6 @@
 // Shared staged Start progress for the SearXNG container lifecycle.
 // Centralizes the 1s health poll, minutes-budget client cap, elapsed math, and unmount cleanup
-// so the profile menu and the Settings search pane stay in lockstep instead of duplicating the
+// so the profile menu and the Settings Web pane stay in lockstep instead of duplicating the
 // timer, cap, and stage-resolution logic. The hook owns only the stage line (live step plus
 // ticking elapsed); busy/disabled ownership stays with callers so the cap path can clear the
 // stage line and re-probe the dot without unlocking the toggle before the terminal result lands.

@@ -132,7 +132,7 @@ The engine ensures SearXNG on `serve` boot and on first `web.search`: it probes 
 
 `browser.navigate` (`readOnly`) opens a page in a fresh isolated Playwright context (no persistent profile, no cross-task storage) and returns distilled text plus snapshot refs in its envelope (`url`, `title`, `text`, `refs`, `truncated`, `authRequired`, manifest-only `downloads`). `browser.act` (`requiresApproval`) performs one validated action (click, fill, select, press, scroll) against a snapshot ref plus its URL, parking every call with target plus URL. `api.request` (`requiresApproval`) is the constrained GET/POST/PUT/DELETE path with an allowlisted header subset, 64KB body and 256KB response caps, and `ok` / `download` (manifest-only) / `preview` envelopes. Screenshots are an opt-in `includeScreenshot` on `browser.navigate` (default false), advertised only to vision-capable models and stripped from text-only history.
 
-Search health shows in the same three places: `rune-weaver status` prints `reachable` or `unreachable`, the dashboard Profile menu shows a SearXNG row with Start and Stop, and the Settings Search pane shows the same controls plus health text.
+Search health shows in the same three places: `rune-weaver status` prints `reachable` or `unreachable`, the dashboard Profile menu shows a SearXNG row with Start and Stop, and the Settings Web pane shows the same controls plus health text.
 
 ### `[email]` — `[[email.accounts]]`
 

@@ -1063,6 +1063,22 @@ a {
   text-align: left;
 }
 
+/* The live header pairs the toggle with a per-call cancel control; the toggle
+ * yields its full width so the two actions share one row without wrapping. The
+ * right inset lives on the cancel control rather than the header so a row with
+ * no cancel keeps the toggle's own 8px padding instead of doubling it. */
+.chat-tool-pill-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-tool-pill-header .chat-tool-toggle {
+  width: auto;
+  flex: 1;
+  min-width: 0;
+}
+
 .chat-tool-icon {
   color: var(--accent-purple);
 }
@@ -1133,6 +1149,163 @@ a {
   50% {
     opacity: 0.5;
   }
+}
+
+/* Live per-tool progress under the Running pill. The engine publishes counters
+ * and a relative tail only, so the bar stays an indeterminate shimmer rather
+ * than a percent track it cannot fill honestly. */
+.chat-tool-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px 8px;
+}
+
+.chat-tool-progress-scope {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-main);
+}
+
+.tool-progress-scope-warning {
+  color: #fbbf24;
+  font-weight: 600;
+}
+
+.tool-progress-stats {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.tool-progress-current {
+  font-size: 10px;
+  font-style: italic;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-progress-shimmer {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(147, 51, 234, 0.65),
+    transparent
+  );
+  background-size: 200% 100%;
+  animation: toolProgressShimmer 1.2s linear infinite;
+}
+
+@keyframes toolProgressShimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Per-call cancel control. It sits beside the toggle in the pill header and
+ * opens a reason popover; the optimistic "Cancelling…" mark replaces it until
+ * the engine's terminal frame confirms the stop. */
+.chat-tool-cancel {
+  position: relative;
+  flex-shrink: 0;
+  padding-right: 8px;
+}
+
+.chat-tool-cancel-btn {
+  padding: 2px 6px;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.chat-tool-cancel-btn:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ffffff;
+}
+
+.chat-tool-cancelling {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--status-amber);
+}
+
+.tool-cancel-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 220px;
+  padding: 10px;
+  background: #1c1c25;
+  border: 1px solid #2c2c38;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.tool-cancel-reason-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.tool-cancel-reason-input {
+  padding: 5px 7px;
+  background: #0f0f14;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-main);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.tool-cancel-reason-input:focus {
+  outline: none;
+  border-color: var(--accent-purple);
+}
+
+.tool-cancel-popover-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chat-tool-cancel-confirm {
+  padding: 3px 8px;
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: 4px;
+  color: #fca5a5;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chat-tool-cancel-confirm:hover {
+  background: rgba(239, 68, 68, 0.32);
+  color: #ffffff;
+}
+
+.tool-cancel-dismiss {
+  font-size: 11px;
 }
 
 .chat-tool-details {

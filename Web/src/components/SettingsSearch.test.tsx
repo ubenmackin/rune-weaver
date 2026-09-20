@@ -52,7 +52,7 @@ describe("SettingsManager search", () => {
     expect(DEFAULT_SEARCH_MAX_RESULTS).toBe(10);
   });
 
-  it("renders the Search pane with URL, limits, and the container hint", async () => {
+  it("renders the Web pane with URL, limits, and the container hint", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -76,7 +76,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     expect(screen.getByLabelText(/SearXNG URL/i)).toBeDefined();
     expect(screen.getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
@@ -127,7 +127,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const urlInput = screen.getByLabelText(/SearXNG URL/i);
     await user.clear(urlInput);
@@ -184,7 +184,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     // Stopped reads as a single Start toggle with no Stop beside it.
     const startToggle = screen.getByRole("button", { name: "Start SearXNG" });
@@ -245,7 +245,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     await waitFor(() => {
       expect(
@@ -281,7 +281,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     await waitFor(() => {
       expect(
@@ -329,7 +329,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const startToggle = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startToggle);
@@ -379,7 +379,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const stopToggle = await screen.findByRole("button", {
       name: "Stop SearXNG",
@@ -425,7 +425,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     // Health still probes automatically on pane open without a manual control.
     await waitFor(() => {
@@ -480,7 +480,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);
@@ -537,7 +537,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);
@@ -592,7 +592,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);
@@ -642,7 +642,7 @@ describe("SettingsManager search", () => {
     await waitFor(() => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
-    const searchTab = screen.getByRole("tab", { name: /Search/i });
+    const searchTab = screen.getByRole("tab", { name: /Web/i });
     await user.click(searchTab);
     const startBtn = screen.getByRole("button", { name: "Start SearXNG" });
     await user.click(startBtn);

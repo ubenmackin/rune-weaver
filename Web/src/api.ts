@@ -97,6 +97,106 @@ export function toNonNegativeInt(value: unknown): number | undefined {
     : undefined;
 }
 
+// Live progress for one executing tool, mirrored from the engine's throttled
+// `tool_progress` frame. Counters are monotonic while a call runs and `current`
+// is relative-only on purpose: the engine never streams absolute machine paths,
+// so the dashboard can show activity without exposing the local filesystem.
+export interface ToolProgress {
+  callID: string;
+  toolName: string;
+  // Human scope copy the engine composes (for example "Find *.txt in ~"). The
+  // broad-scope warning travels on its own `warning` field rather than folded
+  // into this line, so a pattern containing an em-dash is never misread as a
+  // scope-plus-warning pair.
+  message: string;
+  // Advisory broad-scope warning for `message`, when the engine supplies one.
+  // Optional and nullable so older frames and narrow scans degrade to no
+  // warning instead of rendering an empty span.
+  warning?: string | null;
+  scanned: number;
+  matched: number;
+  elapsedMs: number;
+  // Relative path of the item currently being examined; absent when the engine
+  // has no meaningful tail to report.
+  current?: string | null;
+}
+
+// Longest relative tail retained for display, pinned to the engine's
+// ToolProgress.maxCurrentLength (Sources/RuneWeaverCore/Tool.swift) so a
+// handcrafted frame cannot smuggle in a path the engine would have shortened.
+const MAX_TOOL_PROGRESS_CURRENT_LENGTH = 240;
+
+// Normalizes a progress tail the same way the engine's ToolProgress.relativeCurrent
+// does: trim, drop blank, refuse anything that could disclose an absolute
+// location or climb outside its root, then cap for display. The dashboard mirrors
+// this instead of trusting the wire as defense-in-depth, so a handcrafted frame
+// ("/etc/passwd", "~/.ssh", "../../secret") can never render a filesystem path
+// the engine deliberately keeps private.
+function relativeProgressCurrent(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return null;
+  // A leading slash discloses a filesystem root and a leading tilde a home
+  // directory, so neither may survive.
+  if (trimmed.startsWith("/") || trimmed.startsWith("~")) return null;
+  // A traversal segment reveals as much as an absolute path, and resolving it
+  // would require a base the reporter intentionally does not know.
+  if (trimmed.split("/").includes("..")) return null;
+  return trimmed.slice(0, MAX_TOOL_PROGRESS_CURRENT_LENGTH);
+}
+
+// Validates one live progress frame before it enters the keyed map. Required
+// numeric fields (scanned, matched, elapsedMs) share the engine's non-negative
+// integer contract so a drifted or partial payload drops instead of rendering a
+// floored or negative tally; the optional relative tail and warning degrade to
+// null rather than aborting the update.
+export function parseToolProgress(value: unknown): ToolProgress | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.callID !== "string" || value.callID.trim().length === 0)
+    return null;
+  if (typeof value.toolName !== "string" || value.toolName.trim().length === 0)
+    return null;
+  if (typeof value.message !== "string") return null;
+  const scanned = toNonNegativeInt(value.scanned);
+  const matched = toNonNegativeInt(value.matched);
+  const elapsedMs = toNonNegativeInt(value.elapsedMs);
+  if (scanned === undefined || matched === undefined || elapsedMs === undefined)
+    return null;
+  const rawWarning = typeof value.warning === "string" ? value.warning.trim() : "";
+  return {
+    callID: value.callID,
+    toolName: value.toolName,
+    message: value.message,
+    warning: rawWarning.length > 0 ? rawWarning : null,
+    scanned,
+    matched,
+    elapsedMs,
+    current: relativeProgressCurrent(value.current),
+  };
+}
+
+// Formats the elapsed portion of a progress line. Work under ten seconds keeps
+// one decimal so fast scans still look alive, while ten seconds and beyond rounds
+// to whole seconds to avoid a jittering tenth that implies false precision.
+export function formatToolProgressElapsedMs(elapsedMs: number): string {
+  const seconds = Math.max(0, elapsedMs) / 1000;
+  const rounded = seconds >= 10 ? Math.round(seconds) : Math.round(seconds * 10) / 10;
+  return `${rounded}s`;
+}
+
+// Single counts line shared by the live row: "N files checked · M matched · Ss".
+// Pluralization keys off the scanned count so a one-file scan reads honestly.
+export function formatToolProgressCounts(progress: {
+  scanned: number;
+  matched: number;
+  elapsedMs: number;
+}): string {
+  const files = `${progress.scanned} file${progress.scanned === 1 ? "" : "s"} checked`;
+  return `${files} · ${progress.matched} matched · ${formatToolProgressElapsedMs(
+    progress.elapsedMs,
+  )}`;
+}
+
 // Compares two actions chronologically: numbered rounds ascend oldest-first with
 // untracked rounds partitioning after tracked so mixed legacy+tracked history
 // holds a total order. Untracked pairs keep stored order through sort stability,
@@ -1115,6 +1215,33 @@ export function cancelChat(sessionID: string): Promise<CancelChatResponse> {
   });
 }
 
+export interface ToolCancelResponse {
+  sessionID: string;
+  callID: string;
+  cancelled: boolean;
+}
+
+// Cancels one tool call by identity, distinct from the session-wide turn cancel
+// above: a turn cancel aborts the whole reply while this stops a single
+// long-running execution and lets the model reason about the partial result.
+// The optional reason travels with the audit record; blank input is omitted so
+// the engine stores absence rather than an empty string.
+export function toolCancel(
+  sessionID: string,
+  callID: string,
+  reason?: string,
+): Promise<ToolCancelResponse> {
+  const trimmedReason = reason?.trim();
+  return fetchJson<ToolCancelResponse>("/chat/tool_cancel", {
+    method: "POST",
+    body: JSON.stringify({
+      sessionID,
+      callID,
+      ...(trimmedReason ? { reason: trimmedReason } : {}),
+    }),
+  });
+}
+
 export function listApprovals(limit?: number): Promise<ApprovalsResponse> {
   const query = limit != null && limit > 0 ? `?limit=${encodeURIComponent(limit)}` : "";
   return fetchJson<ApprovalsResponse>(`/approvals${query}`);
@@ -1638,7 +1765,7 @@ export function startElapsedSeconds(
 }
 
 // Reads live SearXNG reachability without touching settings: the profile
-// menu dot and the Settings search pane both poll this so Start and Stop
+// menu dot and the Settings Web pane both poll this so Start and Stop
 // stay honest about the container state.
 export function getSearchHealth(): Promise<SearchHealthResponse> {
   return fetchJson<SearchHealthResponse>("/search/health");
