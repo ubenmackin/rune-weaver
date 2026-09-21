@@ -251,6 +251,16 @@ extension Orchestrator {
         try Task.checkCancellation()
         await flushEpisodic(pendingEpisodic, sessionID: sessionID)
         let cumulative = accumulateSessionTokens(loopBilled, for: sessionID)
+        // A zero occupancy report carries no pressure signal, so the resumed
+        // turn keeps the parked estimate instead of dropping the gauge to 0%.
+        let resumedContextTokens: Int? =
+            if (contextTokens ?? 0) > 0 {
+                contextTokens
+            } else if (parked.contextTokens ?? 0) > 0 {
+                parked.contextTokens
+            } else {
+                nil
+            }
         return OrchestratorResponse(
             text: finalText,
             sessionID: sessionID,
@@ -259,7 +269,7 @@ extension Orchestrator {
             modelName: llm.modelInfo.name,
             contextLength: llm.modelInfo.contextLength,
             sessionTokens: cumulative,
-            contextTokens: contextTokens,
+            contextTokens: resumedContextTokens,
             isParked: false,
             warnings: resumeWarnings,
             completedAt: finalNote?.createdAt.timeIntervalSince1970
