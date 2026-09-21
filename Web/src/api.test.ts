@@ -18,6 +18,7 @@ import {
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
   deleteFact,
   deleteJob,
+  formatAllowedOriginsText,
   formatToolProgressElapsedMs,
   getAuthToken,
   getFacts,
@@ -31,6 +32,7 @@ import {
   listTrustGrants,
   MAX_CONCURRENT_CHAT_TURNS,
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
+  parseAllowedOriginsText,
   parseMaxConcurrentChatTurns,
   parsePlaceholderCallID,
   parseToolProgress,
@@ -980,5 +982,24 @@ describe("owner bearer auth client", () => {
     ).toBe(false);
     expect(isAuthenticatedHealth(null)).toBe(false);
     expect(isAuthenticatedHealth(undefined)).toBe(false);
+  });
+
+  it("parses allowed origins text into trimmed array ignoring blanks", () => {
+    expect(parseAllowedOriginsText(null)).toEqual([]);
+    expect(parseAllowedOriginsText(undefined)).toEqual([]);
+    expect(parseAllowedOriginsText("")).toEqual([]);
+    expect(parseAllowedOriginsText("  \n  ")).toEqual([]);
+    expect(
+      parseAllowedOriginsText("  *.int.volcrypt.com \n\n 192.168.1.*  \n homeassistant.local ")
+    ).toEqual(["*.int.volcrypt.com", "192.168.1.*", "homeassistant.local"]);
+  });
+
+  it("formats allowed origins array into newline-separated text", () => {
+    expect(formatAllowedOriginsText(null)).toBe("");
+    expect(formatAllowedOriginsText(undefined)).toBe("");
+    expect(formatAllowedOriginsText([])).toBe("");
+    expect(
+      formatAllowedOriginsText(["*.int.volcrypt.com", "192.168.1.*"])
+    ).toBe("*.int.volcrypt.com\n192.168.1.*");
   });
 });

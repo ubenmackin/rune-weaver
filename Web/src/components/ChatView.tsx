@@ -1116,6 +1116,12 @@ export default function ChatView({ health }: ChatViewProps) {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
+  const messageListRef = useRef<HTMLDivElement | null>(null);
+  // When the user scrolls up to review earlier messages, suppress auto-scroll
+  // so newly arriving content doesn't yank the viewport away from what they
+  // are reading.  We consider the user "at the bottom" when they are within a
+  // small threshold (150 px) of the scroll end.
+  const userHasScrolledUpRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionIDRef = useRef(sessionID);
   const isFirstMessageRef = useRef(false);
@@ -2014,6 +2020,13 @@ export default function ChatView({ health }: ChatViewProps) {
       const safeBase = toNonNegativeInt(base);
       if (safeBase != null) {
         setSessionTokens(safeBase + turnTotal);
+      }
+      // Live context-window occupancy: optional so older engines that omit it
+      // keep the prior value and done stays authoritative for reconciliation.
+      const rawContextTokens = record.contextTokens;
+      const liveContextTokens = toNonNegativeInt(rawContextTokens);
+      if (typeof liveContextTokens === "number") {
+        setContextTokens(liveContextTokens);
       }
       // Re-arm the inactivity timer while this turn is in flight so long
       // multi-round inference never looks like a dropped socket; idle viewers
@@ -3114,8 +3127,22 @@ export default function ChatView({ health }: ChatViewProps) {
   }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface]);
 
   useEffect(() => {
-    messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
+    // Own sends reset the lock before appending, so this suppresses only remote
+    // deltas while the user reviews history; the user's own bubble always lands in view.
+    if (!userHasScrolledUpRef.current) {
+      messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
+    }
   }, [messages, pending, inFlightTurn]);
+
+  // Track whether the user has scrolled away from the bottom of the message
+  // list.  A 150 px threshold accounts for padding / partial-line reveals so
+  // the scroll-lock doesn't disengage on minor touch/trackpad drift.
+  const handleMessageListScroll = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    userHasScrolledUpRef.current = distanceFromBottom > 150;
+  }, []);
 
   const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(event.target.value);
@@ -3172,6 +3199,9 @@ export default function ChatView({ health }: ChatViewProps) {
       const shed = pendingSteerRef.current.shift();
       if (shed) shedSteerId = shed.id;
     }
+    // Steering is the user's own message, so release the scroll lock so the
+    // optimistic bubble lands in view even when reviewing history.
+    userHasScrolledUpRef.current = false;
     setMessages((prev) => {
       const withSteer = [...prev, userMsg];
       const withoutShed = shedSteerId
@@ -3275,6 +3305,9 @@ export default function ChatView({ health }: ChatViewProps) {
     // retract exactly this send; turn-wide failures leave it visible.
     pendingNormalRef.current = { id: userMessage.id, text };
 
+    // The user's own send always lands in view, even when reviewing history;
+    // remote deltas keep respecting the lock until the next manual scroll.
+    userHasScrolledUpRef.current = false;
     setMessages((prev) => [...prev, userMessage].slice(-MAX_MESSAGES));
     setInput("");
     if (textareaRef.current) {
@@ -3462,6 +3495,8 @@ export default function ChatView({ health }: ChatViewProps) {
   function handleNewSession() {
     // Switching never cancels: the active turn parks into the per-session map
     // and keeps its server slot while the fresh draft starts idle.
+    // A fresh draft starts at the bottom, so release any inherited scroll lock.
+    userHasScrolledUpRef.current = false;
     parkActiveFlight();
     const nextID = newSessionId();
     knownDraftIDRef.current = nextID;
@@ -3494,6 +3529,8 @@ export default function ChatView({ health }: ChatViewProps) {
     // Keep the prior server turn alive in the background instead of
     // cancelling it; its frames accumulate in the parked map and the return
     // restores the live bubble without duplicating completed history.
+    // The target session opens at its latest message, so release the lock.
+    userHasScrolledUpRef.current = false;
     parkActiveFlight();
     knownDraftIDRef.current = null;
     setSessionID(id);
@@ -3591,7 +3628,7 @@ export default function ChatView({ health }: ChatViewProps) {
         </div>
 
         {/* Message Stream */}
-        <div className="message-list" aria-live="polite">
+        <div className="message-list" aria-live="polite" ref={messageListRef} onScroll={handleMessageListScroll}>
           {messages.length === 0 && !pending ? (
             <div className="chat-empty-state">
               <h3>What would you like to work on?</h3>

@@ -422,7 +422,9 @@ extension Orchestrator {
             billed: collected.billedTokens,
             billedTokens: &billedTokens,
             roundIndex: llmRoundIndex,
-            request: request
+            request: request,
+            workingMessages: messages,
+            currentText: collected.text
         )
         llmRoundIndex += 1
         return collected
@@ -604,7 +606,9 @@ extension Orchestrator {
         billed: Int?,
         billedTokens: inout Int?,
         roundIndex: Int,
-        request: TurnLoopRequest
+        request: TurnLoopRequest,
+        workingMessages: [Message],
+        currentText: String
     ) async {
         guard let billed, billed >= 0 else { return }
         billedTokens = (billedTokens ?? 0) + billed
@@ -614,10 +618,12 @@ extension Orchestrator {
             } else {
                 turnTotal
             }
+            let contextTokens = Self.estimatedContextTokens(for: workingMessages, finalText: currentText)
             await request.onEvent?(.turnTokens(
                 roundIndex: roundIndex,
                 roundTokens: billed,
-                turnTotalTokens: cumulativeTurnTotal
+                turnTotalTokens: cumulativeTurnTotal,
+                contextTokens: contextTokens
             ))
         }
     }

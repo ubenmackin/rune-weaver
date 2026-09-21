@@ -285,6 +285,8 @@ public struct ApiRequestTool: Tool, Sendable {
 
     /// Browser policy supplying `searxng_url` for the loopback exemption.
     private let browserConfig: BrowserConfig
+    /// Media automation policy supplying Sonarr/Radarr auto-allowed origins.
+    private let mediaConfig: MediaConfig?
     /// Configured LLM `server_url` values for the loopback exemption.
     private let llmServerURLs: [String]
     /// HTTP transport (live session by default, stub in tests).
@@ -293,10 +295,12 @@ public struct ApiRequestTool: Tool, Sendable {
     /// Creates an API request tool.
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         transport: (any ApiRequestTransport)? = nil
     ) {
         self.browserConfig = browserConfig
+        self.mediaConfig = mediaConfig
         self.llmServerURLs = llmServerURLs
         if let transport {
             self.transport = transport
@@ -329,7 +333,9 @@ public struct ApiRequestTool: Tool, Sendable {
         // DNS blocks its thread with no kernel cancellation, so the verdict hops
         // to the bounded pool instead of stalling shared tasks; literals still
         // resolve inline without waiting.
-        if let refusal = await ApiSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) {
+        if let refusal = await ApiSSRFGuard.denyReasonAsync(
+            for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs
+        ) {
             RuneWeaverLog.tools.warning("api.request denied \(method.rawValue) \(rawURL) headers=\(ApiHeaderPolicy.logSummary([:])) reason=\(refusal)")
             return .failure(refusal, callID: input.callID)
         }
@@ -547,6 +553,7 @@ public struct ApiRequestTool: Tool, Sendable {
         if let denial = await ApiSSRFGuard.denyReasonAsync(
             for: urlString,
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs
         ) {
             throw ApiRequestError.unsafeURL(denial)
@@ -678,23 +685,29 @@ public enum ApiRequestTools {
     /// Tool names in registration order.
     public static let toolNames = ["api.request"]
 
-    /// Builds the API request tool for a browser config plus LLM endpoints.
+    /// Builds the API request tool for a browser config plus media and LLM endpoints.
+    /// Media origins ride along so Sonarr/Radarr auto-allow matches `web.fetch`
+    /// instead of diverging on self-hosted hosts.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         transport: (any ApiRequestTransport)? = nil
     ) -> [any Tool] {
-        [ApiRequestTool(browserConfig: browserConfig, llmServerURLs: llmServerURLs, transport: transport)]
+        [ApiRequestTool(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport)]
     }
 
     /// Registers the API request tool, replacing same-named entries.
     public static func register(
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         transport: (any ApiRequestTransport)? = nil
     ) async {
-        for tool in makeTools(browserConfig: browserConfig, llmServerURLs: llmServerURLs, transport: transport) {
+        for tool in makeTools(
+            browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport
+        ) {
             await bus.register(tool: tool)
         }
     }

@@ -261,6 +261,21 @@ public final class ServerContext: Sendable {
     public let browserConfig: BrowserConfig
     /// Owner bearer verifier, or nil for the no-auth loopback posture.
     public let auth: ServerAuth?
+    /// Shared Playwright gateway reused across browser live-reloads so a settings PUT
+    /// refreshes allowlisted origins without dropping the managed bridge or test doubles.
+    public let browserGateway: (any BrowserPlaywrightGateway)?
+    /// Hermetic search transport preserved across live-reloads.
+    public let searchTransport: (any WebSearchTransport)?
+    /// Hermetic fetch transport preserved across live-reloads.
+    public let fetchTransport: (any WebFetchTransport)?
+    /// Hermetic API transport preserved across live-reloads.
+    public let apiTransport: (any ApiRequestTransport)?
+    /// Hermetic media transport preserved across live-reloads.
+    public let mediaTransport: (any MediaArrTransport)?
+    /// Search lifecycle ensurer preserved across live-reloads.
+    public let searchEnsurer: (any SearXNGEnsuring)?
+    /// Media secrets resolver preserved across live-reloads so injected doubles survive.
+    public let mediaSecrets: SecretsManager?
 
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
@@ -294,7 +309,14 @@ public final class ServerContext: Sendable {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
-        auth: ServerAuth? = nil
+        auth: ServerAuth? = nil,
+        browserGateway: (any BrowserPlaywrightGateway)? = nil,
+        searchTransport: (any WebSearchTransport)? = nil,
+        fetchTransport: (any WebFetchTransport)? = nil,
+        apiTransport: (any ApiRequestTransport)? = nil,
+        mediaTransport: (any MediaArrTransport)? = nil,
+        searchEnsurer: (any SearXNGEnsuring)? = nil,
+        mediaSecrets: SecretsManager? = nil
     ) {
         self.config = config
         self.conversations = conversations
@@ -328,6 +350,13 @@ public final class ServerContext: Sendable {
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
         self.auth = auth
+        self.browserGateway = browserGateway
+        self.searchTransport = searchTransport
+        self.fetchTransport = fetchTransport
+        self.apiTransport = apiTransport
+        self.mediaTransport = mediaTransport
+        self.searchEnsurer = searchEnsurer
+        self.mediaSecrets = mediaSecrets
         // Fail fast when the context would enqueue through a different queue than
         // the turn loop dequeues through; such a pair accepts steering yet never
         // delivers it, so surface the wiring mistake at construction.
@@ -370,18 +399,28 @@ public final class ServerContext: Sendable {
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig = FilesConfig(),
         mediaConfig: MediaConfig? = nil,
-        auth: ServerAuth? = nil
+        auth: ServerAuth? = nil,
+        browserGateway: (any BrowserPlaywrightGateway)? = nil,
+        searchTransport: (any WebSearchTransport)? = nil,
+        fetchTransport: (any WebFetchTransport)? = nil,
+        apiTransport: (any ApiRequestTransport)? = nil,
+        mediaTransport: (any MediaArrTransport)? = nil,
+        searchEnsurer: (any SearXNGEnsuring)? = nil,
+        mediaSecrets: SecretsManager? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
         // block the cooperative pool on SQLite reads, so disk hydration
         // suspends here on the shared serial store queue instead.
-        let scheduler = await SchedulerStore.load(from: schedulerConfig, dbPath: episodesDBPath)
-        let runs = await RunLogStore.load(dbPath: episodesDBPath)
-        let hub = WSHub()
-        let runLock = SchedulerRunLock()
+        let durable = await loadDurableServerStores(schedulerConfig: schedulerConfig, episodesDBPath: episodesDBPath)
+        let scheduler = durable.scheduler
+        let runs = durable.runs
+        let hub = durable.hub
+        let runLock = durable.runLock
         let bus = ToolBus(permissionGate: permissionGate)
         // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, API, and media tools.
+        // Injected gateway and transports ride along so hermetic doubles survive
+        // from boot through later settings live-reloads instead of resetting to live defaults.
         await BuiltinToolPlugins.registerAll(
             on: bus,
             emailConfig: emailConfig,
@@ -391,16 +430,19 @@ public final class ServerContext: Sendable {
             mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
             memoryEngine: memoryEngine,
-            embedder: embedder
+            embedder: embedder,
+            gateway: browserGateway,
+            searchTransport: searchTransport,
+            fetchTransport: fetchTransport,
+            apiTransport: apiTransport,
+            mediaTransport: mediaTransport,
+            ensurer: searchEnsurer,
+            mediaSecrets: mediaSecrets
         )
-        let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
-        let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
-        let tStates = ToolStateStore(dbPath: resolvedDBPath)
-        let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
-        let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
-        if pluginConfig.autoRescan {
-            _ = await pDiscovery.discoverAndSync(toolBus: bus)
-        }
+        let pluginStack = await resolvePluginStack(episodesDBPath: episodesDBPath, pluginConfig: pluginConfig, bus: bus)
+        let pStore = pluginStack.store
+        let tStates = pluginStack.states
+        let pDiscovery = pluginStack.discovery
         // The orchestrator shares the approvals queue so narrated gated
         // calls file parked requests tagged with their session instead of
         // dropping, with resume continuing the same session on decision.
@@ -448,30 +490,22 @@ public final class ServerContext: Sendable {
             toolStates: tStates,
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
-            auth: auth
+            auth: auth,
+            browserGateway: browserGateway,
+            searchTransport: searchTransport,
+            fetchTransport: fetchTransport,
+            apiTransport: apiTransport,
+            mediaTransport: mediaTransport,
+            searchEnsurer: searchEnsurer,
+            mediaSecrets: mediaSecrets
         )
-        // Reclaim crash-orphaned detonation machines once at boot so restarts
-        // never inherit leaked VMs; the periodic lifecycle below keeps
-        // pressure bounded afterwards. Only aggregate counts reach the audit trail.
-        let bootSummary = SandboxCleaner.cleanup(config: sandboxConfig)
-        FileSandboxAuditLog.append(bootSummary)
-        let handlerApprovals = context.approvals
-        let handlerHub = context.hub
-        await bus.setApprovalHandler { tool, call, toolContext in
-            // Decorates the shared filing path: file through
-            // `fileRequest(tool:call:sessionID:)` tagging the owning session,
-            // then broadcast and wait with a timeout.
-            let request = await handlerApprovals.fileRequest(tool: tool, call: call, sessionID: toolContext.conversationID)
-            await handlerHub.broadcastApproval(request)
-            if let onApprovalRequested {
-                await onApprovalRequested(request)
-            }
-            let decision = await handlerApprovals.waitForDecision(
-                id: request.id,
-                timeoutSeconds: ApprovalQueue.defaultDecisionTimeoutSeconds
-            )
-            return decision.approved
-        }
+        reclaimSandboxDetonationMachines(config: sandboxConfig)
+        await installLiveApprovalHandler(
+            bus: bus,
+            approvals: context.approvals,
+            hub: context.hub,
+            onApprovalRequested: onApprovalRequested
+        )
         // Stored toggles win over fresh registration defaults so restarts
         // restore operator intent; tools registered after `make` (builtin
         // plugins in the serve path) re-apply via `restoreToolStates`.
@@ -508,6 +542,93 @@ public final class ServerContext: Sendable {
             steeringQueue: steering
         )
     }()
+}
+
+/// Reclaims crash-orphaned detonation machines once at boot so restarts never inherit leaked VMs.
+/// The periodic lifecycle keeps pressure bounded afterwards; only aggregate counts reach the audit trail.
+private func reclaimSandboxDetonationMachines(config: SandboxConfig) {
+    let bootSummary = SandboxCleaner.cleanup(config: config)
+    FileSandboxAuditLog.append(bootSummary)
+}
+
+/// Installs the live approval prompt path so narrated gated calls file parked requests for their session.
+/// Broadcasts each filed request and waits with a timeout, keeping the bus wiring single-sourced for boot.
+private func installLiveApprovalHandler(
+    bus: ToolBus,
+    approvals: ApprovalQueue,
+    hub: WSHub,
+    onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
+) async {
+    let handlerApprovals = approvals
+    let handlerHub = hub
+    await bus.setApprovalHandler { tool, call, toolContext in
+        // Decorates the shared filing path: file through
+        // `fileRequest(tool:call:sessionID:)` tagging the owning session,
+        // then broadcast and wait with a timeout.
+        let request = await handlerApprovals.fileRequest(tool: tool, call: call, sessionID: toolContext.conversationID)
+        await handlerHub.broadcastApproval(request)
+        if let onApprovalRequested {
+            await onApprovalRequested(request)
+        }
+        let decision = await handlerApprovals.waitForDecision(
+            id: request.id,
+            timeoutSeconds: ApprovalQueue.defaultDecisionTimeoutSeconds
+        )
+        return decision.approved
+    }
+}
+
+/// Durable boot collaborators hydrated together so `make` carries one bundle instead of four locals.
+/// Keeps scheduler hydration single-sourced while staying within the tuple arity limit.
+private struct DurableServerStores: Sendable {
+    /// Scheduler job registry hydrated from SQLite or the bootstrap seed.
+    let scheduler: SchedulerStore
+    /// Run audit trail for chat turns and scheduler firings.
+    let runs: RunLogStore
+    /// Live sockets receiving approval broadcasts.
+    let hub: WSHub
+    /// Single-flight lock for scheduler job runs within this service process.
+    let runLock: SchedulerRunLock
+}
+
+/// Plugin persistence plus discovery resolved together so restarts reuse the same registry directory.
+/// Bundles the registry collaborators under one name to keep toggle restores single-sourced in `make`.
+private struct ResolvedPluginStack: Sendable {
+    /// Durable plugin registry store tracking discovered runes.
+    let store: ToolRegistryStore
+    /// Durable per-tool enable/disable toggles for every registered tool.
+    let states: ToolStateStore
+    /// Service discovering and syncing plugins from disk.
+    let discovery: PluginDiscoveryService
+}
+
+/// Loads durable scheduler and run stores off the cooperative pool so actor init never blocks on SQLite.
+/// Groups the four independent boot collaborators so durable hydration stays single-sourced.
+private func loadDurableServerStores(
+    schedulerConfig: SchedulerConfig,
+    episodesDBPath: String?
+) async -> DurableServerStores {
+    let scheduler = await SchedulerStore.load(from: schedulerConfig, dbPath: episodesDBPath)
+    let runs = await RunLogStore.load(dbPath: episodesDBPath)
+    return DurableServerStores(scheduler: scheduler, runs: runs, hub: WSHub(), runLock: SchedulerRunLock())
+}
+
+/// Resolves plugin persistence plus discovery so restarts reuse the same registry directory.
+/// Runs the optional rescan against the live bus, keeping toggle restores single-sourced in `make`.
+private func resolvePluginStack(
+    episodesDBPath: String?,
+    pluginConfig: PluginConfig,
+    bus: ToolBus
+) async -> ResolvedPluginStack {
+    let resolvedDBPath = episodesDBPath ?? (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
+    let pStore = ToolRegistryStore(dbPath: resolvedDBPath)
+    let tStates = ToolStateStore(dbPath: resolvedDBPath)
+    let pluginsURL = URL(fileURLWithPath: (pluginConfig.pluginsDir as NSString).expandingTildeInPath)
+    let pDiscovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: pStore)
+    if pluginConfig.autoRescan {
+        _ = await pDiscovery.discoverAndSync(toolBus: bus)
+    }
+    return ResolvedPluginStack(store: pStore, states: tStates, discovery: pDiscovery)
 }
 
 /// Storage key for the shared ``ServerContext``.
@@ -1024,21 +1145,116 @@ private func registerSettingsRoutes(_ app: Application) {
             // field cannot corrupt the stored file or live engine state.
             try config.validate()
             try config.save(to: url)
-            if let maxToolIterations = body.maxToolIterations {
-                await req.application.runeWeaver.orchestrator.updateMaxToolIterations(maxToolIterations)
-            }
-            // Push the persisted compaction threshold into the live engine so
-            // the saved value takes effect immediately instead of staying stale
-            // until the next restart.
-            if let compactionThresholdPercent = body.compactionThresholdPercent {
-                await req.application.runeWeaver.orchestrator.updateCompactionPercent(compactionThresholdPercent)
-            }
+            let liveContext = req.application.runeWeaver
+            await applyLiveOrchestratorTuning(body: body, context: liveContext)
+            await reloadLiveMediaTools(body: body, config: config, context: liveContext)
+            await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         } catch let error as ConfigError {
             throw Abort(.badRequest, reason: String(describing: error))
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
         return SettingsResponse(config: config, configPath: url.path)
+    }
+}
+
+/// Pushes persisted engine budgets into the live orchestrator so saved values take effect without a restart.
+private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: ServerContext) async {
+    if let maxToolIterations = body.maxToolIterations {
+        await context.orchestrator.updateMaxToolIterations(maxToolIterations)
+    }
+    // Push the persisted compaction threshold into the live engine so
+    // the saved value takes effect immediately instead of staying stale
+    // until the next restart.
+    if let compactionThresholdPercent = body.compactionThresholdPercent {
+        await context.orchestrator.updateCompactionPercent(compactionThresholdPercent)
+    }
+}
+
+/// Reloads media tools when media settings changed so Sonarr / Radarr picks up URLs without a restart.
+/// Stored transports ride along so hermetic doubles survive a settings PUT instead of resetting to live defaults.
+private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    guard body.media != nil else { return }
+    for tool in MediaTools.makeTools(
+        mediaConfig: config.media, transport: context.mediaTransport, secrets: context.mediaSecrets
+    ) {
+        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+    }
+}
+
+/// Rebuilds the Playwright bridge with fresh origins while preserving injected doubles.
+/// A managed subprocess gateway keeps its executable and budgets; a test double survives as-is.
+private func gatewayForLiveReload(
+    stored: (any BrowserPlaywrightGateway)?,
+    busGateway: (any BrowserPlaywrightGateway)?,
+    origins: Set<String>
+) -> (any BrowserPlaywrightGateway)? {
+    let baseGateway = stored ?? busGateway
+    if let baseGateway, let managed = baseGateway as? SubprocessPlaywrightGateway {
+        return SubprocessPlaywrightGateway(
+            pythonExecutable: managed.pythonExecutable,
+            timeoutSeconds: managed.timeoutSeconds,
+            maxOutputBytes: managed.maxOutputBytes,
+            allowlistedOrigins: origins
+        )
+    }
+    return baseGateway
+}
+
+/// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply immediately.
+/// The stored gateway and transports ride along so a settings PUT refreshes origins without dropping the bridge.
+private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    // Provider endpoints feed the SSRF exemption set, so an LLM-endpoint change
+    // must refresh live tools immediately rather than waiting for a restart.
+    guard body.media != nil || body.browserAllowedOrigins != nil || body.browserSearxngURL != nil
+        || body.searchSearxngURL != nil || body.providers != nil || body.defaultProvider != nil
+        || body.fallbackProvider != nil
+    else {
+        return
+    }
+    let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
+    let browserOrigins = ApiSSRFGuard.allowlistedOrigins(
+        browserConfig: config.browser,
+        mediaConfig: config.media,
+        llmServerURLs: appLLMOrigins
+    )
+    let busGateway: (any BrowserPlaywrightGateway)? = if let existing =
+        await context.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool
+    {
+        existing.browserGateway
+    } else {
+        nil
+    }
+    if let gatewayForReload = gatewayForLiveReload(stored: context.browserGateway, busGateway: busGateway, origins: browserOrigins) {
+        for tool in BrowserTools.makeTools(gateway: gatewayForReload, allowlistedOrigins: browserOrigins) {
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        }
+    } else {
+        for tool in BrowserTools.makeTools(allowlistedOrigins: browserOrigins) {
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        }
+    }
+    for tool in WebTools.makeTools(
+        browserConfig: config.browser,
+        mediaConfig: config.media,
+        searchTransport: context.searchTransport,
+        fetchTransport: context.fetchTransport,
+        ensurer: context.searchEnsurer
+    ) {
+        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+    }
+    for tool in ApiRequestTools.makeTools(
+        browserConfig: config.browser,
+        mediaConfig: config.media,
+        llmServerURLs: appLLMOrigins,
+        transport: context.apiTransport
+    ) {
+        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
     }
 }
 
@@ -1051,7 +1267,7 @@ private func registerWebSocketRoute(_ app: Application) {
     app.webSocket(
         PathComponent.constant(ServerPaths.websocket),
         shouldUpgrade: { request in
-            await authorizeWebSocketUpgrade(request)
+            request.eventLoop.makeSucceededFuture(authorizeWebSocketUpgrade(request))
         },
         onUpgrade: { req, webSocket in
             let context = req.application.runeWeaver

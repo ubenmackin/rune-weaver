@@ -988,22 +988,6 @@ public extension MemoryEngine {
     }
 }
 
-// MARK: - MemoryEngine Tool Plumbing Compatibility
-
-public extension MemoryEngine {
-    /// Whether one raw line is persisted tool-call plumbing.
-    /// Retained as a forwarding shim for external callers of the former
-    /// `MemoryEngine` predicate: history cleaning now agrees on the shared
-    /// tool-loop grammar, so this delegates there instead of holding a copy
-    /// that could drift.
-    /// - Parameter line: One raw line from a persisted assistant note.
-    /// - Returns: True when the line parses as a placeholder plumbing line.
-    @available(*, deprecated, message: "Use OrchestratorToolLoop.isPlaceholderPlumbingLine(_:) instead.")
-    static func isToolPlumbingLine(_ line: String) -> Bool {
-        OrchestratorToolLoop.isPlaceholderPlumbingLine(line)
-    }
-}
-
 // MARK: - MemoryEngine Automatic Recall
 
 public extension MemoryEngine {

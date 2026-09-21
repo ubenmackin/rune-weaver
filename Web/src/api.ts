@@ -1520,6 +1520,7 @@ export interface SettingsResponse {
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
+  browserAllowedOrigins?: string[];
   searchSearxngURL?: string;
   searchTimeoutSeconds?: number;
   searchMaxResults?: number;
@@ -1559,6 +1560,7 @@ export interface UpdateSettingsInput {
   browserSearxngURL?: string;
   browserSearchTimeoutSeconds?: number;
   browserMaxResults?: number;
+  browserAllowedOrigins?: string[];
   searchSearxngURL?: string;
   searchTimeoutSeconds?: number;
   searchMaxResults?: number;
@@ -1567,6 +1569,28 @@ export interface UpdateSettingsInput {
   pluginsMarketplaceIndexURL?: string;
   pluginsAutoRescan?: boolean;
   media?: MediaConfigData;
+}
+
+// Textarea mirror of the empty allowed origins defaults.
+export const DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT = "";
+
+// Parses the allowed-origins textarea into the wire shape: one pattern per line, trimmed, with blank
+// lines dropped. Blank filtering avoids persisting whitespace-only rows.
+export function parseAllowedOriginsText(text: string | undefined | null): string[] {
+  if (text == null) return [];
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// Formats an allowed-origins array for the multiline editor. Callers use this for display and reset
+// so textarea and array states never diverge.
+export function formatAllowedOriginsText(
+  origins: string[] | undefined | null
+): string {
+  if (!Array.isArray(origins)) return "";
+  return origins.join("\n");
 }
 
 // Manual mirror of FilesConfig.defaultDenyPatterns in Sources/RuneWeaverCore/Config.swift.

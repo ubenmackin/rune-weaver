@@ -177,6 +177,7 @@ extension RuneWeaverConfig {
             "searxng_url = \(Self.tomlQuoted(browser.searxngURL))",
             "search_timeout_seconds = \(browser.searchTimeoutSeconds)",
             "max_results = \(browser.maxResults)",
+            "allowed_origins = \(Self.tomlStringArray(browser.allowedOrigins))",
             ""
         ]
     }

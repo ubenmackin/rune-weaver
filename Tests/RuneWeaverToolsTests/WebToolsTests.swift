@@ -425,6 +425,33 @@ struct BrowserConfigTests {
             #expect(field == "browser.search_timeout_seconds")
         }
     }
+
+    @Test
+    func `Universal wildcard allowed origins fail closed`() throws {
+        var config = RuneWeaverConfig.default
+        config.browser.allowedOrigins = ["*"]
+        do {
+            try config.validate()
+            Issue.record("Expected validation error for universal wildcard")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error else {
+                Issue.record("Expected validationError, got \(error)")
+                return
+            }
+            #expect(field == "browser.allowed_origins")
+        }
+        config.browser.allowedOrigins = ["http://nas:8080/api"]
+        do {
+            try config.validate()
+            Issue.record("Expected validation error for path-scoped origin")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error else {
+                Issue.record("Expected validationError, got \(error)")
+                return
+            }
+            #expect(field == "browser.allowed_origins")
+        }
+    }
 }
 
 @Suite("SearXNG Runtime Search")
@@ -569,5 +596,107 @@ struct SearXNGEnsurerRuntimeTests {
         let blanked = SearXNGEnsurer.EnsureReport(reachable: false, started: false, message: "  ", diagnostics: "  ")
         #expect(blanked.message == nil)
         #expect(blanked.diagnostics == nil)
+    }
+
+    @Test
+    func `DNS resolution timeout is five seconds`() {
+        #expect(ApiSSRFGuard.dnsResolutionTimeoutSeconds == 5.0)
+    }
+
+    @Test
+    func `Allowlisted origins extracts media servers and browser allowed origins`() {
+        let browser = BrowserConfig(
+            searxngURL: "http://127.0.0.1:8888",
+            allowedOrigins: ["*.int.volcrypt.com", "192.168.1.*"]
+        )
+        let media = MediaConfig(
+            sonarr: ArrInstanceConfig(url: "http://sonarr.local:8989"),
+            radarr: ArrInstanceConfig(url: "http://10.0.0.2:7878")
+        )
+        let origins = ApiSSRFGuard.allowlistedOrigins(
+            browserConfig: browser,
+            mediaConfig: media,
+            llmServerURLs: ["http://127.0.0.1:11434"]
+        )
+        #expect(origins.contains("127.0.0.1:8888"))
+        #expect(origins.contains("127.0.0.1:11434"))
+        #expect(origins.contains("sonarr.local:8989"))
+        #expect(origins.contains("sonarr.local"))
+        #expect(origins.contains("10.0.0.2:7878"))
+        #expect(origins.contains("10.0.0.2"))
+        #expect(origins.contains("*.int.volcrypt.com"))
+        #expect(origins.contains("192.168.1.*"))
+    }
+
+    @Test
+    func `SSRF allowlist permits wildcard homelab hosts and IPs but denies link-local`() {
+        let browser = BrowserConfig(
+            allowedOrigins: ["*.int.volcrypt.com", "192.168.1.*"]
+        )
+        let origins = ApiSSRFGuard.allowlistedOrigins(browserConfig: browser)
+        // Allowlisted names prove addresses explicitly so rebinding cannot launder
+        // a blocked target behind a permitted suffix.
+        #expect(ApiSSRFGuard.vettedIPListDenial(
+            host: "nas.int.volcrypt.com", addresses: ["192.168.1.10"], origins: origins
+        ) == nil)
+        // Rebinding an allowlisted name to link-local stays denied.
+        #expect(ApiSSRFGuard.vettedIPListDenial(
+            host: "nas.int.volcrypt.com", addresses: ["169.254.169.254"], origins: origins
+        ) != nil)
+        // Wildcard IP match stays literal-only without DNS.
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser) == nil)
+        // Different IP not matched
+        #expect(ApiSSRFGuard.denyReason(for: "http://10.0.0.1/admin", browserConfig: browser) != nil)
+        // Link-local is never allowed
+        #expect(ApiSSRFGuard.denyReason(for: "http://169.254.169.254/latest/meta-data", browserConfig: browser) != nil)
+    }
+
+    @Test
+    func `Universal wildcard never authorizes a host`() {
+        #expect(ApiSSRFGuard.isHostAllowed("example.com", origins: ["*"]) == false)
+        #expect(ApiSSRFGuard.isHostAllowed("192.168.1.10", origins: ["*.*"]) == false)
+        #expect(ApiSSRFGuard.isHostAllowed("example.com", origins: ["*.example.com"]) == true)
+    }
+
+    @Test
+    func `Port-qualified wildcard stays denied while plain wildcard matches`() {
+        // A port-qualified wildcard could never match a port-less host, so it
+        // fails closed at validation instead of lingering as a dead entry.
+        #expect(AllowedOriginPattern.classifyWildcard("*.example.com:8080") == .invalidShape)
+        #expect(ApiSSRFGuard.isHostAllowed("foo.example.com", origins: ["*.example.com:8080"]) == false)
+        #expect(ApiSSRFGuard.isHostAllowed("foo.example.com", origins: ["*.example.com"]) == true)
+        var config = RuneWeaverConfig.default
+        config.browser.allowedOrigins = ["*.example.com:8080"]
+        do {
+            try config.validate()
+            Issue.record("Expected validation error for port-qualified wildcard")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error else {
+                Issue.record("Expected validationError, got \(error)")
+                return
+            }
+            #expect(field == "browser.allowed_origins")
+        } catch {
+            Issue.record("Expected ConfigError, got \(error)")
+        }
+        // The port-less edge keeps authorizing its suffix after the fix.
+        config.browser.allowedOrigins = ["*.example.com"]
+        do {
+            try config.validate()
+        } catch {
+            Issue.record("Plain leading wildcard should validate: \(error)")
+        }
+    }
+
+    @Test
+    func `Media servers are auto-allowed without double entry`() {
+        let browser = BrowserConfig(allowedOrigins: [])
+        let media = MediaConfig(
+            sonarr: ArrInstanceConfig(url: "http://192.168.1.50:8989")
+        )
+        // Without media config, 192.168.1.50 is denied
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50:8989/api/v3", browserConfig: browser) != nil)
+        // With media config, Sonarr is auto-allowed
+        #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.50:8989/api/v3", browserConfig: browser, mediaConfig: media) == nil)
     }
 }

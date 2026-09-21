@@ -34,6 +34,7 @@ private final class ParkedApprovalLLM: LLMProvider, Sendable {
     private struct ScriptState: Sendable {
         var texts: [String]
         var index: Int
+        var recordedCalls: [[Message]] = []
     }
 
     /// Guards script state below.
@@ -42,12 +43,13 @@ private final class ParkedApprovalLLM: LLMProvider, Sendable {
     /// Creates a scripted provider.
     /// - Parameter texts: Canned texts in call order.
     init(texts: [String]) {
-        self.state = OSAllocatedUnfairLock(initialState: ScriptState(texts: texts, index: 0))
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(texts: texts, index: 0, recordedCalls: []))
     }
 
     /// Replays the next canned text as a finished stream.
-    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+    func chat(messages: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
         let text: String = state.withLock { s in
+            s.recordedCalls.append(messages)
             let next = s.index < s.texts.count ? s.texts[s.index] : s.texts.last ?? ""
             s.index += 1
             return next
@@ -56,6 +58,11 @@ private final class ParkedApprovalLLM: LLMProvider, Sendable {
             continuation.yield(LLMResponse(delta: text, isFinished: true))
             continuation.finish()
         }
+    }
+
+    /// Snapshot of all message histories received by chat in call order.
+    func recordedMessages() -> [[Message]] {
+        state.withLock { $0.recordedCalls }
     }
 
     /// Unused embeddings stub.
@@ -317,5 +324,129 @@ struct NarratedApprovalTests {
         #expect(persistedCallIDs.filter { $0 == "call_mixed_gated" }.count == 1)
         #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_mixed_read" })
         #expect(!history.contains { $0.role == .tool && $0.toolCallID == "call_mixed_gated" })
+    }
+
+    @Test
+    func `Tool loop continuation approval resumes with completed tool and valid LLM wire history`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedReadTool(name: "stub.read", output: "read-ok"))
+        let round1 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.read", argumentsJSON: #"{"q":"1"}"#, callID: "call_r1")
+        ])
+        let round2 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.read", argumentsJSON: #"{"q":"2"}"#, callID: "call_r2")
+        ])
+        let postContinuationSynthesis = "Continuing: here is the final answer."
+        let llm = ParkedApprovalLLM(texts: [round1, round2, postContinuationSynthesis])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            maxToolIterations: 1,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Do work", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 1)
+        guard let request = await queue.list().first else {
+            Issue.record("Expected an engine.continue approval request")
+            return
+        }
+        #expect(request.toolName == "engine.continue")
+        let historyWhileParked = await conversations.history(for: sessionID)
+        #expect(historyWhileParked.contains { $0.role == .assistant && $0.content.contains("Awaiting continuation approval") })
+
+        // Lock-guarded collector keeps concurrent event delivery race-free under Swift 6.
+        final class CompletedCollector: Sendable {
+            private let box = OSAllocatedUnfairLock<[(name: String, callID: String, content: String)]>(initialState: [])
+            func append(_ item: (name: String, callID: String, content: String)) {
+                box.withLock { $0.append(item) }
+            }
+
+            func contains(where predicate: @Sendable (String, String, String) -> Bool) -> Bool {
+                box.withLock { items in items.contains { predicate($0.name, $0.callID, $0.content) } }
+            }
+        }
+        let collector = CompletedCollector()
+
+        #expect(await queue.decide(id: request.id, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(
+            id: request.id,
+            approved: true,
+            onEvent: { event in
+                if case let .toolCompleted(name, callID, result, _) = event {
+                    collector.append((name, callID, result.content))
+                }
+            }
+        )
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text == postContinuationSynthesis)
+        #expect(collector.contains { $0 == "engine.continue" && $1 == request.input.callID && $2.contains("Continuation granted") })
+
+        let historyAfterResume = await conversations.history(for: sessionID)
+        #expect(!historyAfterResume.contains { $0.content.contains("Awaiting continuation approval") })
+        #expect(historyAfterResume.contains { $0.role == .tool && $0.toolCallID == request.input.callID && $0.content.contains("Continuation granted") })
+
+        // Verify the LLM chat call during synthesis received a clean message sequence without consecutive assistant messages
+        let recorded = llm.recordedMessages()
+        guard let synthesisMessages = recorded.last else {
+            Issue.record("Expected recorded messages from synthesis call")
+            return
+        }
+        // Verify no waiting notes reached the LLM
+        #expect(!synthesisMessages.contains { $0.content.contains("Awaiting continuation approval") })
+        // Verify no two consecutive assistant messages anywhere in the synthesis prompt
+        for i in 1 ..< synthesisMessages.count {
+            let prev = synthesisMessages[i - 1]
+            let curr = synthesisMessages[i]
+            #expect(!(prev.role == .assistant && curr.role == .assistant), "Found consecutive assistant messages at index \(i - 1) and \(i)")
+        }
+        // The last message before model generation must be the tool result for continuation
+        #expect(synthesisMessages.last?.role == .tool)
+        #expect(synthesisMessages.last?.toolCallID == request.input.callID)
+    }
+
+    @Test
+    func `Tool loop continuation denial notifies session with stopped notice and clears waiting note`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedReadTool(name: "stub.read", output: "read-ok"))
+        let round1 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.read", argumentsJSON: #"{"q":"1"}"#, callID: "call_deny_r1")
+        ])
+        let round2 = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "stub.read", argumentsJSON: #"{"q":"2"}"#, callID: "call_deny_r2")
+        ])
+        let llm = ParkedApprovalLLM(texts: [round1, round2])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            maxToolIterations: 1,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Do work", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        guard let request = await queue.list().first else {
+            Issue.record("Expected an engine.continue approval request")
+            return
+        }
+        #expect(await queue.decide(id: request.id, approved: false) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: request.id, approved: false)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text.contains("Continuation stopped by user") == true)
+
+        let history = await conversations.history(for: sessionID)
+        #expect(!history.contains { $0.content.contains("Awaiting continuation approval") })
+        #expect(history.contains { $0.role == .assistant && $0.content.contains("Continuation stopped by user") })
     }
 }

@@ -469,11 +469,25 @@ public struct BrowserNavigateTool: Tool, Sendable {
 
     /// Playwright gateway (subprocess bridge by default, stub in tests).
     private let gateway: any BrowserPlaywrightGateway
+    /// Allowlisted origin and host patterns exempted from SSRF refusals.
+    private let allowlistedOrigins: Set<String>
+
+    /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
+    /// without dropping an injected test double.
+    public var browserGateway: any BrowserPlaywrightGateway {
+        gateway
+    }
 
     /// Creates a navigate tool.
-    /// - Parameter gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
-    public init(gateway: (any BrowserPlaywrightGateway)? = nil) {
-        self.gateway = gateway ?? SubprocessPlaywrightGateway()
+    /// - Parameters:
+    ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
+    ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
+    public init(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        allowlistedOrigins: Set<String> = []
+    ) {
+        self.gateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
+        self.allowlistedOrigins = allowlistedOrigins
     }
 
     /// Opens the page and returns its distilled snapshot.
@@ -491,7 +505,7 @@ public struct BrowserNavigateTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try await BrowserValidation.validateURLAsync(args.trimmedURL)
+            url = try await BrowserValidation.validateURLAsync(args.trimmedURL, allowlistedOrigins: allowlistedOrigins)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -621,11 +635,25 @@ public struct BrowserActTool: Tool, Sendable {
 
     /// Playwright gateway (subprocess bridge by default, stub in tests).
     private let gateway: any BrowserPlaywrightGateway
+    /// Allowlisted origin and host patterns exempted from SSRF refusals.
+    private let allowlistedOrigins: Set<String>
+
+    /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
+    /// without dropping an injected test double.
+    public var browserGateway: any BrowserPlaywrightGateway {
+        gateway
+    }
 
     /// Creates an act tool.
-    /// - Parameter gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
-    public init(gateway: (any BrowserPlaywrightGateway)? = nil) {
-        self.gateway = gateway ?? SubprocessPlaywrightGateway()
+    /// - Parameters:
+    ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
+    ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
+    public init(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        allowlistedOrigins: Set<String> = []
+    ) {
+        self.gateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
+        self.allowlistedOrigins = allowlistedOrigins
     }
 
     /// Validates and performs (or previews under dry-run) one action.
@@ -656,7 +684,7 @@ public struct BrowserActTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try await BrowserValidation.validateURLAsync(args.trimmedURL)
+            url = try await BrowserValidation.validateURLAsync(args.trimmedURL, allowlistedOrigins: allowlistedOrigins)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -732,16 +760,23 @@ public enum BrowserTools {
     public static let toolNames = ["browser.navigate", "browser.act"]
 
     /// Builds the browser tools sharing one gateway.
-    public static func makeTools(gateway: (any BrowserPlaywrightGateway)? = nil) -> [any Tool] {
-        let shared: any BrowserPlaywrightGateway = gateway ?? SubprocessPlaywrightGateway()
-        let navigate: any Tool = BrowserNavigateTool(gateway: shared)
-        let act: any Tool = BrowserActTool(gateway: shared)
+    public static func makeTools(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        allowlistedOrigins: Set<String> = []
+    ) -> [any Tool] {
+        let shared: any BrowserPlaywrightGateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
+        let navigate: any Tool = BrowserNavigateTool(gateway: shared, allowlistedOrigins: allowlistedOrigins)
+        let act: any Tool = BrowserActTool(gateway: shared, allowlistedOrigins: allowlistedOrigins)
         return [navigate, act]
     }
 
     /// Registers the browser tools, replacing same-named entries.
-    public static func register(on bus: ToolBus, gateway: (any BrowserPlaywrightGateway)? = nil) async {
-        for tool in makeTools(gateway: gateway) {
+    public static func register(
+        on bus: ToolBus,
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        allowlistedOrigins: Set<String> = []
+    ) async {
+        for tool in makeTools(gateway: gateway, allowlistedOrigins: allowlistedOrigins) {
             await bus.register(tool: tool)
         }
     }

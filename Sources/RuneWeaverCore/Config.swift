@@ -797,21 +797,38 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
         (managedPythonVenvDir as NSString).appendingPathComponent(managedPythonRelativeBin)
     }
 
+    /// Additional allowed homelab domains, hostnames, or IP patterns for browser/web navigation.
+    public var allowedOrigins: [String]
+
+    /// Default allowed origins for fresh installs.
+    public static let defaultAllowedOrigins: [String] = []
+
     /// Creates a browser config.
     public init(
         searxngURL: String = defaultSearxngURL,
         searchTimeoutSeconds: Int = defaultSearchTimeoutSeconds,
-        maxResults: Int = defaultMaxResults
+        maxResults: Int = defaultMaxResults,
+        allowedOrigins: [String] = defaultAllowedOrigins
     ) {
         self.searxngURL = searxngURL
         self.searchTimeoutSeconds = searchTimeoutSeconds
         self.maxResults = maxResults
+        self.allowedOrigins = allowedOrigins
     }
 
     private enum CodingKeys: String, CodingKey {
         case searxngURL = "searxng_url"
         case searchTimeoutSeconds = "search_timeout_seconds"
         case maxResults = "max_results"
+        case allowedOrigins = "allowed_origins"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        searxngURL = try container.decodeIfPresent(String.self, forKey: .searxngURL) ?? Self.defaultSearxngURL
+        searchTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .searchTimeoutSeconds) ?? Self.defaultSearchTimeoutSeconds
+        maxResults = try container.decodeIfPresent(Int.self, forKey: .maxResults) ?? Self.defaultMaxResults
+        allowedOrigins = try container.decodeIfPresent([String].self, forKey: .allowedOrigins) ?? Self.defaultAllowedOrigins
     }
 }
 

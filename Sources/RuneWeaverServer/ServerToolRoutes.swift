@@ -36,8 +36,13 @@ func buildToolInfo(
     }
 
     // The server owns which tools expose settings so the dashboard never
-    // keeps a name allowlist: media tools share the Sonarr/Radarr patch.
-    let hasConfig = tool.name == "media.arr" || tool.name == "media.arr.read"
+    // keeps a name allowlist: media tools share the Sonarr/Radarr patch,
+    // and browser/web tools configure allowed homelab origins.
+    let hasConfig = tool.name == "media.arr"
+        || tool.name == "media.arr.read"
+        || tool.name == "browser.navigate"
+        || tool.name == "browser.act"
+        || tool.name == "web.fetch"
 
     return ToolInfo(
         tool,

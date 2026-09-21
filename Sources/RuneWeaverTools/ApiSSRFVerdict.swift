@@ -56,7 +56,7 @@ extension ApiSSRFGuard {
             return .denied("SSRF denied: refusing link-local address '\(host)' (fe80::/10).")
         }
         if isLoopbackHost(host) {
-            if let key = originKey(for: url), origins.contains(key) {
+            if isOriginAllowed(url: url, origins: origins) {
                 return .allowed
             }
             // Exemption wording follows the configured origins so fetch-only
@@ -69,22 +69,27 @@ extension ApiSSRFGuard {
         }
         let canonical = normalizedHost(host)
         if let value = ipv4Value(canonical), isSensitiveIPv4Value(value) {
-            if let key = originKey(for: url), origins.contains(key) {
+            if isOriginAllowed(url: url, origins: origins) {
                 return .allowed
             }
             return .denied("SSRF denied: refusing private or reserved IPv4 host '\(host)'.")
         }
         if isSensitiveIPv6Host(canonical) {
-            if let key = originKey(for: url), origins.contains(key) {
+            if isOriginAllowed(url: url, origins: origins) {
                 return .allowed
             }
             return .denied("SSRF denied: refusing private or loopback IPv6 host '\(host)'.")
         }
-        if let key = originKey(for: url), origins.contains(key) {
+        if isIPAddressLiteral(host) {
+            // Literals carry no resolver alias to rebind, so the allowlist verdict above
+            // plus the public-literal default below settle them without DNS.
             return .allowed
         }
-        if isIPAddressLiteral(host) {
-            return .allowed
+        if isOriginAllowed(url: url, origins: origins) {
+            // An allowlisted name can still rebind to metadata or link-local between
+            // check and dial, so even allowlisted DNS names must prove every resolved
+            // address stays outside never-allowlisted space before dialing.
+            return .needsDNS(host: host)
         }
         // Every remaining hostname must prove its addresses via the resolver: local DNS can
         // rebind reserved names to loopback or private ranges, so absence of proof fails closed.
@@ -123,26 +128,141 @@ extension ApiSSRFGuard {
         "SSRF denied: hostname '\(host)' could not be verified (DNS unavailable; fail closed)."
     }
 
+    /// Reports whether a URL's origin or host matches any allowlisted origin or pattern.
+    /// Exact `host:port` compares through the normalized origin key while bare hosts
+    /// compare through the dedicated host-pattern matcher, so callers can tell why a
+    /// full-URL entry alone never authorizes a host.
+    static func isOriginAllowed(url: URL, origins: Set<String>) -> Bool {
+        guard !origins.isEmpty else { return false }
+        if let key = originKey(for: url), origins.contains(key.lowercased()) {
+            return true
+        }
+        guard let rawHost = url.host else { return false }
+        return isHostAllowed(rawHost, origins: origins)
+    }
+
+    /// Reports whether a host or IP string matches any allowlisted origin or pattern.
+    /// Only DNS-host semantics apply here: exact hosts, `*.suffix` domain wildcards,
+    /// and `prefix.*` IP wildcards. File-path glob characters (`?`, `[...]`, `**`)
+    /// and the universal `*` never match, so a forged exemption set cannot silently
+    /// broaden; exact `host:port` stays with the origin-key check in `isOriginAllowed`.
+    static func isHostAllowed(_ host: String, origins: Set<String>) -> Bool {
+        guard !origins.isEmpty else { return false }
+        let cleanedHost = ApiSSRFOrigin.cleanedHostBase(host)
+        guard !cleanedHost.isEmpty else { return false }
+        let loweredHost = cleanedHost.lowercased()
+        // Canonical form collapses resolver-accepted IP spellings so hex, octal, and
+        // short aliases compare against the same allowlisted address.
+        let normalizedHost = ApiSSRFOrigin.normalizedHost(host).lowercased()
+        if origins.contains(loweredHost) || origins.contains(normalizedHost) {
+            return true
+        }
+        for pattern in origins {
+            let loweredPattern = pattern.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !loweredPattern.isEmpty else { continue }
+            // Universal shapes never authorize: validation rejects them, and the
+            // matcher stays closed even when a forged set carries one. The closed
+            // set is shared with validation so the two cannot drift.
+            if AllowedOriginPattern.isUniversalWildcard(loweredPattern) {
+                continue
+            }
+            // Full URLs, paths, queries, and fragments are not host patterns: the
+            // allowlist builder stores their host and key variants separately, so the
+            // raw entry itself never authorizes a host here.
+            if loweredPattern.contains("://") || loweredPattern.contains("/") || loweredPattern.contains("?")
+                || loweredPattern.contains("#") || loweredPattern.contains(" ")
+            {
+                continue
+            }
+            if loweredPattern.contains("\u{00}") || loweredPattern.unicodeScalars.contains(where: {
+                $0.value < 0x20 || $0.value == 0x7F
+            }) {
+                continue
+            }
+            // Wildcard edges share validation with config so only a single
+            // leading `*.` or trailing `.*` can authorize; the shape verdict
+            // already rejects file-glob syntax, malformed edges, and
+            // port-qualified wildcards, which stay denied here instead of
+            // persisting as entries that could never match a port-less host.
+            switch AllowedOriginPattern.classifyWildcard(loweredPattern) {
+            case .leading:
+                let suffix = String(loweredPattern.dropFirst(1))
+                let bare = String(loweredPattern.dropFirst(2))
+                if loweredHost.hasSuffix(suffix) || normalizedHost.hasSuffix(suffix)
+                    || loweredHost == bare || normalizedHost == bare
+                {
+                    return true
+                }
+                continue
+            case .trailing:
+                let prefix = String(loweredPattern.dropLast(1))
+                if loweredHost.hasPrefix(prefix) || normalizedHost.hasPrefix(prefix) {
+                    return true
+                }
+                continue
+            case .invalidShape, .invalidSuffix, .invalidStem:
+                continue
+            case .none:
+                break
+            }
+            // Any remaining wildcard or glob syntax has no host meaning and stays denied.
+            if loweredPattern.contains("*") || AllowedOriginPattern.containsGlobSyntax(loweredPattern) {
+                continue
+            }
+            // Exact host comparison on both spellings so canonical IP aliases match.
+            if !loweredPattern.contains(":") {
+                if loweredHost == loweredPattern || normalizedHost == loweredPattern {
+                    return true
+                }
+                continue
+            }
+            // A `host:port` entry never authorizes a bare host probe: port-qualified
+            // exemptions compare through the origin key in `isOriginAllowed`.
+            continue
+        }
+        return false
+    }
+
     /// Vets one address list against the shared resolved-range table.
     /// Centralizes the range decision so the system resolver and the canned
     /// debug proof cannot diverge on what counts as blocked.
     /// - Parameters:
     ///   - host: Hostname the addresses were claimed for, for honest wording.
     ///   - addresses: Resolved IP literals to vet.
+    ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
     /// - Returns: Refusal reason, or nil when every address is dialable.
-    static func vettedIPListDenial(host: String, addresses: [String]) -> String? {
+    static func vettedIPListDenial(host: String, addresses: [String], origins: Set<String> = []) -> String? {
         guard !addresses.isEmpty else {
             return unverifiedDenial(for: host)
         }
+        // An allowlisted name still proves every address: its exemption covers only
+        // private and loopback resolutions, while metadata and link-local stay denied
+        // even when allowlisted so a rebinding name cannot launder a blocked target.
+        let hostAllowlisted = isHostAllowed(host, origins: origins)
+        if isMetadataHost(host) {
+            return "SSRF denied: refusing metadata host '\(host)'."
+        }
         for ipAddress in addresses {
-            if isLinkLocalIPv4(ipAddress) || isLinkLocalIPv6(ipAddress) || isLoopbackHost(ipAddress) {
+            if isLinkLocalIPv4(ipAddress) || isLinkLocalIPv6(ipAddress) || isMetadataHost(ipAddress) {
+                return "SSRF denied: hostname '\(host)' resolves to blocked address"
+            }
+            if isLoopbackHost(ipAddress) {
+                if hostAllowlisted || isHostAllowed(ipAddress, origins: origins) {
+                    continue
+                }
                 return "SSRF denied: hostname '\(host)' resolves to blocked address"
             }
             let canonicalIP = normalizedHost(ipAddress)
             if let value = ipv4Value(canonicalIP), isSensitiveIPv4Value(value) {
+                if hostAllowlisted || isHostAllowed(canonicalIP, origins: origins) {
+                    continue
+                }
                 return "SSRF denied: hostname '\(host)' resolves to blocked address"
             }
             if isSensitiveIPv6Host(canonicalIP) {
+                if hostAllowlisted || isHostAllowed(canonicalIP, origins: origins) {
+                    continue
+                }
                 return "SSRF denied: hostname '\(host)' resolves to blocked address"
             }
         }

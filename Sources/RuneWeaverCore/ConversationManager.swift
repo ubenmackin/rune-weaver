@@ -404,9 +404,30 @@ public actor ConversationManager {
         await readSingleMerged(id: sessionID)?.messages.count ?? 0
     }
 
-    /// Builds the working history with the system prompt first.
+    /// Builds the working history with the system prompt first, excluding temporary waiting-on-approval notices.
+    /// Marker identity leads so wording edits cannot leak interim notes to the provider
+    /// and recreate consecutive-assistant sequencing failures.
     public func workingHistory(for sessionID: UUID, systemPrompt: String?) async -> [Message] {
-        await history(for: sessionID).withSystemPrompt(systemPrompt)
+        let raw = await history(for: sessionID).withSystemPrompt(systemPrompt)
+        return raw.filter { msg in
+            !OrchestratorToolLoop.isWaitingOnApprovalMessage(msg)
+        }
+    }
+
+    /// Removes temporary waiting-on-approval notices from a session's persistent history.
+    /// Read-only lookup keeps unknown identifiers from materializing empty sessions
+    /// when merely clearing notices. Marker identity leads with content as legacy fallback
+    /// so pre-marker rows still clear.
+    public func removeWaitingMessages(from sessionID: UUID) async {
+        guard var session = await session(id: sessionID) else { return }
+        let initialCount = session.messages.count
+        session.messages.removeAll { msg in
+            OrchestratorToolLoop.isWaitingOnApprovalMessage(msg)
+        }
+        guard session.messages.count < initialCount else { return }
+        session.updatedAt = Date()
+        sessions[session.id] = session
+        await persist(session)
     }
 
     /// Bulk-replaces history for session resume with truncation.

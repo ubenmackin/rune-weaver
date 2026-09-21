@@ -242,13 +242,11 @@ public enum BrowserBounds: Sendable {
 /// Fail-closed validation for browser bridge inputs.
 public enum BrowserValidation: Sendable {
     /// Validates a navigation or act URL, rejecting control bytes, non-web schemes, and SSRF targets.
-    public static func validateURL(_ url: String) throws -> String {
+    public static func validateURL(_ url: String, allowlistedOrigins: Set<String> = []) throws -> String {
         let trimmed = try validatedURLLiteral(url)
-        // Browser flows never dial local origins, so the empty exemption holds
-        // the fail-closed line for every loopback and LAN spelling with no
-        // config to forge; shares the single SSRF range table with the web
-        // and API tools.
-        if let refusal = ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: []) {
+        // Shares the single SSRF range table with the web and API tools, honoring
+        // any configured allowlisted origins or homelab patterns.
+        if let refusal = ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: allowlistedOrigins) {
             throw BrowserError.invalidURL("Invalid URL: \(refusal)")
         }
         return trimmed
@@ -259,11 +257,9 @@ public enum BrowserValidation: Sendable {
     /// shape so a wedged resolver cannot stall shared tasks; the verdict stays
     /// point-in-time, so callers pin the address at dial time. The synchronous
     /// shape stays for callers that cannot suspend.
-    public static func validateURLAsync(_ url: String) async throws -> String {
+    public static func validateURLAsync(_ url: String, allowlistedOrigins: Set<String> = []) async throws -> String {
         let trimmed = try validatedURLLiteral(url)
-        // Same empty exemption as the synchronous shape: browser flows never
-        // dial local origins, so every loopback and LAN spelling fails closed.
-        if let refusal = await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: []) {
+        if let refusal = await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: allowlistedOrigins) {
             throw BrowserError.invalidURL("Invalid URL: \(refusal)")
         }
         return trimmed
@@ -445,12 +441,15 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public let timeoutSeconds: TimeInterval
     /// Maximum stdout bytes retained. Defaults to the shared detonation bound.
     public let maxOutputBytes: Int
+    /// Allowlisted origin and host patterns exempted from SSRF refusals.
+    public let allowlistedOrigins: Set<String>
 
     /// Creates a subprocess gateway.
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
-        maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes
+        maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
+        allowlistedOrigins: Set<String> = []
     ) {
         if let trimmed = NormalizedText.value(pythonExecutable) {
             self.pythonExecutable = trimmed
@@ -461,6 +460,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
         }
         self.timeoutSeconds = timeoutSeconds
         self.maxOutputBytes = maxOutputBytes
+        self.allowlistedOrigins = allowlistedOrigins
     }
 
     /// Navigates in a fresh isolated context and returns a bounded snapshot.
@@ -470,7 +470,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
 
     /// Navigates resolving the interpreter from the fast path only when dry-running.
     public func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
-        let validated = try await BrowserValidation.validateURLAsync(url)
+        let validated = try await BrowserValidation.validateURLAsync(url, allowlistedOrigins: allowlistedOrigins)
         var payload: [String: Any] = ["op": "navigate", "url": validated]
         if includeScreenshot {
             payload["includeScreenshot"] = true
@@ -486,7 +486,7 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// dry-run path because read-only opens still validate through the fast
     /// interpreter without provisioning.
     public func act(action: BrowserActAction, ref: String, text: String?, url: String) async throws -> BrowserActResult {
-        let validatedURL = try await BrowserValidation.validateURLAsync(url)
+        let validatedURL = try await BrowserValidation.validateURLAsync(url, allowlistedOrigins: allowlistedOrigins)
         let validatedRef = try BrowserValidation.validateRef(ref)
         let validatedText = try BrowserValidation.validateActText(action: action, text: text)
         var payload: [String: Any] = [

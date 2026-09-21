@@ -193,6 +193,44 @@ public enum OrchestratorToolLoop {
         return "Waiting for approval to run \(joined). Approve in the approvals inbox to continue."
     }
 
+    /// Sentinel marking waiting-on-approval notes structurally so history filtering
+    /// survives wording tweaks; content matching stays only for rows written before
+    /// the marker existed.
+    public static let waitingOnApprovalMarker = "waiting-on-approval"
+
+    /// Builds a waiting-on-approval note carrying the structural marker.
+    /// The marker rides in `toolCallID` so no persistence migration is needed:
+    /// existing `tool_call_id` storage already round-trips it alongside content.
+    public static func waitingNoteMessage(text: String) -> Message {
+        Message(role: .assistant, content: text, toolCallID: waitingOnApprovalMarker)
+    }
+
+    /// Whether an assistant note matches the synthetic waiting-on-approval notice.
+    /// Legacy content fallback for rows persisted before the structural marker.
+    public static func isWaitingOnApprovalMessage(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed == "The agent has completed its allocated tool rounds. Awaiting continuation approval." {
+            return true
+        }
+        if trimmed.hasPrefix("Waiting for approval to run "),
+           trimmed.hasSuffix(". Approve in the approvals inbox to continue.")
+        {
+            return true
+        }
+        return false
+    }
+
+    /// Whether a message is a waiting-on-approval notice, preferring the marker.
+    /// Structural identity keeps provider sequencing stable when user-visible
+    /// wording changes; content sniffing remains only for pre-marker history.
+    public static func isWaitingOnApprovalMessage(_ message: Message) -> Bool {
+        guard message.role == .assistant else { return false }
+        if message.toolCallID == waitingOnApprovalMarker {
+            return true
+        }
+        return isWaitingOnApprovalMessage(message.content)
+    }
+
     /// Builds the session notice recording a denied narrated approval.
     public static func deniedApprovalMessage(for toolName: String) -> String {
         let trimmed = toolName.trimmingCharacters(in: .whitespacesAndNewlines)

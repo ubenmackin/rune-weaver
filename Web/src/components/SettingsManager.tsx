@@ -9,6 +9,9 @@ import {
   DEFAULT_FILES_DENY_PATTERNS_TEXT,
   formatDenyPatternsText,
   parseDenyPatternsText,
+  DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT,
+  formatAllowedOriginsText,
+  parseAllowedOriginsText,
   DEFAULT_SANDBOX_ARCHIVE_SESSION_TTL_MINUTES,
   DEFAULT_SANDBOX_CONTAINER_BASE_IMAGE,
   DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES,
@@ -373,6 +376,14 @@ export default function SettingsManager() {
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const mediaSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Homelab allowed origins for browser & web tools (multiline text, one host/domain per line)
+  const [browserAllowedOriginsText, setBrowserAllowedOriginsText] = useState<string>(
+    DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT
+  );
+  const [browserSaveSuccess, setBrowserSaveSuccess] = useState(false);
+  const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
+  const [browserModalError, setBrowserModalError] = useState<string | null>(null);
   // Access-management flow: rotating the single owner token signs out every
   // other device the moment the engine swaps it, so the dashboard asks twice
   // before calling the route, then reveals the new token once. The API client
@@ -1067,6 +1078,7 @@ export default function SettingsManager() {
     setSearchMaxResults(
       data.browserMaxResults ?? data.searchMaxResults ?? DEFAULT_SEARCH_MAX_RESULTS
     );
+    setBrowserAllowedOriginsText(formatAllowedOriginsText(data.browserAllowedOrigins));
     setPluginsDir(data.pluginsDir ?? "~/.runeweaver/plugins");
     setPluginsMarketplaceIndexURL(
       data.pluginsMarketplaceIndexURL ??
@@ -1115,8 +1127,8 @@ export default function SettingsManager() {
     }
   }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
 
-  // Unmount must never leave the browser provision poll or the media
-  // success-then-close tick running behind a closed pane.
+  // Unmount must never leave the browser provision poll or media tick
+  // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
     const mediaRef = mediaSaveTimerRef;
@@ -1466,6 +1478,7 @@ export default function SettingsManager() {
         browserSearxngURL: trimmedSearxngURL,
         browserSearchTimeoutSeconds: timeoutNum,
         browserMaxResults: maxResultsNum,
+        browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
         searchSearxngURL: trimmedSearxngURL,
         searchTimeoutSeconds: timeoutNum,
         searchMaxResults: maxResultsNum,
@@ -1512,6 +1525,25 @@ export default function SettingsManager() {
       setMediaModalError(err instanceof ApiError ? err.message : "Failed to save media settings");
     } finally {
       setMediaSaveLoading(false);
+    }
+  };
+
+  const handleSaveBrowserConfig = async () => {
+    setBrowserSaveLoading(true);
+    setBrowserModalError(null);
+    try {
+      const updated = await updateSettings({
+        browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
+      });
+      // Refresh only the browser field so unsaved edits in other tabs survive;
+      // a full repopulate would clobber them. The modal stays open until an
+      // explicit close so the success confirmation remains readable.
+      setBrowserAllowedOriginsText(formatAllowedOriginsText(updated.browserAllowedOrigins));
+      setBrowserSaveSuccess(true);
+    } catch (err) {
+      setBrowserModalError(err instanceof ApiError ? err.message : "Failed to save browser settings");
+    } finally {
+      setBrowserSaveLoading(false);
     }
   };
 
@@ -2721,6 +2753,8 @@ export default function SettingsManager() {
                             onClick={() => {
                               setMediaModalError(null);
                               setMediaSaveSuccess(false);
+                              setBrowserModalError(null);
+                              setBrowserSaveSuccess(false);
                               setConfiguringToolName(tool.name);
                             }}
                             style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -4191,6 +4225,138 @@ export default function SettingsManager() {
               disabled={!tokenSavedAck}
             >
               Done
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Browser and Web tools configuration modal (browser.navigate, browser.act, web.fetch).
+          Configures homelab allowlist patterns and displays auto-allowed media servers. */}
+      {configuringToolName === "browser.navigate" ||
+      configuringToolName === "browser.act" ||
+      configuringToolName === "web.fetch" ? (
+        <Modal
+          label="Configure Browser & Web Automation"
+          onClose={() => {
+            if (!browserSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Browser & Web Automation</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!browserSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={browserSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {browserModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{browserModalError}</span>
+              </div>
+            )}
+            {browserSaveSuccess && (
+              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <CheckIcon size={16} />
+                <span>Browser & web settings saved!</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Configure allowed homelab hosts and domain patterns for <code>browser.navigate</code>, <code>browser.act</code>, and <code>web.fetch</code>.
+              Requests to private RFC 1918 IPs and internal networks are blocked by default to prevent SSRF, but allowed origins and auto-allowed services can be safely accessed.
+            </p>
+
+            {/* Auto-Allowed Services Card */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <h4 style={{ margin: "0 0 6px 0", fontSize: "0.88rem" }}>Auto-Allowed Services</h4>
+              <p className="muted text-sm" style={{ margin: "0 0 10px 0" }}>
+                Configured media automation servers and SearXNG are automatically trusted and exempt from SSRF blocking without needing to be re-entered.
+              </p>
+              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
+                  <span style={{ fontWeight: 500 }}>Sonarr (TV Shows)</span>
+                  {sonarrUrl.trim() ? (
+                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
+                      {sonarrUrl.trim()}
+                    </span>
+                  ) : (
+                    <span className="muted text-xs">Not configured</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
+                  <span style={{ fontWeight: 500 }}>Radarr (Movies)</span>
+                  {radarrUrl.trim() ? (
+                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
+                      {radarrUrl.trim()}
+                    </span>
+                  ) : (
+                    <span className="muted text-xs">Not configured</span>
+                  )}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.85rem", padding: "6px 10px", borderRadius: "6px", backgroundColor: "var(--bg-tertiary, #1a202c)" }}>
+                  <span style={{ fontWeight: 500 }}>SearXNG (Search)</span>
+                  {searchSearxngURL.trim() ? (
+                    <span className="badge badge-success" style={{ fontSize: "0.75rem" }}>
+                      {searchSearxngURL.trim()}
+                    </span>
+                  ) : (
+                    <span className="muted text-xs">Not configured</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Allowed Origins Multiline Textarea */}
+            <div className="form-group" style={{ marginBottom: "10px" }}>
+              <label htmlFor="browser-allowed-origins-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>
+                  Allowed Homelab Hosts & Domains{" "}
+                  <span className="muted text-sm">
+                    ({parseAllowedOriginsText(browserAllowedOriginsText).length}{" "}
+                    {parseAllowedOriginsText(browserAllowedOriginsText).length === 1 ? "host" : "hosts"})
+                  </span>
+                </span>
+              </label>
+              <textarea
+                id="browser-allowed-origins-textarea"
+                className="input-field"
+                style={{ fontFamily: "monospace", fontSize: "0.82rem" }}
+                rows={6}
+                value={browserAllowedOriginsText}
+                onChange={(e) => setBrowserAllowedOriginsText(e.target.value)}
+                placeholder={"*.int.volcrypt.com\n192.168.1.*\nhomeassistant.local\n10.0.0.5:8123"}
+              />
+              <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                One host, domain pattern, or IP pattern per line. Supports exact hostnames (e.g. <code>nas.local</code>),
+                exact origins with ports (e.g. <code>192.168.1.50:8080</code>), or wildcards (e.g. <code>*.int.volcrypt.com</code> or <code>192.168.1.*</code>). Blank lines are ignored.
+              </span>
+            </div>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={browserSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveBrowserConfig()}
+              disabled={browserSaveLoading}
+            >
+              {browserSaveLoading ? "Saving…" : "Save Configuration"}
             </button>
           </div>
         </Modal>
