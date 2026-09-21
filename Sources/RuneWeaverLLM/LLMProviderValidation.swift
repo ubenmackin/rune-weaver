@@ -99,7 +99,7 @@ func openAIChatRequestBody(
                         "type": "function",
                         "function": [
                             "name": call.name,
-                            "arguments": call.argumentsJSON
+                            "arguments": sanitizedToolCallArgumentsJSON(call.argumentsJSON)
                         ]
                     ]
                 }
@@ -160,6 +160,22 @@ func openAIChatRequestBody(
     } catch {
         throw LLMProviderError.invalidResponse("Could not encode chat request: \(error.localizedDescription)")
     }
+}
+
+/// Validates and returns tool call arguments for the wire, falling back to "{}" if malformed.
+/// Protects OpenAI-compatible and llama.cpp endpoints (which strictly parse arguments as JSON)
+/// from 500 errors when encountering legacy truncated placeholders (e.g. ending in '…') or invalid syntax.
+/// The wire expects an object string, so non-object valid JSON (arrays, scalars, null) also falls back.
+func sanitizedToolCallArgumentsJSON(_ raw: String) -> String {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return "{}" }
+    guard let data = trimmed.data(using: .utf8),
+          let parsed = try? JSONSerialization.jsonObject(with: data),
+          parsed is [String: Any]
+    else {
+        return "{}"
+    }
+    return trimmed
 }
 
 /// Parses one persisted assistant placeholder line into a structured call.
@@ -286,7 +302,7 @@ func openAIResponsesRequestBody(
                         "type": "function_call",
                         "call_id": call.id,
                         "name": call.name,
-                        "arguments": call.argumentsJSON
+                        "arguments": sanitizedToolCallArgumentsJSON(call.argumentsJSON)
                     ])
                 }
             }

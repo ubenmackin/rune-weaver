@@ -1495,6 +1495,25 @@ a {
   padding: 20px;
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
+}
+
+.modal-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.modal-body::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.modal-body::-webkit-scrollbar-thumb {
+  background: var(--border-color, #2d3748);
+  border-radius: 4px;
+}
+
+.modal-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted, #718096);
 }
 
 .modal-footer {
@@ -2386,6 +2405,24 @@ button:disabled {
   padding-bottom: 40px;
 }
 
+/* Standalone Settings Window (macOS native window wrapper) */
+.standalone-settings {
+  min-height: 100vh;
+  background: var(--bg-main);
+  overflow-y: auto;
+}
+
+.standalone-settings .app-main-content {
+  padding: 16px 20px;
+  min-height: 100vh;
+  box-sizing: border-box;
+}
+
+.standalone-settings .panel {
+  min-height: calc(100vh - 32px);
+  margin-bottom: 0;
+}
+
 .settings-config-badge {
   display: inline-flex;
   align-items: center;
@@ -2565,6 +2602,15 @@ button:disabled {
   white-space: pre;
 }
 
+.allowed-origins-textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  height: auto;
+  min-height: 140px;
+  resize: vertical;
+  white-space: pre;
+}
+
 .form-row {
   display: flex;
   gap: 16px;
@@ -2581,6 +2627,9 @@ button:disabled {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-secondary, #cbd5e1);
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: default;
 }
 
 .form-group-hint {

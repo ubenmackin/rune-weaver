@@ -77,23 +77,35 @@ public struct ToolContext: Sendable, Equatable {
 // MARK: - Tool call placeholder
 
 public extension ToolInput {
+    /// Generous cap for arguments embedded in a persisted placeholder line.
+    /// Bounds `sessions`/`messages` persistence and every subsequent wire
+    /// serialization when tool payloads grow large (e.g. email bodies), while
+    /// staying far above the legacy 160-char bound so ordinary calls persist
+    /// intact. Over-limit lines truncate with an ellipsis and degrade to `{}`
+    /// on the wire via `sanitizedToolCallArgumentsJSON`, keeping strict
+    /// backends from 400ing instead of sending a non-object fragment.
+    static let placeholderArgumentsLimit = 4000
+
     /// Builds the assistant placeholder stored when a turn contains only tool calls.
     static func placeholderContent(for calls: [ToolInput]) -> String {
         guard !calls.isEmpty else { return "Calling tool…" }
         let lines = calls.map { call in
-            "Calling \(call.toolName) \(inline(call.argumentsJSON, limit: 160)) [\(call.callID)]"
+            "Calling \(call.toolName) \(inline(call.argumentsJSON, limit: placeholderArgumentsLimit)) [\(call.callID)]"
         }
         return lines.joined(separator: "\n")
     }
 
-    /// Collapses whitespace and truncates text for single-line display.
-    static func inline(_ text: String, limit: Int) -> String {
+    /// Collapses whitespace and optionally truncates text for single-line display.
+    static func inline(_ text: String, limit: Int? = nil) -> String {
         let singleLine = text
+            .replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\t", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard singleLine.count > limit else { return singleLine }
-        return String(singleLine.prefix(limit)) + "…"
+        if let limit, singleLine.count > limit {
+            return String(singleLine.prefix(limit)) + "…"
+        }
+        return singleLine
     }
 
     /// Parses one persisted assistant placeholder line into a structured input.

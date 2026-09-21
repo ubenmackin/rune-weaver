@@ -1046,10 +1046,34 @@ function mergeWarningLists(previous: string[], next: string[]): string[] {
   return merged;
 }
 
+// Strict session-ID validator for attacker-controlled URL values (`?session=`,
+// `#chat/...`). The loose 36-char hex/dash class would adopt 36 dashes or any
+// hex/dash mix as a session ID, so require canonical 8-4-4-4-12 UUID grouping
+// before the value is adopted as state and persisted.
+const strictSessionIDPattern =
+  /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+function getURLSessionID(): string | null {
+  if (typeof window === "undefined") return null;
+  const param = new URLSearchParams(window.location.search).get("session");
+  if (param && strictSessionIDPattern.test(param)) return param;
+  const hash = window.location.hash.replace(/^#/, "");
+  if (hash.startsWith("chat/")) {
+    const candidate = hash.slice(5).split("?")[0];
+    if (strictSessionIDPattern.test(candidate)) return candidate;
+  }
+  const hashQuery = hash.includes("?") ? hash.substring(hash.indexOf("?")) : "";
+  const hashParam = new URLSearchParams(hashQuery).get("session");
+  if (hashParam && strictSessionIDPattern.test(hashParam)) return hashParam;
+  return null;
+}
+
 export default function ChatView({ health }: ChatViewProps) {
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [input, setInput] = useState("");
   const [sessionID, setSessionID] = useState<string>(() => {
+    const urlSession = getURLSessionID();
+    if (urlSession) return urlSession;
     return localStorage.getItem("rw_active_session_id") || newSessionId();
   });
   const [pending, setPending] = useState(false);
@@ -3525,7 +3549,10 @@ export default function ChatView({ health }: ChatViewProps) {
   }
 
   function handleSelectSession(id: string) {
-    if (normalizeSessionID(id) === normalizeSessionID(sessionID)) return;
+    // Compare against the live ref so the once-mounted hashchange/popstate
+    // listener never acts on a stale mount-time closure; otherwise an A→B→A
+    // return via URL early-returns against the initial A and drops the switch.
+    if (normalizeSessionID(id) === normalizeSessionID(sessionIDRef.current)) return;
     // Keep the prior server turn alive in the background instead of
     // cancelling it; its frames accumulate in the parked map and the return
     // restores the live bubble without duplicating completed history.
@@ -3557,6 +3584,24 @@ export default function ChatView({ health }: ChatViewProps) {
     setContextTokens(hydratedContext);
     restoreParkedFlight(id);
   }
+
+  useEffect(() => {
+    function handleURLSessionChange() {
+      const targetSession = getURLSessionID();
+      if (
+        targetSession &&
+        normalizeSessionID(targetSession) !== normalizeSessionID(sessionIDRef.current)
+      ) {
+        handleSelectSession(targetSession);
+      }
+    }
+    window.addEventListener("hashchange", handleURLSessionChange);
+    window.addEventListener("popstate", handleURLSessionChange);
+    return () => {
+      window.removeEventListener("hashchange", handleURLSessionChange);
+      window.removeEventListener("popstate", handleURLSessionChange);
+    };
+  }, []);
 
   const usedPercent =
     contextLimit > 0

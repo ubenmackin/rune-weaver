@@ -30,11 +30,23 @@ import { useWebNotifications } from "./hooks/useWebNotifications";
 
 const VALID_TABS: Tab[] = ["chat", "approvals", "memory", "runs", "schedules", "settings"];
 
+export function isStandaloneMode(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("standalone") === "true") return true;
+  const hash = window.location.hash;
+  if (hash.includes("standalone=true")) return true;
+  return false;
+}
+
 function getInitialTab(): Tab {
   if (typeof window === "undefined") return "chat";
-  const hash = window.location.hash.replace("#", "").toLowerCase() as Tab;
+  if (isStandaloneMode()) return "settings";
+  const rawHash = window.location.hash.replace("#", "").toLowerCase();
+  const hash = rawHash.split("/")[0].split("?")[0] as Tab;
   if (VALID_TABS.includes(hash)) return hash;
-  const path = window.location.pathname.replace(/^\//, "").toLowerCase() as Tab;
+  const rawPath = window.location.pathname.replace(/^\//, "").toLowerCase();
+  const path = rawPath.split("/")[0] as Tab;
   if (VALID_TABS.includes(path)) return path;
   return "chat";
 }
@@ -139,7 +151,8 @@ interface AuthenticatedAppProps {
 }
 
 function AuthenticatedApp({ health }: AuthenticatedAppProps) {
-  const [tab, setTab] = useState<Tab>(getInitialTab);
+  const isStandalone = isStandaloneMode();
+  const [tab, setTab] = useState<Tab>(() => (isStandalone ? "settings" : getInitialTab()));
 
   const {
     notificationsEnabled,
@@ -153,17 +166,20 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
   } = useWebNotifications();
 
   useEffect(() => {
+    if (isStandalone) return;
     function handleHashChange() {
-      const current = window.location.hash.replace("#", "").toLowerCase() as Tab;
+      const rawHash = window.location.hash.replace("#", "").toLowerCase();
+      const current = rawHash.split("/")[0].split("?")[0] as Tab;
       if (VALID_TABS.includes(current)) {
         setTab((previous) => (previous === current ? previous : current));
       }
     }
     window.addEventListener("hashchange", handleHashChange);
     return () => window.removeEventListener("hashchange", handleHashChange);
-  }, []);
+  }, [isStandalone]);
 
   function handleSelectTab(selected: Tab) {
+    if (isStandalone) return;
     setTab((previous) => (previous === selected ? previous : selected));
     // Writing the hash fires `hashchange`, which would set the same tab a
     // second time; guard the write so selecting the active tab (or an
@@ -183,6 +199,18 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
   function handleRequestNotifications() {
     clearWarningsBadge();
     void requestPermission();
+  }
+
+  if (isStandalone) {
+    return (
+      <div className="app-root standalone-settings">
+        <main className="app-main-content">
+          <div className="app-container">
+            <SettingsManager />
+          </div>
+        </main>
+      </div>
+    );
   }
 
   return (

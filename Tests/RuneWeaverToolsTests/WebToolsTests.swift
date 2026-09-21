@@ -607,7 +607,7 @@ struct SearXNGEnsurerRuntimeTests {
     func `Allowlisted origins extracts media servers and browser allowed origins`() {
         let browser = BrowserConfig(
             searxngURL: "http://127.0.0.1:8888",
-            allowedOrigins: ["*.int.volcrypt.com", "192.168.1.*"]
+            allowedOrigins: ["*.homelab.local", "192.168.1.*"]
         )
         let media = MediaConfig(
             sonarr: ArrInstanceConfig(url: "http://sonarr.local:8989"),
@@ -624,24 +624,24 @@ struct SearXNGEnsurerRuntimeTests {
         #expect(origins.contains("sonarr.local"))
         #expect(origins.contains("10.0.0.2:7878"))
         #expect(origins.contains("10.0.0.2"))
-        #expect(origins.contains("*.int.volcrypt.com"))
+        #expect(origins.contains("*.homelab.local"))
         #expect(origins.contains("192.168.1.*"))
     }
 
     @Test
     func `SSRF allowlist permits wildcard homelab hosts and IPs but denies link-local`() {
         let browser = BrowserConfig(
-            allowedOrigins: ["*.int.volcrypt.com", "192.168.1.*"]
+            allowedOrigins: ["*.homelab.local", "192.168.1.*"]
         )
         let origins = ApiSSRFGuard.allowlistedOrigins(browserConfig: browser)
         // Allowlisted names prove addresses explicitly so rebinding cannot launder
         // a blocked target behind a permitted suffix.
         #expect(ApiSSRFGuard.vettedIPListDenial(
-            host: "nas.int.volcrypt.com", addresses: ["192.168.1.10"], origins: origins
+            host: "nas.homelab.local", addresses: ["192.168.1.10"], origins: origins
         ) == nil)
         // Rebinding an allowlisted name to link-local stays denied.
         #expect(ApiSSRFGuard.vettedIPListDenial(
-            host: "nas.int.volcrypt.com", addresses: ["169.254.169.254"], origins: origins
+            host: "nas.homelab.local", addresses: ["169.254.169.254"], origins: origins
         ) != nil)
         // Wildcard IP match stays literal-only without DNS.
         #expect(ApiSSRFGuard.denyReason(for: "http://192.168.1.120:8080/status", browserConfig: browser) == nil)

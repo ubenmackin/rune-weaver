@@ -1102,6 +1102,51 @@ describe("SettingsManager", () => {
     });
     expect((savedBody as unknown as Record<string, unknown>)?.maxToolIterations).toBe(15);
   });
+
+  it("opens browser and web configuration modal for browser.act without fallback error", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (typeof url === "string" && url.includes("/tools")) {
+          return jsonResponse({
+            tools: [
+              {
+                name: "browser.act",
+                description: "Perform an action",
+                isEnabled: true,
+                isBuiltIn: true,
+                hasConfig: true,
+              },
+            ],
+          });
+        }
+        if (typeof url === "string" && url.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(mockSettings);
+      }),
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Switch to Tools tab
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Find the Configure button for browser.act
+    const configureButton = await screen.findByRole("button", { name: /Configure/i });
+    await user.click(configureButton);
+
+    // Should open "Configure Browser & Web Automation" modal
+    expect(screen.getByRole("heading", { name: /Configure Browser & Web Automation/i })).toBeDefined();
+    // Must NOT show the fallback error message
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+  });
 });
 
 
