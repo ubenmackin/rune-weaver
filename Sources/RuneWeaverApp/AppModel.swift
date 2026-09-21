@@ -393,12 +393,9 @@ public final class AppModel {
         var chats: [ActiveChatInfo] = []
         for sid in runningIDs {
             let session = await context.conversations.session(id: sid)
-            let rawTitle = session?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let title: String = if let rawTitle, !rawTitle.isEmpty {
-                rawTitle
-            } else {
-                "Chat \(sid.uuidString.prefix(8))"
-            }
+            // Shared fallback keeps the menu label identical to the engine
+            // display title for untitled sessions instead of a second prefix.
+            let title = session?.displayTitle ?? ConversationSession.fallbackTitle(for: sid)
             chats.append(ActiveChatInfo(id: sid, title: title))
         }
         self.activeChats = chats.sorted(by: { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending })

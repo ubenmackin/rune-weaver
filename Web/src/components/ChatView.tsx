@@ -549,6 +549,11 @@ const MAX_MESSAGES = 200;
 // oldest entry the server queue drops on overflow.
 const MAX_PENDING_STEERS = 20;
 
+// Brief guard after steering so an accidental double-tap on Cancel does not
+// drop guidance just sent. Named so the send and cancel paths share one
+// bound instead of drifting on separate literals.
+const STEER_CANCEL_DEBOUNCE_MS = 500;
+
 // Counts user-visible characters with the same grapheme discipline the engine
 // enforces, so emoji-heavy drafts meet one bound on both sides instead of
 // passing a UTF-16 length check locally and failing the server limit.
@@ -1022,12 +1027,23 @@ export function reconstructMessages(
 }
 
 // Single first-turn title policy: first line truncated to 40 characters,
-// mirroring ConversationSession.displayTitle so dashboard pre-names stay
-// consistent with engine titles without recreating the helper per render.
+// sharing the engine's line-fold and terminator handling so concurrent
+// client pre-names and server auto-titles converge on one value instead of
+// flickering between two spellings under last-write-wins.
 export function autoTitleFromPrompt(text: string): string {
-  const firstLine = text.split("\n")[0].trim();
-  if (firstLine.length <= 40) return firstLine;
-  return firstLine.slice(0, 40) + "…";
+  const normalized = normalizeLineEndings(text);
+  const parts = normalized.split("\n");
+  // Mirror NormalizedText.splitLines: a single trailing newline terminates
+  // the last line rather than adding an empty one.
+  if (parts.length > 0 && parts[parts.length - 1] === "") {
+    parts.pop();
+  }
+  const firstLine = (parts[0] ?? text).trim();
+  // Code-point truncation avoids splitting a surrogate pair where the engine's
+  // Character prefix would keep the grapheme whole.
+  const chars = [...firstLine];
+  if (chars.length <= 40) return firstLine;
+  return chars.slice(0, 40).join("") + "…";
 }
 
 // Merges terminal warnings over live ones without duplicating the lines the
@@ -1164,6 +1180,8 @@ export default function ChatView({ health }: ChatViewProps) {
   // received. A list because rapid steers queue server-side: a single slot
   // would let the second steer overwrite the first and orphan it on error.
   const pendingSteerRef = useRef<Array<{ id: string; text: string }>>([]);
+  // Timestamp of the latest steering action to debounce and protect against accidental cancels
+  const lastSteerTimestampRef = useRef<number>(0);
   // Tracks the latest normal optimistic send so an authoritative length refusal
   // can retract exactly that bubble; steering misses never touch it because
   // they belong to the steering list above.
@@ -1328,6 +1346,31 @@ export default function ChatView({ health }: ChatViewProps) {
       previous.size === 0 ? previous : new Set<string>(),
     );
   }, []);
+
+  // Single first-turn pre-name so streaming and REST terminal paths share one
+  // PUT instead of triplicating the block. The flag clears only after the
+  // server confirms the rename, so a failed PUT keeps the retry for the next
+  // terminal frame instead of losing it behind a synchronous clear.
+  const preNameSessionIfFirst = useCallback(
+    (sessionId: string, promptText: string) => {
+      if (!isFirstMessageRef.current) return;
+      const title = autoTitleFromPrompt(promptText);
+      if (!title.trim()) return;
+      updateSessionTitle(sessionId, title)
+        .then(() => {
+          isFirstMessageRef.current = false;
+          setSessionRefreshKey((k) => k + 1);
+        })
+        .catch(() => {
+          // Keep the flag so the next terminal frame retries; a non-blocking
+          // rename stays in the dev log instead of alarming the chat.
+          logWarn(
+            "[ChatView] session pre-name failed; will retry on next terminal frame",
+          );
+        });
+    },
+    [],
+  );
 
   // Reaps expired parked flights and surfaces live drops through visible state.
   // Every entry point that can observe a settled shell funnels here so expiry
@@ -2557,13 +2600,9 @@ export default function ChatView({ health }: ChatViewProps) {
         }
       }
 
-      if (isFirstMessageRef.current) {
-        const title = autoTitleFromPrompt(latestPromptRef.current);
-        void updateSessionTitle(currentSid, title).then(() => {
-          setSessionRefreshKey((k) => k + 1);
-        });
-        isFirstMessageRef.current = false;
-      }
+      // First-turn pre-name shares one helper with the REST terminal path so
+      // both transports rename once with the same value the engine derives.
+      preNameSessionIfFirst(currentSid, latestPromptRef.current);
 
       // Snapshot the streamed turn outside any updater so each update
       // stays pure; nesting a message append inside a turn updater would
@@ -2607,10 +2646,11 @@ export default function ChatView({ health }: ChatViewProps) {
         ...(doneCompletedAt != null ? { completedAt: doneCompletedAt } : {}),
       };
       setMessages((prev) => {
-        // Terminal dedup stays batch-scoped: evict only placeholders whose batch overlaps this
-        // turn's preserved callIDs in actions or in narration text, plus generic waiting
-        // with no correlation. Other parked batches in the same session keep their
-        // placeholders so completing one resume never wipes the other.
+        // Terminal dedup stays batch-scoped: any prior bubble whose callIDs
+        // overlap this turn's terminal actions is the same execution (including
+        // an optimistic pre-steer commit), so it evicts; uncorrelated waiting
+        // with no actions is stale and evicts as well. Other batches share no
+        // callIDs and stay, so completing one resume never wipes the other.
         const base = !isParked
           ? prev.filter((m) => {
               if (m.role !== "assistant") return true;
@@ -2627,9 +2667,17 @@ export default function ChatView({ health }: ChatViewProps) {
                       fa.callID &&
                       textContainsPlaceholderForCall(m.text, fa.callID),
                   ));
+              // Correlated bubbles collapse even when they look like real
+              // completed turns, so a pre-steer snapshot never doubles with
+              // the later done frame for the same activity.
               if (overlaps) return false;
-              if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
-              if (!m.toolActions || m.toolActions.length === 0) return false;
+              const isWaiting = m.text.trim().startsWith(WAITING_PREFIX);
+              if (!isWaiting) return true;
+              const hasActions =
+                !!m.toolActions && m.toolActions.length > 0;
+              // Generic waiting with no correlation is stale; waiting that
+              // owns actions without overlap belongs to another batch.
+              if (!hasActions) return false;
               return true;
             })
           : prev;
@@ -3202,6 +3250,7 @@ export default function ChatView({ health }: ChatViewProps) {
       );
       return;
     }
+    lastSteerTimestampRef.current = Date.now();
     setInput("");
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -3223,11 +3272,53 @@ export default function ChatView({ health }: ChatViewProps) {
       const shed = pendingSteerRef.current.shift();
       if (shed) shedSteerId = shed.id;
     }
+
+    // Snapshot and seal synchronously with no await between: the handler runs
+    // to completion on one event-loop turn, so no tool_end/delta frame can
+    // interleave between the read and the reset. The committed snapshot keeps
+    // the live turn's call identities verbatim, so the later done frame
+    // collapses it by callID overlap instead of doubling one execution.
+    const currentTurn = inFlightTurnRef.current;
+    const hasPreSteerActivity =
+      currentTurn &&
+      (currentTurn.toolActions.length > 0 ||
+        currentTurn.text.trim().length > 0 ||
+        (currentTurn.segments && currentTurn.segments.length > 0));
+
+    let preSteerMsg: MessageItem | null = null;
+    if (hasPreSteerActivity && currentTurn) {
+      preSteerMsg = {
+        id: newSessionId(),
+        role: "assistant",
+        text: currentTurn.text,
+        toolActions:
+          currentTurn.toolActions.length > 0
+            ? [...currentTurn.toolActions]
+            : undefined,
+        segments:
+          currentTurn.segments && currentTurn.segments.length > 0
+            ? [...currentTurn.segments]
+            : undefined,
+      };
+    }
+
+    // Reset in-flight turn so post-steer work streams into a fresh bubble below the steer message.
+    const freshTurn: InFlightTurn = {
+      text: "",
+      toolActions: [],
+      segments: [],
+    };
+    inFlightTurnRef.current = freshTurn;
+    // Functional reset keeps a state commit that lags behind the ref from
+    // resurrecting the snapshot over the fresh bubble.
+    setInFlightTurn(() => freshTurn);
+
     // Steering is the user's own message, so release the scroll lock so the
     // optimistic bubble lands in view even when reviewing history.
     userHasScrolledUpRef.current = false;
     setMessages((prev) => {
-      const withSteer = [...prev, userMsg];
+      const withPreSteer = preSteerMsg ? [...prev, preSteerMsg] : prev;
+      const withSteer = [...withPreSteer, userMsg];
       const withoutShed = shedSteerId
         ? withSteer.filter((m) => m.id !== shedSteerId)
         : withSteer;
@@ -3251,6 +3342,14 @@ export default function ChatView({ health }: ChatViewProps) {
   // without touching background sessions, which keep their server slots.
   async function handleCancel() {
     if (!pending) return;
+    if (Date.now() - lastSteerTimestampRef.current < STEER_CANCEL_DEBOUNCE_MS) {
+      // A steer just left, so a Cancel tap in the same beat likely meant the
+      // pre-steer bubble; surface the pause instead of silently dropping it.
+      setError(
+        "Steering was just sent — Cancel is briefly paused so the steer isn't dropped; try again in a moment.",
+      );
+      return;
+    }
     const cancelSID = sessionID;
     cancelledRef.current = true;
     clearTurnTimeout();
@@ -3317,8 +3416,14 @@ export default function ChatView({ health }: ChatViewProps) {
     setTurnWarnings([]);
 
     const isFirst = messages.length === 0;
-    isFirstMessageRef.current = isFirst;
-    latestPromptRef.current = text;
+    // Arm the pre-name flag without renaming yet: the terminal frame owns the
+    // single PUT through the shared helper, so a failed send keeps the retry
+    // instead of losing it behind a synchronous clear. Only set on first turns
+    // so a later send never clears a pending retry from an earlier failure.
+    if (isFirst) {
+      isFirstMessageRef.current = true;
+      latestPromptRef.current = text;
+    }
 
     const userMessage: MessageItem = {
       id: newSessionId(),
@@ -3435,14 +3540,9 @@ export default function ChatView({ health }: ChatViewProps) {
         }
       }
 
-      // Pre-name session on first turn
-      if (isFirst) {
-        const title = autoTitleFromPrompt(text);
-        void updateSessionTitle(currentSid, title).then(() => {
-          setSessionRefreshKey((k) => k + 1);
-        });
-        isFirstMessageRef.current = false;
-      }
+      // First-turn pre-name shares one helper with the streaming terminal path
+      // so the REST fallback renames once instead of doubling the pre-send PUT.
+      preNameSessionIfFirst(currentSid, text);
 
       const orderedRestActions = [...response.toolActions].sort(
         compareToolActionsByRound,
@@ -4058,25 +4158,26 @@ export default function ChatView({ health }: ChatViewProps) {
               data-form-type="other"
             />
             {pending ? (
-              input.trim().length > 0 ? (
-                <button
-                  type="button"
-                  className="primary chat-send-btn"
-                  onClick={handleSteer}
-                  aria-label="Steer turn"
-                >
-                  Steer
-                </button>
-              ) : (
+              <>
                 <button
                   type="button"
                   className="chat-cancel-btn"
                   onClick={() => void handleCancel()}
                   aria-label="Cancel turn"
+                  title="Cancel the active turn (briefly paused right after steering so fresh guidance isn't dropped)"
                 >
                   Cancel
                 </button>
-              )
+                <button
+                  type="button"
+                  className="primary chat-send-btn"
+                  onClick={handleSteer}
+                  aria-label="Steer turn"
+                  disabled={input.trim().length === 0}
+                >
+                  Steer
+                </button>
+              </>
             ) : (
               <button
                 type="button"

@@ -23,6 +23,21 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
     public var updatedAt: Date
     /// Originating source of this session (e.g. "chat", "scheduler").
     public var source: String?
+    /// Prefix for auto-generated titles so the fallback, the auto-title guard,
+    /// and menu-bar presentation agree on one spelling instead of drifting.
+    public static let fallbackTitlePrefix = "Session "
+    /// Untitled title for one session, shared so every surface renders the
+    /// same placeholder for a conversation without a stored title.
+    public static func fallbackTitle(for id: UUID) -> String {
+        "\(fallbackTitlePrefix)\(id.uuidString.prefix(8))"
+    }
+
+    /// Whether a rendered title is still the auto-generated placeholder rather
+    /// than a stored or derived name, so callers can tell an untitled session
+    /// from one the user or engine actually named.
+    public static func isFallbackTitle(_ title: String) -> Bool {
+        title.hasPrefix(fallbackTitlePrefix)
+    }
 
     /// Human-readable display title, falling back to an extractive preview of the first user message.
     public var displayTitle: String {
@@ -40,7 +55,7 @@ public struct ConversationSession: Sendable, Codable, Equatable, Identifiable {
                 return trimmed
             }
         }
-        return "Session \(id.uuidString.prefix(8))"
+        return Self.fallbackTitle(for: id)
     }
 
     /// Creates a session.
@@ -374,6 +389,15 @@ public actor ConversationManager {
         // even as the shape grows; only the timestamp is quantized here.
         let stored = message.withCreatedAt(Self.persistedInstant(message.createdAt))
         session.messages.append(stored)
+        let hasNoTitle = session.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+        if message.role == .user, hasNoTitle {
+            let auto = session.displayTitle
+            // Shared placeholder check keeps the guard in sync with the
+            // fallback spelling above instead of hardcoding a second copy.
+            if !ConversationSession.isFallbackTitle(auto) {
+                session.title = auto
+            }
+        }
         session.updatedAt = Date()
         truncateIfNeeded(messages: &session.messages, summary: &session.summary)
         sessions[session.id] = session
@@ -762,9 +786,25 @@ public extension ConversationManager {
     /// Estimated character-to-token ratio (standard rule of thumb: ~4 characters per token).
     static let charactersPerToken: Double = 4.0
 
+    /// Wire-format overhead per tool definition (function wrapper keys and
+    /// framing around name, description, and schema) so the token estimate
+    /// stays honest without a magic literal at the call site.
+    static let toolWireOverheadChars: Int = 50
+
     /// Estimates token count for a list of messages.
     static func estimateTokens(in messages: [Message]) -> Int {
         let totalChars = messages.reduce(0) { $0 + $1.content.count }
+        return Int(ceil(Double(totalChars) / charactersPerToken))
+    }
+
+    /// Estimates token count for registered tools based on their definitions and schemas.
+    static func estimateToolTokens(in tools: [any Tool]) -> Int {
+        guard !tools.isEmpty else { return 0 }
+        // Each tool definition on the wire includes formatting wrappers
+        // plus name, description, and raw JSON schema.
+        let totalChars = tools.reduce(0) { sum, tool in
+            sum + tool.name.count + tool.description.count + tool.inputSchema.rawValue.count + Self.toolWireOverheadChars
+        }
         return Int(ceil(Double(totalChars) / charactersPerToken))
     }
 
@@ -775,11 +815,13 @@ public extension ConversationManager {
     func compactHistoryIfNeeded(
         for sessionID: UUID,
         contextLength: Int,
-        thresholdPercent: Int
+        thresholdPercent: Int,
+        reservedTokens: Int = 0
     ) async -> Bool {
         guard contextLength > 0, thresholdPercent > 0 else { return false }
         guard var session = await readSingleMerged(id: sessionID) else { return false }
-        let maxAllowedTokens = max(100, (contextLength * min(100, thresholdPercent)) / 100)
+        let effectiveLength = max(100, contextLength - max(0, reservedTokens))
+        let maxAllowedTokens = max(100, (effectiveLength * min(100, thresholdPercent)) / 100)
 
         func currentEstimatedTokens() -> Int {
             var msgs = session.messages

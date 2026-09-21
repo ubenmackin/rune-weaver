@@ -1621,6 +1621,121 @@ describe("Mid-turn steering", () => {
     expect(inputEl).toHaveValue("");
     expect(screen.getByText("please focus on tests")).toBeInTheDocument();
   });
+
+  it("renders pre-steer assistant tool activity above the steer bubble so steer stays at the bottom", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    // Start turn
+    await user.type(screen.getByLabelText("Chat input"), "find attachments");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string }).sessionID;
+
+    // Simulate tool activity mid-turn
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "mailbox_search",
+      callID: "call-1",
+      argumentsJSON: '{"query":"inbox"}',
+      sessionID: turnSID,
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "mailbox_search",
+      callID: "call-1",
+      result: { ok: true, value: "found 1 message" },
+      sessionID: turnSID,
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/mailbox_search/)).toBeInTheDocument();
+    });
+
+    // Type steering message
+    const inputEl = screen.getByLabelText("Chat input");
+    await user.type(inputEl, "make sure to move mail back");
+    const steerBtn = screen.getByRole("button", { name: "Steer turn" });
+    await user.click(steerBtn);
+
+    // Verify both messages are in the document and steer bubble is below tool activity
+    expect(screen.getByText("make sure to move mail back")).toBeInTheDocument();
+
+    // Order by rendered text rather than layout classes so the assertion
+    // follows reading order instead of coupling to CSS structure or indexes.
+    const promptEl = screen.getByText("find attachments");
+    const toolEl = screen.getByText(/mailbox_search/);
+    const steerEl = screen.getByText("make sure to move mail back");
+    expect(
+      promptEl.compareDocumentPosition(toolEl) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      toolEl.compareDocumentPosition(steerEl) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("prevents accidental cancellation within 500ms of clicking steer", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    // Pin the clock so the debounce window is deterministic instead of
+    // relying on real wall-time between two clicks.
+    const nowSpy = vi.spyOn(Date, "now");
+    let now = 1_000_000;
+    nowSpy.mockReturnValue(now);
+
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "start job");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+
+    const inputEl = screen.getByLabelText("Chat input");
+    await user.type(inputEl, "steer command");
+    const steerBtn = screen.getByRole("button", { name: "Steer turn" });
+    await user.click(steerBtn);
+
+    expect(capture.sentFrames.length).toBe(2);
+
+    // Still inside the guard: advancing only 100ms keeps the cancel blocked.
+    now += 100;
+    nowSpy.mockReturnValue(now);
+    const cancelBtn = screen.getByRole("button", { name: "Cancel turn" });
+    await user.click(cancelBtn);
+
+    // Cancel frame should NOT have been sent because it occurred within 500ms
+    expect(capture.sentFrames.length).toBe(2);
+
+    // Past the guard a deliberate cancel goes through.
+    now += 600;
+    nowSpy.mockReturnValue(now);
+    await user.click(cancelBtn);
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(3);
+    });
+    nowSpy.mockRestore();
+  });
 });
 
 describe("Token metrics status bar", () => {

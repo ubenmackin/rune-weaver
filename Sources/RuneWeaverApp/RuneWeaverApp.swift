@@ -37,10 +37,13 @@ struct AppMenuView: View {
     var model: AppModel
 
     var body: some View {
+        // Standard platform shortcuts keep menu actions discoverable by
+        // keyboard: dashboard, settings, and quit follow the same bindings
+        // users expect across macOS apps.
         Button("Open Web Dashboard") {
             model.openDashboard()
         }
-        .keyboardShortcut("o", modifiers: [.command])
+        .keyboardShortcut("o", modifiers: .command)
 
         if !model.activeChats.isEmpty || !model.pendingApprovals.isEmpty {
             Divider()
@@ -100,13 +103,13 @@ struct AppMenuView: View {
         Button("Settings...") {
             model.openSettings()
         }
-        .keyboardShortcut(",", modifiers: [.command])
+        .keyboardShortcut(",", modifiers: .command)
 
         Divider()
 
         Button("Quit Rune Weaver") {
             model.quit()
         }
-        .keyboardShortcut("q", modifiers: [.command])
+        .keyboardShortcut("q")
     }
 }

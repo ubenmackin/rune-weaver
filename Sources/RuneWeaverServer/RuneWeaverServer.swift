@@ -1320,9 +1320,14 @@ private func registerWebSocketRoute(_ app: Application) {
                         break
                     }
                 }
+                let retiredAtEnd = await webSocketGenerationIsRetired(auth: auth, generation: generation)
+                // Every socket close seals the turn registry so orphaned turns
+                // cannot keep writing past the socket lifetime and the
+                // reserve/insert race stays closed; only a retired credential
+                // additionally closes the socket with a policy violation.
                 connectionTasks.cancelAll()
                 await context.hub.remove(id: connectionID)
-                if await webSocketGenerationIsRetired(auth: auth, generation: generation) {
+                if retiredAtEnd {
                     _ = try? await box.close(code: .policyViolation)
                 }
             }
@@ -1330,6 +1335,8 @@ private func registerWebSocketRoute(_ app: Application) {
                 continuation.yield(text)
             }
             webSocket.onClose.whenComplete { _ in
+                // Seal immediately so a normal disconnect cannot leak turns
+                // when the connection task has not yet reached its own seal.
                 connectionTasks.cancelAll()
                 continuation.finish()
                 connectionTask.cancel()

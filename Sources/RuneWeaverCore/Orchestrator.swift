@@ -233,10 +233,12 @@ public actor Orchestrator {
             } else {
                 nil
             }
+            let reservedToolTokens = ConversationManager.estimateToolTokens(in: tools)
             await conversations.compactHistoryIfNeeded(
                 for: sessionID,
                 contextLength: llm.modelInfo.contextLength,
-                thresholdPercent: compactionThresholdPercent
+                thresholdPercent: compactionThresholdPercent,
+                reservedTokens: reservedToolTokens
             )
             let workingMessages = await Self.stableHistoryWithRecall(
                 conversations.workingHistory(for: sessionID, systemPrompt: effectiveSystemPrompt),
@@ -408,6 +410,7 @@ extension Orchestrator {
         messages: [Message],
         llmRoundIndex: inout Int,
         billedTokens: inout Int?,
+        lastRoundContextTokens: inout Int?,
         request: TurnLoopRequest
     ) async throws -> TurnDraft {
         let collected = try await collectTurn(
@@ -418,13 +421,22 @@ extension Orchestrator {
                 await request.onEvent?(.textDelta(delta))
             }
         )
+        // A zero usage report carries no occupancy signal, so it falls back to
+        // the history estimate below instead of pinning the pressure gauge at 0%.
+        if let billed = collected.billedTokens, billed > 0 {
+            lastRoundContextTokens = billed
+        }
+        let roundContext = lastRoundContextTokens ?? Self.estimatedContextTokens(
+            for: messages,
+            tools: request.tools,
+            finalText: collected.text
+        )
         await emitTurnTokens(
             billed: collected.billedTokens,
             billedTokens: &billedTokens,
             roundIndex: llmRoundIndex,
             request: request,
-            workingMessages: messages,
-            currentText: collected.text
+            contextTokens: roundContext
         )
         llmRoundIndex += 1
         return collected
@@ -470,15 +482,23 @@ extension Orchestrator {
     }
 
     /// Estimates active window occupancy for status reporting from the working
-    /// history plus the pending completion. Reuses the history compaction
+    /// history, registered tools, plus the pending completion. Reuses the history compaction
     /// heuristic so the status-bar percent reflects window pressure, kept
     /// separate from cumulative billed totals and per-round provider usage.
-    private static func estimatedContextTokens(for workingMessages: [Message], finalText: String) -> Int {
+    private static func estimatedContextTokens(
+        for workingMessages: [Message],
+        tools: [any Tool] = [],
+        finalText: String
+    ) -> Int {
         var sizing = workingMessages
         if !finalText.isEmpty {
             sizing.append(Message(role: .assistant, content: finalText))
         }
-        return ConversationManager.estimateTokens(in: sizing)
+        var tokens = ConversationManager.estimateTokens(in: sizing)
+        if !tools.isEmpty {
+            tokens += ConversationManager.estimateToolTokens(in: tools)
+        }
+        return tokens
     }
 
     /// Parks the turn when gated narrations require approval.
@@ -517,6 +537,7 @@ extension Orchestrator {
         var finalText = ""
         var toolRounds = request.initialToolRounds
         var billedTokens: Int?
+        var lastRoundContextTokens: Int?
         var llmRoundIndex = request.initialLlmRoundIndex
 
         while true {
@@ -530,6 +551,7 @@ extension Orchestrator {
                 messages: workingMessages,
                 llmRoundIndex: &llmRoundIndex,
                 billedTokens: &billedTokens,
+                lastRoundContextTokens: &lastRoundContextTokens,
                 request: request
             )
             finalText = collected.text
@@ -553,9 +575,12 @@ extension Orchestrator {
             if calls.isEmpty, gated.isEmpty {
                 break
             }
-            // Parked frames carry the same occupancy estimate so approval pauses
-            // report window pressure instead of last-round cost.
-            let tokens = (billedTokens, Self.estimatedContextTokens(for: workingMessages, finalText: finalText))
+            // Parked frames carry the latest round's context tokens (or fallback estimate)
+            // so approval pauses report window pressure instead of cumulative cost.
+            let currentContextTokens = lastRoundContextTokens ?? Self.estimatedContextTokens(
+                for: workingMessages, tools: request.tools, finalText: finalText
+            )
+            let tokens = (billedTokens, currentContextTokens)
             if !calls.isEmpty {
                 toolRounds += 1
                 let parkContext = makeParkContext(
@@ -595,10 +620,13 @@ extension Orchestrator {
                 break
             }
         }
-        // Finished turns advertise working-history occupancy so contextTokens
-        // divided by the model limit reflects window pressure, kept separate
-        // from the cumulative billed total carried alongside it.
-        let contextTokens = Self.estimatedContextTokens(for: workingMessages, finalText: finalText)
+        // Finished turns advertise the latest round's active context window occupancy
+        // (falling back to working-history + tools estimate when provider usage is absent)
+        // so contextTokens divided by the model limit reflects window pressure, kept
+        // separate from the cumulative billed total carried alongside it.
+        let contextTokens = lastRoundContextTokens ?? Self.estimatedContextTokens(
+            for: workingMessages, tools: request.tools, finalText: finalText
+        )
         return .finished(finalText: finalText, toolActions: toolActions, billedTokens: billedTokens, contextTokens: contextTokens)
     }
 
@@ -607,8 +635,7 @@ extension Orchestrator {
         billedTokens: inout Int?,
         roundIndex: Int,
         request: TurnLoopRequest,
-        workingMessages: [Message],
-        currentText: String
+        contextTokens: Int?
     ) async {
         guard let billed, billed >= 0 else { return }
         billedTokens = (billedTokens ?? 0) + billed
@@ -618,7 +645,6 @@ extension Orchestrator {
             } else {
                 turnTotal
             }
-            let contextTokens = Self.estimatedContextTokens(for: workingMessages, finalText: currentText)
             await request.onEvent?(.turnTokens(
                 roundIndex: roundIndex,
                 roundTokens: billed,
