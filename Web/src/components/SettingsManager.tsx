@@ -35,6 +35,7 @@ import {
   getTools,
   updateToolState,
   type EmailAccountData,
+  type MediaConfigData,
   type ProviderConfigData,
   type SettingsResponse,
   type PluginSummary,
@@ -350,6 +351,28 @@ export default function SettingsManager() {
     id: string;
     name: string;
   } | null>(null);
+
+  // Media configuration state (Sonarr & Radarr)
+  const [sonarrEnabled, setSonarrEnabled] = useState(true);
+  const [sonarrUrl, setSonarrUrl] = useState("");
+  const [sonarrApiKeyEnv, setSonarrApiKeyEnv] = useState("SONARR_API_KEY");
+  const [sonarrDefaultQuality, setSonarrDefaultQuality] = useState("");
+  const [sonarrDefaultRoot, setSonarrDefaultRoot] = useState("");
+
+  const [radarrEnabled, setRadarrEnabled] = useState(true);
+  const [radarrUrl, setRadarrUrl] = useState("");
+  const [radarrApiKeyEnv, setRadarrApiKeyEnv] = useState("RADARR_API_KEY");
+  const [radarrDefaultQuality, setRadarrDefaultQuality] = useState("");
+  const [radarrDefaultRoot, setRadarrDefaultRoot] = useState("");
+
+  const [configuringToolName, setConfiguringToolName] = useState<string | null>(null);
+  const [mediaSaveSuccess, setMediaSaveSuccess] = useState(false);
+  const [mediaSaveLoading, setMediaSaveLoading] = useState(false);
+  const [mediaModalError, setMediaModalError] = useState<string | null>(null);
+  // Short-lived success-then-close timer for the media modal: held in a ref
+  // (not bare setTimeout) so unmount or a second save clears the pending tick
+  // instead of firing setState on an unmounted pane or closing a fresh edit.
+  const mediaSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Access-management flow: rotating the single owner token signs out every
   // other device the moment the engine swaps it, so the dashboard asks twice
   // before calling the route, then reveals the new token once. The API client
@@ -877,6 +900,98 @@ export default function SettingsManager() {
     }
   };
 
+  // Copies one settings fetch into the Sonarr/Radarr fields, tolerating both
+  // snake_case and camelCase DTO aliases and falling back to the conventional
+  // key names. Only overwrites sections the engine returns so older engines
+  // without [media] leave the form defaults untouched.
+  const populateMediaSettings = useCallback(
+    (media: MediaConfigData | undefined | null) => {
+      if (media?.sonarr) {
+        setSonarrEnabled(media.sonarr.enabled ?? true);
+        setSonarrUrl(media.sonarr.url ?? "");
+        setSonarrApiKeyEnv(
+          media.sonarr.api_key_env || media.sonarr.apiKeyEnv || "SONARR_API_KEY"
+        );
+        setSonarrDefaultQuality(
+          media.sonarr.default_quality_profile ||
+            media.sonarr.defaultQualityProfile ||
+            ""
+        );
+        setSonarrDefaultRoot(
+          media.sonarr.default_root_folder || media.sonarr.defaultRootFolder || ""
+        );
+      }
+      if (media?.radarr) {
+        setRadarrEnabled(media.radarr.enabled ?? true);
+        setRadarrUrl(media.radarr.url ?? "");
+        setRadarrApiKeyEnv(
+          media.radarr.api_key_env || media.radarr.apiKeyEnv || "RADARR_API_KEY"
+        );
+        setRadarrDefaultQuality(
+          media.radarr.default_quality_profile ||
+            media.radarr.defaultQualityProfile ||
+            ""
+        );
+        setRadarrDefaultRoot(
+          media.radarr.default_root_folder || media.radarr.defaultRootFolder || ""
+        );
+      }
+    },
+    []
+  );
+
+  // Builds the [media] delta from the Sonarr/Radarr form fields so the
+  // full-settings save and the modal-only save share one shape. Emptied URL,
+  // quality, and root-folder fields send as "" so the engine clears back to
+  // auto-detect/unconfigured instead of preserving the stale value; the engine
+  // reads blank and missing identically, so "" is the explicit clear signal.
+  // An emptied credential env-var name keeps the last loaded stored value
+  // instead of resetting to the conventional name, so clearing the input never
+  // overwrites a custom name with the default.
+  const buildMediaPayload = useCallback(
+    (): MediaConfigData => {
+      const storedSonarrEnv =
+        settings?.media?.sonarr?.api_key_env?.trim() ||
+        settings?.media?.sonarr?.apiKeyEnv?.trim() ||
+        "";
+      const storedRadarrEnv =
+        settings?.media?.radarr?.api_key_env?.trim() ||
+        settings?.media?.radarr?.apiKeyEnv?.trim() ||
+        "";
+      return {
+        sonarr: {
+          enabled: sonarrEnabled,
+          url: sonarrUrl.trim(),
+          api_key_env:
+            sonarrApiKeyEnv.trim() || storedSonarrEnv || "SONARR_API_KEY",
+          default_quality_profile: sonarrDefaultQuality.trim(),
+          default_root_folder: sonarrDefaultRoot.trim(),
+        },
+        radarr: {
+          enabled: radarrEnabled,
+          url: radarrUrl.trim(),
+          api_key_env:
+            radarrApiKeyEnv.trim() || storedRadarrEnv || "RADARR_API_KEY",
+          default_quality_profile: radarrDefaultQuality.trim(),
+          default_root_folder: radarrDefaultRoot.trim(),
+        },
+      };
+    },
+    [
+      sonarrEnabled,
+      sonarrUrl,
+      sonarrApiKeyEnv,
+      sonarrDefaultQuality,
+      sonarrDefaultRoot,
+      radarrEnabled,
+      radarrUrl,
+      radarrApiKeyEnv,
+      radarrDefaultQuality,
+      radarrDefaultRoot,
+      settings,
+    ]
+  );
+
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
     setEngineName(data.engineName);
@@ -965,7 +1080,11 @@ export default function SettingsManager() {
       account: { ...acc },
     }));
     setEmailAccountsList(eList);
-  }, []);
+
+    // Media fields share one helper so load and save stay symmetric; an
+    // absent [media] keeps the form defaults instead of blanking the modal.
+    populateMediaSettings(data.media);
+  }, [populateMediaSettings]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -996,14 +1115,19 @@ export default function SettingsManager() {
     }
   }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
 
-  // Unmount must never leave the browser provision poll running behind a
-  // closed pane.
+  // Unmount must never leave the browser provision poll or the media
+  // success-then-close tick running behind a closed pane.
   useEffect(() => {
-    const timerRef = browserTimerRef;
+    const pollRef = browserTimerRef;
+    const mediaRef = mediaSaveTimerRef;
     return () => {
-      if (timerRef.current !== null) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
+      if (pollRef.current !== null) {
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+      }
+      if (mediaRef.current !== null) {
+        clearTimeout(mediaRef.current);
+        mediaRef.current = null;
       }
     };
   }, []);
@@ -1349,6 +1473,7 @@ export default function SettingsManager() {
         pluginsDir,
         pluginsMarketplaceIndexURL,
         pluginsAutoRescan,
+        media: buildMediaPayload(),
       });
       populateForm(updated);
       // Settings persist to the config file only; live providers, system
@@ -1360,6 +1485,33 @@ export default function SettingsManager() {
       setError(failure instanceof ApiError ? failure.message : "Failed to save settings");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSaveMediaConfig = async () => {
+    setMediaSaveLoading(true);
+    setMediaModalError(null);
+    try {
+      const updated = await updateSettings({
+        media: buildMediaPayload(),
+      });
+      populateForm(updated);
+      setMediaSaveSuccess(true);
+      // Re-arm the success-then-close tick through the ref so a repeat save
+      // replaces the pending tick and unmount clears it instead of leaking.
+      if (mediaSaveTimerRef.current !== null) {
+        clearTimeout(mediaSaveTimerRef.current);
+        mediaSaveTimerRef.current = null;
+      }
+      mediaSaveTimerRef.current = setTimeout(() => {
+        mediaSaveTimerRef.current = null;
+        setMediaSaveSuccess(false);
+        setConfiguringToolName(null);
+      }, 1000);
+    } catch (err) {
+      setMediaModalError(err instanceof ApiError ? err.message : "Failed to save media settings");
+    } finally {
+      setMediaSaveLoading(false);
     }
   };
 
@@ -2528,7 +2680,7 @@ export default function SettingsManager() {
                           <p className="builtin-tool-details-body">{tool.description}</p>
                         </details>
                       )}
-                      <div className="builtin-tool-footer">
+                      <div className="builtin-tool-footer builtin-tool-footer--split">
                         <label
                           className="toggle-label tool-switch"
                           style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
@@ -2559,6 +2711,25 @@ export default function SettingsManager() {
                             {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
                           </span>
                         </label>
+                        {/* Configure affordance follows the server hasConfig flag
+                            alone so capability detection stays with the tool
+                            listing route instead of a client name allowlist. */}
+                        {tool.hasConfig && (
+                          <button
+                            type="button"
+                            className="ghost icon-text-btn"
+                            onClick={() => {
+                              setMediaModalError(null);
+                              setMediaSaveSuccess(false);
+                              setConfiguringToolName(tool.name);
+                            }}
+                            style={{ padding: "4px 8px", fontSize: "0.78rem" }}
+                            title="Configure instance endpoints, credentials, and defaults"
+                          >
+                            <SettingsIcon size={12} />
+                            <span>Configure</span>
+                          </button>
+                        )}
                       </div>
                     </article>
                   );
@@ -4020,6 +4191,246 @@ export default function SettingsManager() {
               disabled={!tokenSavedAck}
             >
               Done
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {/* Media tools (Sonarr & Radarr) configuration modal. Both media tool
+          names share the Sonarr/Radarr patch, so either opens this editor;
+          any other hasConfig tool falls through to the honest fallback below
+          instead of a dead click with no modal. */}
+      {configuringToolName === "media.arr" ||
+      configuringToolName === "media.arr.read" ? (
+        <Modal
+          label="Configure Sonarr & Radarr"
+          onClose={() => {
+            if (!mediaSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Media Automation (Sonarr & Radarr)</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!mediaSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={mediaSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {mediaModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{mediaModalError}</span>
+              </div>
+            )}
+            {mediaSaveSuccess && (
+              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <CheckIcon size={16} />
+                <span>Media settings saved!</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Configure your local or network Sonarr (TV) and Radarr (Movie) instances.
+              API keys are resolved from environment variables or macOS Keychain (<code>com.runeweaver.secrets</code>) and never stored in plaintext config.
+            </p>
+
+            {/* Sonarr Card */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>Sonarr (TV Shows)</span>
+                </h4>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={sonarrEnabled}
+                    onChange={(e) => setSonarrEnabled(e.target.checked)}
+                  />
+                  <span>Enabled</span>
+                </label>
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "10px" }}>
+                <label htmlFor="sonarr-url" style={{ fontSize: "0.82rem" }}>Server URL</label>
+                <input
+                  id="sonarr-url"
+                  type="text"
+                  className="input-field"
+                  value={sonarrUrl}
+                  onChange={(e) => setSonarrUrl(e.target.value)}
+                  placeholder="e.g. http://localhost:8989 or http://192.168.1.100:8989"
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "10px" }}>
+                <label htmlFor="sonarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                <input
+                  id="sonarr-key-env"
+                  type="text"
+                  className="input-field"
+                  value={sonarrApiKeyEnv}
+                  onChange={(e) => setSonarrApiKeyEnv(e.target.value)}
+                  placeholder="SONARR_API_KEY"
+                />
+              </div>
+
+              <div className="form-row" style={{ display: "flex", gap: "10px" }}>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="sonarr-quality" style={{ fontSize: "0.82rem" }}>Default Quality Profile (Optional)</label>
+                  <input
+                    id="sonarr-quality"
+                    type="text"
+                    className="input-field"
+                    value={sonarrDefaultQuality}
+                    onChange={(e) => setSonarrDefaultQuality(e.target.value)}
+                    placeholder="e.g. HD-1080p"
+                  />
+                </div>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="sonarr-root" style={{ fontSize: "0.82rem" }}>Default Root Folder (Optional)</label>
+                  <input
+                    id="sonarr-root"
+                    type="text"
+                    className="input-field"
+                    value={sonarrDefaultRoot}
+                    onChange={(e) => setSonarrDefaultRoot(e.target.value)}
+                    placeholder="e.g. /data/media/tv"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Radarr Card */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>Radarr (Movies)</span>
+                </h4>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={radarrEnabled}
+                    onChange={(e) => setRadarrEnabled(e.target.checked)}
+                  />
+                  <span>Enabled</span>
+                </label>
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "10px" }}>
+                <label htmlFor="radarr-url" style={{ fontSize: "0.82rem" }}>Server URL</label>
+                <input
+                  id="radarr-url"
+                  type="text"
+                  className="input-field"
+                  value={radarrUrl}
+                  onChange={(e) => setRadarrUrl(e.target.value)}
+                  placeholder="e.g. http://localhost:7878 or http://192.168.1.100:7878"
+                />
+              </div>
+
+              <div className="form-group" style={{ marginBottom: "10px" }}>
+                <label htmlFor="radarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                <input
+                  id="radarr-key-env"
+                  type="text"
+                  className="input-field"
+                  value={radarrApiKeyEnv}
+                  onChange={(e) => setRadarrApiKeyEnv(e.target.value)}
+                  placeholder="RADARR_API_KEY"
+                />
+              </div>
+
+              <div className="form-row" style={{ display: "flex", gap: "10px" }}>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="radarr-quality" style={{ fontSize: "0.82rem" }}>Default Quality Profile (Optional)</label>
+                  <input
+                    id="radarr-quality"
+                    type="text"
+                    className="input-field"
+                    value={radarrDefaultQuality}
+                    onChange={(e) => setRadarrDefaultQuality(e.target.value)}
+                    placeholder="e.g. HD-1080p"
+                  />
+                </div>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="radarr-root" style={{ fontSize: "0.82rem" }}>Default Root Folder (Optional)</label>
+                  <input
+                    id="radarr-root"
+                    type="text"
+                    className="input-field"
+                    value={radarrDefaultRoot}
+                    onChange={(e) => setRadarrDefaultRoot(e.target.value)}
+                    placeholder="e.g. /data/media/movies"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={mediaSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveMediaConfig()}
+              disabled={mediaSaveLoading}
+            >
+              {mediaSaveLoading ? "Saving…" : "Save Configuration"}
+            </button>
+          </div>
+        </Modal>
+      ) : configuringToolName !== null ? (
+        // Honest fallback for any future hasConfig tool without a dedicated
+        // editor: the Configure button stays flag-driven, so an unmapped name
+        // must explain itself instead of rendering nothing on click.
+        <Modal
+          label={`Configure ${configuringToolName}`}
+          onClose={() => setConfiguringToolName(null)}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure {configuringToolName}</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setConfiguringToolName(null)}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted text-sm">
+              No configuration UI is available for &ldquo;
+              {configuringToolName}&rdquo; yet. This tool reports settings
+              support, but the dashboard has no editor for it, so nothing was
+              changed.
+            </p>
+          </div>
+          <div
+            className="modal-footer"
+            style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}
+          >
+            <button
+              type="button"
+              className="primary"
+              onClick={() => setConfiguringToolName(null)}
+            >
+              Close
             </button>
           </div>
         </Modal>

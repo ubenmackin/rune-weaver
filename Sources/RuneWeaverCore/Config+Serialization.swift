@@ -48,6 +48,7 @@ extension RuneWeaverConfig {
         lines += renderHomeTOML()
         lines += renderSchedulerTOML()
         lines += renderPluginsTOML()
+        lines += renderMediaTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -259,6 +260,45 @@ extension RuneWeaverConfig {
             "auto_rescan = \(plugins.autoRescan ? "true" : "false")",
             ""
         ]
+    }
+
+    private func renderMediaTOML() -> [String] {
+        var lines: [String] = []
+        lines += renderArrSection(name: "sonarr", config: media.sonarr, defaultAPIKeyEnv: ArrInstanceConfig.defaultSonarrAPIKeyEnv)
+        lines += renderArrSection(name: "radarr", config: media.radarr, defaultAPIKeyEnv: ArrInstanceConfig.defaultRadarrAPIKeyEnv)
+        return lines
+    }
+
+    /// Renders one `[media.<service>]` section, or nothing when stock.
+    ///
+    /// The `isCustomized` gate is the single persistence decision so blank-vs-nil
+    /// cannot diverge between "should I write" and "what do I write": blanks read
+    /// as absent on both paths, and a nil/blank/default key name all read as stock
+    /// (the client falls back to the conventional name), collapsing to omitted
+    /// rather than emitting a section that would decode back as default.
+    private func renderArrSection(name: String, config: ArrInstanceConfig, defaultAPIKeyEnv: String) -> [String] {
+        guard config.isCustomized(defaultAPIKeyEnv: defaultAPIKeyEnv) else { return [] }
+        var lines: [String] = [
+            "[media.\(name)]",
+            "enabled = \(config.enabled ? "true" : "false")"
+        ]
+        if let url = NormalizedText.value(config.url) {
+            lines.append("url = \(Self.tomlQuoted(url))")
+        }
+        // Emitted even when it matches the conventional name so a customized
+        // section stays explicit; an omitted key decodes back to stock, which is
+        // why nil and default intentionally share the omitted form.
+        if let apiKeyEnv = NormalizedText.value(config.apiKeyEnv) {
+            lines.append("api_key_env = \(Self.tomlQuoted(apiKeyEnv))")
+        }
+        if let profile = NormalizedText.value(config.defaultQualityProfile) {
+            lines.append("default_quality_profile = \(Self.tomlQuoted(profile))")
+        }
+        if let folder = NormalizedText.value(config.defaultRootFolder) {
+            lines.append("default_root_folder = \(Self.tomlQuoted(folder))")
+        }
+        lines.append("")
+        return lines
     }
 
     /// Saves and validates the configuration to a file URL.

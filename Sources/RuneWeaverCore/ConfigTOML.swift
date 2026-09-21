@@ -415,6 +415,7 @@ extension RuneWeaverConfig {
         try Self.decodeScheduler(root, into: &config)
         try Self.decodePlugins(root, into: &config)
         try Self.decodeBrowser(root, into: &config)
+        try Self.decodeMedia(root, into: &config)
         self = config
     }
 
@@ -717,6 +718,38 @@ extension RuneWeaverConfig {
         }
         if let maxResults = try browser.strictInt("max_results", field: "browser.max_results") {
             config.browser.maxResults = maxResults
+        }
+    }
+
+    private static func decodeMedia(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let media = root.tables["media"] else { return }
+        if let sonarr = media.tables["sonarr"] {
+            try decodeArrSection(sonarr, fieldPrefix: "media.sonarr", into: &config.media.sonarr)
+        }
+        if let radarr = media.tables["radarr"] {
+            try decodeArrSection(radarr, fieldPrefix: "media.radarr", into: &config.media.radarr)
+        }
+    }
+
+    /// Decodes one `[media.<service>]` table onto an Arr entry.
+    ///
+    /// Absent keys keep the caller's stock values (enabled plus the conventional
+    /// key name) so an empty section never resets to nil; present values land
+    /// verbatim and blank-vs-missing normalization stays with the serialization
+    /// layer where persistence decisions are made.
+    private static func decodeArrSection(_ node: TOMLNode, fieldPrefix: String, into config: inout ArrInstanceConfig) throws {
+        config.enabled = try node.strictBool("enabled", field: "\(fieldPrefix).enabled") ?? config.enabled
+        if let url = try node.strictString("url", field: "\(fieldPrefix).url") {
+            config.url = url
+        }
+        if let apiKeyEnv = try node.strictString("api_key_env", field: "\(fieldPrefix).api_key_env") {
+            config.apiKeyEnv = apiKeyEnv
+        }
+        if let profile = try node.strictString("default_quality_profile", field: "\(fieldPrefix).default_quality_profile") {
+            config.defaultQualityProfile = profile
+        }
+        if let folder = try node.strictString("default_root_folder", field: "\(fieldPrefix).default_root_folder") {
+            config.defaultRootFolder = folder
         }
     }
 }

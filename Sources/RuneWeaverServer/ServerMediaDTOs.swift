@@ -1,0 +1,94 @@
+// Rune Weaver Server — Media settings DTOs for the settings API.
+//
+// Purpose: carries the partial Sonarr, Radarr, and combined media patches for
+// `PUT /settings` so dashboard edits preserve untouched fields and services.
+// Scope: REST patch bodies only; the settings request type owns merge policy
+// while validation and persistence stay with the config layer.
+// Architectural role: keeps media Codable contracts version-tolerant and
+// decoupled from the broader settings surface.
+
+import Foundation
+import RuneWeaverCore
+import Vapor
+
+/// Partial Arr patch for `PUT /settings`.
+/// Sonarr and Radarr share the same five-field shape, so one struct backs both
+/// sides and the per-service names stay as aliases below. Every field stays
+/// optional so a request carrying only one key leaves the stored toggle, URL,
+/// and defaults untouched instead of resetting them.
+public struct ArrSettingsUpdate: Content, Equatable {
+    public var enabled: Bool?
+    public var url: String?
+    public var apiKeyEnv: String?
+    public var defaultQualityProfile: String?
+    public var defaultRootFolder: String?
+
+    public init(
+        enabled: Bool? = nil,
+        url: String? = nil,
+        apiKeyEnv: String? = nil,
+        defaultQualityProfile: String? = nil,
+        defaultRootFolder: String? = nil
+    ) {
+        self.enabled = enabled
+        self.url = url
+        self.apiKeyEnv = apiKeyEnv
+        self.defaultQualityProfile = defaultQualityProfile
+        self.defaultRootFolder = defaultRootFolder
+    }
+
+    /// Builds a patch carrying every field of a full snapshot so programmatic
+    /// callers holding a complete config can reuse the merge path.
+    public init(_ config: ArrInstanceConfig) {
+        self.enabled = config.enabled
+        self.url = config.url
+        self.apiKeyEnv = config.apiKeyEnv
+        self.defaultQualityProfile = config.defaultQualityProfile
+        self.defaultRootFolder = config.defaultRootFolder
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case url
+        case apiKeyEnv = "api_key_env"
+        case defaultQualityProfile = "default_quality_profile"
+        case defaultRootFolder = "default_root_folder"
+    }
+}
+
+/// Partial Sonarr patch, sharing the Arr shape so the two services cannot drift.
+public typealias SonarrSettingsUpdate = ArrSettingsUpdate
+
+/// Partial Radarr patch, sharing the Arr shape so the two services cannot drift.
+public typealias RadarrSettingsUpdate = ArrSettingsUpdate
+
+/// Partial media patch for `PUT /settings`.
+/// A nil side preserves that service entirely, so updating Sonarr never clears
+/// an untouched Radarr entry (and vice versa).
+public struct MediaSettingsUpdate: Content, Equatable {
+    public var sonarr: SonarrSettingsUpdate?
+    public var radarr: RadarrSettingsUpdate?
+
+    public init(
+        sonarr: SonarrSettingsUpdate? = nil,
+        radarr: RadarrSettingsUpdate? = nil
+    ) {
+        self.sonarr = sonarr
+        self.radarr = radarr
+    }
+
+    /// Builds a patch from a full snapshot so callers holding a complete
+    /// `MediaConfig` can reuse the merge path without hand-mapping fields.
+    public init(_ config: MediaConfig) {
+        self.sonarr = SonarrSettingsUpdate(config.sonarr)
+        self.radarr = RadarrSettingsUpdate(config.radarr)
+    }
+}
+
+public extension UpdateSettingsRequest {
+    /// Builds a request from a full media snapshot, routing through the same
+    /// merge path so snapshot callers keep working without hand-mapping fields.
+    init(media: MediaConfig) {
+        self.init(media: MediaSettingsUpdate(media))
+    }
+}

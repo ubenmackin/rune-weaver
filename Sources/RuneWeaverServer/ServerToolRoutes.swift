@@ -35,13 +35,18 @@ func buildToolInfo(
         }
     }
 
+    // The server owns which tools expose settings so the dashboard never
+    // keeps a name allowlist: media tools share the Sonarr/Radarr patch.
+    let hasConfig = tool.name == "media.arr" || tool.name == "media.arr.read"
+
     return ToolInfo(
         tool,
         isEnabled: isEnabled,
         isBuiltIn: isBuiltIn,
         pluginID: pluginID,
         source: source,
-        integrityStatus: integrityStatus
+        integrityStatus: integrityStatus,
+        hasConfig: hasConfig
     )
 }
 

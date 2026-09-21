@@ -164,6 +164,48 @@ Both `[home.homekit]` and `[[home.homekit]]` spellings load; same for `home_assi
 | `url` | string \| unset | unset | Home Assistant base URL (e.g. `http://homeassistant.local:8123`). Must be absolute when set. |
 | `token_env` | string \| unset | unset | Env var (and Keychain key) holding the long-lived access token. |
 
+### `[media]` — `[media.sonarr]` / `[media.radarr]`
+
+Configuration for self-hosted home media managers (Sonarr for television series and Radarr for movies), used by the `media.arr` tool. API keys are resolved securely via `SecretsManager` (environment variables or Keychain `com.runeweaver.secrets`), never stored in plaintext.
+
+Both services default to `enabled = true` with no `url` (matching `RuneWeaverConfig` defaults and `config.toml.example`). An enabled entry with a missing or blank `url` stays unconfigured: the tool reports guidance and never dials, so set `url` to activate against a running instance.
+
+`[media.sonarr]`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Whether Sonarr integration is enabled. |
+| `url` | string \| unset | unset | Sonarr base URL (e.g. `http://localhost:8989`). Must be an absolute http(s) URL when set. |
+| `api_key_env` | string \| unset | unset | Env var (and Keychain key) holding the Sonarr API key. |
+| `default_quality_profile` | string \| unset | unset | Optional default quality profile name (e.g. `"HD-1080p"`). When unset, auto-detected from Sonarr. |
+| `default_root_folder` | string \| unset | unset | Optional default root folder path (e.g. `"/data/media/tv"`). When unset, auto-detected from Sonarr. |
+
+`[media.radarr]`:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | `true` | Whether Radarr integration is enabled. |
+| `url` | string \| unset | unset | Radarr base URL (e.g. `http://localhost:7878`). Must be an absolute http(s) URL when set. |
+| `api_key_env` | string \| unset | unset | Env var (and Keychain key) holding the Radarr API key. |
+| `default_quality_profile` | string \| unset | unset | Optional default quality profile name (e.g. `"HD-1080p"`). When unset, auto-detected from Radarr. |
+| `default_root_folder` | string \| unset | unset | Optional default root folder path (e.g. `"/data/media/movies"`). When unset, auto-detected from Radarr. |
+
+```toml
+[media.sonarr]
+enabled = true
+url = "http://localhost:8989"
+api_key_env = "SONARR_API_KEY"
+default_quality_profile = "HD-1080p"
+default_root_folder = "/data/media/tv"
+
+[media.radarr]
+enabled = true
+url = "http://localhost:7878"
+api_key_env = "RADARR_API_KEY"
+default_quality_profile = "HD-1080p"
+default_root_folder = "/data/media/movies"
+```
+
 ### `[scheduler]` — `[[scheduler.jobs]]`
 
 Repeat the `[[scheduler.jobs]]` table once per job. A job needs a `name`, a `prompt`, and at least one trigger: a cron `schedule` or a `poll_account` email-arrival rule. A job with both fires on either trigger. Disabled jobs are kept but never fire.
@@ -269,10 +311,12 @@ Practical guide:
 # Option A: environment (simplest for dev/Docker)
 export OPENROUTER_API_KEY="sk-or-..."
 export HA_TOKEN="your-home-assistant-token"
+export SONARR_API_KEY="your-sonarr-api-key"
+export RADARR_API_KEY="your-radarr-api-key"
 
 # Option B: Keychain (best for daily use on macOS)
 # Store via the app/CLI secrets path under service "com.runeweaver.secrets",
-# keyed by the same name (e.g. OPENROUTER_API_KEY, HA_TOKEN, per-account IMAP passwords).
+# keyed by the same name (e.g. OPENROUTER_API_KEY, HA_TOKEN, SONARR_API_KEY, RADARR_API_KEY, per-account IMAP passwords).
 ```
 
 Email account passwords are looked up by account — store each account's password in the Keychain rather than adding any key to TOML.

@@ -1459,6 +1459,35 @@ export interface EmailAccountData {
   smtpSecurity?: string;
 }
 
+// One self-hosted Arr instance (Sonarr for TV, Radarr for movies). Both
+// services share the same five-field shape mirroring the engine
+// ArrInstanceConfig, so a single interface backs both sections and keeps the
+// dashboard DTO from drifting out of lockstep when one side gains a knob.
+// Only env-var names persist; key values resolve via SecretsManager at
+// execution time and never enter TOML, logs, or model output.
+export interface ArrServiceConfigData {
+  enabled: boolean;
+  url?: string;
+  api_key_env?: string;
+  apiKeyEnv?: string;
+  default_quality_profile?: string;
+  defaultQualityProfile?: string;
+  default_root_folder?: string;
+  defaultRootFolder?: string;
+}
+
+// Sonarr (TV) section of [media]; an alias so call sites keep the service
+// name while sharing the single Arr shape above.
+export type SonarrConfigData = ArrServiceConfigData;
+
+// Radarr (movies) section of [media]; same shared shape as Sonarr.
+export type RadarrConfigData = ArrServiceConfigData;
+
+export interface MediaConfigData {
+  sonarr: SonarrConfigData;
+  radarr: RadarrConfigData;
+}
+
 export interface SettingsResponse {
   engineName: string;
   logLevel: string;
@@ -1498,6 +1527,7 @@ export interface SettingsResponse {
   pluginsDir: string;
   pluginsMarketplaceIndexURL: string;
   pluginsAutoRescan: boolean;
+  media?: MediaConfigData;
   configPath: string;
 }
 
@@ -1536,6 +1566,7 @@ export interface UpdateSettingsInput {
   pluginsDir?: string;
   pluginsMarketplaceIndexURL?: string;
   pluginsAutoRescan?: boolean;
+  media?: MediaConfigData;
 }
 
 // Manual mirror of FilesConfig.defaultDenyPatterns in Sources/RuneWeaverCore/Config.swift.
@@ -1811,6 +1842,7 @@ export interface ToolInfo {
   pluginID?: string | null;
   source: string;
   integrityStatus: string;
+  hasConfig?: boolean;
 }
 
 export interface ToolsResponse {

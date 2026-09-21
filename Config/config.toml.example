@@ -204,3 +204,26 @@ plugins_dir = "~/.runeweaver/plugins"
 marketplace_index_url = "https://raw.githubusercontent.com/ubenmackin/rune-weaver-marketplace/main/index.json"
 auto_rescan = true
 
+# -----------------------------------------------------------------------------
+# Home Media (Sonarr & Radarr)
+# -----------------------------------------------------------------------------
+# Integration with self-hosted Sonarr (TV shows) and Radarr (movies).
+# API keys are read from environment variables or Keychain, never stored here.
+# Defaults are enabled = true with no URL (matching RuneWeaverConfig defaults):
+# enabled with no URL stays unconfigured — the tool reports guidance and never
+# dials — so set url to activate against a running instance.
+
+[media.sonarr]
+enabled = true
+url = "http://localhost:8989"
+api_key_env = "SONARR_API_KEY"
+# default_quality_profile = "HD-1080p"
+# default_root_folder = "/data/media/tv"
+
+[media.radarr]
+enabled = true
+url = "http://localhost:7878"
+api_key_env = "RADARR_API_KEY"
+# default_quality_profile = "HD-1080p"
+# default_root_folder = "/data/media/movies"
+

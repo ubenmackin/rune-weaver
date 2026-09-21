@@ -3415,6 +3415,14 @@ button.danger:hover:not(:disabled) {
   border-top: 1px solid var(--border-color, #2d3748);
 }
 
+/* Split variant for rows pairing the enable switch with a Configure action:
+ * keeps the switch left and the action right without inline style overrides
+ * so the footer layout stays in the stylesheet. */
+.builtin-tool-footer--split {
+  justify-content: space-between;
+  align-items: center;
+}
+
 /* ==========================================================================
    Browser Navigate Extras (final URL, redirects, auth, snapshot, thumbnail)
    ========================================================================== */

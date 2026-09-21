@@ -126,7 +126,7 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Shipped tool set: Email IMAP/SMTP (`email.search`, `email.read`, `email.attachment`, `email.send`, `email.listMailboxes`, `email.move`), web + browser (`web.search`, `web.fetch`, `browser.navigate`, `browser.act`, `api.request`), files (`files.read`, `files.grep`, `files.glob`), memory (`remember_fact`, `recall_memories`). Planned: Apple Mail native, HomeKit / Home Assistant control, Discord, GitHub, Apple Messages, Calendar (config knobs and marketplace stubs only — no tool implementations).
+Shipped tool set: Email IMAP/SMTP (`email.search`, `email.read`, `email.attachment`, `email.send`, `email.listMailboxes`, `email.move`), web + browser (`web.search`, `web.fetch`, `browser.navigate`, `browser.act`, `api.request`), files (`files.read`, `files.grep`, `files.glob`), memory (`remember_fact`, `recall_memories`), media automation (`media.arr` approval-gated search/add/queue/status plus `media.arr.read` read-only search/queue/status over self-hosted Sonarr/Radarr). Planned: Apple Mail native, HomeKit / Home Assistant control, Discord, GitHub, Apple Messages, Calendar (config knobs and marketplace stubs only — no tool implementations).
 
 ### Engine-to-Service Shift
 
@@ -214,6 +214,8 @@ public protocol Tool: Sendable {
 - `browser.navigate` (`readOnly`): interactive page open over the isolated Playwright bridge in a fresh context with no persistent profile; returns distilled text plus snapshot refs.
 - `browser.act` (`requiresApproval`): one validated action against a `browser.navigate` snapshot ref; every call parks in the approvals inbox; dry runs return a would-act preview.
 - `api.request` (`requiresApproval`): constrained HTTP (GET, POST, PUT, DELETE) replacing shell curl, with allowlisted headers, body/response caps, per-hop SSRF checks, manifest-only file pulls, and dry-run previews.
+- `media.arr` (`requiresApproval`): Sonarr (TV) plus Radarr (movies) search, add, queue, and status against self-hosted instances; every call parks in the approvals inbox and dry runs preview without dialing (reads stay local, adds preview through the client).
+- `media.arr.read` (`readOnly`): approval-free search, queue, and status over the same client path; an `add` routed here fails closed with guidance to use the gated `media.arr` tool instead.
 
 **SearXNG lifecycle**: `SearXNGEnsurer.shared` keeps the local engine warm — ensured on `serve` boot and first search, single-flight in-process. The runtime is the Apple Container CLI only (`container`; Docker is unsupported) with loopback-only publish, a per-install settings file carrying a random secret (directory `0700`, file `0600`), and fail-closed guidance when down. The container stays running after quit by design; `rune-weaver status` reports `reachable`/`unreachable`.
 
@@ -285,7 +287,7 @@ The permission system is the trust boundary between the agent and the real world
 
 **macOS App — shipped**: Menu-bar app (always accessible) with chat window, approval notifications, scheduler summary, and dashboard/settings shortcuts. Its embedded service defaults to loopback (`127.0.0.1`) and resolves the same owner token as `serve`: it enforces the shared fail-closed bind policy (`ServerConfig.requireBindable`) and installs the bearer verifier once a token resolves, passing it into the served context so the bind posture and the request gate agree. Without a resolved token the service stays the loopback no-auth shape, so it never exposes an unauthenticated LAN bind. Dashboard and settings shortcuts open only a loopback address because the app never places the owner token in a URL.
 
-**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; when owner auth is active, the publicly served bundle renders its own in-bundle sign-in gate while every data route stays behind the uniform `401`. The live token is held in memory and mirrored only to `sessionStorage` (never persistent storage), logout or a uniform `401` returns to the gate, and the shared WebSocket presents the token as a query ticket restricted to the `/ws` upgrade.
+**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; when owner auth is active, the publicly served bundle renders its own in-bundle sign-in gate while every data route stays behind the uniform `401`. The live token is held in memory and mirrored only to `sessionStorage` (never persistent storage), logout or a uniform `401` returns to the gate, and the shared WebSocket presents the token as a query ticket restricted to the `/ws` upgrade. The Settings Tools tab renders each tool's Configure action solely from the server `hasConfig` flag on `GET /tools` (never a client name allowlist); the Sonarr/Radarr modal edits endpoints, credential env-var names, and defaults and saves a `media`-only delta through `PUT /settings`, persisting env-var names only and sharing one payload/populate helper so full-save and modal-save stay symmetric.
 
 **iOS App — planned**: SwiftUI client with push-to-talk and approval prompts. Remote engine access is gated by the owner token (presented as a bearer credential), with WireGuard recommended for off-LAN transport.
 
@@ -299,6 +301,8 @@ The permission system is the trust boundary between the agent and the real world
 - Search, read (read-only via `BODY.PEEK`), attachment download (Seatbelt-confined staging, per-file and total caps, approval-gated), send (approval-gated, logged). Passwords in Keychain, never in TOML.
 
 **Browser automation and web access**: static search (`web.search`), static fetch (`web.fetch`), interactive browser (`browser.navigate` + `browser.act`), constrained API calls (`api.request`) — see Tool Plugin System. Screenshots opt-in per call, gated by model vision support.
+
+**Media automation (Sonarr & Radarr, shipped)**: `media.arr` (approval-gated writes plus reads) and `media.arr.read` (approval-free reads) share one `MediaArrClient` execution path shaped by `ArrInstanceConfig` per service (`enabled`, `url`, `apiKeyEnv`, default quality profile, default root folder). Secrets never enter TOML, schemas, logs, or model output: only `api_key_env` names persist (`SONARR_API_KEY` / `RADARR_API_KEY` by default) and values resolve via `SecretsManager` (environment or Keychain `com.runeweaver.secrets`) at execution time. Every dial is LAN-scoped and bounded: the base URL must be absolute http(s) without credentials; metadata, link-local, and unspecified targets fail closed in any spelling while loopback and private-LAN ranges stay allowed so self-hosted instances keep working. Requests carry a 15s timeout and the `X-Api-Key` header, follow redirects manually within the shared redirect budget with per-hop re-validation, strip `X-Api-Key`/`Authorization` on cross-host moves (redacted `Location` on refusal), and fail closed past the response byte cap with a 1KB error-preview bound. An enabled entry with a blank or missing URL stays unconfigured — guidance, no dial — so stock installs fail closed until a base URL is set. Config round-trips through `ConfigTOML` (decode), `Config+Serialization` (encode), `Config+Validation` (bounds), and the `PUT /settings` partial `media` patch (`MediaSettingsUpdate` merge preserving untouched fields); the dashboard DTO mirrors the engine shape (`ArrServiceConfigData` backing both `SonarrConfigData` and `RadarrConfigData` aliases).
 
 **Files & documents**: direct filesystem reads plus grep/glob via `FilesAccessGuard` (`deny_patterns`, `allow_roots`, `require_approval_on_deny`); writes use Seatbelt-confined temp with atomic move on approval.
 
@@ -466,6 +470,20 @@ enabled = true
 enabled = true
 url = "http://homeassistant.local:8123"
 token_env = "HA_TOKEN"
+
+[media.sonarr]
+enabled = true
+url = "http://localhost:8989"  # omit until a Sonarr instance is reachable; enabled without a URL stays unconfigured and never dials
+api_key_env = "SONARR_API_KEY"  # env-var / Keychain name only; the key value never lives in this file
+# default_quality_profile = "HD-1080p"  # optional override; omit to auto-detect from Sonarr
+# default_root_folder = "/data/media/tv"  # optional override; omit to auto-detect from Sonarr
+
+[media.radarr]
+enabled = true
+url = "http://localhost:7878"  # omit until a Radarr instance is reachable; same fail-closed rule as Sonarr
+api_key_env = "RADARR_API_KEY"  # env-var / Keychain name only
+# default_quality_profile = "HD-1080p"  # optional override; omit to auto-detect from Radarr
+# default_root_folder = "/data/media/movies"  # optional override; omit to auto-detect from Radarr
 
 [scheduler]
 # Cron fires use five-field expressions or @hourly / @daily / @weekly shortcuts.

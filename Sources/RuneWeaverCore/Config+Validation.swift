@@ -24,6 +24,7 @@ extension RuneWeaverConfig {
         try validateHomeSection()
         try validateSchedulerSection()
         try validatePluginsSection()
+        try validateMediaSection()
     }
 
     private func validateEngineSection() throws {
@@ -351,6 +352,15 @@ extension RuneWeaverConfig {
             )
         }
         return ConfigError.validationError(field: prefix, message: error.displayDetail)
+    }
+
+    private func validateMediaSection() throws {
+        if let sonarrURL = media.sonarr.url, !sonarrURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try Self.validateHTTPURLField(sonarrURL, field: "media.sonarr.url")
+        }
+        if let radarrURL = media.radarr.url, !radarrURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try Self.validateHTTPURLField(radarrURL, field: "media.radarr.url")
+        }
     }
 
     private static func validateURLField(_ value: String, field: String) throws {

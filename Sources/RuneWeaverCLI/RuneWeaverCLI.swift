@@ -199,7 +199,8 @@ enum CLIShared {
         embedder: (any EmbeddingsBackend)? = nil,
         browserConfig: BrowserConfig? = nil,
         llmConfig: LLMConfig? = nil,
-        llmServerURLs: [String] = []
+        llmServerURLs: [String] = [],
+        mediaConfig: MediaConfig? = nil
     ) -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -209,6 +210,7 @@ enum CLIShared {
             filesConfig: filesConfig,
             sandboxConfig: sandboxConfig,
             browserConfig: browser,
+            mediaConfig: mediaConfig,
             llmServerURLs: combinedOrigins,
             memoryEngine: memoryEngine,
             embedder: embedder
@@ -228,7 +230,8 @@ enum CLIShared {
         episodesDBPath: String? = nil,
         browserConfig: BrowserConfig? = nil,
         llmConfig: LLMConfig? = nil,
-        llmServerURLs: [String] = []
+        llmServerURLs: [String] = [],
+        mediaConfig: MediaConfig? = nil
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
         for tool in pluginTools(
@@ -239,7 +242,8 @@ enum CLIShared {
             embedder: embedder,
             browserConfig: browserConfig,
             llmConfig: llmConfig,
-            llmServerURLs: llmServerURLs
+            llmServerURLs: llmServerURLs,
+            mediaConfig: mediaConfig
         ) {
             await bus.register(tool: tool)
         }

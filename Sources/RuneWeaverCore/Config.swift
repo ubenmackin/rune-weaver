@@ -847,6 +847,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var plugins: PluginConfig
     /// Local web search and fetch policy.
     public var browser = BrowserConfig()
+    /// Home media automation (Sonarr & Radarr).
+    public var media = MediaConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -862,7 +864,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         home: HomeConfig = HomeConfig(),
         scheduler: SchedulerConfig = SchedulerConfig(),
         plugins: PluginConfig = PluginConfig(),
-        browser: BrowserConfig = BrowserConfig()
+        browser: BrowserConfig = BrowserConfig(),
+        media: MediaConfig = MediaConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -877,6 +880,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.scheduler = scheduler
         self.plugins = plugins
         self.browser = browser
+        self.media = media
     }
 
     /// Config with sensible defaults matching `config.toml.example`.

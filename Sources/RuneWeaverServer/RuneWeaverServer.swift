@@ -369,6 +369,7 @@ public final class ServerContext: Sendable {
         engineConfig: EngineConfig = EngineConfig(),
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig = FilesConfig(),
+        mediaConfig: MediaConfig? = nil,
         auth: ServerAuth? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
@@ -380,13 +381,14 @@ public final class ServerContext: Sendable {
         let hub = WSHub()
         let runLock = SchedulerRunLock()
         let bus = ToolBus(permissionGate: permissionGate)
-        // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, and API tools.
+        // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, API, and media tools.
         await BuiltinToolPlugins.registerAll(
             on: bus,
             emailConfig: emailConfig,
             filesConfig: filesConfig,
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
             memoryEngine: memoryEngine,
             embedder: embedder
