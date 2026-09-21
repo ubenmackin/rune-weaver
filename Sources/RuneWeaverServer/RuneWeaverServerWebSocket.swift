@@ -96,6 +96,110 @@ final class ConnectionChatTasks: Sendable {
     }
 }
 
+/// Partial audit snapshot for a turn that ended without an authoritative response.
+///
+/// Named fields keep error paths readable where an anonymous triple would hide
+/// which value is billed usage versus partial text, and keep the audit shape
+/// identical between the REST and WebSocket failure paths.
+struct ChatTurnAuditSnapshot: Sendable {
+    /// Assistant text streamed before the failure, possibly empty.
+    let partialText: String
+    /// Tool actions completed or started before the failure.
+    let toolActions: [ToolAction]
+    /// Billed total accumulated before the failure, when reported.
+    let totalTokens: Int?
+
+    /// Creates a snapshot.
+    init(partialText: String, toolActions: [ToolAction], totalTokens: Int? = nil) {
+        self.partialText = partialText
+        self.toolActions = toolActions
+        self.totalTokens = totalTokens
+    }
+}
+
+/// Accumulates mid-turn audit progress from orchestrator events so error paths keep partial context.
+///
+/// Success paths persist the authoritative response, while failures have no response to persist;
+/// without this the audit row would drop tools that already ran. Completed tool frames build the
+/// action list, pending starts cover a tool interrupted mid-call, deltas rebuild partial text, and
+/// the latest turn total carries billed usage for the same response/toolActions/totalTokens shape
+/// as success.
+final class ChatTurnAuditProgress: Sendable {
+    /// One started-but-unfinished tool call, kept so an interrupted call still audits.
+    private struct PendingStart: Sendable {
+        let toolName: String
+        let argumentsJSON: String
+        let roundIndex: Int?
+    }
+
+    /// Locked progress: pending starts plus completed actions, partial text, and billed total.
+    private struct ProgressState: Sendable {
+        var pendingStarts: [String: PendingStart] = [:]
+        var completed: [ToolAction] = []
+        var partialText = ""
+        var totalTokens: Int?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: ProgressState())
+
+    /// Creates an empty accumulator.
+    init() {}
+
+    /// Folds one orchestrator event into the partial audit snapshot.
+    /// - Parameter event: Live turn event to accumulate.
+    func record(_ event: OrchestratorEvent) {
+        state.withLock { locked in
+            switch event {
+            case let .toolStarted(toolName, callID, argumentsJSON, roundIndex):
+                locked.pendingStarts[callID] = PendingStart(
+                    toolName: toolName,
+                    argumentsJSON: argumentsJSON,
+                    roundIndex: roundIndex
+                )
+            case let .toolCompleted(toolName, callID, result, roundIndex):
+                let pending = locked.pendingStarts.removeValue(forKey: callID)
+                locked.completed.append(ToolAction(
+                    toolName: toolName,
+                    callID: callID,
+                    argumentsJSON: pending?.argumentsJSON ?? "{}",
+                    result: result,
+                    roundIndex: roundIndex ?? pending?.roundIndex
+                ))
+            case let .textDelta(delta):
+                locked.partialText += delta
+            case let .turnTokens(_, _, turnTotalTokens):
+                guard turnTotalTokens >= 0 else { break }
+                locked.totalTokens = turnTotalTokens
+            case .warning, .toolProgress, .approval:
+                break
+            }
+        }
+    }
+
+    /// Snapshots the accumulated partial text, tool actions, and billed total.
+    /// - Returns: Partial text plus completed actions with pending starts appended as result-less actions.
+    func snapshot() -> ChatTurnAuditSnapshot {
+        state.withLock { locked in
+            var actions = locked.completed
+            for callID in locked.pendingStarts.keys.sorted() {
+                guard let pending = locked.pendingStarts[callID] else { continue }
+                actions.append(ToolAction(
+                    toolName: pending.toolName,
+                    callID: callID,
+                    argumentsJSON: pending.argumentsJSON,
+                    result: nil,
+                    roundIndex: pending.roundIndex
+                ))
+            }
+            return ChatTurnAuditSnapshot(
+                partialText: locked.partialText,
+                toolActions: actions,
+                totalTokens: locked.totalTokens
+            )
+        }
+    }
+}
+
 /// Authorizes a WebSocket upgrade at the route boundary.
 ///
 /// The global auth middleware is the primary gate; this re-checks the marker it
@@ -334,6 +438,10 @@ private struct WebSocketTurnParameters: Sendable {
 }
 
 /// Runs one chat turn's liveness heartbeat, inference process, and status updates.
+///
+/// The heartbeat and audit accumulator stay here while terminal persistence
+/// lives in the finish helpers below, keeping this body inside the lint budget
+/// without changing the per-path audit behavior.
 private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTasks: ConnectionChatTasks?) async {
     let context = params.context
     let connectionID = params.connectionID
@@ -346,18 +454,9 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
 
     defer { connectionTasks?.remove(id: trackingID) }
     let startTime = Date()
-    // Liveness heartbeat covers the silent stretches where prompt evaluation
-    // produces no deltas, tool frames, or warnings: without it a healthy
-    // multi-minute local inference looks identical to a dropped socket and
-    // the dashboard's inactivity timer cancels the turn mid-eval. The task
-    // is unstructured so it ticks alongside `process`; the defer below
-    // guarantees it stops on every terminal path, and per-send delivery
-    // still flows through the queued 5s timeout so a slow peer cannot wedge
-    // the turn. Sends targeted to the owning socket so unrelated sessions
-    // never wake; the REST path keeps broadcasting because it has no owning
-    // socket for multi-viewer turns.
     let heartbeat = startHeartbeat(context: context, connectionID: connectionID, sessionID: sessionID)
     defer { heartbeat.cancel() }
+    let auditProgress = ChatTurnAuditProgress()
     do {
         let response = try await context.orchestrator.process(
             input: UserInput(
@@ -366,65 +465,22 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
                 source: source.isEmpty ? "websocket" : source
             ),
             onEvent: { event in
+                auditProgress.record(event)
                 await sendWSEventFrame(event, connectionID: connectionID, sessionID: sessionID, context: context)
             }
         )
         guard !Task.isCancelled else {
-            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-            let entry = await context.runs.update(
-                id: initialEntry.id,
-                status: "cancelled",
-                durationMs: durationMs
-            ) ?? initialEntry
-            await context.hub.broadcastRun(entry)
-            // Cancellation can land after inference succeeds but before the done
-            // frame sends, so the owning socket still needs a targeted terminal
-            // frame to clear its pending state without waiting for a timeout.
-            let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
-            if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
-                await context.hub.send(id: connectionID, text: frame)
-            }
-            await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-            await context.steeringQueue.clear(for: sessionID)
+            await handleWebSocketTurnCancellation(
+                context: context,
+                connectionID: connectionID,
+                sessionID: sessionID,
+                registrationToken: registration.token,
+                initialEntry: initialEntry,
+                startTime: startTime
+            )
             return
         }
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        // Parked approval-gated turns persist as awaiting_approval instead of ok so the inbox
-        // decision can transition the same session entry. The per-turn parked flag keeps a
-        // stale prior park in this session from mis-marking a fresh normal turn.
-        // A parked turn clears the running badge (its broadcast lands as completed)
-        // while the approvals badge carries the wait, matching the polled
-        // running-session filter so live and reload views agree.
-        let parked = response.isParked
-        let parkedStatus = if parked {
-            "awaiting_approval"
-        } else {
-            "ok"
-        }
-        let entry = await context.runs.update(
-            id: initialEntry.id,
-            status: parkedStatus,
-            response: response.text,
-            toolActions: response.toolActions,
-            totalTokens: response.totalTokens,
-            durationMs: durationMs
-        ) ?? initialEntry
-        await context.hub.broadcastRun(entry)
-        // Live warning frames already streamed mid-turn; the terminal done frame repeats them
-        // for polling clients, so no per-warning resend here that would double-count the bell.
-        // Late steering stays queued above, so report its depth on done: the dashboard
-        // keeps exactly that many newest bubbles for the next turn and releases the
-        // consumed ones answered here instead of retaining them to the cap.
-        var done = WSStreamDone(from: response)
-        done.retainedSteerCount = await context.steeringQueue.pendingCount(for: sessionID)
-        if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
-            await context.hub.send(id: connectionID, text: frame)
-        }
-        await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-        // Late steering stays queued for the next turn so guidance arriving after
-        // the final ingest still gets answered instead of vanishing after its
-        // optimistic render.
-        // Preserve late steering for next turn; dashboard retains pending list and re-attaches to next timeline.
+        await finishWebSocketSuccessfulTurn(params: params, response: response, startTime: startTime)
     } catch is CancellationError {
         await handleWebSocketTurnCancellation(
             context: context,
@@ -446,18 +502,88 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
             )
             return
         }
-        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
-        let entry = await context.runs.update(
-            id: initialEntry.id,
-            status: "error",
-            durationMs: durationMs
-        ) ?? initialEntry
-        await context.hub.broadcastRun(entry)
-        await sendWSError(error.localizedDescription, connectionID: connectionID, context: context, sessionID: sessionID)
-        await context.activeTurns.unregister(sessionID: sessionID, token: registration.token)
-        // Failed turns keep late steering queued so the retry can still answer
-        // guidance that arrived after the final ingest.
+        await finishWebSocketFailedTurn(
+            params: params,
+            error: error,
+            audit: auditProgress.snapshot(),
+            startTime: startTime
+        )
     }
+}
+
+/// Persists a successful WebSocket turn and delivers its terminal done frame.
+///
+/// Parked approval-gated turns persist as awaiting_approval instead of ok so the
+/// inbox decision can transition the same session entry. Late steering stays
+/// queued for the next turn so guidance arriving after the final ingest still
+/// gets answered instead of vanishing after its optimistic render.
+private func finishWebSocketSuccessfulTurn(
+    params: WebSocketTurnParameters,
+    response: OrchestratorResponse,
+    startTime: Date
+) async {
+    let context = params.context
+    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    let parkedStatus = if response.isParked {
+        "awaiting_approval"
+    } else {
+        "ok"
+    }
+    let entry = await context.runs.update(
+        id: params.initialEntry.id,
+        status: parkedStatus,
+        response: response.text,
+        toolActions: response.toolActions,
+        totalTokens: response.totalTokens,
+        durationMs: durationMs
+    ) ?? params.initialEntry
+    await context.hub.broadcastRun(entry)
+    var done = WSStreamDone(from: response)
+    done.retainedSteerCount = await context.steeringQueue.pendingCount(for: params.sessionID)
+    if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
+        await context.hub.send(id: params.connectionID, text: frame)
+    }
+    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
+}
+
+/// Persists a failed WebSocket turn keeping the same audit shape as success.
+///
+/// Error rows reuse partial assistant text when streamed (else the error detail
+/// so the row is never response-less) plus the tools that already ran and their
+/// billed total, matching the tools the client already rendered live. Failed
+/// turns keep late steering queued so the retry can still answer guidance that
+/// arrived after the final ingest.
+private func finishWebSocketFailedTurn(
+    params: WebSocketTurnParameters,
+    error: Error,
+    audit: ChatTurnAuditSnapshot,
+    startTime: Date
+) async {
+    let context = params.context
+    let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    let auditResponse = audit.partialText.isEmpty ? error.localizedDescription : audit.partialText
+    let entry = await context.runs.update(
+        id: params.initialEntry.id,
+        status: "error",
+        response: auditResponse,
+        toolActions: audit.toolActions,
+        totalTokens: audit.totalTokens,
+        durationMs: durationMs
+    ) ?? params.initialEntry
+    await context.hub.broadcastRun(entry)
+    let errorMessage = Message(
+        role: .assistant,
+        content: "Error: \(error.localizedDescription)",
+        isError: true
+    )
+    await context.conversations.append(errorMessage, to: params.sessionID)
+    await sendWSError(
+        error.localizedDescription,
+        connectionID: params.connectionID,
+        context: context,
+        sessionID: params.sessionID
+    )
+    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
 }
 
 private func handleWebSocketTurnCancellation(

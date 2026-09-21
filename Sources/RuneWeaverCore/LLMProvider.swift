@@ -71,7 +71,7 @@ public struct ModelInfo: Sendable, Codable, Equatable {
 /// Decides whether vision payloads may reach the active model.
 public enum VisionGate: Sendable {
     /// Placeholder left where an image payload was removed.
-    public static let strippedPlaceholder = "[screenshot omitted: text-only model]"
+    public static let strippedPlaceholder = "[image omitted: text-only model]"
 
     /// Whether screenshot parameters should be advertised to the model.
     public static func shouldAdvertiseScreenshot(supportsVision: Bool) -> Bool {
@@ -82,40 +82,54 @@ public enum VisionGate: Sendable {
     /// Matches contiguous base64 plus newline-wrapped chunks (long lines only)
     /// with missing `=` padding and base64url spellings tolerated, so
     /// text-only models never receive leaked pixels through a strict match.
-    /// Whitespace stays outside the payload class so trailing prose after the
-    /// payload survives: spaces terminate the match, and only newline
-    /// continuations of 16 or more base64 characters extend it, keeping
-    /// chunked captures stripped without swallowing following text.
+    /// Also strips JSON image payload fields (`imageDataBase64`, `screenshotDataURL`).
     public static func strippedContent(_ content: String) -> String {
-        guard content.contains("data:image") else { return content }
-        guard let pattern = try? NSRegularExpression(
-            pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]+(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
-            options: []
-        ) else { return content }
-        let range = NSRange(content.startIndex ..< content.endIndex, in: content)
-        return pattern.stringByReplacingMatches(
-            in: content,
-            options: [],
-            range: range,
-            withTemplate: strippedPlaceholder
-        )
+        var result = content
+
+        // 1. Data URLs: data:image/jpeg;base64,...
+        if result.contains("data:image") {
+            if let pattern = try? NSRegularExpression(
+                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]+(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
+                options: []
+            ) {
+                let range = NSRange(result.startIndex ..< result.endIndex, in: result)
+                result = pattern.stringByReplacingMatches(
+                    in: result,
+                    options: [],
+                    range: range,
+                    withTemplate: strippedPlaceholder
+                )
+            }
+        }
+
+        // 2. JSON image fields: "imageDataBase64": "..." or "screenshotDataURL": "..."
+        // Length-gated so empty values stay untouched and re-stripping stays stable.
+        if result.contains("imageDataBase64") || result.contains("screenshotDataURL") {
+            if let jsonPattern = try? NSRegularExpression(
+                pattern: #"\"(imageDataBase64|screenshotDataURL)\"\s*:\s*\"[^\"]{16,}\""#,
+                options: []
+            ) {
+                let range = NSRange(result.startIndex ..< result.endIndex, in: result)
+                result = jsonPattern.stringByReplacingMatches(
+                    in: result,
+                    options: [],
+                    range: range,
+                    withTemplate: "\"$1\": \"\(strippedPlaceholder)\""
+                )
+            }
+        }
+
+        return result
     }
 
     /// Strips vision payloads from history when the model is text-only.
+    /// Copies through `withContent` so future `Message` fields survive the stripped path.
     public static func stripMessages(_ messages: [Message], supportsVision: Bool) -> [Message] {
         guard !supportsVision else { return messages }
         return messages.map { message in
             let stripped = strippedContent(message.content)
             guard stripped != message.content else { return message }
-            return Message(
-                id: message.id,
-                role: message.role,
-                content: stripped,
-                toolCallID: message.toolCallID,
-                isError: message.isError,
-                errorKind: message.errorKind,
-                createdAt: message.createdAt
-            )
+            return message.withContent(stripped)
         }
     }
 }

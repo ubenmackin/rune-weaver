@@ -825,15 +825,11 @@ public enum EmailAttachmentLifecycle: Sendable {
     }
 
     /// Returns whether an attachment part must detonate inside a microVM.
+    /// Delegates to the single archive truth table so MIME/extension membership
+    /// cannot drift from magic-byte routing; byte-level matches layer on top
+    /// inside `AttachmentSecurity.requiresMicroVMDetonation`.
     public static func isArchive(contentType: String, filename: String) -> Bool {
-        if mimeCategory(for: contentType) == "archive" {
-            return true
-        }
-        let lower = filename.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        for suffix in [".zip", ".tar", ".tgz", ".tar.gz", ".tar.bz2", ".tbz", ".tbz2", ".gz", ".7z", ".rar"] where lower.hasSuffix(suffix) {
-            return true
-        }
-        return false
+        AttachmentSecurity.isArchiveFilenameOrMime(contentType: contentType, filename: filename)
     }
 
     /// Validates an archive subpath without touching any filesystem.

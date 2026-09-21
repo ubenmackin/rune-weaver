@@ -394,8 +394,6 @@ public struct EmailAttachmentTool: Tool, Sendable {
 
     /// Maximum decoded bytes staged per attachment (10 MB).
     public static let maxAttachmentBytes = 10 * 1024 * 1024
-    /// Maximum raw image bytes delivered inline as vision Base64 (1 MiB). Larger images stay staged/export-only so model context stays bounded.
-    static let maxVisionBytes = 1 * 1024 * 1024
     /// Subdirectory of the isolated temp area holding downloaded attachments.
     public static let attachmentsSubdirectory = "attachments"
 
@@ -459,7 +457,24 @@ public struct EmailAttachmentTool: Tool, Sendable {
             if fetched.sizeBytes > Self.maxAttachmentBytes || fetched.data.count > Self.maxAttachmentBytes {
                 return oversizedEnvelope(target: effectiveTarget, accountName: account.name, fetched: fetched, callID: input.callID)
             }
-            if EmailAttachmentLifecycle.isArchive(contentType: fetched.contentType, filename: fetched.filename) {
+            let classification = AttachmentSecurity.classify(
+                data: fetched.data,
+                contentType: fetched.contentType,
+                filename: fetched.filename
+            )
+            if case let .executable(reason) = classification {
+                return executableBlockedEnvelope(
+                    target: effectiveTarget,
+                    accountName: account.name,
+                    fetched: fetched,
+                    reason: reason,
+                    callID: input.callID
+                )
+            }
+            // Single archive decision via AttachmentSecurity; the lifecycle
+            // filename/MIME check delegates to the same table, so one call covers
+            // MIME, extension, and magic-byte matches without drift.
+            if AttachmentSecurity.requiresMicroVMDetonation(data: fetched.data, contentType: fetched.contentType, filename: fetched.filename) {
                 if context.dryRun {
                     return archiveDryRunEnvelope(
                         target: effectiveTarget,
@@ -652,6 +667,30 @@ extension EmailAttachmentTool {
         return successEnvelope(envelope, callID: callID)
     }
 
+    /// Builds the skip result for an attachment identified as an executable or script.
+    private func executableBlockedEnvelope(
+        target: AttachmentTarget,
+        accountName: String,
+        fetched: EmailAttachmentData,
+        reason: String,
+        callID: String
+    ) -> ToolOutput {
+        let envelope = EmailAttachmentEnvelope(
+            account: accountName,
+            id: target.messageID,
+            index: target.attachmentIndex,
+            filename: fetched.filename,
+            contentType: fetched.contentType,
+            sizeBytes: fetched.sizeBytes,
+            path: nil,
+            skipped: true,
+            note: "Attachment download blocked: Executable or script detected (\(reason)).",
+            mailbox: target.mailbox,
+            nextSteps: "Executable files and scripts cannot be downloaded or staged for security reasons."
+        )
+        return successEnvelope(envelope, callID: callID)
+    }
+
     /// Resolves the isolated-temp destination for a download.
     private func stagedDestinationURL(
         target: AttachmentTarget,
@@ -734,6 +773,7 @@ extension EmailAttachmentTool {
                 attributes: [.posixPermissions: 0o700]
             )
             try fetched.data.write(to: destination, options: .atomic)
+            AttachmentSecurity.applyQuarantine(to: destination)
         } catch {
             let requestTemp = destination.deletingLastPathComponent().deletingLastPathComponent()
             SeatbeltTempStaging.discardTemp(at: requestTemp)
@@ -774,7 +814,7 @@ extension EmailAttachmentTool {
             if let vision = Self.cappedVisionBase64(for: fetched.data) {
                 imageDataBase64 = vision
             } else {
-                inlineNote = "Image omitted from inline vision payload (over \(Self.maxVisionBytes) bytes); "
+                inlineNote = "Image omitted from inline vision payload (invalid image or over 500KB budget); "
                     + "use files.read with path \"\(destination.path)\" to inspect it."
             }
         }
@@ -861,7 +901,7 @@ extension EmailAttachmentTool {
                 if let vision = Self.cappedVisionBase64(for: entryData) {
                     imageDataBase64 = vision
                 } else {
-                    inlineNote = "Image entry omitted from inline vision payload (over \(Self.maxVisionBytes) bytes); use 'saveToPath' to export it."
+                    inlineNote = "Image entry omitted from inline vision payload (invalid image or over 500KB budget); use 'saveToPath' to export it."
                 }
             } else if let capped = Self.cappedExtractedText(for: entryData) {
                 extractedText = capped.text
@@ -955,12 +995,14 @@ extension EmailAttachmentTool {
             throw EmailIMAPError.bridgeFailed("Could not export archive entry: \(error.localizedDescription)")
         }
         do {
-            return try SeatbeltTempStaging.atomicMoveTempFile(
+            let savedPath = try SeatbeltTempStaging.atomicMoveTempFile(
                 at: staged,
                 to: saveToPath,
                 homeDirectoryURL: homeDirectoryURL,
                 filesConfig: filesConfig
             )
+            AttachmentSecurity.applyQuarantine(to: URL(fileURLWithPath: savedPath))
+            return savedPath
         } catch let staging as SeatbeltTempStaging.StagingError {
             throw EmailIMAPError.bridgeFailed(staging.message)
         } catch {
