@@ -864,6 +864,45 @@ describe("reconstructMessages", () => {
     expect(result[1].toolActions).toHaveLength(1);
     expect(result[1].toolActions?.[0]?.result).toBeNull();
   });
+
+  it("preserves isError on assistant messages and retains associated tool actions", async () => {
+    const { reconstructMessages, toolActionMap } = await import("./ChatView");
+    const raw = [
+      { role: "user", content: "get attachment" },
+      {
+        id: "m-tool",
+        role: "assistant",
+        content: 'Calling email.attachment [call-1]',
+      },
+      {
+        id: "m-err",
+        role: "assistant",
+        content: "Error: context length exceeded",
+        isError: true,
+      },
+    ];
+    const structured = toolActionMap([
+      {
+        messageID: "m-tool",
+        actions: [
+          {
+            toolName: "email.attachment",
+            callID: "call-1",
+            argumentsJSON: '{"id":"1"}',
+            result: { toolCallID: "call-1", content: '{"ok":true}', isError: false },
+          },
+        ],
+      },
+    ]);
+
+    const result = reconstructMessages(raw, structured);
+    expect(result).toHaveLength(2);
+    expect(result[0].role).toBe("user");
+    expect(result[1].role).toBe("assistant");
+    expect(result[1].isError).toBe(true);
+    expect(result[1].toolActions).toHaveLength(1);
+    expect(result[1].toolActions?.[0].toolName).toBe("email.attachment");
+  });
 });
 
 describe("Inline session approval banner", () => {
@@ -1160,6 +1199,63 @@ describe("Degraded tool warnings and fatal errors", () => {
       screen.queryByTestId("turn-warnings-banner"),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+  });
+
+  it("preserves in-flight tool activity and renders error card when turn fails", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    render(<ChatView />);
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Message Rune Weaver/)).toBeInTheDocument();
+    });
+
+    await user.type(screen.getByLabelText("Chat input"), "download invoice attachment");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string }).sessionID;
+
+    // Simulate tool activity during the turn
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.attachment",
+      callID: "call-1",
+      argumentsJSON: '{"id":"10"}',
+      sessionID: turnSID,
+    });
+
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_end",
+      toolName: "email.attachment",
+      callID: "call-1",
+      result: {
+        toolCallID: "call-1",
+        content: '{"downloaded":true}',
+        isError: false,
+      },
+      sessionID: turnSID,
+    });
+
+    // An error frame arrives (e.g. context limit exceeded)
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "error",
+      message: "request (568726 tokens) exceeds the available context size (128000 tokens)",
+      sessionID: turnSID,
+    });
+
+    // Tool activity must STILL be visible, and error card must render
+    await waitFor(() => {
+      expect(screen.getByText(/Tool Activity/)).toBeInTheDocument();
+      expect(screen.getByText(/email\.attachment/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/Turn failed: request \(568726 tokens\) exceeds the available context size/),
+      ).toBeInTheDocument();
+    });
   });
 });
 

@@ -877,7 +877,8 @@ extension Orchestrator {
         } else {
             nil
         }
-        let stream = llm.chat(messages: messages, tools: tools, session: sessionID)
+        let effectiveMessages = VisionGate.stripMessages(messages, supportsVision: llm.modelInfo.supportsVision)
+        let stream = llm.chat(messages: effectiveMessages, tools: tools, session: sessionID)
         do {
             for await chunk in stream {
                 try Task.checkCancellation()

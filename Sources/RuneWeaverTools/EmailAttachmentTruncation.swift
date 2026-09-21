@@ -20,10 +20,10 @@ extension EmailAttachmentTool {
         return (text, false)
     }
 
-    /// Encodes image bytes as vision Base64 unless over the vision cap.
+    /// Downscales image bytes and encodes as vision data URL unless over budget or unparseable.
     static func cappedVisionBase64(for data: Data) -> String? {
-        guard data.count <= maxVisionBytes else { return nil }
-        return data.base64EncodedString()
+        guard AttachmentSecurity.isValidImage(data: data) else { return nil }
+        return ImageDownscaler.downscaledDataURL(for: data)
     }
 
     /// Rejects control bytes in an export destination before policy checks.

@@ -40,7 +40,7 @@ import SessionSidebar from "./SessionSidebar";
 import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
-import { WrenchIcon } from "./icons";
+import { AlertTriangleIcon, WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useRunningRuns, type FrozenRunLogEntry } from "../hooks/useRunningRuns";
 import type {
@@ -74,6 +74,8 @@ interface MessageItem {
   // The stamp stays grounded in the persisted creation time so live cards and
   // history reloads agree; an omitted stamp renders no footer.
   completedAt?: number;
+  isError?: boolean;
+  errorText?: string;
 }
 
 interface InFlightTurn {
@@ -863,6 +865,7 @@ export function reconstructMessages(
     segments: ChatSegment[],
     id: string,
     completedAt?: number,
+    isError?: boolean,
   ): MessageItem => {
     const text = flatTextFromSegments(segments);
     const flat = flatActionsFromSegments(segments);
@@ -873,6 +876,7 @@ export function reconstructMessages(
       toolActions: flat.length > 0 ? flat : undefined,
       segments: [...segments],
       ...(completedAt != null ? { completedAt } : {}),
+      ...(isError ? { isError: true } : {}),
     };
   };
   const result: MessageItem[] = [];
@@ -948,6 +952,18 @@ export function reconstructMessages(
           });
         }
         pendingSegments.push(...toolsSegmentsForMessage(dedupedStructured));
+        if (m.isError) {
+          result.push(
+            flushTurn(
+              pendingSegments,
+              m.id || `${m.createdAt || i}`,
+              pendingCompletedAt,
+              true,
+            ),
+          );
+          pendingSegments = [];
+          pendingCompletedAt = undefined;
+        }
         continue;
       }
       const leftoverLines: string[] = [];
@@ -973,6 +989,7 @@ export function reconstructMessages(
             pendingSegments,
             m.id || `${m.createdAt || i}`,
             pendingCompletedAt,
+            m.isError ?? false,
           ),
         );
         pendingSegments = [];
@@ -988,17 +1005,19 @@ export function reconstructMessages(
   }
 
   if (pendingSegments.length > 0) {
+    const lastRaw = rawMessages[rawMessages.length - 1];
     result.push(
       flushTurn(
         pendingSegments,
         `trailing_${rawMessages.length}`,
         pendingCompletedAt,
+        lastRaw?.isError ?? false,
       ),
     );
   }
 
   return result.filter(
-    (m) => m.text.trim().length > 0 || (m.toolActions && m.toolActions.length > 0)
+    (m) => m.text.trim().length > 0 || (m.toolActions && m.toolActions.length > 0) || m.isError
   );
 }
 
@@ -2658,17 +2677,60 @@ export default function ChatView({ health }: ChatViewProps) {
       }
       clearTurnTimeout();
       clearAllToolProgress();
-      turnSessionIDRef.current = null;
-      activeTurnStartMsRef.current = null;
+      const rawMessage: unknown = data.message;
+      const message =
+        typeof rawMessage === "string" && rawMessage.length > 0
+          ? rawMessage
+          : "Chat turn failed";
       if (!cancelledRef.current) {
-        const rawMessage: unknown = data.message;
-        const message =
-          typeof rawMessage === "string" && rawMessage.length > 0
-            ? rawMessage
-            : "Chat turn failed";
         setError(message);
       }
+
+      const snapshot = inFlightTurnRef.current;
+      const orderedDoneActions = deduplicateToolActionsByCallID([
+        ...(snapshot?.toolActions ?? []),
+      ]).sort(compareToolActionsByRound);
+      const errorSegments: ChatSegment[] =
+        snapshot?.segments && snapshot.segments.length > 0
+          ? [...snapshot.segments]
+          : [];
+      if (
+        errorSegments.length === 0 &&
+        snapshot?.text &&
+        snapshot.text.trim().length > 0
+      ) {
+        errorSegments.push({ kind: "text", text: snapshot.text });
+      }
+
+      const errorMsg: MessageItem = {
+        id: newSessionId(),
+        role: "assistant",
+        // Keep the streamed reply verbatim so the inline bubble never repeats
+        // the failure: the dedicated error card below owns the failure text.
+        text: snapshot?.text ?? "",
+        toolActions:
+          orderedDoneActions.length > 0 ? orderedDoneActions : undefined,
+        segments: errorSegments.length > 0 ? errorSegments : undefined,
+        isError: true,
+        errorText: message,
+        completedAt: Date.now(),
+      };
+      setMessages((prev) => {
+        const base = prev.filter((m) => {
+          if (m.role !== "assistant") return true;
+          if (!m.text.trim().startsWith(WAITING_PREFIX)) return true;
+          if (!m.toolActions || m.toolActions.length === 0) return false;
+          return true;
+        });
+        return [...base, errorMsg].slice(-MAX_MESSAGES);
+      });
+
+      // Release the turn identity with the live bubble so a stray duplicate
+      // error frame no longer owns this session and double-appends.
+      turnSessionIDRef.current = null;
+      activeTurnStartMsRef.current = null;
       setInFlightTurn(null);
+      inFlightTurnRef.current = null;
       setPending(false);
     } else if (frameType === "run_started" || frameType === "run_completed") {
       // Run lifecycle broadcasts keep the background badge honest across tabs
@@ -3544,7 +3606,24 @@ export default function ChatView({ health }: ChatViewProps) {
               message.role === "assistant" ? (message.toolActions ?? []) : [];
             const hasTools = actions.length > 0;
             const hasText = Boolean(message.text && message.text.trim().length > 0);
-            if (!hasText && !hasTools) return null;
+            if (!hasText && !hasTools && !message.isError) return null;
+            // Persisted failures store the failure string as the bubble text,
+            // so a prefix match keeps the dedicated error card as the single
+            // owner. Live snapshots instead keep the verbatim partial reply
+            // while the failure lives on `errorText`, so a partial that merely
+            // starts with `Error:` must stay visible and only an exact
+            // duplicate of the failure collapses.
+            const isPersistedErrorText = (text: string) =>
+              text.trim().startsWith("Error:") ||
+              text.trim().startsWith("Chat request failed");
+            const isSuppressedErrorText = (text: string) => {
+              if (!message.isError) return false;
+              const failure = message.errorText?.trim();
+              if (failure && failure.length > 0) {
+                return text.trim() === failure;
+              }
+              return isPersistedErrorText(text);
+            };
             // Segmented turns render text and tool batches in chronological order
             // so multi-round timelines never collapse into one lumped bucket.
             // Turns built before segmentation fall back to the legacy bucket below.
@@ -3554,7 +3633,10 @@ export default function ChatView({ health }: ChatViewProps) {
                 : undefined;
 
             return (
-              <div key={message.id} className={`message ${message.role}`}>
+              <div
+                key={message.id}
+                className={`message ${message.role}${message.isError ? " message-error" : ""}`}
+              >
                 {segments && segments.length > 0 ? (
                   <>
                     {segments.map((segment, segmentIndex) =>
@@ -3578,16 +3660,18 @@ export default function ChatView({ health }: ChatViewProps) {
                           </div>
                         </div>
                       ) : segment.text.trim().length > 0 ? (
-                        <div
-                          key={`text-${segmentIndex}`}
-                          className="message-text"
-                        >
-                          {message.role === "assistant" ? (
-                            <MarkdownText text={segment.text} />
-                          ) : (
-                            segment.text
-                          )}
-                        </div>
+                        message.isError && isSuppressedErrorText(segment.text) ? null : (
+                          <div
+                            key={`text-${segmentIndex}`}
+                            className="message-text"
+                          >
+                            {message.role === "assistant" ? (
+                              <MarkdownText text={segment.text} />
+                            ) : (
+                              segment.text
+                            )}
+                          </div>
+                        )
                       ) : null,
                     )}
                   </>
@@ -3613,7 +3697,7 @@ export default function ChatView({ health }: ChatViewProps) {
                     ) : null}
 
                     {/* Message Content */}
-                    {hasText ? (
+                    {hasText && (!message.isError || !isSuppressedErrorText(message.text)) ? (
                       <div className="message-text">
                         {message.role === "assistant" ? (
                           <MarkdownText text={message.text} />
@@ -3624,6 +3708,31 @@ export default function ChatView({ health }: ChatViewProps) {
                     ) : null}
                   </>
                 )}
+
+                {/* Turn error callout */}
+                {message.isError ? (
+                  <div
+                    className="chat-turn-error-card"
+                    role="alert"
+                    style={{
+                      marginTop: "8px",
+                      padding: "10px 14px",
+                      background: "rgba(239, 68, 68, 0.12)",
+                      border: "1px solid rgba(239, 68, 68, 0.35)",
+                      borderRadius: "8px",
+                      color: "var(--color-danger, #ef4444)",
+                      fontSize: "0.875rem",
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "10px",
+                    }}
+                  >
+                    <AlertTriangleIcon size={18} style={{ flexShrink: 0, marginTop: "2px" }} />
+                    <div style={{ wordBreak: "break-word" }}>
+                      Turn failed: {message.errorText || message.text.replace(/^Error:\s*/, "")}
+                    </div>
+                  </div>
+                ) : null}
                 {/* Completion footer: local relative time with an absolute
                     tooltip so each agent card carries its when without touching
                     markdown rendering. Missing stamps render no footer. */}
