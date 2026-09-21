@@ -1,7 +1,7 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
 // Single-sources the full built-in suite (Email, Files, Memory, Web, Browser,
-// API) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
+// API, Media) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
 // under one `[browser]` policy; `api.request` additionally exempts the
@@ -17,9 +17,9 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, files, memory, web, browser, api).
+    /// (email, files, memory, web, browser, api, media).
     public static var allToolNames: [String] {
-        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + toolNames
+        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + toolNames + MediaTools.toolNames
     }
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -51,13 +51,14 @@ public enum BuiltinToolPlugins {
             + ApiRequestTools.makeTools(browserConfig: browserConfig, llmServerURLs: llmServerURLs, transport: apiTransport)
     }
 
-    /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API)
+    /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API, Media)
     /// from component configurations.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -65,6 +66,7 @@ public enum BuiltinToolPlugins {
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
+        mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
@@ -90,6 +92,9 @@ public enum BuiltinToolPlugins {
             apiTransport: apiTransport,
             ensurer: ensurer
         )
+        if let mediaConfig {
+            tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport)
+        }
         return tools
     }
 
@@ -102,6 +107,7 @@ public enum BuiltinToolPlugins {
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
+        mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
@@ -110,6 +116,7 @@ public enum BuiltinToolPlugins {
             filesConfig: config.files,
             sandboxConfig: config.sandbox,
             browserConfig: config.browser,
+            mediaConfig: config.media,
             llmServerURLs: appLLMOrigins,
             memoryEngine: memoryEngine,
             embedder: embedder,
@@ -117,6 +124,7 @@ public enum BuiltinToolPlugins {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
+            mediaTransport: mediaTransport,
             ensurer: ensurer
         )
     }
@@ -130,6 +138,7 @@ public enum BuiltinToolPlugins {
         filesConfig: FilesConfig? = nil,
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -137,6 +146,7 @@ public enum BuiltinToolPlugins {
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
+        mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) async {
         for tool in makeAllTools(
@@ -144,6 +154,7 @@ public enum BuiltinToolPlugins {
             filesConfig: filesConfig,
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
             memoryEngine: memoryEngine,
             embedder: embedder,
@@ -151,6 +162,7 @@ public enum BuiltinToolPlugins {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
+            mediaTransport: mediaTransport,
             ensurer: ensurer
         ) {
             await bus.register(tool: tool)

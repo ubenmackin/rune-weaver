@@ -300,8 +300,12 @@ public struct ToolInfo: Content, Equatable {
     public let source: String
     /// Integrity status (`"valid"`, `"tampered"`, `"unverified"`).
     public let integrityStatus: String
+    /// Whether this tool has configurable settings.
+    public let hasConfig: Bool
 
     /// Creates a tool info row.
+    /// `hasConfig` is stored verbatim so the listing route stays the single
+    /// source of truth for which tools expose settings.
     public init(
         name: String,
         description: String,
@@ -311,7 +315,8 @@ public struct ToolInfo: Content, Equatable {
         isBuiltIn: Bool = true,
         pluginID: String? = nil,
         source: String = "builtin",
-        integrityStatus: String = "valid"
+        integrityStatus: String = "valid",
+        hasConfig: Bool = false
     ) {
         self.name = name
         self.description = description
@@ -322,17 +327,21 @@ public struct ToolInfo: Content, Equatable {
         self.pluginID = pluginID
         self.source = source
         self.integrityStatus = integrityStatus
+        self.hasConfig = hasConfig
     }
 
     /// Creates a row from a runtime tool.
     /// - Parameter tool: Registered tool.
+    /// - Parameter hasConfig: Whether the tool exposes settings, supplied by the
+    ///   caller so this type never branches on tool names.
     public init(
         _ tool: any Tool,
         isEnabled: Bool = true,
         isBuiltIn: Bool = true,
         pluginID: String? = nil,
         source: String = "builtin",
-        integrityStatus: String = "valid"
+        integrityStatus: String = "valid",
+        hasConfig: Bool = false
     ) {
         self.name = tool.name
         self.description = tool.description
@@ -347,6 +356,52 @@ public struct ToolInfo: Content, Equatable {
         self.pluginID = pluginID
         self.source = source
         self.integrityStatus = integrityStatus
+        self.hasConfig = hasConfig
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case name
+        case description
+        case permissionLevel
+        case inputSchema
+        case isEnabled
+        case isBuiltIn
+        case pluginID
+        case source
+        case integrityStatus
+        case hasConfig
+    }
+
+    /// Decodes tolerantly so registries persisted before the settings flag
+    /// existed still load with settings hidden instead of failing the listing.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        description = try container.decode(String.self, forKey: .description)
+        permissionLevel = try container.decode(String.self, forKey: .permissionLevel)
+        inputSchema = try container.decode(String.self, forKey: .inputSchema)
+        isEnabled = try container.decode(Bool.self, forKey: .isEnabled)
+        isBuiltIn = try container.decode(Bool.self, forKey: .isBuiltIn)
+        pluginID = try container.decodeIfPresent(String.self, forKey: .pluginID)
+        source = try container.decode(String.self, forKey: .source)
+        integrityStatus = try container.decode(String.self, forKey: .integrityStatus)
+        hasConfig = try container.decodeIfPresent(Bool.self, forKey: .hasConfig) ?? false
+    }
+
+    /// Encodes every field including the settings flag so newer dashboards
+    /// can rely on its presence without name-based fallbacks.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(name, forKey: .name)
+        try container.encode(description, forKey: .description)
+        try container.encode(permissionLevel, forKey: .permissionLevel)
+        try container.encode(inputSchema, forKey: .inputSchema)
+        try container.encode(isEnabled, forKey: .isEnabled)
+        try container.encode(isBuiltIn, forKey: .isBuiltIn)
+        try container.encodeIfPresent(pluginID, forKey: .pluginID)
+        try container.encode(source, forKey: .source)
+        try container.encode(integrityStatus, forKey: .integrityStatus)
+        try container.encode(hasConfig, forKey: .hasConfig)
     }
 }
 
@@ -988,6 +1043,7 @@ public struct SettingsResponse: Content, Equatable {
     public let pluginsDir: String
     public let pluginsMarketplaceIndexURL: String
     public let pluginsAutoRescan: Bool
+    public let media: MediaConfig
     public let configPath: String
 
     public init(config: RuneWeaverConfig, configPath: String) {
@@ -1021,6 +1077,7 @@ public struct SettingsResponse: Content, Equatable {
         self.pluginsDir = config.plugins.pluginsDir
         self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
         self.pluginsAutoRescan = config.plugins.autoRescan
+        self.media = config.media
         self.configPath = configPath
     }
 }
@@ -1059,6 +1116,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let pluginsDir: String?
     public let pluginsMarketplaceIndexURL: String?
     public let pluginsAutoRescan: Bool?
+    public let media: MediaSettingsUpdate?
 
     public init(
         engineName: String? = nil,
@@ -1090,7 +1148,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         emailAccounts: [EmailAccount]? = nil,
         pluginsDir: String? = nil,
         pluginsMarketplaceIndexURL: String? = nil,
-        pluginsAutoRescan: Bool? = nil
+        pluginsAutoRescan: Bool? = nil,
+        media: MediaSettingsUpdate? = nil
     ) {
         self.engineName = engineName
         self.logLevel = logLevel
@@ -1122,6 +1181,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.pluginsDir = pluginsDir
         self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
         self.pluginsAutoRescan = pluginsAutoRescan
+        self.media = media
     }
 
     /// Applies this update onto a loaded config, preserving every field
@@ -1137,6 +1197,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyBrowser(to: &config.browser)
         applyEmail(to: &config.email)
         applyPlugins(to: &config.plugins)
+        applyMedia(to: &config.media)
     }
 
     private func applyEngine(to engine: inout EngineConfig) throws {
@@ -1263,6 +1324,42 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let pluginsAutoRescan {
             plugins.autoRescan = pluginsAutoRescan
+        }
+    }
+
+    /// Merges a partial media patch onto the stored config, preserving every
+    /// field and every service the request omits. A nil patch or a nil side
+    /// is a no-op, so touching Sonarr never resets Radarr.
+    private func applyMedia(to media: inout MediaConfig) {
+        guard let update = self.media else { return }
+        if let sonarr = update.sonarr {
+            applyArr(sonarr, to: &media.sonarr)
+        }
+        if let radarr = update.radarr {
+            applyArr(radarr, to: &media.radarr)
+        }
+    }
+
+    /// Merges one Arr patch key-by-key; omitted keys keep their stored values
+    /// and stored secrets are never cleared by an absent key. Blank text reads
+    /// as absent (cleared to nil) so a dashboard-cleared field falls through to
+    /// server auto-detect instead of persisting as an empty override. Sonarr and
+    /// Radarr share this path so the two services cannot drift.
+    private func applyArr(_ update: ArrSettingsUpdate, to config: inout ArrInstanceConfig) {
+        if let enabled = update.enabled {
+            config.enabled = enabled
+        }
+        if let url = update.url {
+            config.url = NormalizedText.value(url)
+        }
+        if let apiKeyEnv = update.apiKeyEnv {
+            config.apiKeyEnv = NormalizedText.value(apiKeyEnv)
+        }
+        if let defaultQualityProfile = update.defaultQualityProfile {
+            config.defaultQualityProfile = NormalizedText.value(defaultQualityProfile)
+        }
+        if let defaultRootFolder = update.defaultRootFolder {
+            config.defaultRootFolder = NormalizedText.value(defaultRootFolder)
         }
     }
 }

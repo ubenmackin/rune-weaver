@@ -56,7 +56,8 @@ struct ServeCommand: AsyncParsableCommand {
             selected: selected,
             allProviders: allProviders,
             serverConfig: serverConfig,
-            auth: auth
+            auth: auth,
+            mediaConfig: loaded.config.media
         )
         var env = try Environment.detect()
         try LoggingSystem.bootstrap(from: &env)
@@ -185,7 +186,8 @@ struct ServeCommand: AsyncParsableCommand {
         selected: any LLMProvider,
         allProviders: [any LLMProvider],
         serverConfig: ServerConfig,
-        auth: ServerAuth?
+        auth: ServerAuth?,
+        mediaConfig: MediaConfig? = nil
     ) async -> (context: ServerContext, permissionGate: PermissionGate) {
         let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
         let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
@@ -207,6 +209,9 @@ struct ServeCommand: AsyncParsableCommand {
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: allProviders)
         )
+        // Resolve the media section once so the preview registry, the prompt
+        // snapshot, and the served context register the same media tools.
+        let resolvedMediaConfig = mediaConfig ?? loaded.config.media
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.
@@ -217,7 +222,8 @@ struct ServeCommand: AsyncParsableCommand {
             sandboxConfig: loaded.config.sandbox,
             embedder: embedder,
             browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm
+            llmConfig: loaded.config.llm,
+            mediaConfig: resolvedMediaConfig
         )
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
@@ -232,7 +238,8 @@ struct ServeCommand: AsyncParsableCommand {
             pluginConfig: loaded.config.plugins,
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm
+            llmConfig: loaded.config.llm,
+            mediaConfig: resolvedMediaConfig
         )
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
@@ -257,6 +264,7 @@ struct ServeCommand: AsyncParsableCommand {
             engineConfig: loaded.config.engine,
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
+            mediaConfig: resolvedMediaConfig,
             auth: auth
         )
         for tool in plugins {

@@ -204,4 +204,34 @@ struct SettingsRouteTests {
         let reloaded = try RuneWeaverConfig.load(from: fileURL)
         #expect(reloaded.engine.name == "Updated Name")
     }
+
+    @Test
+    func `SettingsResponse and UpdateSettingsRequest map media configuration`() throws {
+        var config = RuneWeaverConfig.default
+        let update = UpdateSettingsRequest(
+            media: MediaConfig(
+                sonarr: SonarrConfig(
+                    enabled: true,
+                    url: "http://192.168.1.50:8989",
+                    apiKeyEnv: "SONARR_KEY_TEST",
+                    defaultQualityProfile: "HD-1080p",
+                    defaultRootFolder: "/tv"
+                ),
+                radarr: RadarrConfig(
+                    enabled: false,
+                    url: "http://192.168.1.50:7878",
+                    apiKeyEnv: "RADARR_KEY_TEST"
+                )
+            )
+        )
+
+        try update.apply(to: &config)
+        #expect(config.media.sonarr.url == "http://192.168.1.50:8989")
+        #expect(config.media.sonarr.apiKeyEnv == "SONARR_KEY_TEST")
+        #expect(config.media.radarr.enabled == false)
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.media.sonarr.url == "http://192.168.1.50:8989")
+        #expect(response.media.radarr.enabled == false)
+    }
 }
