@@ -384,6 +384,7 @@ export default function SettingsManager() {
   const [browserSaveSuccess, setBrowserSaveSuccess] = useState(false);
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
+  const browserSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Access-management flow: rotating the single owner token signs out every
   // other device the moment the engine swaps it, so the dashboard asks twice
   // before calling the route, then reveals the new token once. The API client
@@ -1132,6 +1133,7 @@ export default function SettingsManager() {
   useEffect(() => {
     const pollRef = browserTimerRef;
     const mediaRef = mediaSaveTimerRef;
+    const browserSaveRef = browserSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -1140,6 +1142,10 @@ export default function SettingsManager() {
       if (mediaRef.current !== null) {
         clearTimeout(mediaRef.current);
         mediaRef.current = null;
+      }
+      if (browserSaveRef.current !== null) {
+        clearTimeout(browserSaveRef.current);
+        browserSaveRef.current = null;
       }
     };
   }, []);
@@ -1535,11 +1541,18 @@ export default function SettingsManager() {
       const updated = await updateSettings({
         browserAllowedOrigins: parseAllowedOriginsText(browserAllowedOriginsText),
       });
-      // Refresh only the browser field so unsaved edits in other tabs survive;
-      // a full repopulate would clobber them. The modal stays open until an
-      // explicit close so the success confirmation remains readable.
+      // Refresh only the browser field so unsaved edits in other tabs survive.
       setBrowserAllowedOriginsText(formatAllowedOriginsText(updated.browserAllowedOrigins));
       setBrowserSaveSuccess(true);
+      if (browserSaveTimerRef.current !== null) {
+        clearTimeout(browserSaveTimerRef.current);
+        browserSaveTimerRef.current = null;
+      }
+      browserSaveTimerRef.current = setTimeout(() => {
+        browserSaveTimerRef.current = null;
+        setBrowserSaveSuccess(false);
+        setConfiguringToolName(null);
+      }, 1000);
     } catch (err) {
       setBrowserModalError(err instanceof ApiError ? err.message : "Failed to save browser settings");
     } finally {
@@ -4256,7 +4269,7 @@ export default function SettingsManager() {
               <CloseIcon size={16} />
             </button>
           </div>
-          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+          <div className="modal-body" style={{ maxHeight: "calc(85vh - 130px)", overflowY: "auto" }}>
             {browserModalError && (
               <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
                 <AlertTriangleIcon size={16} />
@@ -4319,7 +4332,7 @@ export default function SettingsManager() {
             <div className="form-group" style={{ marginBottom: "10px" }}>
               <label htmlFor="browser-allowed-origins-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span>
-                  Allowed Homelab Hosts & Domains{" "}
+                  Allowed Hosts & Domains{" "}
                   <span className="muted text-sm">
                     ({parseAllowedOriginsText(browserAllowedOriginsText).length}{" "}
                     {parseAllowedOriginsText(browserAllowedOriginsText).length === 1 ? "host" : "hosts"})
@@ -4328,16 +4341,14 @@ export default function SettingsManager() {
               </label>
               <textarea
                 id="browser-allowed-origins-textarea"
-                className="input-field"
-                style={{ fontFamily: "monospace", fontSize: "0.82rem" }}
-                rows={6}
+                className="input-field allowed-origins-textarea"
                 value={browserAllowedOriginsText}
                 onChange={(e) => setBrowserAllowedOriginsText(e.target.value)}
-                placeholder={"*.int.volcrypt.com\n192.168.1.*\nhomeassistant.local\n10.0.0.5:8123"}
+                placeholder={"*.homelab.local\n192.168.1.*\nhomeassistant.local\n10.0.0.5:8123"}
               />
               <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
                 One host, domain pattern, or IP pattern per line. Supports exact hostnames (e.g. <code>nas.local</code>),
-                exact origins with ports (e.g. <code>192.168.1.50:8080</code>), or wildcards (e.g. <code>*.int.volcrypt.com</code> or <code>192.168.1.*</code>). Blank lines are ignored.
+                exact origins with ports (e.g. <code>192.168.1.50:8080</code>), or wildcards (e.g. <code>*.homelab.local</code> or <code>192.168.1.*</code>). Blank lines are ignored.
               </span>
             </div>
           </div>
@@ -4360,13 +4371,7 @@ export default function SettingsManager() {
             </button>
           </div>
         </Modal>
-      ) : null}
-
-      {/* Media tools (Sonarr & Radarr) configuration modal. Both media tool
-          names share the Sonarr/Radarr patch, so either opens this editor;
-          any other hasConfig tool falls through to the honest fallback below
-          instead of a dead click with no modal. */}
-      {configuringToolName === "media.arr" ||
+      ) : configuringToolName === "media.arr" ||
       configuringToolName === "media.arr.read" ? (
         <Modal
           label="Configure Sonarr & Radarr"

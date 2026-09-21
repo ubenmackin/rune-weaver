@@ -990,8 +990,8 @@ describe("owner bearer auth client", () => {
     expect(parseAllowedOriginsText("")).toEqual([]);
     expect(parseAllowedOriginsText("  \n  ")).toEqual([]);
     expect(
-      parseAllowedOriginsText("  *.int.volcrypt.com \n\n 192.168.1.*  \n homeassistant.local ")
-    ).toEqual(["*.int.volcrypt.com", "192.168.1.*", "homeassistant.local"]);
+      parseAllowedOriginsText("  *.homelab.local \n\n 192.168.1.*  \n homeassistant.local ")
+    ).toEqual(["*.homelab.local", "192.168.1.*", "homeassistant.local"]);
   });
 
   it("formats allowed origins array into newline-separated text", () => {
@@ -999,7 +999,7 @@ describe("owner bearer auth client", () => {
     expect(formatAllowedOriginsText(undefined)).toBe("");
     expect(formatAllowedOriginsText([])).toBe("");
     expect(
-      formatAllowedOriginsText(["*.int.volcrypt.com", "192.168.1.*"])
-    ).toBe("*.int.volcrypt.com\n192.168.1.*");
+      formatAllowedOriginsText(["*.homelab.local", "192.168.1.*"])
+    ).toBe("*.homelab.local\n192.168.1.*");
   });
 });

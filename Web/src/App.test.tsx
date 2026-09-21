@@ -14,7 +14,8 @@ import { clearAuthToken, getAuthToken } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
 vi.mock("./components/ChatView", () => ({ default: () => null }));
-vi.mock("./components/TopNav", () => ({ default: () => null }));
+vi.mock("./components/TopNav", () => ({ default: () => <div data-testid="top-nav">TopNav</div> }));
+vi.mock("./components/SettingsManager", () => ({ default: () => <div data-testid="settings-manager">Settings</div> }));
 vi.mock("./hooks/useWebNotifications", () => ({
   useWebNotifications: () => ({
     notificationsEnabled: false,
@@ -88,5 +89,30 @@ describe("App owner-auth gate", () => {
       expect(document.querySelector(".app-root")).not.toBeNull(),
     );
     expect(getAuthToken()).toBe("owner-token");
+  });
+
+  it("renders only SettingsManager without TopNav in standalone mode", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ status: "ok", engine: "Rune Weaver", version: "0.1.0" }),
+      ),
+    );
+
+    // Set standalone query parameter
+    window.history.pushState({}, "", "/?standalone=true#settings");
+
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-manager")).toBeInTheDocument(),
+    );
+
+    // TopNav is completely absent from the DOM
+    expect(screen.queryByTestId("top-nav")).toBeNull();
+    // Container has standalone-settings class
+    expect(document.querySelector(".standalone-settings")).not.toBeNull();
+
+    // Clean up URL
+    window.history.pushState({}, "", "/");
   });
 });

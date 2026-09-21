@@ -10,6 +10,17 @@ import RuneWeaverTools
 import SwiftUI
 import Vapor
 
+/// Active chat session snapshot for menu bar presentation.
+public struct ActiveChatInfo: Identifiable, Sendable, Equatable {
+    public let id: UUID
+    public let title: String
+
+    public init(id: UUID, title: String) {
+        self.id = id
+        self.title = title
+    }
+}
+
 @Observable
 @MainActor
 public final class AppModel {
@@ -22,6 +33,7 @@ public final class AppModel {
     public var port: Int = ServerEndpointConfig.defaultPort
     public var providerName: String = "Detecting..."
     public var pendingApprovals: [PermissionRequest] = []
+    public var activeChats: [ActiveChatInfo] = []
     public var nextScheduleText: String = "No jobs scheduled"
     public var lastRunSummaryText: String = "None yet"
 
@@ -376,6 +388,20 @@ public final class AppModel {
         guard let context = serverContext else { return }
         let pending = await context.approvals.list()
         let runs = await context.runs.list(limit: 1)
+        let runningIDs = await context.activeTurns.runningSessionIDs()
+
+        var chats: [ActiveChatInfo] = []
+        for sid in runningIDs {
+            let session = await context.conversations.session(id: sid)
+            let rawTitle = session?.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title: String = if let rawTitle, !rawTitle.isEmpty {
+                rawTitle
+            } else {
+                "Chat \(sid.uuidString.prefix(8))"
+            }
+            chats.append(ActiveChatInfo(id: sid, title: title))
+        }
+        self.activeChats = chats.sorted(by: { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending })
 
         self.pendingApprovals = pending
 
@@ -404,14 +430,18 @@ public final class AppModel {
         guard let context = serverContext else { return }
         self.pendingApprovals = await context.approvals.list()
     }
+}
 
-    public func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
+// MARK: - Actions & Navigation
+
+public extension AppModel {
+    func approve(id: UUID, duration: TrustDuration = .thisTime, widen: Bool = false) {
         Task {
             await decideApproval(id: id, approved: true, duration: duration, widen: widen)
         }
     }
 
-    public func deny(id: UUID) {
+    func deny(id: UUID) {
         Task {
             await decideApproval(id: id, approved: false, duration: .thisTime, widen: false)
         }
@@ -461,7 +491,7 @@ public final class AppModel {
     /// scheme or path, and so a concurrent edit cannot produce a half-old address. Only loopback
     /// hosts are opened: the app never puts the owner token in a URL, so a non-loopback engine
     /// address is left for the owner to open directly.
-    private func dashboardURL(fragment: String? = nil) -> URL? {
+    private func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
         // Follow the endpoint actually bound at boot (which may come from
         // `[server]`), falling back to the published fields before boot.
         let host = (boundEndpoint?.hostname ?? hostname).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -473,25 +503,34 @@ public final class AppModel {
         components.host = host
         components.port = portValue
         components.path = "/"
+        if let queryItems, !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
         if let fragment {
             components.fragment = fragment
         }
         return components.url
     }
 
-    public func openDashboard() {
+    func openDashboard() {
         if let url = dashboardURL() {
             NSWorkspace.shared.open(url)
         }
     }
 
-    public func openSettings() {
-        if let url = dashboardURL(fragment: "settings") {
+    func openChat(id: UUID) {
+        if let url = dashboardURL(fragment: "chat", queryItems: [URLQueryItem(name: "session", value: id.uuidString)]) {
             NSWorkspace.shared.open(url)
         }
     }
 
-    public func quit() {
+    func openSettings() {
+        if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
+            SettingsWindowController.shared.show(url: url)
+        }
+    }
+
+    func quit() {
         pollingTask?.cancel()
         pollingTask = nil
         // Cancel the detached search flight up front so quit never leaves

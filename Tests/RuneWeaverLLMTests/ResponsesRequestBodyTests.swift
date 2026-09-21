@@ -572,6 +572,81 @@ struct ResponsesRequestBodyTests {
         }
     }
 
+    @Test
+    func `Long tool call arguments over 160 characters serialize untruncated into wire requests`() throws {
+        let callID = "call_long_args"
+        let longBody = String(repeating: "Detailed smoke test report contents. ", count: 10)
+        let longPayload = #"{"bodyText":"\#(longBody)","subject":"Report","to":["user@example.com"]}"#
+        #expect(longPayload.count > 160)
+
+        let placeholder = ToolInput.placeholderContent(for: [
+            ToolInput(toolName: "email.send", argumentsJSON: longPayload, callID: callID)
+        ])
+        let messages = [
+            Message(role: .user, content: "Send report"),
+            Message(role: .assistant, content: placeholder),
+            Message(role: .tool, content: #"{"sent":true}"#, toolCallID: callID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+
+        // Check chat completions wire format
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let chatObj = try #require(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatMessages = try #require(chatObj["messages"] as? [[String: Any]])
+        let assistantMsg = try #require(chatMessages.first(where: { ($0["role"] as? String) == "assistant" }))
+        let toolCalls = try #require(assistantMsg["tool_calls"] as? [[String: Any]])
+        #expect(toolCalls.count == 1)
+        let functionCall = toolCalls.first?["function"] as? [String: Any]
+        let wireArgs = functionCall?["arguments"] as? String
+        #expect(wireArgs == longPayload)
+
+        // Check responses wire format
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: responsesBody)
+        let callItem = try #require(input.first(where: { ($0["type"] as? String) == "function_call" }))
+        #expect((callItem["arguments"] as? String) == longPayload)
+    }
+
+    @Test
+    func `Malformed or truncated arguments JSON is sanitized to empty object on wire`() throws {
+        let callID = "call_corrupted"
+        let corruptedLine = "Calling email.send {\"subject\":\"Test\",\"bodyText\":\"## Report\\n\\nSummary: … [\(callID)]"
+        let messages = [
+            Message(role: .user, content: "Send report"),
+            Message(role: .assistant, content: corruptedLine),
+            Message(role: .tool, content: #"{"sent":true}"#, toolCallID: callID)
+        ]
+        let tools = [
+            ToolDefinition(
+                name: "email.send",
+                description: "Send email",
+                parameters: JSONSchema(rawValue: #"{"type":"object"}"#)
+            )
+        ]
+
+        // Check chat completions wire format sanitizes to "{}"
+        let chatBody = try openAIChatRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let chatObj = try #require(JSONSerialization.jsonObject(with: chatBody) as? [String: Any])
+        let chatMessages = try #require(chatObj["messages"] as? [[String: Any]])
+        let assistantMsg = try #require(chatMessages.first(where: { ($0["role"] as? String) == "assistant" }))
+        let toolCalls = try #require(assistantMsg["tool_calls"] as? [[String: Any]])
+        #expect(toolCalls.count == 1)
+        let functionCall = toolCalls.first?["function"] as? [String: Any]
+        #expect((functionCall?["arguments"] as? String) == "{}")
+
+        // Check responses wire format sanitizes to "{}"
+        let responsesBody = try openAIResponsesRequestBody(model: "gpt-4o-mini", messages: messages, tools: tools, stream: true)
+        let input = try responsesInputItems(from: responsesBody)
+        let callItem = try #require(input.first(where: { ($0["type"] as? String) == "function_call" }))
+        #expect((callItem["arguments"] as? String) == "{}")
+    }
+
     private func responsesInputItems(from body: Data) throws -> [[String: Any]] {
         let object = try JSONSerialization.jsonObject(with: body)
         let json = try #require(object as? [String: Any])

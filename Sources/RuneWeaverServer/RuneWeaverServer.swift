@@ -131,6 +131,11 @@ public actor ActiveTurnTracker {
         entries[sessionID] != nil
     }
 
+    /// Returns the session identifiers of all active turns currently in flight.
+    public func runningSessionIDs() -> [UUID] {
+        Array(entries.keys)
+    }
+
     /// Unregisters the turn for a session when it completes.
     public func unregister(sessionID: UUID, token: UUID) {
         guard entries[sessionID]?.token == token else { return }

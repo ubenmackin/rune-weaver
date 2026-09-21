@@ -37,51 +37,51 @@ struct AppMenuView: View {
     var model: AppModel
 
     var body: some View {
-        Text("Rune Weaver Engine")
-            .font(.headline)
-        Text(model.serverStatus)
-            .font(.caption)
-        Text("Provider: \(model.providerName)")
-            .font(.caption)
-
-        Divider()
-
         Button("Open Web Dashboard") {
             model.openDashboard()
         }
         .keyboardShortcut("o", modifiers: [.command])
 
-        Divider()
+        if !model.activeChats.isEmpty || !model.pendingApprovals.isEmpty {
+            Divider()
 
-        Section("Pending Approvals (\(model.pendingApprovals.count))") {
-            if model.pendingApprovals.isEmpty {
-                Text("No pending approvals")
-                    .disabled(true)
-            } else {
-                ForEach(model.pendingApprovals, id: \.id) { approval in
-                    Menu("\(approval.toolName): \(approval.description.isEmpty ? "Requires confirmation" : approval.description)") {
-                        Menu("Approve (This Target)") {
-                            ForEach(TrustDuration.allCases, id: \.self) { duration in
-                                Button(duration.displayName) {
-                                    model.approve(id: approval.id, duration: duration, widen: false)
+            if !model.activeChats.isEmpty {
+                Section(model.activeChats.count == 1 ? "Active Chat" : "Active Chats (\(model.activeChats.count))") {
+                    ForEach(model.activeChats) { chat in
+                        Button(chat.title) {
+                            model.openChat(id: chat.id)
+                        }
+                    }
+                }
+            }
+
+            if !model.pendingApprovals.isEmpty {
+                Section("Pending Approvals (\(model.pendingApprovals.count))") {
+                    ForEach(model.pendingApprovals, id: \.id) { approval in
+                        Menu("\(approval.toolName): \(approval.description.isEmpty ? "Requires confirmation" : approval.description)") {
+                            Menu("Approve (This Target)") {
+                                ForEach(TrustDuration.allCases, id: \.self) { duration in
+                                    Button(duration.displayName) {
+                                        model.approve(id: approval.id, duration: duration, widen: false)
+                                    }
                                 }
                             }
-                        }
-                        Menu("Approve for Any Target") {
-                            // Widening grants trust beyond the single target, which
-                            // only a durable tier can express; "only this time"
-                            // stores no grant at all, so it is excluded by
-                            // construction. Deriving the eligible set from allCases
-                            // keeps a future durable tier widen-eligible here
-                            // without a second list to keep in sync.
-                            ForEach(TrustDuration.allCases.filter { $0 != .thisTime }, id: \.self) { duration in
-                                Button(duration.displayName) {
-                                    model.approve(id: approval.id, duration: duration, widen: true)
+                            Menu("Approve for Any Target") {
+                                // Widening grants trust beyond the single target, which
+                                // only a durable tier can express; "only this time"
+                                // stores no grant at all, so it is excluded by
+                                // construction. Deriving the eligible set from allCases
+                                // keeps a future durable tier widen-eligible here
+                                // without a second list to keep in sync.
+                                ForEach(TrustDuration.allCases.filter { $0 != .thisTime }, id: \.self) { duration in
+                                    Button(duration.displayName) {
+                                        model.approve(id: approval.id, duration: duration, widen: true)
+                                    }
                                 }
                             }
-                        }
-                        Button("Deny") {
-                            model.deny(id: approval.id)
+                            Button("Deny") {
+                                model.deny(id: approval.id)
+                            }
                         }
                     }
                 }
