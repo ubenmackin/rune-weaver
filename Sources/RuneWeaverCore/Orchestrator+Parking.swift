@@ -27,6 +27,7 @@ extension Orchestrator {
             _ = await queue.takeEarlyDecision(id: id)
         }
         _ = await conversations.ensureSession(id: parked.sessionID)
+        await conversations.removeWaitingMessages(from: parked.sessionID)
         if approved {
             return try await resumeAllowedParked(parked, onEvent: onEvent)
         } else {
@@ -58,13 +59,21 @@ extension Orchestrator {
         let sessionID = parked.sessionID
         let call = parked.toolCall
         if call.toolName == "engine.continue" {
+            let result = ToolResult.success(toolCallID: call.callID, content: "Continuation granted by user.")
             let action = ToolAction(
                 toolName: "engine.continue",
                 callID: call.callID,
                 argumentsJSON: call.argumentsJSON,
-                result: ToolResult.success(toolCallID: call.callID, content: "Continuation granted by user."),
+                result: result,
                 roundIndex: parked.roundIndex
             )
+            await onEvent?(.toolCompleted(
+                toolName: call.toolName,
+                callID: call.callID,
+                result: result,
+                roundIndex: parked.roundIndex
+            ))
+            await conversations.append(result.asMessage(), to: sessionID)
             return try await finishParkedBatch(
                 parked: parked,
                 baseText: "",
@@ -154,6 +163,7 @@ extension Orchestrator {
             contextLength: llm.modelInfo.contextLength,
             thresholdPercent: compactionThresholdPercent
         )
+        await conversations.removeWaitingMessages(from: sessionID)
         let workingMessages = await refreshedWorkingMessages(
             sessionID: sessionID,
             recall: parked.recall,
@@ -333,6 +343,7 @@ extension Orchestrator {
         sessionID: UUID,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     ) async -> Message {
+        await conversations.removeWaitingMessages(from: sessionID)
         let denial = OrchestratorToolLoop.deniedApprovalMessage(for: call.toolName)
         let note = Message(role: .assistant, content: denial)
         let persisted = await conversations.append(note, to: sessionID)
@@ -529,7 +540,7 @@ extension Orchestrator {
         if !context.narrationAlreadyPersisted {
             await conversations.append(assistantNoteMessage(text: context.narratedText, calls: context.gated), to: context.sessionID)
         }
-        let waitingNote = Message(role: .assistant, content: waiting)
+        let waitingNote = OrchestratorToolLoop.waitingNoteMessage(text: waiting)
         let persistedWaiting = await conversations.append(waitingNote, to: context.sessionID)
         pendingEpisodic.append((waiting, .assistant))
         await context.onEvent?(.textDelta(waiting))

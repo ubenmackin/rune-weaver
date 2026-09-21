@@ -167,7 +167,7 @@ final class ChatTurnAuditProgress: Sendable {
                 ))
             case let .textDelta(delta):
                 locked.partialText += delta
-            case let .turnTokens(_, _, turnTotalTokens):
+            case let .turnTokens(_, _, turnTotalTokens, _):
                 guard turnTotalTokens >= 0 else { break }
                 locked.totalTokens = turnTotalTokens
             case .warning, .toolProgress, .approval:
@@ -209,7 +209,7 @@ final class ChatTurnAuditProgress: Sendable {
 /// token, so this guard cannot reintroduce it into logs.
 /// - Parameter request: Upgrade handshake request.
 /// - Returns: Empty headers to proceed, or nil to refuse the upgrade.
-func authorizeWebSocketUpgrade(_ request: Request) async -> HTTPHeaders? {
+func authorizeWebSocketUpgrade(_ request: Request) -> HTTPHeaders? {
     guard request.application.runeWeaverAuth != nil else {
         return [:]
     }
@@ -269,7 +269,7 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
         // Degraded-tool notices stream as warning frames so clients surface skips
         // mid-turn without failing the turn; the terminal done frame repeats them.
         try? String(data: JSONEncoder().encode(WSWarningFrame(message: message, sessionID: sessionID)), encoding: .utf8)
-    case let .turnTokens(roundIndex, roundTokens, turnTotalTokens):
+    case let .turnTokens(roundIndex, roundTokens, turnTotalTokens, contextTokens):
         // Per-round usage progress for the live footer: session-tagged so multiplexed
         // views only apply their own turn and older clients drop the unknown type.
         // The terminal done frame stays authoritative for reconciliation.
@@ -279,7 +279,8 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
                     sessionID: sessionID,
                     roundIndex: roundIndex,
                     roundTokens: roundTokens,
-                    turnTotalTokens: turnTotalTokens
+                    turnTotalTokens: turnTotalTokens,
+                    contextTokens: contextTokens
                 )
             ),
             encoding: .utf8

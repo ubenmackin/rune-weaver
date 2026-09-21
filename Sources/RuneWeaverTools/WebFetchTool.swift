@@ -78,32 +78,48 @@ public enum WebURLSafety: Sendable {
 /// between the web and API guards.
 public enum WebFetchSSRFGuard: Sendable {
     /// Refusal reason for a URL, or nil when the URL may be dialed.
-    public static func denyReason(for rawURL: String, browserConfig: BrowserConfig) -> String? {
+    public static func denyReason(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil
+    ) -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
         }
-        return ApiSSRFGuard.denyReason(for: trimmed, browserConfig: browserConfig, llmServerURLs: [])
+        return ApiSSRFGuard.denyReason(for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: [])
     }
 
     /// Async refusal reason that keeps blocking DNS off the cooperative pool.
     /// Literal spellings still resolve inline; only hostnames needing the
     /// resolver hop to the bounded pool with a fail-closed timeout, preserving
-    /// the exact `searxng_url`-only exemption of the synchronous shape.
-    public static func denyReasonAsync(for rawURL: String, browserConfig: BrowserConfig) async -> String? {
+    /// the configured exemptions of the synchronous shape.
+    public static func denyReasonAsync(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil
+    ) async -> String? {
         guard let trimmed = NormalizedText.value(rawURL) else {
             return "Empty URL: web.fetch needs an absolute http(s) URL."
         }
-        return await ApiSSRFGuard.denyReasonAsync(for: trimmed, browserConfig: browserConfig, llmServerURLs: [])
+        return await ApiSSRFGuard.denyReasonAsync(for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: [])
     }
 
     /// Whether a URL may be dialed under the fetch SSRF guard.
-    public static func isAllowed(for rawURL: String, browserConfig: BrowserConfig) -> Bool {
-        denyReason(for: rawURL, browserConfig: browserConfig) == nil
+    public static func isAllowed(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil
+    ) -> Bool {
+        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) == nil
     }
 
     /// Async allow check that keeps blocking DNS on the bounded pool.
-    public static func isAllowedAsync(for rawURL: String, browserConfig: BrowserConfig) async -> Bool {
-        await denyReasonAsync(for: rawURL, browserConfig: browserConfig) == nil
+    public static func isAllowedAsync(
+        for rawURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil
+    ) async -> Bool {
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) == nil
     }
 
     /// Normalizes a URL host for sensitive-range comparison.
@@ -294,12 +310,19 @@ public struct WebFetchTool: Tool, Sendable {
 
     /// Browser policy supplying timeouts and the `searxng_url` SSRF exemption.
     private let browserConfig: BrowserConfig
+    /// Media automation policy supplying Sonarr/Radarr auto-allowed origins.
+    private let mediaConfig: MediaConfig?
     /// HTTP transport (live session by default, stub in tests).
     private let transport: any WebFetchTransport
 
     /// Creates a fetch tool.
-    public init(browserConfig: BrowserConfig = BrowserConfig(), transport: (any WebFetchTransport)? = nil) {
+    public init(
+        browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
+        transport: (any WebFetchTransport)? = nil
+    ) {
         self.browserConfig = browserConfig
+        self.mediaConfig = mediaConfig
         if let transport {
             self.transport = transport
         } else {
@@ -332,10 +355,10 @@ public struct WebFetchTool: Tool, Sendable {
         }
         // Approval-free fetch must not dial loopback, link-local, metadata, or private ranges:
         // prompt-injected content could otherwise exfiltrate the loopback-only no-auth service into
-        // tool output. Only the exact configured `searxng_url` origin is exempt.
+        // tool output. Configured search, media, and allowed origins are exempt.
         // DNS blocks its thread, so the verdict hops to the bounded pool instead
         // of stalling shared tasks.
-        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig) {
+        if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig) {
             return unsupportedFailure(
                 originalURL: rawURL,
                 finalURL: rawURL,
@@ -408,7 +431,7 @@ public struct WebFetchTool: Tool, Sendable {
             }
             // Hop checks hop to the bounded pool for the same wedged-resolver
             // reason as the entry check, keeping redirects off shared tasks.
-            if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: currentURL.absoluteString, browserConfig: browserConfig) {
+            if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: currentURL.absoluteString, browserConfig: browserConfig, mediaConfig: mediaConfig) {
                 return chainEnvelope(
                     status: WebFetchEnvelope.statusUnsupported,
                     finalURL: currentURL.absoluteString,
@@ -455,7 +478,7 @@ public struct WebFetchTool: Tool, Sendable {
                 // bounce the approval-free fetcher into a loopback or
                 // private target. The async shape keeps a wedged resolver
                 // from stalling shared tasks on redirect chains.
-                if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: next.absoluteString, browserConfig: browserConfig) {
+                if let refusal = await WebFetchSSRFGuard.denyReasonAsync(for: next.absoluteString, browserConfig: browserConfig, mediaConfig: mediaConfig) {
                     return chainEnvelope(
                         status: WebFetchEnvelope.statusUnsupported,
                         finalURL: next.absoluteString,
@@ -711,21 +734,23 @@ public enum WebFetchTools {
     /// Tool names in registration order.
     public static let toolNames = ["web.fetch"]
 
-    /// Builds the fetch tool for a browser config.
+    /// Builds the fetch tool for a browser and media config.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         transport: (any WebFetchTransport)? = nil
     ) -> [any Tool] {
-        [WebFetchTool(browserConfig: browserConfig, transport: transport)]
+        [WebFetchTool(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: transport)]
     }
 
     /// Registers the fetch tool, replacing same-named entries.
     public static func register(
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         transport: (any WebFetchTransport)? = nil
     ) async {
-        for tool in makeTools(browserConfig: browserConfig, transport: transport) {
+        for tool in makeTools(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: transport) {
             await bus.register(tool: tool)
         }
     }

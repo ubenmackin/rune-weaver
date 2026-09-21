@@ -998,27 +998,30 @@ public enum WebTools {
     /// Tool names in registration order.
     public static let toolNames = ["web.search", "web.fetch"]
 
-    /// Builds both web tools for a browser config.
+    /// Builds both web tools for a browser config and optional media config.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) -> [any Tool] {
         WebSearchTools.makeTools(browserConfig: browserConfig, transport: searchTransport, ensurer: ensurer)
-            + WebFetchTools.makeTools(browserConfig: browserConfig, transport: fetchTransport)
+            + WebFetchTools.makeTools(browserConfig: browserConfig, mediaConfig: mediaConfig, transport: fetchTransport)
     }
 
     /// Registers both web tools, replacing same-named entries.
     public static func register(
         on bus: ToolBus,
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) async {
         for tool in makeTools(
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer

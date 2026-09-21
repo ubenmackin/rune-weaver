@@ -719,6 +719,9 @@ extension RuneWeaverConfig {
         if let maxResults = try browser.strictInt("max_results", field: "browser.max_results") {
             config.browser.maxResults = maxResults
         }
+        if let allowed = try browser.strictStringArray("allowed_origins", field: "browser.allowed_origins") {
+            config.browser.allowedOrigins = allowed
+        }
     }
 
     private static func decodeMedia(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

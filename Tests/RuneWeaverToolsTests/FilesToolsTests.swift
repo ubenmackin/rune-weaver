@@ -675,6 +675,60 @@ struct FilesToolsTests {
     }
 
     @Test
+    func `Glob matches slash-less patterns against filename at any depth`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        let top = home.appendingPathComponent("top.md")
+        try FilesTestSupport.write("# Top", at: top)
+        let subDir = home.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        let nested = subDir.appendingPathComponent("CONFIG.md")
+        try FilesTestSupport.write("# Config", at: nested)
+        let other = subDir.appendingPathComponent("notes.txt")
+        try FilesTestSupport.write("text", at: other)
+
+        let tool = FilesGlobTool(homeDirectoryURL: home)
+
+        // Pattern without slash matches filename across all subdirectories
+        let globMD = try await tool.execute(
+            input: ToolInput(toolName: "files.glob", argumentsJSON: #"{"pattern":"*.md","baseDir":"\#(home.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(globMD.isError == false)
+        let decodedMD = try JSONDecoder().decode(FilesTestSupport.Glob.self, from: Data(globMD.content.utf8))
+        #expect(decodedMD.paths.contains(FilesAccessGuard.resolvedURL(for: top.path).path))
+        #expect(decodedMD.paths.contains(FilesAccessGuard.resolvedURL(for: nested.path).path))
+        #expect(decodedMD.paths.count == 2)
+
+        // Exact filename without slash matches nested target
+        let globConfig = try await tool.execute(
+            input: ToolInput(toolName: "files.glob", argumentsJSON: #"{"pattern":"CONFIG.md","baseDir":"\#(home.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(globConfig.isError == false)
+        let decodedConfig = try JSONDecoder().decode(FilesTestSupport.Glob.self, from: Data(globConfig.content.utf8))
+        #expect(decodedConfig.paths == [FilesAccessGuard.resolvedURL(for: nested.path).path])
+
+        // Pattern with slash is anchored to the relative path
+        let globSub = try await tool.execute(
+            input: ToolInput(toolName: "files.glob", argumentsJSON: #"{"pattern":"sub/*.md","baseDir":"\#(home.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(globSub.isError == false)
+        let decodedSub = try JSONDecoder().decode(FilesTestSupport.Glob.self, from: Data(globSub.content.utf8))
+        #expect(decodedSub.paths == [FilesAccessGuard.resolvedURL(for: nested.path).path])
+    }
+
+    @Test
+    func `FilesGlobMatching matchesPath follows Git and VS Code convention`() {
+        #expect(FilesGlobMatching.matchesPath(pattern: "*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
+        #expect(FilesGlobMatching.matchesPath(pattern: "CONFIG.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
+        #expect(FilesGlobMatching.matchesPath(pattern: "harness/*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
+        #expect(FilesGlobMatching.matchesPath(pattern: "other/*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == false)
+        #expect(FilesGlobMatching.matchesPath(pattern: "**/*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
+    }
+
+    @Test
     func `Progress throttle fires on the time floor or the file interval`() {
         let start = ContinuousClock.now
         // Time trigger: any new visit once the spacing window closes is enough,

@@ -737,14 +737,18 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
     /// Cumulative billed tokens for this turn so far. Required so a missing key
     /// drops the frame instead of resetting the live footer.
     public var turnTotalTokens: Int
+    /// Estimated context-window occupancy at this round. Optional so older engines
+    /// that omit it still decode; dashboards keep their prior value when absent.
+    public var contextTokens: Int?
 
     /// Creates a token progress frame.
-    public init(sessionID: UUID? = nil, roundIndex: Int, roundTokens: Int, turnTotalTokens: Int) {
+    public init(sessionID: UUID? = nil, roundIndex: Int, roundTokens: Int, turnTotalTokens: Int, contextTokens: Int? = nil) {
         self.type = "turn_tokens"
         self.sessionID = sessionID
         self.roundIndex = roundIndex
         self.roundTokens = roundTokens
         self.turnTotalTokens = turnTotalTokens
+        self.contextTokens = contextTokens
     }
 
     /// Coding keys for the token progress frame.
@@ -759,6 +763,8 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
         case roundTokens
         /// Cumulative billed tokens for the turn.
         case turnTotalTokens
+        /// Context-window occupancy estimate.
+        case contextTokens
     }
 
     /// Decodes a token progress frame, defaulting a missing discriminator for back-compat
@@ -787,6 +793,11 @@ public struct WSTurnTokensFrame: Codable, Sendable, Equatable {
             throw DecodingError.dataCorruptedError(forKey: .turnTotalTokens, in: container, debugDescription: "turnTotalTokens must be non-negative")
         }
         self.turnTotalTokens = turnTotalTokens
+        let contextTokens = try container.decodeIfPresent(Int.self, forKey: .contextTokens)
+        if let contextTokens, contextTokens < 0 {
+            throw DecodingError.dataCorruptedError(forKey: .contextTokens, in: container, debugDescription: "contextTokens must be non-negative")
+        }
+        self.contextTokens = contextTokens
     }
 }
 

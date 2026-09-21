@@ -1036,6 +1036,7 @@ public struct SettingsResponse: Content, Equatable {
     public let browserSearxngURL: String
     public let browserSearchTimeoutSeconds: Int
     public let browserMaxResults: Int
+    public let browserAllowedOrigins: [String]
     public let searchSearxngURL: String
     public let searchTimeoutSeconds: Int
     public let searchMaxResults: Int
@@ -1070,6 +1071,7 @@ public struct SettingsResponse: Content, Equatable {
         self.browserSearxngURL = config.browser.searxngURL
         self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.browserMaxResults = config.browser.maxResults
+        self.browserAllowedOrigins = config.browser.allowedOrigins
         self.searchSearxngURL = config.browser.searxngURL
         self.searchTimeoutSeconds = config.browser.searchTimeoutSeconds
         self.searchMaxResults = config.browser.maxResults
@@ -1109,6 +1111,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let browserSearxngURL: String?
     public let browserSearchTimeoutSeconds: Int?
     public let browserMaxResults: Int?
+    public let browserAllowedOrigins: [String]?
     public let searchSearxngURL: String?
     public let searchTimeoutSeconds: Int?
     public let searchMaxResults: Int?
@@ -1142,6 +1145,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         browserSearxngURL: String? = nil,
         browserSearchTimeoutSeconds: Int? = nil,
         browserMaxResults: Int? = nil,
+        browserAllowedOrigins: [String]? = nil,
         searchSearxngURL: String? = nil,
         searchTimeoutSeconds: Int? = nil,
         searchMaxResults: Int? = nil,
@@ -1174,6 +1178,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.browserSearxngURL = browserSearxngURL
         self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
         self.browserMaxResults = browserMaxResults
+        self.browserAllowedOrigins = browserAllowedOrigins
         self.searchSearxngURL = searchSearxngURL
         self.searchTimeoutSeconds = searchTimeoutSeconds
         self.searchMaxResults = searchMaxResults
@@ -1306,6 +1311,9 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let browserMaxResults = browserMaxResults ?? searchMaxResults {
             browser.maxResults = browserMaxResults
+        }
+        if let browserAllowedOrigins {
+            browser.allowedOrigins = browserAllowedOrigins
         }
     }
 

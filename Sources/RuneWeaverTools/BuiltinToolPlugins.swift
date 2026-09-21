@@ -25,6 +25,7 @@ public enum BuiltinToolPlugins {
     /// Builds the shared five-tool set for one `[browser]` policy.
     /// - Parameters:
     ///   - browserConfig: `[browser]` policy feeding search, fetch, and API tools.
+    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
     ///   - llmServerURLs: Configured LLM `server_url` values exempted from the SSRF loopback deny.
     ///   - gateway: Playwright gateway shared by the browser tools.
     ///   - searchTransport: Hermetic SearXNG transport for tests; live session when nil.
@@ -34,6 +35,7 @@ public enum BuiltinToolPlugins {
     /// - Returns: Tools in registration order.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
         gateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -41,14 +43,22 @@ public enum BuiltinToolPlugins {
         apiTransport: (any ApiRequestTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil
     ) -> [any Tool] {
-        WebTools.makeTools(
+        let origins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs
+        )
+        return WebTools.makeTools(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             ensurer: ensurer
         )
-            + BrowserTools.makeTools(gateway: gateway)
-            + ApiRequestTools.makeTools(browserConfig: browserConfig, llmServerURLs: llmServerURLs, transport: apiTransport)
+            + BrowserTools.makeTools(gateway: gateway, allowlistedOrigins: origins)
+            + ApiRequestTools.makeTools(
+                browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: apiTransport
+            )
     }
 
     /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API, Media)
@@ -67,7 +77,8 @@ public enum BuiltinToolPlugins {
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        mediaSecrets: SecretsManager? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -85,6 +96,7 @@ public enum BuiltinToolPlugins {
         }
         tools += makeTools(
             browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
             llmServerURLs: llmServerURLs,
             gateway: gateway,
             searchTransport: searchTransport,
@@ -93,7 +105,7 @@ public enum BuiltinToolPlugins {
             ensurer: ensurer
         )
         if let mediaConfig {
-            tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport)
+            tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport, secrets: mediaSecrets)
         }
         return tools
     }
@@ -108,7 +120,8 @@ public enum BuiltinToolPlugins {
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        mediaSecrets: SecretsManager? = nil
     ) -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return makeAllTools(
@@ -125,7 +138,8 @@ public enum BuiltinToolPlugins {
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
-            ensurer: ensurer
+            ensurer: ensurer,
+            mediaSecrets: mediaSecrets
         )
     }
 
@@ -147,7 +161,8 @@ public enum BuiltinToolPlugins {
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        mediaSecrets: SecretsManager? = nil
     ) async {
         for tool in makeAllTools(
             emailConfig: emailConfig,
@@ -163,7 +178,8 @@ public enum BuiltinToolPlugins {
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
-            ensurer: ensurer
+            ensurer: ensurer,
+            mediaSecrets: mediaSecrets
         ) {
             await bus.register(tool: tool)
         }

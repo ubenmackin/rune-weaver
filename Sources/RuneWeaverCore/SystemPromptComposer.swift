@@ -432,7 +432,8 @@ public enum SystemPromptComposer {
         // usual cause of an over-broad scan.
         lines.append(
             "- files.glob searches the entire home directory when baseDir is omitted: pass the narrowest "
-                + "baseDir that covers the target unless a home-wide search is intended."
+                + "baseDir that covers the target unless a home-wide search is intended. "
+                + "Patterns without '/' (e.g. *.md) match filenames at any depth under baseDir."
         )
         lines.append(
             "- Memory writes auto-allowed and auditable: remember_fact and recall_memories are trusted "

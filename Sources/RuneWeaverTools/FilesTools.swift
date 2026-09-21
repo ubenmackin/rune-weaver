@@ -466,6 +466,18 @@ public enum FilesGlobMatching: Sendable {
         return expression.firstMatch(in: relativePath, range: range) != nil
     }
 
+    /// Reports whether a path matches a glob pattern, following the Git and
+    /// VS Code convention: patterns without a slash match against the filename
+    /// component at any depth; slash-bearing patterns match against the root-relative path.
+    public static func matchesPath(pattern: String, relativePath: String, filename: String) -> Bool {
+        if !pattern.contains("/") {
+            if matches(pattern: pattern, relativePath: filename) {
+                return true
+            }
+        }
+        return matches(pattern: pattern, relativePath: relativePath)
+    }
+
     /// Converts a glob to an anchored regular-expression source.
     public static func regexSource(fromGlob pattern: String) -> String {
         var source = "^"
@@ -825,20 +837,13 @@ public struct FilesGrepTool: Tool, Sendable {
     /// Reports whether a file passes the optional include filter.
     private func includeMatches(include: String, fileURL: URL, root: URL) -> Bool {
         let filename = fileURL.lastPathComponent
-        if FilesGlobMatching.matches(pattern: include, relativePath: filename) {
-            return true
-        }
-        // Fall back to the root-relative path for slash-bearing includes;
-        // single-file roots have no relative parent, so only the filename
-        // applies there.
         let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        if fileURL.path.hasPrefix(rootPath) {
-            let relative = String(fileURL.path.dropFirst(rootPath.count))
-            if !relative.isEmpty, FilesGlobMatching.matches(pattern: include, relativePath: relative) {
-                return true
-            }
+        let relative = if fileURL.path.hasPrefix(rootPath) {
+            String(fileURL.path.dropFirst(rootPath.count))
+        } else {
+            ""
         }
-        return false
+        return FilesGlobMatching.matchesPath(pattern: include, relativePath: relative, filename: filename)
     }
 
     /// Reads a file's searchable lines, or nil when the file is skipped.
@@ -924,9 +929,11 @@ public struct FilesGlobTool: Tool, Sendable {
     public let name = "files.glob"
     /// When the LLM should use this tool.
     public let description =
-        "Lists local paths matching a glob. "
+        "Lists local paths matching a glob pattern. "
             + "Use when the user asks to find files by name. "
-            + "Pass pattern (glob with *, ?, **, [...], max 500 chars, relative to baseDir, no '..'), "
+            + "Patterns without '/' (e.g. *.md or config.json) match filenames at any depth under baseDir. "
+            + "Patterns with '/' (e.g. src/**/*.swift or docs/*.md) match paths relative to baseDir. "
+            + "Pass pattern (*, ?, **, [...], max 500 chars, no '..'), "
             + "always pass the narrowest baseDir that covers the target, and maxResults (1-500, default 100). "
             + "Omitting baseDir searches the entire home directory, so pass it unless a home-wide scan is intended. "
             + "Returns sorted paths with a truncation flag; sensitive paths are pruned, denied bases fail with an approval hint."
@@ -934,7 +941,8 @@ public struct FilesGlobTool: Tool, Sendable {
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"pattern":{"type":"string","description":"Glob pattern "#
-                + #"relative to baseDir (*, ?, **, [...]; max 500 chars; no '..')"},"baseDir":{"type":"string","description":"Base "#
+                + #"(*, ?, **, [...]; max 500 chars; no '..'). Patterns without '/' (e.g. *.md, config.json) match "#
+                + #"filenames at any depth under baseDir. Patterns with '/' match paths relative to baseDir."},"baseDir":{"type":"string","description":"Base "#
                 + #"directory to search; prefer the narrowest directory (\"~\" expands to home). "#
                 + #"Omitted searches the entire home directory"},"maxResults":{"type":"integer","description":"Maximum "#
                 + #"paths (1-500, default 100)","minimum":1,"maximum":500}},"required":["pattern"],"additionalProperties":false}"#
@@ -1108,7 +1116,7 @@ public struct FilesGlobTool: Tool, Sendable {
                 continue
             }
             scanned += 1
-            if FilesGlobMatching.matches(pattern: rawPattern, relativePath: relative) {
+            if FilesGlobMatching.matchesPath(pattern: rawPattern, relativePath: relative, filename: url.lastPathComponent) {
                 matched.append(decision.resolvedPath)
             }
             // Emitted after the match so `matched` counts the visit just completed;

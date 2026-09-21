@@ -233,25 +233,63 @@ public enum ApiSSRFGuard: Sendable {
 
     /// Bounded wait for the async DNS probe so a wedged resolver fails closed
     /// quickly instead of stalling the gate; literal refusals never wait on DNS.
-    private static let dnsResolutionTimeoutSeconds: TimeInterval = 2
+    public static let dnsResolutionTimeoutSeconds: TimeInterval = 5
 
-    /// Allowlisted loopback origins derived from configuration.
-    public static func allowlistedOrigins(browserConfig: BrowserConfig, llmServerURLs: [String]) -> Set<String> {
+    /// Allowlisted loopback and homelab origins derived from configuration.
+    public static func allowlistedOrigins(
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = []
+    ) -> Set<String> {
         var origins = Set<String>()
-        let candidates = [browserConfig.searxngURL] + llmServerURLs
+        var candidates = [browserConfig.searxngURL] + llmServerURLs
+        // Disabled services stay out of the exemption set: broadening dialable
+        // origins for a service the operator turned off would violate least privilege.
+        if let mediaConfig, mediaConfig.sonarr.enabled, let sonarrURL = mediaConfig.sonarr.url {
+            candidates.append(sonarrURL)
+        }
+        if let mediaConfig, mediaConfig.radarr.enabled, let radarrURL = mediaConfig.radarr.url {
+            candidates.append(radarrURL)
+        }
         for raw in candidates {
-            guard let trimmed = NormalizedText.value(raw),
-                  let url = URL(string: trimmed),
-                  let key = originKey(for: url)
-            else { continue }
-            origins.insert(key)
+            insertOriginVariants(raw, into: &origins)
+        }
+        for raw in browserConfig.allowedOrigins {
+            insertOriginVariants(raw, into: &origins)
         }
         return origins
     }
 
+    /// Inserts the dialable host and key variants for one configured origin.
+    /// Matching is origin/host only, so a path-scoped entry contributes its host and
+    /// key without implying path scoping; the raw full URL itself never authorizes a
+    /// host and stays out of the set, while bare host and wildcard patterns survive
+    /// verbatim for host-pattern matching.
+    private static func insertOriginVariants(_ raw: String, into origins: inout Set<String>) {
+        guard let trimmed = NormalizedText.value(raw) else { return }
+        if trimmed.contains("://") {
+            let urlString = trimmed
+            if let url = URL(string: urlString), let host = url.host, !host.isEmpty {
+                origins.insert(host.lowercased())
+                if let key = originKey(for: url) {
+                    origins.insert(key)
+                }
+            }
+            return
+        }
+        origins.insert(trimmed.lowercased())
+        let urlString = "http://\(trimmed)"
+        if let url = URL(string: urlString), let host = url.host, !host.isEmpty {
+            origins.insert(host.lowercased())
+            if let key = originKey(for: url) {
+                origins.insert(key)
+            }
+        }
+    }
+
     /// Refusal reason against an explicit exemption set, or nil when dialable.
-    /// Browser flows pass an empty set because they never dial local origins,
-    /// so every loopback and LAN spelling fails closed with no config to forge.
+    /// Browser and web flows honor the precomputed allowlisted origins, so configured
+    /// homelab hosts dial while an empty set stays fail-closed with no config to forge.
     /// Blocking on the calling thread for DNS and point-in-time: prefer
     /// `denyReasonAsync` off the cooperative pool, and pin the resolved
     /// address at dial time because a hostname can rebind between this check
@@ -271,9 +309,9 @@ public enum ApiSSRFGuard: Sendable {
     }
 
     /// Refusal reason for a URL, or nil when the URL may be dialed.
-    /// Denies metadata, link-local, loopback (except the configured
-    /// `searxng_url` plus LLM origins), private RFC 1918 ranges, `0.0.0.0/8`,
-    /// and IPv6 unique-local addresses across decimal/hex/octal/short forms.
+    /// Denies metadata, link-local, loopback (except configured origins),
+    /// private RFC 1918 ranges, `0.0.0.0/8`, and IPv6 unique-local addresses
+    /// across decimal/hex/octal/short forms unless exempted by allowlisted origins.
     /// Blocking on the calling thread for DNS and point-in-time: prefer
     /// `denyReasonAsync` off the cooperative pool, and pin the resolved
     /// address at dial time because a hostname can rebind between this check
@@ -281,9 +319,10 @@ public enum ApiSSRFGuard: Sendable {
     public static func denyReason(
         for rawURL: String,
         browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = []
     ) -> String? {
-        let origins = allowlistedOrigins(browserConfig: browserConfig, llmServerURLs: llmServerURLs)
+        let origins = allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
         let hasLLM = llmServerURLs.contains(where: { NormalizedText.value($0) != nil })
         return denyReasonImpl(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLM)
     }
@@ -310,7 +349,7 @@ public enum ApiSSRFGuard: Sendable {
         case .allowed:
             nil as String?
         case let .needsDNS(host):
-            await dnsVerdictAsync(host: host)
+            await dnsVerdictAsync(host: host, origins: allowlistedOrigins)
         }
     }
 
@@ -325,9 +364,10 @@ public enum ApiSSRFGuard: Sendable {
     public static func denyReasonAsync(
         for rawURL: String,
         browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = []
     ) async -> String? {
-        let origins = allowlistedOrigins(browserConfig: browserConfig, llmServerURLs: llmServerURLs)
+        let origins = allowlistedOrigins(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs)
         let hasLLM = llmServerURLs.contains(where: { NormalizedText.value($0) != nil })
         return switch preDNSOutcome(for: rawURL, allowlistedOrigins: origins, hasLLMOrigins: hasLLM) {
         case let .denied(reason):
@@ -335,7 +375,7 @@ public enum ApiSSRFGuard: Sendable {
         case .allowed:
             nil as String?
         case let .needsDNS(host):
-            await dnsVerdictAsync(host: host)
+            await dnsVerdictAsync(host: host, origins: origins)
         }
     }
 
@@ -362,7 +402,7 @@ public enum ApiSSRFGuard: Sendable {
         case .allowed:
             nil as String?
         case let .needsDNS(host):
-            vettedDNSDenial(for: host)
+            vettedDNSDenial(for: host, origins: origins)
         }
     }
 
@@ -372,10 +412,12 @@ public enum ApiSSRFGuard: Sendable {
     /// Vets resolved addresses for one hostname, failing closed when empty.
     /// Single-sourced by the sync engine, the bounded async worker, and the
     /// debug stub fast path so every path enforces the same resolved-range table.
-    /// - Parameter host: Hostname whose addresses were resolved.
+    /// - Parameters:
+    ///   - host: Hostname whose addresses were resolved.
+    ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
     /// - Returns: Refusal reason, or nil when every address is dialable.
-    private static func vettedDNSDenial(for host: String) -> String? {
-        vettedIPListDenial(host: host, addresses: resolveHostAddresses(host))
+    private static func vettedDNSDenial(for host: String, origins: Set<String> = []) -> String? {
+        vettedIPListDenial(host: host, addresses: resolveHostAddresses(host), origins: origins)
     }
 
     /// Bounded async DNS vetting with fail-closed timeout and cancellation.
@@ -385,9 +427,11 @@ public enum ApiSSRFGuard: Sendable {
     /// without queueing, and a queued lookup that lost the race to timeout or
     /// cancellation skips the resolver instead of holding a thread for a
     /// verdict nobody waits on.
-    /// - Parameter host: Hostname needing DNS vetting.
+    /// - Parameters:
+    ///   - host: Hostname needing DNS vetting.
+    ///   - origins: Precomputed allowed origins/hosts that exempt internal IPs.
     /// - Returns: Refusal reason, or nil when every address is dialable.
-    private static func dnsVerdictAsync(host: String) async -> String? {
+    private static func dnsVerdictAsync(host: String, origins: Set<String> = []) async -> String? {
         if Task.isCancelled {
             return unverifiedDenial(for: host)
         }
@@ -398,7 +442,7 @@ public enum ApiSSRFGuard: Sendable {
             // the system resolver fail-closed. Serialized suites publish and
             // clear per test because the holder is process-global.
             if let stub = ssrfTestDNSBox.get() {
-                return vettedIPListDenial(host: host, addresses: stub(host))
+                return vettedIPListDenial(host: host, addresses: stub(host), origins: origins)
             }
         #endif
         // Drop-newest when the pool is saturated so a burst cannot stack
@@ -458,7 +502,7 @@ public enum ApiSSRFGuard: Sendable {
                             return
                         }
                         defer { ssrfDNSGate.release() }
-                        let verdict = vettedDNSDenial(for: host)
+                        let verdict = vettedDNSDenial(for: host, origins: origins)
                         let held = sleeper.withLock { current -> Task<Void, Never>? in
                             let task = current
                             current = nil
@@ -539,9 +583,18 @@ public enum ApiSSRFGuard: Sendable {
     public static func isAllowed(
         _ rawURL: String,
         browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = []
     ) -> Bool {
-        denyReason(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) == nil
+        denyReason(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+    }
+
+    /// Whether a URL may be dialed under the SSRF guard with precomputed origins.
+    public static func isAllowed(
+        _ rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) -> Bool {
+        denyReason(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
     }
 
     /// Async allow check that keeps blocking DNS on the bounded pool.
@@ -550,8 +603,17 @@ public enum ApiSSRFGuard: Sendable {
     public static func isAllowedAsync(
         _ rawURL: String,
         browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = []
     ) async -> Bool {
-        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, llmServerURLs: llmServerURLs) == nil
+        await denyReasonAsync(for: rawURL, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs) == nil
+    }
+
+    /// Async allow check with precomputed origins that keeps blocking DNS on the bounded pool.
+    public static func isAllowedAsync(
+        _ rawURL: String,
+        allowlistedOrigins: Set<String> = []
+    ) async -> Bool {
+        await denyReasonAsync(for: rawURL, allowlistedOrigins: allowlistedOrigins) == nil
     }
 }

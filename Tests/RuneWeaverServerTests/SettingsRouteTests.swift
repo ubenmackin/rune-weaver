@@ -3,6 +3,7 @@
 import Foundation
 import RuneWeaverCore
 @testable import RuneWeaverServer
+import RuneWeaverTools
 import Testing
 
 @Suite("Settings Configuration and DTOs")
@@ -233,5 +234,44 @@ struct SettingsRouteTests {
         let response = SettingsResponse(config: config, configPath: "/test/config.toml")
         #expect(response.media.sonarr.url == "http://192.168.1.50:8989")
         #expect(response.media.radarr.enabled == false)
+    }
+
+    @Test
+    func `Updating media config re-registers media tools with new settings`() async throws {
+        let bus = ToolBus()
+        let initialTools = MediaTools.makeTools(mediaConfig: MediaConfig())
+        for tool in initialTools {
+            await bus.register(tool: tool)
+        }
+
+        // Initial state: Sonarr URL is unconfigured
+        let initialToolOpt = await bus.tool(named: "media.arr")
+        let initialTool = try #require(initialToolOpt)
+        let unconfiguredOutput = try await initialTool.execute(
+            input: ToolInput(toolName: "media.arr", argumentsJSON: "{\"action\":\"status\",\"service\":\"sonarr\"}", callID: "call-1"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(unconfiguredOutput.isError)
+        #expect(unconfiguredOutput.content.contains("Sonarr URL is not configured"))
+
+        // Update media config and re-register
+        var updatedMedia = MediaConfig()
+        updatedMedia.sonarr.url = "http://127.0.0.1:8989"
+        updatedMedia.sonarr.apiKeyEnv = "MOCK_SONARR_KEY"
+        for tool in MediaTools.makeTools(mediaConfig: updatedMedia) {
+            let isEnabled = await bus.isToolEnabled(named: tool.name)
+            await bus.register(tool: tool, isEnabled: isEnabled)
+        }
+
+        // New state: Sonarr URL is present and new apiKeyEnv is picked up
+        let reloadedToolOpt = await bus.tool(named: "media.arr")
+        let reloadedTool = try #require(reloadedToolOpt)
+        let configuredOutput = try await reloadedTool.execute(
+            input: ToolInput(toolName: "media.arr", argumentsJSON: "{\"action\":\"status\",\"service\":\"sonarr\"}", callID: "call-2"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(configuredOutput.isError)
+        #expect(configuredOutput.content.contains("Missing API key for Sonarr"))
+        #expect(configuredOutput.content.contains("MOCK_SONARR_KEY"))
     }
 }

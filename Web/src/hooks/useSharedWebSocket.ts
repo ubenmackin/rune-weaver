@@ -126,6 +126,9 @@ export interface WSTurnTokensFrame {
   roundTokens: number;
   // Cumulative billed tokens for this turn so far.
   turnTotalTokens: number;
+  // Estimated context-window occupancy at this round. Optional so older
+  // engines that omit it still decode; dashboards keep prior value when absent.
+  contextTokens?: number;
 }
 
 // Live per-tool progress for one executing call. The engine throttles these

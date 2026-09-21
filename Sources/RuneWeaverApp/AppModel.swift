@@ -338,6 +338,7 @@ public final class AppModel {
                 engineConfig: config.engine,
                 emailConfig: config.email,
                 filesConfig: config.files,
+                mediaConfig: config.media,
                 auth: auth
             )
 
