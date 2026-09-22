@@ -978,6 +978,107 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
 
 // MARK: - NormalizedText lives in NormalizedText.swift
 
+// MARK: - Desktop vision and control
+
+/// `[desktop]` — macOS desktop vision and gated control policy.
+///
+/// Disabled by default (`enabled = false`). Even when enabled, the control
+/// surface (`controlEnabled`) is independently gated and ships off, requiring
+/// explicit operator opt-in. The screenshot tool is safe (read-only), while
+/// `desktop.action` requires approval per-invocation through the permission gate.
+public struct DesktopConfig: Sendable, Equatable {
+    /// Master switch — when false, neither tool is registered on the bus.
+    public var enabled: Bool
+    /// Whether `desktop.screenshot` is available (when the master switch is on).
+    public var screenCaptureEnabled: Bool
+    /// Whether `desktop.action` (mouse, keyboard, app switching) is available.
+    /// Independently gated; requires both `enabled` and `controlEnabled` to
+    /// be true before the tool registers.
+    public var controlEnabled: Bool
+    /// Longest edge of the downscaled screenshot in pixels. Bounds token cost.
+    public var maxImageDimension: Int
+    /// JPEG compression quality for downscaled screenshots (0.0–1.0).
+    public var jpegQuality: Double
+    /// Application names where `desktop.action` will refuse to dispatch input.
+    /// Protects sensitive apps from automated clicks and keystrokes.
+    public var blockedApps: [String]
+
+    /// Default master switch state.
+    public static let defaultEnabled = false
+    /// Default screen capture toggle.
+    public static let defaultScreenCaptureEnabled = true
+    /// Default control toggle.
+    public static let defaultControlEnabled = false
+    /// Default longest edge for downscaled screenshots.
+    public static let defaultMaxImageDimension = 1280
+    /// Hard upper bound for `maxImageDimension`.
+    public static let maxAllowedImageDimension = 3840
+    /// Default JPEG quality.
+    public static let defaultJpegQuality: Double = 0.75
+    /// Default sensitive-app blocklist.
+    public static let defaultBlockedApps = [
+        "Terminal",
+        "iTerm2",
+        "Keychain Access",
+        "System Settings",
+        "System Preferences",
+        "1Password",
+        "Bitwarden"
+    ]
+
+    /// Creates a desktop config.
+    public init(
+        enabled: Bool = defaultEnabled,
+        screenCaptureEnabled: Bool = defaultScreenCaptureEnabled,
+        controlEnabled: Bool = defaultControlEnabled,
+        maxImageDimension: Int = defaultMaxImageDimension,
+        jpegQuality: Double = defaultJpegQuality,
+        blockedApps: [String] = defaultBlockedApps
+    ) {
+        self.enabled = enabled
+        self.screenCaptureEnabled = screenCaptureEnabled
+        self.controlEnabled = controlEnabled
+        self.maxImageDimension = maxImageDimension
+        self.jpegQuality = jpegQuality
+        self.blockedApps = blockedApps
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case screenCaptureEnabled = "screen_capture_enabled"
+        case controlEnabled = "control_enabled"
+        case maxImageDimension = "max_image_dimension"
+        case jpegQuality = "jpeg_quality"
+        case blockedApps = "blocked_apps"
+    }
+}
+
+extension DesktopConfig: Codable {
+    /// Decodes a desktop config, defaulting omitted keys.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? Self.defaultEnabled
+        screenCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .screenCaptureEnabled) ?? Self.defaultScreenCaptureEnabled
+        controlEnabled = try container.decodeIfPresent(Bool.self, forKey: .controlEnabled) ?? Self.defaultControlEnabled
+        maxImageDimension = try container.decodeIfPresent(Int.self, forKey: .maxImageDimension) ?? Self.defaultMaxImageDimension
+        jpegQuality = try container.decodeIfPresent(Double.self, forKey: .jpegQuality) ?? Self.defaultJpegQuality
+        blockedApps = try container.decodeIfPresent([String].self, forKey: .blockedApps) ?? Self.defaultBlockedApps
+    }
+
+    /// Encodes a desktop config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(screenCaptureEnabled, forKey: .screenCaptureEnabled)
+        try container.encode(controlEnabled, forKey: .controlEnabled)
+        try container.encode(maxImageDimension, forKey: .maxImageDimension)
+        try container.encode(jpegQuality, forKey: .jpegQuality)
+        try container.encode(blockedApps, forKey: .blockedApps)
+    }
+}
+
 // MARK: - Root config
 
 /// Root configuration mirroring `~/.runeweaver/config.toml`.
@@ -1012,6 +1113,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var media = MediaConfig()
     /// Local background indexer policy for files, mail, and messages.
     public var index = IndexConfig()
+    /// macOS desktop vision and gated control policy.
+    public var desktop = DesktopConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1029,7 +1132,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         plugins: PluginConfig = PluginConfig(),
         browser: BrowserConfig = BrowserConfig(),
         media: MediaConfig = MediaConfig(),
-        index: IndexConfig = IndexConfig()
+        index: IndexConfig = IndexConfig(),
+        desktop: DesktopConfig = DesktopConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1046,6 +1150,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.browser = browser
         self.media = media
         self.index = index
+        self.desktop = desktop
     }
 
     /// Config with sensible defaults matching `config.toml.example`.

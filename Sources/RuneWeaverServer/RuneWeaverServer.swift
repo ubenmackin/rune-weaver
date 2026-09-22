@@ -417,6 +417,7 @@ public final class ServerContext: Sendable {
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig = FilesConfig(),
         mediaConfig: MediaConfig? = nil,
+        desktopConfig: DesktopConfig = DesktopConfig(),
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -436,7 +437,7 @@ public final class ServerContext: Sendable {
         let hub = durable.hub
         let runLock = durable.runLock
         let bus = ToolBus(permissionGate: permissionGate)
-        // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, API, and media tools.
+        // Unified builtin tool registration covers Email, Files, Memory, Web, Browser, API, Media, and Desktop tools.
         // Injected gateway and transports ride along so hermetic doubles survive
         // from boot through later settings live-reloads instead of resetting to live defaults.
         await BuiltinToolPlugins.registerAll(
@@ -446,6 +447,7 @@ public final class ServerContext: Sendable {
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
+            desktopConfig: desktopConfig,
             llmServerURLs: llmServerURLs,
             memoryEngine: memoryEngine,
             embedder: embedder,

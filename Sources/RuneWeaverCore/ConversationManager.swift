@@ -405,14 +405,6 @@ public actor ConversationManager {
         return stored
     }
 
-    /// Quantizes a timestamp to whole-millisecond precision.
-    /// Whole milliseconds survive the persisted Double round-trip exactly while finer
-    /// fractions drift, so flooring here keeps the stored instant identical on both
-    /// sides of persistence without disturbing chronological order (ties break by row order).
-    private static func persistedInstant(_ date: Date) -> Date {
-        Date(timeIntervalSince1970: (date.timeIntervalSince1970 * 1000).rounded(.down) / 1000)
-    }
-
     /// Returns context-ready history for a session.
     public func history(for sessionID: UUID) async -> [Message] {
         guard let session = await readSingleMerged(id: sessionID) else { return [] }
@@ -505,7 +497,7 @@ public actor ConversationManager {
     /// Saves all tracked sessions to the configured store.
     public func saveAll() async throws {
         guard let path = episodesDBPath else { return }
-        let snapshot = Array(sessions.values)
+        let snapshot = Array(sessions.values).map(Self.redactedForPersistence)
         try await SQLiteSerialIO.run {
             try SessionStoreIO.write(sessions: snapshot, dbPath: path)
         }
@@ -524,7 +516,10 @@ public actor ConversationManager {
     /// Saves one session without throwing (used after every mutation).
     private func persist(_ session: ConversationSession) async {
         guard let path = episodesDBPath else { return }
-        let snapshot = session
+        // Durable history keeps hash-only screenshots: the in-memory session
+        // retains full pixels for the live turn while the written snapshot
+        // strips data URLs so no recoverable pixels reach SQLite.
+        let snapshot = Self.redactedForPersistence(session)
         do {
             try await SQLiteSerialIO.run {
                 try SessionStoreIO.write(sessions: [snapshot], dbPath: path, merge: true)
@@ -540,7 +535,7 @@ public actor ConversationManager {
     /// Saves one session without observing cancellation.
     private func persistUncancellable(_ session: ConversationSession) async {
         guard let path = episodesDBPath else { return }
-        let snapshot = session
+        let snapshot = Self.redactedForPersistence(session)
         await SQLiteSerialIO.runUncancellable {
             do {
                 try SessionStoreIO.write(sessions: [snapshot], dbPath: path, merge: true)
@@ -549,18 +544,6 @@ public actor ConversationManager {
             }
         }
         unpersistedIDs.remove(snapshot.id)
-    }
-
-    /// Deletes one persisted session without observing cancellation.
-    private func deletePersistedSessionUncancellable(id: UUID) async {
-        guard let path = episodesDBPath else { return }
-        await SQLiteSerialIO.runUncancellable {
-            do {
-                try SessionStoreIO.delete(sessionID: id, dbPath: path)
-            } catch {
-                RuneWeaverLog.stores.error("ConversationManager: Failed to uncancellably delete session \(id): \(error)")
-            }
-        }
     }
 }
 

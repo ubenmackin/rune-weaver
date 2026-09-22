@@ -22,4 +22,7 @@ public enum RuneWeaverLog {
 
     /// Logger for scheduler job definitions, triggers, and execution ticks.
     public static let scheduler = Logger(label: "com.runeweaver.scheduler")
+
+    /// Logger for the menu bar application and desktop control subsystem.
+    public static let app = Logger(label: "com.runeweaver.app")
 }

@@ -36,6 +36,12 @@ public final class AppModel {
     public var activeChats: [ActiveChatInfo] = []
     public var nextScheduleText: String = "No jobs scheduled"
     public var lastRunSummaryText: String = "None yet"
+    /// Whether the `[desktop]` section is enabled in config.
+    public var isDesktopEnabled: Bool = false
+    /// Whether a desktop action batch is currently executing.
+    public var isDesktopActive: Bool = false
+    /// Set to true to signal an emergency abort of the current desktop batch.
+    public var desktopEmergencyStop: Bool = false
 
     public let notificationManager = AppNotificationManager()
     private let serverRunner = ServerRunnerActor()
@@ -337,6 +343,7 @@ public final class AppModel {
                 emailConfig: config.email,
                 filesConfig: config.files,
                 mediaConfig: config.media,
+                desktopConfig: config.desktop,
                 auth: auth
             )
 
@@ -349,6 +356,7 @@ public final class AppModel {
             await context.restoreToolStates(forceReload: false)
 
             self.serverContext = context
+            self.isDesktopEnabled = config.desktop.enabled
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
             // Boot is already live at this point, so warm search detached:
@@ -375,6 +383,20 @@ public final class AppModel {
         let pending = await context.approvals.list()
         let runs = await context.runs.list(limit: 1)
         let runningIDs = await context.activeTurns.runningSessionIDs()
+        // Mirror the shared desktop monitor so the indicator and Emergency
+        // Stop appear for exactly the window a batch is dispatching input.
+        let desktopRunning = await DesktopControlMonitor.shared.isActive
+        if desktopRunning {
+            self.isDesktopActive = true
+        } else {
+            self.isDesktopActive = false
+        }
+        // Consume the local stop latch once the batch settles so a later
+        // batch starts clean instead of inheriting a stale abort.
+        if desktopEmergencyStop, !desktopRunning {
+            desktopEmergencyStop = false
+            await DesktopControlMonitor.shared.clearEmergencyStop()
+        }
 
         var chats: [ActiveChatInfo] = []
         for sid in runningIDs {
@@ -529,6 +551,22 @@ public extension AppModel {
             await runner.shutdown(context: context, app: app)
             task?.cancel()
             NSApplication.shared.terminate(nil)
+        }
+    }
+
+    /// Signals an emergency abort of all in-flight desktop automation.
+    func emergencyStopDesktop() {
+        desktopEmergencyStop = true
+        isDesktopActive = false
+        RuneWeaverLog.app.warning("Desktop emergency stop triggered by user")
+        let context = serverContext
+        Task {
+            await DesktopControlMonitor.shared.requestEmergencyStop()
+            if let context {
+                for sessionID in await context.activeTurns.runningSessionIDs() {
+                    await context.activeTurns.cancel(sessionID: sessionID)
+                }
+            }
         }
     }
 }

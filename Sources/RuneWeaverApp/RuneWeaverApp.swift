@@ -22,7 +22,11 @@ struct AppMenuLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: model.pendingApprovals.isEmpty ? "sparkles" : "exclamationmark.triangle.fill")
+            if model.isDesktopActive {
+                Image(systemName: "eye.fill")
+            } else {
+                Image(systemName: model.pendingApprovals.isEmpty ? "sparkles" : "exclamationmark.triangle.fill")
+            }
             if !model.pendingApprovals.isEmpty {
                 Text("\(model.pendingApprovals.count)")
             }
@@ -96,6 +100,23 @@ struct AppMenuView: View {
         Section("Scheduler") {
             Text("Next: \(model.nextScheduleText)")
             Text("Last: \(model.lastRunSummaryText)")
+        }
+
+        if model.isDesktopEnabled {
+            Divider()
+
+            Section("Desktop Control") {
+                HStack {
+                    Image(systemName: model.isDesktopActive ? "eye.fill" : "eye.slash")
+                    Text(model.isDesktopActive ? "Active" : "Idle")
+                }
+                if model.isDesktopActive {
+                    Button("⛔ Emergency Stop") {
+                        model.emergencyStopDesktop()
+                    }
+                    .keyboardShortcut(".", modifiers: [.command, .option, .shift])
+                }
+            }
         }
 
         Divider()

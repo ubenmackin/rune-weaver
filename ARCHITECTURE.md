@@ -13,6 +13,7 @@ The name comes from JRPG lore: a Rune Weaver is a mage who inscribes and channel
 - **Modular by design**: Capabilities are plugins (runes). Add new ones without touching the core. The system learns, remembers, and grows.
 - **Apple-native where it counts**: Deep macOS integration (Apple Mail read path planned, Keychain, AppKit/SwiftUI) — not bolted on, but foundational. iOS is planned, not built.
 - **Swappable LLMs**: The brain is model-agnostic. Run Gemma 4 on MLX locally, switch to Qwen 3.8 via llama.cpp, or fall back to a cloud API — the tools and memory don't care which model is thinking.
+- **Fast recall without exfiltration**: An opt-in on-device index over files, mail, and Apple Messages makes everyday questions fast — chunked, keyword-searchable, and optionally vectorized — while live reads remain the freshness fallback. Nothing is indexed until the owner turns it on.
 
 **Delivery status lives in `ROADMAP.md`.** This document describes what the architecture *is* (decisions, protocols, component responsibilities, constraints) — not what shipped in which release. Items below are explicitly marked **shipped**, **partial**, or **planned** where the distinction matters.
 
@@ -89,13 +90,13 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 │  │  │ Structured  │  │              │  │              │  │    │
 │  │  └─────────────┘  └──────────────┘  └──────────────┘  │    │
 │  │                                                          │    │
-│  │  ┌─────────────┐  ┌──────────────┐                     │    │
-│  │  │  Secrets    │  │  Voice       │                     │    │
-│  │  │  Manager    │  │  Pipeline    │                     │    │
-│  │  │             │  │              │                     │    │
-│  │  │ Keychain +  │  │  Whisper STT │                     │    │
-│  │  │ Docker vault│  │  TTS output  │                     │    │
-│  │  └─────────────┘  └──────────────┘                     │    │
+│  │  ┌─────────────┐  ┌──────────────┐  ┌──────────────┐  │    │
+│  │  │  Secrets    │  │  Voice       │  │  Document    │  │    │
+│  │  │  Manager    │  │  Pipeline    │  │  Index       │  │    │
+│  │  │             │  │              │  │              │  │    │
+│  │  │ Keychain +  │  │  Whisper STT │  │  SQLite FTS5 │  │    │
+│  │  │ Docker vault│  │  TTS output  │  │  + vectors   │  │    │
+│  │  └─────────────┘  └──────────────┘  └──────────────┘  │    │
 │  │                                                          │    │
 │  └──────────────────────────────────────────────────────────┘    │
 │                                                                  │
@@ -126,6 +127,8 @@ LANGUAGE: Swift (core engine + macOS client), Python (embedded bridge scripts an
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+The Document Index is not a separate process: it is an actor-backed local store inside the core engine, sitting beside the other Support Services and feeding `recall`. See Component Details §10.
+
 Shipped tool set: Email IMAP/SMTP (`email.search`, `email.read`, `email.attachment`, `email.send`, `email.listMailboxes`, `email.move`), web + browser (`web.search`, `web.fetch`, `browser.navigate`, `browser.act`, `api.request`), files (`files.read`, `files.grep`, `files.glob`), memory (`remember_fact`, `recall_memories`), media automation (`media.arr` approval-gated search/add/queue/status plus `media.arr.read` read-only search/queue/status over self-hosted Sonarr/Radarr). Planned: Apple Mail native, HomeKit / Home Assistant control, Discord, GitHub, Apple Messages, Calendar (config knobs and marketplace stubs only — no tool implementations).
 
 ### Engine-to-Service Shift
@@ -137,6 +140,7 @@ The core engine is shifting from a CLI-only tool to a local service that other U
 - **Authoritative concurrent-turn cap**: `ActiveTurnTracker.maxConcurrentTurns = 3` bounds simultaneous chat turns across REST and WebSocket (a replacement turn for the same session supersedes its slot; a fresh session past the cap fails with an honest busy notice). Every `GET /health` probe advertises the cap in the `X-RuneWeaver-Max-Concurrent-Turns` header alongside the JSON body so the dashboard prefers the server value and only falls back to its mirrored constant for older engines. `GET /health` also carries the live SearXNG Start flight stage (nil when idle).
 - **Durable SQLite persistence for scheduler & run history**: Scheduled jobs (`scheduler_jobs`) and execution audit logs (`run_logs`) persist in SQLite (`episodes.db`). The `config.toml` `[[scheduler.jobs]]` table is used solely as an initial bootstrap seed when the database has zero jobs. Runtime edits persist immediately to SQLite, and run states (`running` → `ok`/`error`/`cancelled`, plus `awaiting_approval` → `ok`/`error`/`denied` for approval-gated parked turns) are tracked live, with interrupted runs reconciled on restart. Every `run_logs` row carries a nullable `session_id` column (backfilled via migration for older databases) linking the turn to its owning chat or per-run scheduler session (fresh `UUID()` per execution) so parked approvals resume in the same session.
 - **Static dashboard bundle**: The web dashboard ships as a static bundle served by the engine itself. It chats, browses memory, inspects run history, manages schedules, and surfaces the approvals inbox in a browser with no separate frontend host process. When owner auth is active the bundle is still served publicly — a browser cannot attach a bearer header to a navigation or an asset fetch — and renders its own owner-token gate before any data request, so an unauthenticated visitor reaches the sign-in view instead of a dead end.
+- **Document index surface**: The service exposes `GET /index/status` (counts, bytes, `index_as_of`, per-source enablement, live phase, last errors), `POST /index/run`, `POST /index/cancel`, `POST /index/prune`, and `POST /index/reset`, plus an `index` partial patch on `PUT /settings`. Index progress rides the existing WebSocket frames rather than a new transport, and the boot path (`ServerIndexBoot`) wires `config.index` into `DocIndexStore`, `IndexCoordinator`, `MemoryEngine`, and `ServerContext` for both `serve` and the menu-bar app.
 - **Same trust boundary**: Every service-triggered write still flows through the permission gate with graduated trust, sandbox staging, and the local audit trail. The service layer adds transport; it does not bypass approvals.
 - **Single-owner bearer auth (shipped)**: Exactly one owner token guards the engine HTTP surface, whether it is launched through `rune-weaver serve` or the menu-bar app's embedded service. The token is a 256-bit URL-safe value minted by `rune-weaver auth token generate` and resolved at boot from `token_env`, then the Keychain account, then a `0600` `token_file`. It is verified in constant time, and failed non-loopback attempts throttle per client with `Retry-After`. Middleware gates every data path — REST and the WebSocket upgrade — returning the same uniform `401`; only the static dashboard bundle (which renders its own owner-token gate) and a minimal liveness shape are public, because a browser cannot attach a bearer header to a navigation or an asset fetch. The WebSocket query-token fallback requires a genuine `/ws` upgrade handshake (`Sec-WebSocket-Key` plus `Connection: upgrade` and `Upgrade: websocket`) and is stripped before any downstream log. Rotation persists the replacement before it goes live, but the two entry points differ in reach. The dashboard Settings pane rotates inside the running engine, so the previous token stops working immediately and established WebSockets are dropped. The CLI `rune-weaver auth token rotate` runs in a separate process and can only rewrite the stored credential, so a running engine keeps accepting the previous token until it is restarted; use the dashboard path when live revocation is required.
 - **Fail-closed binding (shipped)**: Loopback (`127.0.0.1`, `localhost`, `::1`) always serves. A non-loopback bind — `serve --hostname <lan-ip>` or a non-loopback bind from the menu-bar app's embedded service — is accepted only when a token resolves (`ServerConfig.requireBindable`); otherwise boot is refused rather than silently downgraded to an unauthenticated LAN bind. WireGuard (or equivalent) remains the recommended transport off-LAN: it keeps the engine off the physical LAN while the bearer token still guards every request.
@@ -244,6 +248,8 @@ Three tiers of memory, each backed by different storage:
 
 **Embeddings**: Semantic memory vectors flow through the `EmbeddingsBackend` seam (`EmbeddingsBackendFactory` selects from `memory.embedding_backend`). Facts without vectors persist as keyword-only rows; older rows gain vectors via embedding backfill. Dimension discipline keeps comparisons honest, and any embedding failure falls back to the keyword path (vectors never fail a turn or a write), while cancellation propagates instead of degrading.
 
+**Document recall**: `recall` also draws on the Document Index (§10) through `recallDocuments`, merging indexed document chunks onto the same calibrated scale so a question can surface a file, an email, or a message without a live walk. Results carry the index watermark so the model can tell how fresh the answer is.
+
 ### 5. Permission Gate & Sandboxing (shipped)
 
 The permission system is the trust boundary between the agent and the real world.
@@ -287,9 +293,23 @@ The permission system is the trust boundary between the agent and the real world
 
 **macOS App — shipped**: Menu-bar app (always accessible) with chat window, approval notifications, scheduler summary, and dashboard/settings shortcuts. Its embedded service defaults to loopback (`127.0.0.1`) and resolves the same owner token as `serve`: it enforces the shared fail-closed bind policy (`ServerConfig.requireBindable`) and installs the bearer verifier once a token resolves, passing it into the served context so the bind posture and the request gate agree. Without a resolved token the service stays the loopback no-auth shape, so it never exposes an unauthenticated LAN bind. Dashboard and settings shortcuts open only a loopback address because the app never places the owner token in a URL.
 
-**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; when owner auth is active, the publicly served bundle renders its own in-bundle sign-in gate while every data route stays behind the uniform `401`. The live token is held in memory and mirrored only to `sessionStorage` (never persistent storage), logout or a uniform `401` returns to the gate, and the shared WebSocket presents the token as a query ticket restricted to the `/ws` upgrade. The Settings Tools tab renders each tool's Configure action solely from the server `hasConfig` flag on `GET /tools` (never a client name allowlist); the Sonarr/Radarr modal edits endpoints, credential env-var names, and defaults and saves a `media`-only delta through `PUT /settings`, persisting env-var names only and sharing one payload/populate helper so full-save and modal-save stay symmetric.
+**Web Dashboard — shipped** (static bundle served by the engine): chat with session sidebar and clock-badged scheduled sessions; live tool-visibility frames; mid-turn cancellation; memory browser; scheduler management; run history with live tracking; parked-flight reconcile across reloads; client-side turn-cap enforcement mirroring the server; approvals inbox; search health and policy surfaces; spec-compliant markdown rendering with zero `dangerouslySetInnerHTML` and protocol-whitelisted URL sanitization; Web Notifications with unread badges over a shared WebSocket; when owner auth is active, the publicly served bundle renders its own in-bundle sign-in gate while every data route stays behind the uniform `401`. The live token is held in memory and mirrored only to `sessionStorage` (never persistent storage), logout or a uniform `401` returns to the gate, and the shared WebSocket presents the token as a query ticket restricted to the `/ws` upgrade. The Settings Tools tab renders each tool's Configure action solely from the server `hasConfig` flag on `GET /tools` (never a client name allowlist); the Sonarr/Radarr modal edits endpoints, credential env-var names, and defaults and saves a `media`-only delta through `PUT /settings`, persisting env-var names only and sharing one payload/populate helper so full-save and modal-save stay symmetric. The Memory section hosts a tabbed header — the existing Search and Memory view plus an Indexing pane (§10) — and the Settings surface exposes the same Indexing pane.
 
 **iOS App — planned**: SwiftUI client with push-to-talk and approval prompts. Remote engine access is gated by the owner token (presented as a bearer credential), with WireGuard recommended for off-LAN transport.
+
+### 10. Document Index (shipped, opt-in)
+
+A local, single-owner analogue of the pre-built search indexes that make cloud assistants feel fast: pay indexing cost once, then answer from the index instead of re-walking the world.
+
+- **Opt-in by default**: `index.enabled` is `false`. A fresh install never reads a mailbox or walks the home directory until the owner turns it on. Per-source toggles gate files, mail, and Apple Messages independently; mail and Messages default off even once the master switch is on.
+- **Storage**: One actor-backed SQLite database at `~/.runeweaver/index.db` (`DocIndexStore`, `DocIndexTypes`) holding `indexed_documents` and `indexed_chunks` plus an FTS5 virtual table over chunk text with sync triggers. Schema versioning and migration mirror the session-store pattern. Content-hash awareness means an unchanged document is skipped rather than re-extracted.
+- **Extraction**: `DocumentTextExtractor` (with `DocumentOfficeExtraction`) dispatches by format and reports an `ExtractStatus` — `extracted`, `partial`, `metadataOnly`, `unsupported`, `skippedEvicted`, or `failed`. PDFs use the native text layer; DOCX, XLSX, and PPTX are read from their package XML; text, Markdown, CSV, JSON, and HTML are decoded; iWork documents are best-effort because their body text is a binary payload. Unsupported formats never throw — they record a status and a reason. Text is chunked at roughly 512 tokens with overlap.
+- **Sources**: `FilesIndexer` walks configured `roots` (default `~`) minus `exclude` plus always-skipped media libraries, `Library`, `.Trash`, the app's own state, and VCS/dependency/build/cache directories, pruning excluded directories without descending and never following symlinks, under `FilesAccessGuard` and the `max_file_mb` cap. `MailIndexer` reads bodies and attachments over IMAP using `BODY.PEEK` so nothing is marked read, stages attachments in Seatbelt-confined temp, extracts, then deletes the binary; oversize attachments are skipped and duplicates dedupe by content hash. `MessagesIndexer` reads an isolated snapshot of `~/Library/Messages/chat.db` (never locking the live database), parses `attributedBody` content and tapbacks, and needs Full Disk Access.
+- **Vectors**: Chunks are vectorized through the same `EmbeddingsBackend` seam as semantic memory when extraction is clean and the document is small; otherwise they stay keyword-only. Mail older than `mail_vector_window` is indexed but not vectorized, and can gain vectors later through backfill. An embedding failure degrades to keyword search rather than failing a run.
+- **Freshness**: The index is built by a nightly (and on-demand) run and carries an `index_as_of` watermark. Live `email.search` and `files.grep` remain the fallback for today/this-morning/latest questions, and the system prompt tells the model to prefer them when the question implies recency.
+- **Vision enrichment (opt-in)**: When `describe_images_with_llm` is on and the active provider reports `supportsVision`, image files and scanned PDFs that extracted as `metadataOnly` are described by the configured model, with the description stored as an additive chunk tagged by origin and model. A text-only provider is never sent image content.
+- **Progress**: `IndexCoordinator` orchestrates the sources and streams liveness over the existing tool-progress frames — phase, scanned, indexed split between vectors and keyword-only, skipped, errors, and rate — plus `run_started`/`run_completed` over the WebSocket hub and a `run_logs` row per run. There is no percentage bar; cancel is safe and resumable because committed batches are kept.
+- **Maintenance**: The Indexing pane starts, cancels, prunes (older than a cutoff), and resets. Prune deletes older documents and their chunks; reset clears the whole index. Disabling the index or deleting the database leaves `recall` with episodic and semantic memory only.
 
 ---
 
@@ -305,6 +325,8 @@ The permission system is the trust boundary between the agent and the real world
 **Media automation (Sonarr & Radarr, shipped)**: `media.arr` (approval-gated writes plus reads) and `media.arr.read` (approval-free reads) share one `MediaArrClient` execution path shaped by `ArrInstanceConfig` per service (`enabled`, `url`, `apiKeyEnv`, default quality profile, default root folder). Secrets never enter TOML, schemas, logs, or model output: only `api_key_env` names persist (`SONARR_API_KEY` / `RADARR_API_KEY` by default) and values resolve via `SecretsManager` (environment or Keychain `com.runeweaver.secrets`) at execution time. Every dial is LAN-scoped and bounded: the base URL must be absolute http(s) without credentials; metadata, link-local, and unspecified targets fail closed in any spelling while loopback and private-LAN ranges stay allowed so self-hosted instances keep working. Requests carry a 15s timeout and the `X-Api-Key` header, follow redirects manually within the shared redirect budget with per-hop re-validation, strip `X-Api-Key`/`Authorization` on cross-host moves (redacted `Location` on refusal), and fail closed past the response byte cap with a 1KB error-preview bound. An enabled entry with a blank or missing URL stays unconfigured — guidance, no dial — so stock installs fail closed until a base URL is set. Config round-trips through `ConfigTOML` (decode), `Config+Serialization` (encode), `Config+Validation` (bounds), and the `PUT /settings` partial `media` patch (`MediaSettingsUpdate` merge preserving untouched fields); the dashboard DTO mirrors the engine shape (`ArrServiceConfigData` backing both `SonarrConfigData` and `RadarrConfigData` aliases).
 
 **Files & documents**: direct filesystem reads plus grep/glob via `FilesAccessGuard` (`deny_patterns`, `allow_roots`, `require_approval_on_deny`); writes use Seatbelt-confined temp with atomic move on approval.
+
+**Local document index**: an opt-in index over files, mail, and Apple Messages that `recall` searches by keyword (FTS5) and, when embeddings are on, by meaning — see Component Details §10. It stores content and derived vectors only; credentials resolve from the Keychain at run time and never enter the index.
 
 ### Planned (config knobs and marketplace stubs only — no tool implementations)
 
@@ -328,6 +350,7 @@ The permission system is the trust boundary between the agent and the real world
 ```
 ~/.runeweaver/
 ├── config.toml          # Non-sensitive configuration
+├── index.db             # SQLite: indexed documents, chunks, FTS5 + optional vectors
 ├── memory/
 │   ├── episodes.db      # SQLite: conversation history (sessions, messages, episodes), scheduler jobs, run logs, plugin registry
 │   └── vectors/         # JSON semantic-memory store (LanceDB-compatible shape: facts.json plus optional vectors)
@@ -351,6 +374,7 @@ The permission system is the trust boundary between the agent and the real world
 ### Phase 2: Memory — shipped
 - Conversation history (SQLite)
 - Semantic memory (JSON store, LanceDB-compatible shape) + `remember` / recall commands
+- Opt-in local document index over files, mail, and Apple Messages, feeding `recall`
 
 ### Phase 3: Email Integration — shipped except Apple Mail native (planned)
 - IMAP reading (self-hosted + iCloud), summarization and search
@@ -444,6 +468,26 @@ deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.k
 allow_roots = ["~"]  # allowed roots for file reads (`~` expands to home)
 require_approval_on_deny = true  # deny hits escalate to approvals inbox (true) or fail closed (false)
 
+[index]
+# Opt-in local document index. Off by default: a fresh install never reads a
+# mailbox or walks the home directory until `enabled` is true. Content and
+# derived vectors only — credentials resolve from the Keychain at run time.
+enabled = false  # master switch
+files = true  # local files under `roots`; on once the indexer is enabled
+mail = false  # opt in to index a configured [email.accounts] mailbox
+messages = false  # opt in to index Apple Messages (needs Full Disk Access)
+roots = ["~"]  # directories scanned (`~` expands to home)
+# Additional glob patterns skipped during a file scan; the walk always also
+# skips media libraries (Music, Pictures, Movies), Library, .Trash, the app's
+# own state, and common VCS/dependency/build/cache directories.
+exclude = [".git", "node_modules", ".build", "DerivedData", "Library", ".Trash", "*.app"]
+max_file_mb = 20  # largest file read (1-10240)
+mail_vector_window = "2y"  # 30d | 6m | 1y | 2y | all — older mail stays keyword-only
+icloud_evicted = "skip"  # skip | download — policy for iCloud files whose bytes are evicted
+describe_images_with_llm = false  # describe images/scanned PDFs with the configured model
+nightly_budget = 0  # items processed per run (0 = unlimited)
+db_path = "~/.runeweaver/index.db"
+
 [browser]
 searxng_url = "http://127.0.0.1:8888"  # local SearXNG base URL (`/search` is appended)
 search_timeout_seconds = 10  # per-search timeout (1-120)
@@ -529,6 +573,7 @@ auto_rescan = true
 14. **Plugin Architecture & Disabled-by-Default Security Holding Pen**: Runes run out-of-process via standard JSON-RPC 2.0 over stdin/stdout (`SubprocessToolBridge`), supporting Python and standalone compiled executables. In-process dynamic loading is explicitly omitted for crash isolation, memory safety, and Hardened Runtime compliance. New runes are quarantined disabled until human review; enabling records a deterministic SHA-256 directory-tree hash, and any later modification trips tamper detection and fails closed. External plugins may only use `readOnly` / `requiresApproval`. Protected engine paths are guarded via `PluginSecurity.isProtectedPath` in `PermissionGate`.
 15. **Status lives in ROADMAP.md, not here**: Delivery status (shipped / partial / planned per capability) is owned by `ROADMAP.md`. This document must not become a release log: describe decisions, protocols, and constraints, and mark build-state explicitly where it matters.
 16. **SSRF DNS Resolution Timeout & Fail-Closed Bounds (5.0s)**: DNS resolution within SSRF vetting (`ApiSSRFGuard.dnsResolutionTimeoutSeconds`) is set to 5.0 seconds (expanded from 2.0s). Because the SSRF engine strictly fails closed—refusing any hostname whose IP addresses cannot be verified before dialing to prevent SSRF and DNS-rebinding attacks—a 2.0-second window produced intermittent false-positive denials on legitimate public domains (such as `example.com`) under routine DNS resolver latency, upstream cache misses, or network jitter. Expanding to 5.0 seconds provides headroom for real-world DNS lookups while keeping resolver stalls strictly bounded. The constant is exposed on `ApiSSRFGuard` so integration tests and diagnostics can verify and assert the active timing threshold without divergence.
+17. **Opt-In Local Document Index with Content-Hash Incremental Refresh**: Fast recall comes from a pre-built local index, not from making live reads faster. The engine keeps one actor-backed SQLite store (`~/.runeweaver/index.db`) with FTS5 keyword search plus optional embeddings drawn from the same `EmbeddingsBackend` seam as semantic memory, covering files, mail, and Apple Messages. Indexing is off until the owner enables it, mail and Messages are independently opt-in, and the store holds content plus derived vectors only — never credentials. Runs are incremental: documents are keyed by content hash so unchanged material is skipped, mail advances a per-mailbox UID watermark, and Messages advances a ROWID watermark against an isolated snapshot. Extraction is best-effort per format with a recorded status rather than a capability flag, mail attachments are read with `BODY.PEEK` and their binaries deleted after extraction, and vectorization is bounded by a configurable mail window and a document-size rule so the store stays in the hundreds-of-megabytes to low-gigabytes range. A vector failure degrades to keyword search. Live `email.search` and `files.grep` remain the freshness fallback, and the index advertises an `index_as_of` watermark so the model can prefer live reads for recency-sensitive questions.
 
 ### Constraints
 
@@ -538,7 +583,8 @@ auto_rescan = true
 - **Fail-closed binding**: The engine binds loopback (`127.0.0.1`) by default. A non-loopback interface is accepted only when an owner token resolves, and the service never silently downgrades to an unauthenticated LAN bind. The macOS menu-bar app's embedded service shares this policy: it defaults to loopback, resolves the same owner token, and installs the bearer verifier when one resolves.
 - **Auth-before-exposure**: A non-loopback interface, VPN, tunnel, or port-forward exposure requires the owner token; no unauthenticated exposure is permitted.
 - **ATS Local Networking Only**: The packaged macOS app enables only `NSAllowsLocalNetworking` under App Transport Security. All public internet communication must use HTTPS.
-- **Local-first**: No data leaves the machine unless the user explicitly configures a cloud LLM provider.
+- **Local-first**: No data leaves the machine unless the user explicitly configures a cloud LLM provider. Image description for the index is the same bargain: it runs only when the owner enables `describe_images_with_llm`, and a remote provider sends that content off-device.
+- **Opt-in indexing**: The document index is disabled on a fresh install and reads nothing until enabled. Mail and Apple Messages each require their own explicit opt-in, and Apple Messages additionally requires Full Disk Access.
 - **macOS Sequoia or later** for full framework access.
 
 ### Code Commenting Guidelines
@@ -555,5 +601,6 @@ auto_rescan = true
 2. **Python bridge approach**: Decided — out-of-process subprocess JSON-RPC 2.0 (`SubprocessToolBridge`). PythonKit was considered and rejected (Hardened Runtime, crash isolation).
 3. **Update mechanism**: How do plugin updates and core updates propagate?
 4. **Offline capability**: What should the agent do when the Mac Studio is unreachable?
+5. **Index freshness policy**: Is a nightly run plus on-demand adequate, or should hot paths (Documents, Desktop, recent mail) get a filesystem watcher for near-real-time freshness?
 
 Decided: web dashboard framework is React + TypeScript + Vite, shipped as a static bundle served by the engine (`Web/*` built to `Web/dist` via `DashboardBundle`).

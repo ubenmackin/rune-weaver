@@ -744,7 +744,10 @@ public extension MemoryEngine {
         guard !trimmedName.isEmpty else { return nil }
         let trimmedOutcome = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedOutcome.isEmpty else { return nil }
-        let cleaned = strippingToolPlumbing(from: trimmedOutcome)
+        // Screenshots stay hash-only on disk: strip data URLs before the
+        // outcome is compacted so no base64 prefix persists in episodes.
+        let redacted = VisionGate.strippedContent(trimmedOutcome)
+        let cleaned = strippingToolPlumbing(from: redacted)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return nil }
         let compact = cleaned.count > episodicToolOutcomeLimit
