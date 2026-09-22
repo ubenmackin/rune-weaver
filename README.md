@@ -134,6 +134,65 @@ Contributors only. The DMG app does not need any of this.
 - Install Node 20 or later with `brew install node`, then check `node --version`.
 - Vite ships with the repo `Web` dependencies, so `make build` handles it once Node is present. If you do not use Homebrew, get Node from: https://nodejs.org/
 
+## Indexing
+
+Rune Weaver can build a local index of your files, mail, and Apple Messages so recall can search them by keyword and, when embeddings are on, by meaning. Indexing is opt-in: a fresh install never reads a mailbox or walks your home directory until you enable it. Indexed text and any derived vectors live in `~/.runeweaver/index.db`; credentials resolve from the Keychain at run time and are never written to the index.
+
+Turn it on in the dashboard, or in `~/.runeweaver/config.toml`:
+
+```toml
+[index]
+enabled = true
+files = true      # local files; on once the indexer is enabled
+mail = false      # opt in to index a configured [email.accounts] mailbox
+messages = false  # opt in to index Apple Messages (needs Full Disk Access)
+```
+
+The remaining `[index]` keys bound what a run touches:
+
+- `roots` and `exclude` define the file walk. Excluded directories are pruned without being walked, and symlinks are never followed.
+- `max_file_mb` (default `20`) caps the size of any one file the indexer reads.
+- `mail_vector_window` (default `2y`) sets how far back mail is vectorized; older mail is still indexed and searchable by keyword.
+- `icloud_evicted` (default `skip`) leaves iCloud files whose bytes are evicted out of the index; set `download` to fetch them first.
+- `describe_images_with_llm` (default `false`) describes images and scanned PDFs with the configured model.
+- `nightly_budget` (default `0`, unlimited) caps the items processed per run.
+- `db_path` sets where the index database lives.
+
+In addition to your `exclude` patterns, the walk always skips media libraries (`Music`, `Pictures`, `Movies`), `Library`, `.Trash`, the app's own `.runeweaver` state, and common VCS, dependency, build, and cache directories.
+
+A typical home index lands between about 500 MB and 2 GB, depending on how much you index. Each chunk stores its text plus, when vectorized, one embedding; text is chunked at roughly 512 tokens with 64 tokens of overlap, so the index scales with the volume of text it holds.
+
+### What gets indexed
+
+| Format | Text extraction | Vectors | Notes |
+|--------|-----------------|---------|-------|
+| PDF with a text layer | Full body | Yes | Native text layer. |
+| Scanned or image-only PDF | None (metadata only) | No | Eligible for an LLM description when `describe_images_with_llm` is on. |
+| Encrypted or unreadable PDF | None | No | Counted as an error; not indexed. |
+| DOCX | Full body | Yes | Paragraph text from the document body. |
+| XLSX | Full body | Yes | Worksheet rows with shared strings resolved. |
+| PPTX | Full body | Yes | Text from each slide. |
+| TXT, MD, CSV, JSON | Full body | Yes | Decoded as text. |
+| HTML | Body text | Yes | Tags, scripts, and styles stripped. |
+| iWork (Pages, Numbers, Keynote) | Best-effort (partial) | No | Modern text is a binary payload, so body text is often missing; only package XML text is recovered. |
+| Email bodies | Subject plus body | Yes, inside `mail_vector_window` | Read over IMAP with `BODY.PEEK`, so mail is never marked read. |
+| Email attachments | Attachment text | Yes, inside `mail_vector_window` | Fetched read-only, staged in confined temp, extracted, then deleted; oversize attachments are skipped. |
+| Apple Messages | Message text, tapbacks, and attachment text | No (keyword only) | Reads an isolated snapshot of `chat.db`; needs Full Disk Access. |
+| Images, audio, video | None | No | Not indexed; images can be described when `describe_images_with_llm` is on. |
+| Evicted iCloud files | None by default | No | `icloud_evicted = "skip"` (default) leaves them out; `"download"` fetches them first. |
+
+Files are vectorized only when extraction is clean and the document is under 2 MB. Partial or oversized documents stay keyword-only, and mail older than the vector window can gain vectors later through backfill.
+
+### Privacy and permissions
+
+Describing images with the LLM sends document image content to the configured provider. When that provider is remote, the content leaves your machine. The description is stored as an AI-generated chunk marked with its origin and model, and the prompt instructs the model not to reproduce secrets. A text-only provider is never sent image content.
+
+Apple Messages indexing reads `~/Library/Messages/chat.db`, which macOS protects with TCC. Grant Full Disk Access to the app (or to the terminal or engine you run) under System Settings > Privacy & Security. Without it, a Messages run reports a permission error instead of crashing.
+
+### Managing the index
+
+The Indexing pane in the dashboard starts a run, cancels a run in flight, prunes entries older than a cutoff, and resets the index. Prune deletes older indexed documents and their chunks; reset clears the whole index. Turning `enabled` back off, or deleting `~/.runeweaver/index.db`, leaves recall with episodic and semantic memory only.
+
 ## Releasing
 
 The version lives in one place: the `VERSION` file at the repo root.

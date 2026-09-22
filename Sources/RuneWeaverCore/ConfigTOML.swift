@@ -410,6 +410,7 @@ extension RuneWeaverConfig {
         try Self.decodeVoice(root, into: &config)
         try Self.decodeSandbox(root, into: &config)
         try Self.decodeFiles(root, into: &config)
+        try Self.decodeIndex(root, into: &config)
         try Self.decodeEmail(root, into: &config)
         try Self.decodeHome(root, into: &config)
         try Self.decodeScheduler(root, into: &config)
@@ -566,6 +567,49 @@ extension RuneWeaverConfig {
         }
         if let flag = try files.strictBool("require_approval_on_deny", field: "files.require_approval_on_deny") {
             config.files.requireApprovalOnDeny = flag
+        }
+    }
+
+    private static func decodeIndex(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let index = root.tables["index"] else { return }
+        // Absent keys keep the disabled-by-default policy; present-but-wrong-typed
+        // values throw via the strict accessors instead of silently defaulting,
+        // and range checks land in validation so decode stays type-only.
+        if let enabled = try index.strictBool("enabled", field: "index.enabled") {
+            config.index.enabled = enabled
+        }
+        if let files = try index.strictBool("files", field: "index.files") {
+            config.index.files = files
+        }
+        if let mail = try index.strictBool("mail", field: "index.mail") {
+            config.index.mail = mail
+        }
+        if let messages = try index.strictBool("messages", field: "index.messages") {
+            config.index.messages = messages
+        }
+        if let roots = try index.strictStringArray("roots", field: "index.roots") {
+            config.index.roots = roots
+        }
+        if let exclude = try index.strictStringArray("exclude", field: "index.exclude") {
+            config.index.exclude = exclude
+        }
+        if let maxFileMB = try index.strictInt("max_file_mb", field: "index.max_file_mb") {
+            config.index.maxFileMB = maxFileMB
+        }
+        if let window = try index.strictString("mail_vector_window", field: "index.mail_vector_window") {
+            config.index.mailVectorWindow = window
+        }
+        if let evicted = try index.strictString("icloud_evicted", field: "index.icloud_evicted") {
+            config.index.iCloudEvicted = evicted
+        }
+        if let describe = try index.strictBool("describe_images_with_llm", field: "index.describe_images_with_llm") {
+            config.index.describeImagesWithLLM = describe
+        }
+        if let budget = try index.strictInt("nightly_budget", field: "index.nightly_budget") {
+            config.index.nightlyBudget = budget
+        }
+        if let dbPath = try index.strictString("db_path", field: "index.db_path") {
+            config.index.dbPath = dbPath
         }
     }
 

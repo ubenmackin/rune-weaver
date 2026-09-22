@@ -120,6 +120,41 @@ allow_roots = ["~"]
 # Whether deny hits escalate to the approvals inbox (true) or fail closed.
 require_approval_on_deny = true
 
+[index]
+# Local background indexer for files, mail, and messages. Off by default so a
+# fresh install never reads a mailbox or walks the home directory until you opt
+# in. The index stores content and derived vectors only; credentials never live
+# here and are resolved through the Keychain at run time.
+enabled = false
+# Per-source toggles. File indexing is on once the indexer is enabled; mail and
+# Apple Messages stay off until you set them true.
+files = true
+mail = false
+messages = false
+# Root directories scanned for files (`~` expands to home).
+roots = ["~"]
+# Glob patterns skipped during a file scan (VCS directories, build output,
+# caches) so the walk never descends into material it should not index.
+# Media libraries (Music, Pictures, Movies), Library, .Trash, and the app's
+# own .runeweaver state are always skipped in addition to these.
+exclude = [".git", "node_modules", ".build", "DerivedData", "Library", ".Trash", "*.app"]
+# Largest file the indexer will read, in megabytes (1-10240).
+max_file_mb = 20
+# How far back mail is vectorized: 30d | 6m | 1y | 2y | all ("all" disables the window).
+# Mail older than the window stays indexed and keyword-searchable, and backfill can add
+# its vectors later.
+mail_vector_window = "2y"
+# iCloud files whose bytes are evicted: "skip" (default) or "download".
+# Skip avoids silently pulling a file down during an index run.
+icloud_evicted = "skip"
+# Describe image files with the configured LLM. Off by default; enabling it
+# sends image content to the active provider.
+describe_images_with_llm = false
+# Maximum items processed per nightly run; 0 means unlimited (0-100000).
+nightly_budget = 0
+# SQLite path for the index database.
+db_path = "~/.runeweaver/index.db"
+
 [browser]
 # Local web search and fetch policy. Search runs against self-hosted SearXNG
 # over its JSON API so queries never leave operator infrastructure.

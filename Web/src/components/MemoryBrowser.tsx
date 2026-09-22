@@ -1,4 +1,5 @@
 // Rune Weaver Dashboard — Memory browser for searching episodic/semantic recall and managing facts.
+// Hosts the Memory section's Search and Memory view plus the Indexing panel under one tabbed header.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -11,9 +12,15 @@ import {
   type MemoryResult,
   type UserFact,
 } from "../api";
+import IndexingPanel from "./IndexingPanel";
 import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
 import { CloseIcon, PlusIcon, RefreshIcon, SearchIcon, TrashIcon } from "./icons";
+
+// Memory section sub-views: recall/facts browsing and local index management.
+// Keeping both under one top-level Memory tab shows the whole memory surface
+// without adding another primary nav entry.
+type MemoryTab = "memory" | "indexing";
 
 function hashContent(content: string): string {
   // cyrb53 53-bit hash: substantially fewer collisions than 32-bit djb2
@@ -51,6 +58,7 @@ function baseResultKey(result: MemoryResult): string {
 }
 
 export default function MemoryBrowser() {
+  const [activeTab, setActiveTab] = useState<MemoryTab>("memory");
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemoryResult[]>([]);
   const [facts, setFacts] = useState<FactsResponse | null>(null);
@@ -161,26 +169,54 @@ export default function MemoryBrowser() {
         <div>
           <h2>Memory</h2>
           <p className="muted text-sm">
-            Search episodic recall, semantic embeddings, and manage stored user facts.
+            Search episodic recall, semantic embeddings, manage stored user facts,
+            and index local files, mail, and Messages.
           </p>
         </div>
 
-        <div className="row">
-          <button
-            type="button"
-            className="ghost icon-text-btn"
-            onClick={() => {
-              void loadFacts();
-              if (query.trim()) void search();
-            }}
-            disabled={busy}
-          >
-            <RefreshIcon size={14} className={busy ? "spin" : ""} />
-            <span>{busy ? "Refreshing…" : "Refresh"}</span>
-          </button>
-        </div>
+        {activeTab === "memory" ? (
+          <div className="row">
+            <button
+              type="button"
+              className="ghost icon-text-btn"
+              onClick={() => {
+                void loadFacts();
+                if (query.trim()) void search();
+              }}
+              disabled={busy}
+            >
+              <RefreshIcon size={14} className={busy ? "spin" : ""} />
+              <span>{busy ? "Refreshing…" : "Refresh"}</span>
+            </button>
+          </div>
+        ) : null}
       </div>
 
+      <div className="memory-tabs" role="tablist" aria-label="Memory views">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "memory"}
+          className={`memory-tab-btn ${activeTab === "memory" ? "active" : ""}`}
+          onClick={() => setActiveTab("memory")}
+        >
+          Search and Memory
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === "indexing"}
+          className={`memory-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
+          onClick={() => setActiveTab("indexing")}
+        >
+          Indexing
+        </button>
+      </div>
+
+      {activeTab === "indexing" ? (
+        <IndexingPanel />
+      ) : (
+        <>
       {error ? <p className="error">{error}</p> : null}
 
       <div className="memory-search-section">
@@ -312,6 +348,8 @@ export default function MemoryBrowser() {
           </div>
         ) : null}
       </div>
+        </>
+      )}
       </section>
 
       {/* Centered Modal for persisted fact delete confirmation */}

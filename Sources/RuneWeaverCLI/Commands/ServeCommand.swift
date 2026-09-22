@@ -189,7 +189,10 @@ struct ServeCommand: AsyncParsableCommand {
         auth: ServerAuth?,
         mediaConfig: MediaConfig? = nil
     ) async -> (context: ServerContext, permissionGate: PermissionGate) {
-        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
+        // Point recall at the configured document index when `[index]` is
+        // enabled; a disabled section keeps the keyword-and-vector engine.
+        let docIndexDBPath: String? = loaded.config.index.enabled ? loaded.config.index.dbPath : nil
+        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory, docIndexDBPath: docIndexDBPath)
         let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
         do {
             try await conversations.loadAll()
@@ -208,6 +211,14 @@ struct ServeCommand: AsyncParsableCommand {
         let embedder = EmbeddingsBackendFactory.makeBackend(
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: allProviders)
+        )
+        // Build the document index pipeline once so served recall, the nightly
+        // trigger, and the `/index` routes share one store and coordinator; nil
+        // when disabled keeps routes failing closed and recall unchanged.
+        let indexComponents = ServerIndexBoot.makeComponents(
+            config: loaded.config,
+            embedder: embedder,
+            visionLLM: selected
         )
         // Resolve the media section once so the preview registry, the prompt
         // snapshot, and the served context register the same media tools.
@@ -260,6 +271,8 @@ struct ServeCommand: AsyncParsableCommand {
             pluginConfig: loaded.config.plugins,
             sandboxConfig: loaded.config.sandbox,
             browserConfig: loaded.config.browser,
+            indexCoordinator: indexComponents?.coordinator,
+            indexStore: indexComponents?.store,
             llmServerURLs: CLIShared.llmServerURLs(from: loaded.config.llm),
             engineConfig: loaded.config.engine,
             emailConfig: loaded.config.email,

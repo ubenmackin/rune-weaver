@@ -1488,6 +1488,137 @@ export interface MediaConfigData {
   radarr: RadarrConfigData;
 }
 
+// Local background indexer policy mirroring the engine `IndexConfig`
+// (Sources/RuneWeaverCore/Config.swift). The indexer is off by default, so a
+// fresh install never walks the home directory or reads a mailbox until the
+// operator opts in. Only content and derived vectors live behind these knobs;
+// no secret ever appears here.
+export interface IndexConfigData {
+  enabled: boolean;
+  files: boolean;
+  mail: boolean;
+  messages: boolean;
+  roots: string[];
+  exclude: string[];
+  max_file_mb: number;
+  mail_vector_window: string;
+  icloud_evicted: string;
+  describe_images_with_llm: boolean;
+  nightly_budget: number;
+  db_path: string;
+}
+
+// Partial index patch for `PUT /settings`, mirroring the engine
+// `IndexSettingsUpdate`. Every field is optional so a request carrying one key
+// leaves the rest of the stored `[index]` section untouched; the JSON keys are
+// the snake_case names the engine persists.
+export interface IndexSettingsUpdate {
+  enabled?: boolean;
+  files?: boolean;
+  mail?: boolean;
+  messages?: boolean;
+  roots?: string[];
+  exclude?: string[];
+  max_file_mb?: number;
+  mail_vector_window?: string;
+  icloud_evicted?: string;
+  describe_images_with_llm?: boolean;
+  nightly_budget?: number;
+  db_path?: string;
+}
+
+// One source's enablement row on `GET /index/status`. Global enablement gates
+// every row server-side, so a source reads as live only when the indexer as a
+// whole is on.
+export interface IndexSourceStatus {
+  kind: string;
+  enabled: boolean;
+}
+
+// Status snapshot for `GET /index/status`.
+export interface IndexStatusResponse {
+  enabled: boolean;
+  running: boolean;
+  documents: number;
+  chunks: number;
+  vectorChunks: number;
+  keywordChunks: number;
+  bytes: number;
+  // Watermark of the last successful run, in either wire shape the engine
+  // emits (ISO-8601 strings or Unix seconds), or null when never indexed.
+  // Kept as a union so callers normalize through parseRunTimestamp.
+  indexAsOf?: string | number | null;
+  sources: IndexSourceStatus[];
+  lastErrors: string[];
+}
+
+// Outcome of `POST /index/run`.
+export interface IndexRunResponse {
+  sessionID: string;
+  trigger: string;
+  status: string;
+  documentsIndexed: number;
+  vectorChunks: number;
+  keywordChunks: number;
+  scanned: number;
+  skipped: number;
+  errors: number;
+  warnings: string[];
+  startedAt: string | number;
+  finishedAt: string | number;
+  indexAsOf?: string | number | null;
+  skippedReason?: string | null;
+}
+
+// Outcome of `POST /index/cancel`.
+export interface IndexCancelResponse {
+  cancelled: boolean;
+}
+
+// Outcome of `POST /index/prune`.
+export interface IndexPruneResponse {
+  removed: number;
+  before: string | number;
+}
+
+// Outcome of `POST /index/reset`.
+export interface IndexResetResponse {
+  reset: boolean;
+}
+
+// Closed set of valid `mail_vector_window` values, mirroring
+// IndexConfig.allowedMailVectorWindows; `all` disables the window.
+export const INDEX_MAIL_VECTOR_WINDOWS = ["30d", "6m", "1y", "2y", "all"];
+
+// Closed set of valid `icloud_evicted` policies, mirroring
+// IndexConfig.allowedICloudEvictions.
+export const INDEX_ICLOUD_EVICTIONS = ["skip", "download"];
+
+// Default index policy values mirroring IndexConfig so a fresh form matches the
+// boundary the engine enforces before the first settings fetch.
+export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
+  enabled: false,
+  files: true,
+  mail: false,
+  messages: false,
+  roots: ["~"],
+  exclude: [
+    ".git",
+    "node_modules",
+    ".build",
+    "DerivedData",
+    "Library",
+    ".Trash",
+    "*.app",
+  ],
+  max_file_mb: 20,
+  mail_vector_window: "2y",
+  icloud_evicted: "skip",
+  describe_images_with_llm: false,
+  nightly_budget: 0,
+  db_path: "~/.runeweaver/index.db",
+};
+
 export interface SettingsResponse {
   engineName: string;
   logLevel: string;
@@ -1529,6 +1660,9 @@ export interface SettingsResponse {
   pluginsMarketplaceIndexURL: string;
   pluginsAutoRescan: boolean;
   media?: MediaConfigData;
+  // Local background indexer policy under [index]; optional for back-compat
+  // with older engines that predate the section.
+  index?: IndexConfigData;
   configPath: string;
 }
 
@@ -1569,6 +1703,8 @@ export interface UpdateSettingsInput {
   pluginsMarketplaceIndexURL?: string;
   pluginsAutoRescan?: boolean;
   media?: MediaConfigData;
+  // Partial index patch; an omitted patch preserves the stored [index] section.
+  index?: IndexSettingsUpdate;
 }
 
 // Textarea mirror of the empty allowed origins defaults.
@@ -1659,6 +1795,49 @@ export function updateSettings(
   return fetchJson<SettingsResponse>("/settings", {
     method: "PUT",
     body: JSON.stringify(input),
+  });
+}
+
+// Reads the local index status: counts, bytes, per-source enablement, recent
+// failures, the last watermark, and live run state. A missing store or
+// coordinator reports an honest zeroed snapshot instead of failing, so a stock
+// install still renders an empty state.
+export function getIndexStatus(): Promise<IndexStatusResponse> {
+  return fetchJson<IndexStatusResponse>("/index/status");
+}
+
+// Starts an on-demand index run and awaits its terminal summary. Progress rides
+// the shared `tool_progress` WebSocket frames while the run is in flight.
+export function runIndex(): Promise<IndexRunResponse> {
+  return fetchJson<IndexRunResponse>("/index/run", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Asks an in-flight run to stop at its next safe point. The boolean reports
+// whether a run was actually in flight when cancellation was requested.
+export function cancelIndex(): Promise<IndexCancelResponse> {
+  return fetchJson<IndexCancelResponse>("/index/cancel", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Removes documents older than the cutoff. The cutoff is required so a bare
+// prune cannot silently clear the store; callers must pass an explicit date.
+export function pruneIndex(before: string | number): Promise<IndexPruneResponse> {
+  return fetchJson<IndexPruneResponse>("/index/prune", {
+    method: "POST",
+    body: JSON.stringify({ before }),
+  });
+}
+
+// Clears the index store; the route fails instead of claiming a partial clear.
+export function resetIndex(): Promise<IndexResetResponse> {
+  return fetchJson<IndexResetResponse>("/index/reset", {
+    method: "POST",
+    body: JSON.stringify({}),
   });
 }
 

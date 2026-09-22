@@ -888,8 +888,8 @@ public actor PermissionGate {
     }
 
     /// Starts a periodic background reaper that checks and cleans up expired grants.
-    public func startPeriodicCleanup(intervalSeconds: TimeInterval = 60) {
-        stopPeriodicCleanup()
+    public func startPeriodicCleanup(intervalSeconds: TimeInterval = 60) async {
+        await stopPeriodicCleanup()
         let interval = max(0.01, intervalSeconds)
         reaperTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -904,10 +904,16 @@ public actor PermissionGate {
         }
     }
 
-    /// Stops the periodic background cleanup reaper.
-    public func stopPeriodicCleanup() {
-        reaperTask?.cancel()
+    /// Stops the periodic background cleanup reaper, waiting for any in-flight prune to finish.
+    ///
+    /// Joining the task keeps a stop from racing an uncancellable store
+    /// prune: without the join, a reader immediately after stop could
+    /// observe the pre-prune rows or hit a transient write lock.
+    public func stopPeriodicCleanup() async {
+        let task = reaperTask
         reaperTask = nil
+        task?.cancel()
+        _ = await task?.value
     }
 
     /// Prunes expired grants from memory and storage.

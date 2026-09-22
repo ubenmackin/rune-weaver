@@ -23,6 +23,9 @@ struct PermissionGatePersistenceTests {
             let status = path.withCString { sqlite3_open($0, &handle) }
             guard status == SQLITE_OK, let handle else { return -1 }
             defer { sqlite3_close(handle) }
+            // Mirror the production busy_timeout so a transient reaper/store
+            // write lock waits instead of surfacing as a false -1.
+            _ = sqlite3_busy_timeout(handle, 5000)
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM trust_grants;", -1, &statement, nil) == SQLITE_OK,
                   let statement

@@ -19,6 +19,7 @@ extension RuneWeaverConfig {
         try validateVoiceSection()
         try validateSandboxSection()
         try validateFilesSection()
+        try validateIndexSection()
         try validateBrowserSection()
         try validateEmailSection()
         try validateHomeSection()
@@ -216,6 +217,45 @@ extension RuneWeaverConfig {
     private func validateFilesSection() throws {
         try Self.validateFilesPatterns(files.denyPatterns, field: "files.deny_patterns")
         try Self.validateFilesPatterns(files.allowRoots, field: "files.allow_roots")
+    }
+
+    private func validateIndexSection() throws {
+        // Roots and excludes share the files-guard rules so a `..` escape or a
+        // blank entry fails at load rather than widening the walk at runtime.
+        try Self.validateFilesPatterns(index.roots, field: "index.roots")
+        try Self.validateFilesPatterns(index.exclude, field: "index.exclude")
+        if index.maxFileMB < 1 || index.maxFileMB > IndexConfig.maxAllowedFileMB {
+            throw ConfigError.validationError(
+                field: "index.max_file_mb",
+                message: "must be between 1 and \(IndexConfig.maxAllowedFileMB) (got \(index.maxFileMB))"
+            )
+        }
+        // Closed window set keeps the vector store bounded; a typo would
+        // otherwise silently widen to an unintended span.
+        if !IndexConfig.allowedMailVectorWindows.contains(index.mailVectorWindow) {
+            throw ConfigError.validationError(
+                field: "index.mail_vector_window",
+                message: "must be one of \(IndexConfig.allowedMailVectorWindows.joined(separator: ", ")) (got '\(index.mailVectorWindow)')"
+            )
+        }
+        // Closed eviction set keeps network downloads an explicit decision.
+        if !IndexConfig.allowedICloudEvictions.contains(index.iCloudEvicted) {
+            throw ConfigError.validationError(
+                field: "index.icloud_evicted",
+                message: "must be one of \(IndexConfig.allowedICloudEvictions.joined(separator: ", ")) (got '\(index.iCloudEvicted)')"
+            )
+        }
+        if index.nightlyBudget < 0 || index.nightlyBudget > IndexConfig.maxAllowedNightlyBudget {
+            throw ConfigError.validationError(
+                field: "index.nightly_budget",
+                message: "must be between 0 and \(IndexConfig.maxAllowedNightlyBudget) (got \(index.nightlyBudget))"
+            )
+        }
+        if index.dbPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(
+                field: "index.db_path", message: "must not be empty"
+            )
+        }
     }
 
     private func validateBrowserSection() throws {

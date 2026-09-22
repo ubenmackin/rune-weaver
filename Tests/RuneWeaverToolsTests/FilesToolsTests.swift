@@ -103,7 +103,7 @@ private actor FilesProgressCollector {
 /// Monotonic clock seam that advances by a fixed step on every read.
 /// Lets a walker cross the throttle's time floor deterministically without
 /// depending on how long the test machine takes to enumerate.
-private final class SteppingClock: @unchecked Sendable {
+private final class SteppingClock: Sendable {
     /// Guards the mutable instant below.
     private let state: OSAllocatedUnfairLock<ContinuousClock.Instant>
     /// Duration added to the instant on every read.

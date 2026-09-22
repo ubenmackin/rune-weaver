@@ -64,6 +64,7 @@ import {
 } from "./icons";
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
+import IndexingPanel from "./IndexingPanel";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
 // Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
@@ -78,7 +79,8 @@ type SettingsTab =
   | "memory"
   | "voice"
   | "search"
-  | "email";
+  | "email"
+  | "indexing";
 
 interface ProviderEntry {
   id: string;
@@ -1983,9 +1985,25 @@ export default function SettingsManager() {
               <span className="settings-tab-badge">{emailAccountsList.length}</span>
             )}
           </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "indexing"}
+            className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
+            onClick={() => setActiveTab("indexing")}
+          >
+            <MemoryIcon size={16} />
+            <span>Indexing</span>
+          </button>
         </nav>
 
         <div className="settings-content">
+          {/* The indexing pane owns its own save path (it patches only the
+              [index] section), so it renders outside the shared settings form
+              and its own controls never submit the unrelated config values. */}
+          {activeTab === "indexing" ? <IndexingPanel /> : null}
+          {activeTab !== "indexing" ? (
           <form onSubmit={handleSave} className="settings-form">
         {/* TAB 1: LLM Providers */}
         {activeTab === "providers" && (
@@ -3994,6 +4012,7 @@ export default function SettingsManager() {
           </button>
         </div>
           </form>
+          ) : null}
         </div>
       </div>
 

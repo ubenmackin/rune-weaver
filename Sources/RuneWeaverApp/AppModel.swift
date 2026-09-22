@@ -276,41 +276,25 @@ public final class AppModel {
             ) else { return }
 
             let secrets = SecretsManager()
-            var keysByEntry: [String: String] = [:]
-            for (entryName, entry) in config.llm.providers {
-                guard let envVar = entry.apiKeyEnv, !envVar.isEmpty else { continue }
-                if let key = LLMProviderFactory.resolveAPIKey(explicit: nil, envVar: envVar) {
-                    keysByEntry[entryName] = key
-                } else if let stored = try? await secrets.retrieve(key: envVar) {
-                    keysByEntry[entryName] = stored
-                }
-            }
+            let keysByEntry = await resolveBootAPIKeys(config: config, secrets: secrets)
 
             let providers = LLMProviderFactory.makeProviders(from: config.llm, apiKeysByEntry: keysByEntry)
-            let selectedProvider: any LLMProvider = if let chosen = LLMProviderFactory.selectProvider(named: nil, from: providers, config: config.llm) {
-                chosen
-            } else {
-                FallbackDummyProvider()
-            }
+            let selectedProvider = selectBootProvider(config: config, providers: providers)
 
             self.providerName = selectedProvider.name
 
-            let memoryEngine = MemoryEngine(config: config.memory)
-            let conversations = ConversationManager(episodesDBPath: config.memory.episodesDBPath)
-            do {
-                try await conversations.loadAll()
-            } catch {
-                // Start fresh but surface the failure so missing history is
-                // never mistaken for an empty account.
-                print("[RuneWeaverApp] Could not load conversation history; starting fresh: \(error)")
-            }
+            let memoryEngine = makeBootMemoryEngine(config: config)
+            let conversations = await loadBootConversations(config: config)
 
-            // Share one embeddings backend across memory tools and served
-            // recall so menu-bar turns rank and write vectors like the CLI;
-            // nil keeps keyword-only behavior when vectors are disabled.
-            let embedder = EmbeddingsBackendFactory.makeBackend(
-                memoryEmbeddingBackend: config.memory.embeddingBackend,
-                router: LLMRouter(providers: providers)
+            let embedder = makeBootEmbedder(config: config, providers: providers)
+
+            // Build the document index pipeline once so served recall, the nightly
+            // trigger, and the `/index` routes share one store and coordinator; nil
+            // when disabled keeps routes failing closed and recall unchanged.
+            let indexComponents = ServerIndexBoot.makeComponents(
+                config: config,
+                embedder: embedder,
+                visionLLM: selectedProvider
             )
 
             // Keep the menu-bar registry identical to the serve command's shared
@@ -346,6 +330,8 @@ public final class AppModel {
                 },
                 sandboxConfig: config.sandbox,
                 browserConfig: config.browser,
+                indexCoordinator: indexComponents?.coordinator,
+                indexStore: indexComponents?.store,
                 llmServerURLs: appLLMOrigins,
                 engineConfig: config.engine,
                 emailConfig: config.email,
@@ -570,7 +556,10 @@ private actor ServerRunnerActor {
 }
 
 /// Minimal fallback provider when no LLM provider is enabled in config.
-private struct FallbackDummyProvider: LLMProvider {
+///
+/// Internal so boot helpers in a companion file share the same unconfigured
+/// path without duplicating the placeholder turn.
+struct FallbackDummyProvider: LLMProvider {
     var modelInfo: ModelInfo {
         ModelInfo(name: "unconfigured", provider: "none", contextLength: 4096, supportsTools: false, supportsEmbeddings: false)
     }

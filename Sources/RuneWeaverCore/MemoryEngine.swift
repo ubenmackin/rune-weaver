@@ -8,6 +8,8 @@ public enum MemorySource: String, Sendable, Codable, Equatable, CaseIterable {
     case episodic
     /// Facts with embeddings (vector store).
     case semantic
+    /// Indexed document and mail chunks (document index).
+    case docIndex
     /// Long-lived user profile facts and preferences.
     case profile
 }
@@ -125,12 +127,23 @@ public actor MemoryEngine {
     private let episodeStore: EpisodeStore
     /// Semantic fact/vector store.
     private let vectorStore: VectorStore
+    /// Durable document index for hybrid keyword/vector recall, when configured.
+    ///
+    /// Internal so the document-recall extension in a companion file shares the
+    /// same single store path without duplicating configuration.
+    let docIndexStore: DocIndexStore?
     /// In-memory profile snapshot, mirrored to disk best-effort.
-    private var profile: UserProfile
+    ///
+    /// Internal so recall merging in a companion file reads the live profile
+    /// without exposing mutation outside the engine.
+    var profile: UserProfile
     /// JSON file backing the profile, if configured.
     private let profilePath: String?
     /// Maximum results fetched per tier before merging.
-    private static let maxPerTierResults = 1000
+    ///
+    /// Internal so recall extensions share one per-tier cap with the episodic
+    /// and semantic paths instead of drifting into separate limits.
+    static let maxPerTierResults = 1000
     /// Maximum characters accepted for a single stored content.
     public static let maxContentLength = 10000
     /// Maximum episodic records retained before auto-compacting old sessions.
@@ -140,11 +153,13 @@ public actor MemoryEngine {
     public init(
         episodeStore: EpisodeStore,
         vectorStore: VectorStore,
+        docIndexStore: DocIndexStore? = nil,
         profilePath: String? = nil,
         initialProfile: UserProfile? = nil
     ) {
         self.episodeStore = episodeStore
         self.vectorStore = vectorStore
+        self.docIndexStore = docIndexStore
         self.profilePath = profilePath
         if let initialProfile {
             self.profile = initialProfile
@@ -156,10 +171,21 @@ public actor MemoryEngine {
     }
 
     /// Creates an engine from filesystem paths.
-    public init(episodesDBPath: String, vectorDBPath: String, profilePath: String? = nil) {
+    /// - Parameters:
+    ///   - episodesDBPath: SQLite path for episodic memory.
+    ///   - vectorDBPath: Directory for the semantic vector store.
+    ///   - docIndexDBPath: SQLite path for the document index; omit for keyword-and-vector recall only.
+    ///   - profilePath: JSON profile path; defaults beside the episodes database.
+    public init(
+        episodesDBPath: String,
+        vectorDBPath: String,
+        docIndexDBPath: String? = nil,
+        profilePath: String? = nil
+    ) {
         self.init(
             episodeStore: EpisodeStore(dbPath: episodesDBPath),
             vectorStore: VectorStore(directoryPath: vectorDBPath),
+            docIndexStore: docIndexDBPath.map { DocIndexStore(dbPath: $0) },
             profilePath: profilePath ?? (episodesDBPath + ".profile.json")
         )
     }
@@ -509,34 +535,6 @@ public actor MemoryEngine {
         }
         return created
     }
-
-    // MARK: - Combined recall
-
-    /// Recalls across episodic, semantic, and profile tiers.
-    public func recall(query: String, embedding: [Float]? = nil, limit: Int = 10) async throws -> [MemoryResult] {
-        guard limit > 0 else { return [] }
-        let perTier = min(limit, Self.maxPerTierResults)
-        let episodic = try await searchEpisodes(query: query, limit: perTier)
-        let semanticRaw = await querySemantic(query: query, embedding: embedding ?? [], limit: perTier)
-        let semantic: [MemoryResult] = if (embedding ?? []).isEmpty {
-            semanticRaw.map { Self.normalizedSemantic($0) }
-        } else {
-            semanticRaw
-        }
-        let profile = profileResults(query: query, limit: perTier)
-        let merged = episodic + semantic + profile
-        let calibrated = merged.map { Self.calibrated($0) }
-        let sorted = calibrated.sorted {
-            if $0.score != $1.score {
-                return $0.score > $1.score
-            }
-            return Self.sourcePriority($0.source) > Self.sourcePriority($1.source)
-        }
-        // `perTier` is capped at `maxPerTierResults` (1000) above, so
-        // `perTier * 3` cannot overflow.
-        let cap = perTier * 3
-        return Array(Self.dedupe(sorted).prefix(cap))
-    }
 }
 
 // MARK: - MemoryEngine Semantic Store Maintenance
@@ -575,123 +573,6 @@ extension MemoryEngine {
     /// - Parameter fact: Fact to persist.
     func semanticStoreUpsert(_ fact: StoredFact) async throws {
         try await vectorStore.upsert(fact)
-    }
-}
-
-// MARK: - MemoryEngine Recall Helpers
-
-extension MemoryEngine {
-    /// Keyword matches against profile facts and preferences.
-    private func profileResults(query: String, limit: Int) -> [MemoryResult] {
-        guard limit > 0 else { return [] }
-        let queryTokens = Tokenization.tokenize(query)
-        guard !queryTokens.isEmpty else { return [] }
-        var results: [MemoryResult] = []
-        for fact in profile.facts {
-            let contentTokens = Tokenization.tokenize(fact.content)
-            guard let raw = Tokenization.keywordScore(
-                queryTokens: queryTokens,
-                contentTokens: contentTokens,
-                content: fact.content,
-                query: query
-            ) else { continue }
-            results.append(MemoryResult(
-                content: fact.content,
-                score: min(max((Double(raw) / 10.0) * max(fact.confidence, 0.1), 0.0), 1.0),
-                source: .profile,
-                metadata: ["id": fact.id.uuidString, "confidence": "\(fact.confidence)"]
-            ))
-        }
-        for preference in profile.preferences {
-            let haystack = "\(preference.key) \(preference.value)"
-            let contentTokens = Tokenization.tokenize(haystack)
-            guard let raw = Tokenization.keywordScore(
-                queryTokens: queryTokens,
-                contentTokens: contentTokens,
-                content: haystack,
-                query: query
-            ) else { continue }
-            results.append(MemoryResult(
-                content: "\(preference.key): \(preference.value)",
-                score: min(max((Double(raw) / 10.0) * max(preference.confidence, 0.1), 0.0), 1.0),
-                source: .profile,
-                metadata: ["key": preference.key, "value": preference.value]
-            ))
-        }
-        return Array(results.sorted { $0.score > $1.score }.prefix(limit))
-    }
-
-    /// Weight mapping episodic rank scores onto the shared recall scale.
-    private static let episodicTierWeight = 0.25
-
-    /// Weight for semantic hits on the shared recall scale.
-    private static let semanticTierWeight = 1.0
-
-    /// Weight for profile hits on the shared recall scale.
-    private static let profileTierWeight = 1.0
-
-    /// Applies the tier weight for a recall hit's source.
-    private static func calibrated(_ result: MemoryResult) -> MemoryResult {
-        let weight: Double = switch result.source {
-        case .episodic: Self.episodicTierWeight
-        case .semantic: Self.semanticTierWeight
-        case .profile: Self.profileTierWeight
-        }
-        return MemoryResult(
-            content: result.content,
-            score: min(max(result.score * weight, 0.0), 1.0),
-            source: result.source,
-            metadata: result.metadata
-        )
-    }
-
-    /// Normalizes a keyword semantic hit to the shared `[0, 1]` recall scale.
-    private static func normalizedSemantic(_ result: MemoryResult) -> MemoryResult {
-        MemoryResult(
-            content: result.content,
-            score: min(max(result.score / 10.0, 0.0), 1.0),
-            source: result.source,
-            metadata: result.metadata
-        )
-    }
-
-    /// Priority for tie-breaking merged recall hits.
-    private static func sourcePriority(_ source: MemorySource) -> Int {
-        switch source {
-        case .profile: 2
-        case .semantic: 1
-        case .episodic: 0
-        }
-    }
-
-    /// Dedupes merged recall hits by identifier, with content scope.
-    private static func dedupe(_ results: [MemoryResult]) -> [MemoryResult] {
-        var seenIDs = Set<String>()
-        var seenSemanticProfileContent = Set<String>()
-        var kept: [MemoryResult] = []
-        kept.reserveCapacity(results.count)
-        for result in results {
-            let contentKey = result.content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            let isEpisodic = result.source == .episodic
-            if let id = result.metadata["id"], !id.isEmpty {
-                guard !seenIDs.contains(id) else { continue }
-                if !isEpisodic {
-                    guard !seenSemanticProfileContent.contains(contentKey) else { continue }
-                    seenSemanticProfileContent.insert(contentKey)
-                }
-                seenIDs.insert(id)
-                kept.append(result)
-            } else {
-                if isEpisodic {
-                    kept.append(result)
-                } else {
-                    guard !seenSemanticProfileContent.contains(contentKey) else { continue }
-                    seenSemanticProfileContent.insert(contentKey)
-                    kept.append(result)
-                }
-            }
-        }
-        return kept
     }
 }
 
