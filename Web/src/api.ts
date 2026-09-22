@@ -522,6 +522,24 @@ export function runningSessionIDsFromRuns(
   return [...seen];
 }
 
+// Reports whether any run represents actively-running work that a settings save
+// would interrupt. Only `running` counts; parked `awaiting_approval` rows wait
+// on the inbox and never trigger the guard, so in-flight chat turns, running
+// tool calls, and running scheduler runs guard while parked work does not.
+// Accepts unknown status shapes so drifted payloads degrade to inactive rather
+// than failing the guard check.
+export function hasActiveRuns(
+  runs: ReadonlyArray<{ status?: unknown } | null | undefined> | undefined | null,
+): boolean {
+  if (!Array.isArray(runs)) return false;
+  for (const run of runs) {
+    if (!run) continue;
+    const status = (run as { status?: unknown }).status;
+    if (isActiveRunStatus(typeof status === "string" ? status : undefined)) return true;
+  }
+  return false;
+}
+
 // Narration placeholder shape persisted by the engine for tool rounds
 // ("Calling <tool> <args> [callID]"). Substring checks for "[callID]" elsewhere
 // in prose over-match identifiers merely mentioned in passing, so coverage and
@@ -1527,6 +1545,89 @@ export interface IndexSettingsUpdate {
   db_path?: string;
 }
 
+// Native desktop vision and gated control policy mirroring the engine
+// `DesktopConfig` (Sources/RuneWeaverCore/Config.swift). Both desktop tools
+// always register so they stay visible in `GET /tools`, but they ship
+// disabled and each toggle here is a fail-closed allow boundary: while off,
+// the server force-disables that tool regardless of tool-state toggles; while
+// on, the tool still ships disabled until enabled in the tool-state toggles.
+// Capture and control both default off so a stock install never exposes
+// approval-free screen capture. Only capture knobs and the blocklist live
+// here; no secret ever appears.
+export interface DesktopConfigData {
+  screen_capture_enabled: boolean;
+  control_enabled: boolean;
+  max_image_dimension: number;
+  jpeg_quality: number;
+  blocked_apps: string[];
+}
+
+// Partial desktop patch for `PUT /settings`, mirroring the engine
+// `DesktopSettingsUpdate`. Every field is optional so a request carrying one
+// key leaves the rest of the stored `[desktop]` section untouched; the JSON
+// keys are the snake_case names the engine persists.
+export interface DesktopSettingsUpdate {
+  screen_capture_enabled?: boolean;
+  control_enabled?: boolean;
+  max_image_dimension?: number;
+  jpeg_quality?: number;
+  blocked_apps?: string[];
+}
+
+// Manual mirrors of DesktopConfig defaults in Sources/RuneWeaverCore/Config.swift.
+export const DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED = false;
+export const DEFAULT_DESKTOP_CONTROL_ENABLED = false;
+export const DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION = 1280;
+export const DEFAULT_DESKTOP_JPEG_QUALITY = 0.75;
+
+// Manual mirror of DesktopConfig.defaultBlockedApps; update by hand alongside
+// the Swift default.
+export const DEFAULT_DESKTOP_BLOCKED_APPS: string[] = [
+  "Terminal",
+  "iTerm2",
+  "Keychain Access",
+  "System Settings",
+  "System Preferences",
+  "1Password",
+  "Bitwarden",
+];
+
+// Textarea mirror of the blocked-apps defaults so the desktop editor starts
+// from the same guard boundary without joining inline in every caller.
+export const DEFAULT_DESKTOP_BLOCKED_APPS_TEXT: string =
+  DEFAULT_DESKTOP_BLOCKED_APPS.join("\n");
+
+// Parses the blocked-apps textarea into the wire shape: one app name per line,
+// trimmed, with blank lines dropped. Blank filtering keeps an emptied editor
+// as an explicit allow-all instead of persisting whitespace-only rows, and the
+// server-side control bridge remains the authoritative enforcer.
+export function parseBlockedAppsText(text: string | undefined | null): string[] {
+  if (text == null) return [...DEFAULT_DESKTOP_BLOCKED_APPS];
+  return text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+// Formats a blocked-apps array for the multiline editor, falling back to the
+// guard defaults when an older engine omits the [desktop] section entirely.
+// Callers use this for initial display and reset so textarea and array states
+// never diverge on the default boundary.
+export function formatBlockedAppsText(apps: string[] | undefined | null): string {
+  if (!Array.isArray(apps)) return DEFAULT_DESKTOP_BLOCKED_APPS_TEXT;
+  return apps.join("\n");
+}
+
+// Default desktop policy mirroring DesktopConfig so a fresh form matches the
+// boundary the engine enforces before the first settings fetch.
+export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
+  screen_capture_enabled: DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED,
+  control_enabled: DEFAULT_DESKTOP_CONTROL_ENABLED,
+  max_image_dimension: DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
+  jpeg_quality: DEFAULT_DESKTOP_JPEG_QUALITY,
+  blocked_apps: [...DEFAULT_DESKTOP_BLOCKED_APPS],
+};
+
 // One source's enablement row on `GET /index/status`. Global enablement gates
 // every row server-side, so a source reads as live only when the indexer as a
 // whole is on.
@@ -1663,6 +1764,9 @@ export interface SettingsResponse {
   // Local background indexer policy under [index]; optional for back-compat
   // with older engines that predate the section.
   index?: IndexConfigData;
+  // Native desktop vision and gated control under [desktop]; optional for
+  // back-compat with older engines that predate the section.
+  desktop?: DesktopConfigData;
   configPath: string;
 }
 
@@ -1705,6 +1809,8 @@ export interface UpdateSettingsInput {
   media?: MediaConfigData;
   // Partial index patch; an omitted patch preserves the stored [index] section.
   index?: IndexSettingsUpdate;
+  // Partial desktop patch; an omitted patch preserves the stored [desktop] section.
+  desktop?: DesktopSettingsUpdate;
 }
 
 // Textarea mirror of the empty allowed origins defaults.
@@ -1804,6 +1910,21 @@ export function updateSettings(
 // install still renders an empty state.
 export function getIndexStatus(): Promise<IndexStatusResponse> {
   return fetchJson<IndexStatusResponse>("/index/status");
+}
+
+// Milliseconds elapsed since the last successful index watermark, or null when
+// the store has never been indexed. The status dashboard renders this as the
+// watermark-age card through the shared relative-time ladder instead of
+// re-parsing the wire shape (ISO-8601 string or Unix seconds) per render; a
+// future-skewed timestamp clamps to zero so the label reads "just now".
+export function indexWatermarkAgeMs(
+  value: string | number | null | undefined,
+): number | null {
+  if (value == null) return null;
+  const time = parseRunTimestamp(value).getTime();
+  if (Number.isNaN(time) || time <= 0) return null;
+  const age = Date.now() - time;
+  return age < 0 ? 0 : age;
 }
 
 // Starts an on-demand index run and awaits its terminal summary. Progress rides

@@ -6,7 +6,10 @@
 //
 // `desktop.action` is approval-gated and dangerous: it dispatches batched
 // mouse, keyboard, and app-switch actions through the permission gate.
-// Disabled by default and independently gated behind `control_enabled`.
+// Both tools always register so they stay visible in `GET /tools`, but
+// boot registration ships them disabled and the `[desktop]` toggles act as
+// a fail-closed allow boundary on top, so neither runs without an explicit
+// operator action.
 
 import Foundation
 import RuneWeaverCore
@@ -371,50 +374,65 @@ public enum DesktopTools {
     public static let screenshotToolName = "desktop.screenshot"
     public static let actionToolName = "desktop.action"
 
-    /// Tool names exposed when both are enabled.
+    /// Both tool names in registration order, regardless of toggles.
     public static var allToolNames: [String] {
         [screenshotToolName, actionToolName]
     }
 
     /// Builds the desktop tools according to the configuration.
+    ///
+    /// Both tools always register — visibility in `GET /tools` never
+    /// depends on a toggle, so the surface stays inspectable instead of
+    /// shape-shifting. Enablement is gated separately: boot-path callers
+    /// register them disabled (`isEnabled: false`), persisted tool-state
+    /// rows restore operator intent, and `enforceConfigGates(from:on:)`
+    /// force-disables any tool whose `[desktop]` toggle is off.
     /// - Parameters:
     ///   - desktopConfig: The `[desktop]` configuration section.
     ///   - captureBridge: Optional capture bridge (for tests).
     ///   - controlBridge: Optional control bridge (for tests).
-    /// - Returns: Tools to register, which may be empty if desktop is disabled.
+    /// - Returns: Both desktop tools, in registration order.
     public static func makeTools(
         desktopConfig: DesktopConfig = DesktopConfig(),
         captureBridge: (any DesktopCapturing)? = nil,
         controlBridge: (any DesktopControlling)? = nil
     ) -> [any Tool] {
-        guard desktopConfig.enabled else { return [] }
-        var tools: [any Tool] = []
-        if desktopConfig.screenCaptureEnabled {
-            tools.append(DesktopScreenshotTool(
+        [
+            DesktopScreenshotTool(
                 captureBridge: captureBridge ?? DesktopCaptureBridge(),
                 maxDimension: desktopConfig.maxImageDimension,
                 jpegQuality: desktopConfig.jpegQuality
-            ))
-        }
-        if desktopConfig.controlEnabled {
-            tools.append(DesktopActionTool(
+            ),
+            DesktopActionTool(
                 controlBridge: controlBridge ?? DesktopControlBridge(),
                 blockedApps: desktopConfig.blockedApps
-            ))
-        }
-        return tools
+            )
+        ]
     }
 
-    /// Tool names exposed for the given configuration.
-    public static func toolNames(for config: DesktopConfig) -> [String] {
-        guard config.enabled else { return [] }
-        var names: [String] = []
-        if config.screenCaptureEnabled {
-            names.append(screenshotToolName)
+    /// Both tool names in registration order; registration itself never
+    /// depends on the `[desktop]` toggles.
+    public static func toolNames(for _: DesktopConfig) -> [String] {
+        allToolNames
+    }
+
+    /// Enforces the `[desktop]` allow boundary on a live bus.
+    ///
+    /// Applied after persisted tool-state rows are restored: a toggle that
+    /// is off force-disables its tool regardless of any stored enable row,
+    /// so a hand-edited config, a legacy fail-closed install, or a settings
+    /// toggle turned off always wins over runtime state. A toggle that is
+    /// on leaves the tool's state untouched — it still ships disabled until
+    /// the operator enables it through the tool-state route.
+    /// - Parameters:
+    ///   - config: The live `[desktop]` policy supplying both toggles.
+    ///   - bus: Bus whose desktop tools receive the boundary.
+    public static func enforceConfigGates(from config: DesktopConfig, on bus: ToolBus) async {
+        if !config.screenCaptureEnabled {
+            await bus.disableTool(named: screenshotToolName)
         }
-        if config.controlEnabled {
-            names.append(actionToolName)
+        if !config.controlEnabled {
+            await bus.disableTool(named: actionToolName)
         }
-        return names
     }
 }

@@ -494,8 +494,9 @@ public actor IndexCoordinator {
     /// Minimum spacing between progress frames (2 Hz), shared with `ToolProgress`.
     static let minimumFrameInterval: TimeInterval = Double(ToolProgress.minimumReportIntervalNanoseconds) / 1_000_000_000
 
-    /// Index policy gating sources and budgets.
-    private let config: IndexConfig
+    /// Index policy gating sources and budgets. Mutable so a settings save can
+    /// hot-reload the next run without rebuilding stages or restarting.
+    private var config: IndexConfig
     /// Source stages, sequenced into run order at execution time.
     private let stages: [any IndexSourceStage]
     /// Optional document store used to read final aggregate stats.
@@ -553,6 +554,14 @@ public actor IndexCoordinator {
     /// Whether a run is currently in flight.
     public var isRunning: Bool {
         running
+    }
+
+    /// Updates the live index policy so saved `[index]` values take effect without a restart.
+    /// The next run gates on the new policy; stages built at boot keep their existing enablement
+    /// until rebuilt, so source toggles apply to fresh coordinators while the enabled gate is immediate.
+    /// - Parameter newConfig: Persisted policy from the settings save.
+    public func updateConfig(_ newConfig: IndexConfig) {
+        config = newConfig
     }
 
     /// Runs the nightly trigger when it is due.

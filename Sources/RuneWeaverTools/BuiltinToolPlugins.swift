@@ -155,6 +155,11 @@ public enum BuiltinToolPlugins {
     /// Registers the full built-in tool suite on the provided ToolBus.
     /// The single registration surface for built-in tools; callers that need a
     /// custom subset build from `makeTools`/`makeAllTools` and register directly.
+    ///
+    /// Desktop tools always register but arrive disabled: persisted
+    /// tool-state rows re-apply via `restoreToolStates` and the `[desktop]`
+    /// allow gates run there too, so a stock install never puts
+    /// approval-free screen capture in front of the model at boot.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
@@ -172,8 +177,11 @@ public enum BuiltinToolPlugins {
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        mediaSecrets: SecretsManager? = nil
+        mediaSecrets: SecretsManager? = nil,
+        desktopCaptureBridge: (any DesktopCapturing)? = nil,
+        desktopControlBridge: (any DesktopControlling)? = nil
     ) async {
+        let desktopNames = Set(DesktopTools.allToolNames)
         for tool in makeAllTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
@@ -190,9 +198,14 @@ public enum BuiltinToolPlugins {
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
             ensurer: ensurer,
-            mediaSecrets: mediaSecrets
+            mediaSecrets: mediaSecrets,
+            desktopCaptureBridge: desktopCaptureBridge,
+            desktopControlBridge: desktopControlBridge
         ) {
-            await bus.register(tool: tool)
+            // Every other builtin keeps the enabled-by-default registration;
+            // desktop tools ship disabled so only an operator-enabled tool
+            // goes live (stored rows restore right after registration).
+            await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }
     }
 }

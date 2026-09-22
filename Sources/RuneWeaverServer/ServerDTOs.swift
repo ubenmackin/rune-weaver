@@ -1047,6 +1047,8 @@ public struct SettingsResponse: Content, Equatable {
     public let media: MediaConfig
     /// Local background indexer policy.
     public let index: IndexConfig
+    /// macOS desktop vision and gated control policy.
+    public let desktop: DesktopConfig
     public let configPath: String
 
     public init(config: RuneWeaverConfig, configPath: String) {
@@ -1083,6 +1085,7 @@ public struct SettingsResponse: Content, Equatable {
         self.pluginsAutoRescan = config.plugins.autoRescan
         self.media = config.media
         self.index = config.index
+        self.desktop = config.desktop
         self.configPath = configPath
     }
 }
@@ -1125,6 +1128,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let media: MediaSettingsUpdate?
     /// Partial local index patch; a nil patch preserves the stored `[index]` section.
     public let index: IndexSettingsUpdate?
+    /// Partial desktop patch; a nil patch preserves the stored `[desktop]` section.
+    public let desktop: DesktopSettingsUpdate?
 
     public init(
         engineName: String? = nil,
@@ -1159,7 +1164,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         pluginsMarketplaceIndexURL: String? = nil,
         pluginsAutoRescan: Bool? = nil,
         media: MediaSettingsUpdate? = nil,
-        index: IndexSettingsUpdate? = nil
+        index: IndexSettingsUpdate? = nil,
+        desktop: DesktopSettingsUpdate? = nil
     ) {
         self.engineName = engineName
         self.logLevel = logLevel
@@ -1194,6 +1200,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.pluginsAutoRescan = pluginsAutoRescan
         self.media = media
         self.index = index
+        self.desktop = desktop
     }
 
     /// Applies this update onto a loaded config, preserving every field
@@ -1211,6 +1218,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyPlugins(to: &config.plugins)
         applyMedia(to: &config.media)
         applyIndex(to: &config.index)
+        applyDesktop(to: &config.desktop)
     }
 
     private func applyEngine(to engine: inout EngineConfig) throws {

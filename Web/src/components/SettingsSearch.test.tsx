@@ -4,6 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager from "./SettingsManager";
+import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import {
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_SEARXNG_URL,
@@ -45,6 +46,7 @@ const mockSettings = {
 describe("SettingsManager search", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
   });
 
   it("pins frontend search defaults to the engine BrowserConfig", () => {
@@ -137,7 +139,7 @@ describe("SettingsManager search", () => {
     });
     await user.click(saveButton);
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
     expect(sentPayload).toBeDefined();
     expect(sentPayload?.["searchSearxngURL"]).toBe(ENGINE_SEARCH_URL);

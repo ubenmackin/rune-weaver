@@ -37,12 +37,15 @@ func buildToolInfo(
 
     // The server owns which tools expose settings so the dashboard never
     // keeps a name allowlist: media tools share the Sonarr/Radarr patch,
-    // and browser/web tools configure allowed homelab origins.
+    // browser/web tools configure allowed homelab origins, and desktop tools
+    // configure capture dimensions, quality, and the control blocklist.
     let hasConfig = tool.name == "media.arr"
         || tool.name == "media.arr.read"
         || tool.name == "browser.navigate"
         || tool.name == "browser.act"
         || tool.name == "web.fetch"
+        || tool.name == "desktop.screenshot"
+        || tool.name == "desktop.action"
 
     return ToolInfo(
         tool,
@@ -63,6 +66,23 @@ func updateToolState(toolName: String, enabled: Bool, context: ServerContext) as
     }
     guard let tool = await context.toolBus.tool(named: name) else {
         throw Abort(.notFound, reason: "Unknown tool '\(name)'")
+    }
+    // The `[desktop]` toggles are a fail-closed allow boundary: while one is
+    // off its tool stays registered but disabled, so refuse the enable before
+    // persisting a row the restore-time gates would immediately override.
+    if enabled {
+        if name == "desktop.screenshot", !context.desktopConfig.screenCaptureEnabled {
+            throw Abort(
+                .badRequest,
+                reason: "`desktop.screenshot` is gated off: turn on screen capture in Settings before enabling the tool."
+            )
+        }
+        if name == "desktop.action", !context.desktopConfig.controlEnabled {
+            throw Abort(
+                .badRequest,
+                reason: "`desktop.action` is gated off: turn on desktop control in Settings before enabling the tool."
+            )
+        }
     }
     // Persist before toggling: the durable row is the restart source of
     // truth, so the bus must never run ahead of what a fresh boot would see.

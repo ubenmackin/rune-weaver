@@ -36,7 +36,10 @@ public final class AppModel {
     public var activeChats: [ActiveChatInfo] = []
     public var nextScheduleText: String = "No jobs scheduled"
     public var lastRunSummaryText: String = "None yet"
-    /// Whether the `[desktop]` section is enabled in config.
+    /// Whether either `[desktop]` allow boundary is open (the menu-bar
+    /// Desktop Control section shows then; each tool still needs its
+    /// tool-state toggle to run). Seeded at boot and re-read from the live
+    /// context on every refresh tick, so a gate flipped at runtime surfaces.
     public var isDesktopEnabled: Bool = false
     /// Whether a desktop action batch is currently executing.
     public var isDesktopActive: Bool = false
@@ -45,7 +48,10 @@ public final class AppModel {
 
     public let notificationManager = AppNotificationManager()
     private let serverRunner = ServerRunnerActor()
-    private var serverContext: ServerContext?
+    /// Live engine context backing menu-bar refresh. Internal instead of
+    /// private so refresh-path tests can attach a fixture context without
+    /// booting the embedded service.
+    var serverContext: ServerContext?
     private var vaporApp: Application?
     private var serverTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -61,7 +67,9 @@ public final class AppModel {
     private var boundEndpoint: ServerEndpointConfig?
 
     public init() {
-        notificationManager.configure()
+        // Construction stays side-effect free: the notification center is
+        // configured when boot starts, so building the model (including in
+        // refresh-path tests) never touches UNUserNotificationCenter.
         setupNotificationCallbacks()
     }
 
@@ -83,6 +91,10 @@ public final class AppModel {
     public func start() {
         guard !hasStartedBoot else { return }
         hasStartedBoot = true
+        // Notification setup rides the boot entry (categories plus the
+        // authorization prompt) so model construction stays side-effect
+        // free; a retry after a failed boot re-runs it, which is idempotent.
+        notificationManager.configure()
         Task {
             await bootServer()
         }
@@ -102,13 +114,27 @@ public final class AppModel {
         )
         await permissionGate.startPeriodicCleanup()
         let previewBus = ToolBus(permissionGate: permissionGate)
+        let desktopNames = Set(DesktopTools.allToolNames)
         for tool in plugins {
-            await previewBus.register(tool: tool)
+            // Mirror the served boot path: desktop tools ship disabled so the
+            // startup prompt never advertises capture the model cannot call.
+            await previewBus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }
         let previewPluginsURL = URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
         let previewStore = ToolRegistryStore(dbPath: (config.memory.episodesDBPath as NSString).expandingTildeInPath)
         let previewDiscovery = PluginDiscoveryService(pluginsDirectory: previewPluginsURL, store: previewStore)
         await previewDiscovery.discoverAndSync(toolBus: previewBus)
+        // Same reconcile order as the live bus: stored toggles first, then
+        // the [desktop] allow gates, so the prompt matches what is runnable.
+        let stored = await ToolStateStore(dbPath: episodesDB).loadAll()
+        for (name, enabled) in stored {
+            if enabled {
+                await previewBus.enableTool(named: name)
+            } else {
+                await previewBus.disableTool(named: name)
+            }
+        }
+        await DesktopTools.enforceConfigGates(from: config.desktop, on: previewBus)
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: nil, toolBus: previewBus)
         return (permissionGate, effectiveSystemPrompt)
     }
@@ -348,15 +374,23 @@ public final class AppModel {
             )
 
             for tool in plugins {
-                await context.toolBus.register(tool: tool)
+                // Preserve live enabled state across re-registration: a bare
+                // register would reset every tool to enabled, and desktop
+                // tools ship disabled — without this, a fresh install would
+                // flip them live between registration and the restore below.
+                let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+                await context.toolBus.register(tool: tool, isEnabled: isEnabled)
             }
-            // Registration resets each tool to enabled, so re-apply persisted
-            // toggles after late builtin registration; the cached load makes
-            // this a memory-only pass after the boot hydration in `make`.
+            // Registration resets no state now, but re-apply persisted
+            // toggles plus the desktop allow gates anyway; the cached load
+            // makes this a memory-only pass after the boot hydration in `make`.
             await context.restoreToolStates(forceReload: false)
 
             self.serverContext = context
-            self.isDesktopEnabled = config.desktop.enabled
+            // Seed the menu section from the boot gates; `refreshState`
+            // re-reads the live context each tick so a runtime flip also
+            // surfaces (each tool still needs its tool-state toggle to run).
+            self.isDesktopEnabled = config.desktop.screenCaptureEnabled || config.desktop.controlEnabled
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
             // Boot is already live at this point, so warm search detached:
@@ -380,6 +414,12 @@ public final class AppModel {
 
     public func refreshState() async {
         guard let context = serverContext else { return }
+        // Re-read the live `[desktop]` gates every tick: a settings PUT
+        // hot-reloads the policy onto the context, so the boot snapshot
+        // alone would freeze the menu shut and hide the Desktop Control
+        // section (active indicator plus Emergency Stop) during a live
+        // `desktop.action` dispatch after a runtime gate flip.
+        self.isDesktopEnabled = context.desktopConfig.screenCaptureEnabled || context.desktopConfig.controlEnabled
         let pending = await context.approvals.list()
         let runs = await context.runs.list(limit: 1)
         let runningIDs = await context.activeTurns.runningSessionIDs()

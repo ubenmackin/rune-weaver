@@ -237,6 +237,119 @@ struct SettingsRouteTests {
     }
 
     @Test
+    func `SettingsResponse and UpdateSettingsRequest map desktop configuration`() throws {
+        var config = RuneWeaverConfig.default
+        let update = UpdateSettingsRequest(
+            desktop: DesktopSettingsUpdate(
+                screenCaptureEnabled: true,
+                controlEnabled: true,
+                maxImageDimension: 1600,
+                jpegQuality: 0.8,
+                blockedApps: ["Terminal", "Finder"]
+            )
+        )
+
+        try update.apply(to: &config)
+        #expect(config.desktop.screenCaptureEnabled == true)
+        #expect(config.desktop.controlEnabled == true)
+        #expect(config.desktop.maxImageDimension == 1600)
+        #expect(config.desktop.jpegQuality == 0.8)
+        #expect(config.desktop.blockedApps == ["Terminal", "Finder"])
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.desktop.screenCaptureEnabled == true)
+        #expect(response.desktop.controlEnabled == true)
+        #expect(response.desktop.maxImageDimension == 1600)
+        #expect(response.desktop.blockedApps == ["Terminal", "Finder"])
+    }
+
+    @Test
+    func `UpdateSettingsRequest desktop patch preserves omitted fields`() throws {
+        var config = RuneWeaverConfig.default
+        config.desktop.screenCaptureEnabled = true
+        config.desktop.controlEnabled = false
+        config.desktop.maxImageDimension = 1280
+        config.desktop.jpegQuality = 0.75
+        config.desktop.blockedApps = ["Terminal"]
+
+        // A patch carrying one key leaves the rest of the stored section
+        // untouched instead of resetting it.
+        try UpdateSettingsRequest(
+            desktop: DesktopSettingsUpdate(controlEnabled: true)
+        ).apply(to: &config)
+        #expect(config.desktop.screenCaptureEnabled == true)
+        #expect(config.desktop.controlEnabled == true)
+        #expect(config.desktop.maxImageDimension == 1280)
+        #expect(config.desktop.jpegQuality == 0.75)
+        #expect(config.desktop.blockedApps == ["Terminal"])
+
+        // A nil patch is a full no-op.
+        try UpdateSettingsRequest(engineName: "Kept Desktop").apply(to: &config)
+        #expect(config.desktop.controlEnabled == true)
+        #expect(config.desktop.maxImageDimension == 1280)
+    }
+
+    @Test
+    func `Desktop tools report settings support through buildToolInfo`() {
+        let tools = DesktopTools.makeTools(desktopConfig: DesktopConfig(
+            screenCaptureEnabled: true,
+            controlEnabled: true
+        ))
+        #expect(tools.count == 2)
+        for tool in tools {
+            let info = buildToolInfo(for: tool, isEnabled: false, recordByPluginID: [:])
+            #expect(info.hasConfig == true)
+            #expect(info.isEnabled == false)
+        }
+    }
+
+    @Test
+    func `Desktop settings reload keeps both tools registered and enforces allow gates`() async {
+        // Boot ships both tools disabled with both allow toggles off (the
+        // fail-closed stock install), so a settings reload never has to
+        // re-introduce an absent tool to keep the surface inspectable.
+        let bus = ToolBus()
+        let initial = DesktopConfig()
+        #expect(initial.screenCaptureEnabled == false)
+        #expect(initial.controlEnabled == false)
+        for tool in DesktopTools.makeTools(desktopConfig: initial) {
+            await bus.register(tool: tool, isEnabled: false)
+        }
+        #expect(await bus.tool(named: "desktop.screenshot") != nil)
+        #expect(await bus.tool(named: "desktop.action") != nil)
+
+        // A stored enable row cannot outlive a closed boundary: restore
+        // applies rows first, then the gates force the tool back off while
+        // it stays registered and visible.
+        await bus.enableTool(named: "desktop.screenshot")
+        await DesktopTools.enforceConfigGates(from: initial, on: bus)
+        #expect(await bus.tool(named: "desktop.screenshot") != nil)
+        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == false)
+
+        // Opening the capture boundary in settings re-registers with
+        // preserved state (still disabled until an explicit enable) and the
+        // gates leave an open boundary alone; control stays closed so the
+        // action tool remains forced off.
+        var updated = DesktopConfig()
+        updated.screenCaptureEnabled = true
+        updated.controlEnabled = false
+        updated.maxImageDimension = 1600
+        for tool in DesktopTools.makeTools(desktopConfig: updated) {
+            let isEnabled = await bus.isToolEnabled(named: tool.name)
+            await bus.register(tool: tool, isEnabled: isEnabled)
+        }
+        await DesktopTools.enforceConfigGates(from: updated, on: bus)
+        #expect(await bus.tool(named: "desktop.action") != nil)
+        #expect(await bus.isToolEnabled(named: "desktop.action") == false)
+        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == false)
+
+        await bus.enableTool(named: "desktop.screenshot")
+        await DesktopTools.enforceConfigGates(from: updated, on: bus)
+        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == true)
+        #expect(await bus.isToolEnabled(named: "desktop.action") == false)
+    }
+
+    @Test
     func `Updating media config re-registers media tools with new settings`() async throws {
         let bus = ToolBus()
         let initialTools = MediaTools.makeTools(mediaConfig: MediaConfig())

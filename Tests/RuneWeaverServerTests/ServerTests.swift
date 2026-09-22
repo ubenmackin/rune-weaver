@@ -4,6 +4,7 @@ import Foundation
 import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
+import RuneWeaverTools
 import Testing
 import Vapor
 
@@ -1114,6 +1115,68 @@ struct ToolStateStoreTests {
         )
         #expect(denied.isError == true)
         #expect(denied.content.contains("currently disabled") == true)
+    }
+
+    @Test
+    func `Tool-state enable is refused while the desktop settings toggle is off`() async throws {
+        let (engine, base) = try makeIsolatedEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dbPath = base.appendingPathComponent("episodes.db").path
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let approvals = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        // Boot ships both desktop tools registered but disabled under the
+        // default fail-closed [desktop] policy.
+        for tool in DesktopTools.makeTools() {
+            await bus.register(tool: tool, isEnabled: false)
+        }
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: ServerStubProvider(),
+            memoryEngine: engine
+        )
+        let toolStates = ToolStateStore(dbPath: dbPath)
+        let context = ServerContext(
+            conversations: conversations,
+            toolBus: bus,
+            orchestrator: orchestrator,
+            memoryEngine: engine,
+            permissionGate: gate,
+            approvals: approvals,
+            toolStates: toolStates
+        )
+        #expect(context.desktopConfig.screenCaptureEnabled == false)
+
+        // Closed boundary: the enable is refused before anything persists, so
+        // no stale row exists for the restore-time gates to fight later.
+        do {
+            _ = try await updateToolState(toolName: "desktop.screenshot", enabled: true, context: context)
+            Issue.record("Expected badRequest while screen capture is gated off")
+        } catch let abort as Abort {
+            #expect(abort.status == .badRequest)
+            #expect(abort.reason.contains("screen capture"))
+        }
+        #expect(await toolStates.isEnabled(toolName: "desktop.screenshot") == nil)
+        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == false)
+
+        // Opening the boundary in settings lets the same enable persist.
+        context.desktopConfig.screenCaptureEnabled = true
+        let enabled = try await updateToolState(toolName: "desktop.screenshot", enabled: true, context: context)
+        #expect(enabled.isEnabled == true)
+        #expect(await toolStates.isEnabled(toolName: "desktop.screenshot") == true)
+        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == true)
+
+        // The control boundary stays independently closed for desktop.action.
+        do {
+            _ = try await updateToolState(toolName: "desktop.action", enabled: true, context: context)
+            Issue.record("Expected badRequest while control is gated off")
+        } catch let abort as Abort {
+            #expect(abort.status == .badRequest)
+        }
+        #expect(await toolStates.isEnabled(toolName: "desktop.action") == nil)
+        #expect(await bus.isToolEnabled(named: "desktop.action") == false)
     }
 }
 

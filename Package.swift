@@ -121,6 +121,10 @@ let package = Package(
         .testTarget(
             name: "RuneWeaverServerTests",
             dependencies: ["RuneWeaverServer", "RuneWeaverCore"]
+        ),
+        .testTarget(
+            name: "RuneWeaverAppTests",
+            dependencies: ["RuneWeaverApp", "RuneWeaverCore", "RuneWeaverServer"]
         )
     ],
     swiftLanguageModes: [.v6]

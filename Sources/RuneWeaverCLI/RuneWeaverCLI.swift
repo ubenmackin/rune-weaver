@@ -235,6 +235,11 @@ enum CLIShared {
     }
 
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
+    ///
+    /// Desktop tools register disabled like every other boot path, then the
+    /// persisted tool-state rows re-apply (the same restore the service runs)
+    /// followed by the `[desktop]` allow gates, so the CLI sees exactly the
+    /// tool set the dashboard governs instead of a permissive side door.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -252,6 +257,7 @@ enum CLIShared {
         desktopConfig: DesktopConfig = DesktopConfig()
     ) async -> ToolBus {
         let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
+        let desktopNames = Set(DesktopTools.allToolNames)
         for tool in pluginTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
@@ -264,17 +270,29 @@ enum CLIShared {
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig
         ) {
-            await bus.register(tool: tool)
+            await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }
+        let rawDBPath = episodesDBPath ?? "~/.runeweaver/episodes.db"
+        let dbPath = (rawDBPath as NSString).expandingTildeInPath
         if let pluginConfig {
             let expandedDir = (pluginConfig.pluginsDir as NSString).expandingTildeInPath
             let pluginsURL = URL(fileURLWithPath: expandedDir)
-            let rawDBPath = episodesDBPath ?? "~/.runeweaver/episodes.db"
-            let dbPath = (rawDBPath as NSString).expandingTildeInPath
             let store = ToolRegistryStore(dbPath: dbPath)
             let discovery = PluginDiscoveryService(pluginsDirectory: pluginsURL, store: store)
             await discovery.discoverAndSync(toolBus: bus)
         }
+        // Stored toggles are the restart source of truth for the CLI bus the
+        // same way they are for the service; the `[desktop]` allow gates then
+        // force any toggle-off tool back off over a stored enable row.
+        let stored = await ToolStateStore(dbPath: dbPath).loadAll()
+        for (name, enabled) in stored {
+            if enabled {
+                await bus.enableTool(named: name)
+            } else {
+                await bus.disableTool(named: name)
+            }
+        }
+        await DesktopTools.enforceConfigGates(from: desktopConfig, on: bus)
         return bus
     }
 }
