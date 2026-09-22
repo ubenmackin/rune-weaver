@@ -50,6 +50,7 @@ extension RuneWeaverConfig {
         lines += renderSchedulerTOML()
         lines += renderPluginsTOML()
         lines += renderMediaTOML()
+        lines += renderDesktopTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -344,6 +345,18 @@ extension RuneWeaverConfig {
             try FileManager.default.copyItem(at: url, to: backupURL)
         }
         try tomlText.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private func renderDesktopTOML() -> [String] {
+        var lines = ["[desktop]"]
+        lines.append("enabled = \(desktop.enabled)")
+        lines.append("screen_capture_enabled = \(desktop.screenCaptureEnabled)")
+        lines.append("control_enabled = \(desktop.controlEnabled)")
+        lines.append("max_image_dimension = \(desktop.maxImageDimension)")
+        lines.append("jpeg_quality = \(desktop.jpegQuality)")
+        lines.append("blocked_apps = [\(desktop.blockedApps.map { Self.tomlQuoted($0) }.joined(separator: ", "))]")
+        lines.append("")
+        return lines
     }
 }
 

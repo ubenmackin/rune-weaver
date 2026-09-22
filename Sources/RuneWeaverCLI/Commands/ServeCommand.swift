@@ -250,7 +250,8 @@ struct ServeCommand: AsyncParsableCommand {
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            mediaConfig: resolvedMediaConfig
+            mediaConfig: resolvedMediaConfig,
+            desktopConfig: loaded.config.desktop
         )
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
@@ -278,6 +279,7 @@ struct ServeCommand: AsyncParsableCommand {
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
             mediaConfig: resolvedMediaConfig,
+            desktopConfig: loaded.config.desktop,
             auth: auth
         )
         for tool in plugins {

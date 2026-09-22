@@ -205,7 +205,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             pluginConfig: loaded.config.plugins,
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm
+            llmConfig: loaded.config.llm,
+            desktopConfig: loaded.config.desktop
         )
         let orchestrator = Orchestrator(
             conversations: conversations,

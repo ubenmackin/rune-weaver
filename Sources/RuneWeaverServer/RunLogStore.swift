@@ -235,8 +235,13 @@ public actor RunLogStore {
         if let dbPath {
             #if canImport(SQLite3)
                 let pruneCap = capacity
+                // Durable run history keeps hash-only screenshots: the
+                // in-memory entry retains full pixels for the live turn while
+                // the written row strips data URLs so episodes.db never holds
+                // recoverable screen pixels.
+                let persisted = Self.redactedForPersistence(stored)
                 await SQLiteSerialIO.runUncancellable {
-                    SQLiteRunLogStore.write(entry: stored, dbPath: dbPath, pruneCapacity: pruneCap)
+                    SQLiteRunLogStore.write(entry: persisted, dbPath: dbPath, pruneCapacity: pruneCap)
                 }
             #endif
         }
@@ -273,8 +278,9 @@ public actor RunLogStore {
         if let dbPath {
             #if canImport(SQLite3)
                 let pruneCap = capacity
+                let persisted = Self.redactedForPersistence(updated)
                 await SQLiteSerialIO.runUncancellable {
-                    SQLiteRunLogStore.write(entry: updated, dbPath: dbPath, pruneCapacity: pruneCap)
+                    SQLiteRunLogStore.write(entry: persisted, dbPath: dbPath, pruneCapacity: pruneCap)
                 }
             #endif
         }
@@ -295,6 +301,43 @@ public actor RunLogStore {
     public static func truncatedResponse(_ response: String) -> String {
         guard response.count > maxResponseLength else { return response }
         return String(response.prefix(maxResponseLength)) + "…"
+    }
+
+    /// Copy safe for durable history with transient screenshot pixels removed.
+    /// Keeps the content hash plus dimensions and scales so the audit trail
+    /// can correlate the capture without retaining recoverable pixels.
+    static func redactedForPersistence(_ entry: RunLogEntry) -> RunLogEntry {
+        let redactedActions = entry.toolActions.map { action -> ToolAction in
+            guard let result = action.result else { return action }
+            let redacted = VisionGate.strippedContent(result.content)
+            guard redacted != result.content else { return action }
+            let stripped = ToolResult(
+                toolCallID: result.toolCallID,
+                content: redacted,
+                isError: result.isError,
+                errorKind: result.errorKind
+            )
+            return ToolAction(
+                toolName: action.toolName,
+                callID: action.callID,
+                argumentsJSON: action.argumentsJSON,
+                result: stripped,
+                roundIndex: action.roundIndex
+            )
+        }
+        return RunLogEntry(
+            id: entry.id,
+            jobID: entry.jobID,
+            sessionID: entry.sessionID,
+            kind: entry.kind,
+            status: entry.status,
+            message: entry.message,
+            timestamp: entry.timestamp,
+            response: entry.response,
+            toolActions: redactedActions,
+            totalTokens: entry.totalTokens,
+            durationMs: entry.durationMs
+        )
     }
 
     /// Lists entries, newest first.

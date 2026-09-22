@@ -417,6 +417,7 @@ extension RuneWeaverConfig {
         try Self.decodePlugins(root, into: &config)
         try Self.decodeBrowser(root, into: &config)
         try Self.decodeMedia(root, into: &config)
+        try Self.decodeDesktop(root, into: &config)
         self = config
     }
 
@@ -807,6 +808,39 @@ extension TOMLNode {
     func singleAsArray(_ name: String) -> [TOMLNode] {
         guard let node = tables[name] else { return [] }
         return [node]
+    }
+}
+
+// MARK: - Desktop TOML decoding
+
+extension RuneWeaverConfig {
+    static func decodeDesktop(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let desktop = root.tables["desktop"] else { return }
+        if let enabled = try desktop.strictBool("enabled", field: "desktop.enabled") {
+            config.desktop.enabled = enabled
+        }
+        if let capture = try desktop.strictBool("screen_capture_enabled", field: "desktop.screen_capture_enabled") {
+            config.desktop.screenCaptureEnabled = capture
+        }
+        if let control = try desktop.strictBool("control_enabled", field: "desktop.control_enabled") {
+            config.desktop.controlEnabled = control
+        }
+        if let dim = try desktop.strictInt("max_image_dimension", field: "desktop.max_image_dimension") {
+            config.desktop.maxImageDimension = dim
+        }
+        if let quality = desktop.values["jpeg_quality"] {
+            switch quality {
+            case let .double(value):
+                config.desktop.jpegQuality = value
+            case let .integer(value):
+                config.desktop.jpegQuality = Double(value)
+            default:
+                throw ConfigError.validationError(field: "desktop.jpeg_quality", message: "must be a number")
+            }
+        }
+        if let blocked = try desktop.strictStringArray("blocked_apps", field: "desktop.blocked_apps") {
+            config.desktop.blockedApps = blocked
+        }
     }
 }
 

@@ -17,9 +17,9 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, files, memory, web, browser, api, media).
+    /// (email, files, memory, web, browser, api, media, desktop).
     public static var allToolNames: [String] {
-        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + toolNames + MediaTools.toolNames
+        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + toolNames + MediaTools.toolNames + DesktopTools.allToolNames
     }
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -61,7 +61,7 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API, Media)
+    /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API, Media, Desktop)
     /// from component configurations.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
@@ -69,6 +69,7 @@ public enum BuiltinToolPlugins {
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
+        desktopConfig: DesktopConfig = DesktopConfig(),
         llmServerURLs: [String] = [],
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -78,7 +79,9 @@ public enum BuiltinToolPlugins {
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        mediaSecrets: SecretsManager? = nil
+        mediaSecrets: SecretsManager? = nil,
+        desktopCaptureBridge: (any DesktopCapturing)? = nil,
+        desktopControlBridge: (any DesktopControlling)? = nil
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -107,6 +110,11 @@ public enum BuiltinToolPlugins {
         if let mediaConfig {
             tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport, secrets: mediaSecrets)
         }
+        tools += DesktopTools.makeTools(
+            desktopConfig: desktopConfig,
+            captureBridge: desktopCaptureBridge,
+            controlBridge: desktopControlBridge
+        )
         return tools
     }
 
@@ -130,6 +138,7 @@ public enum BuiltinToolPlugins {
             sandboxConfig: config.sandbox,
             browserConfig: config.browser,
             mediaConfig: config.media,
+            desktopConfig: config.desktop,
             llmServerURLs: appLLMOrigins,
             memoryEngine: memoryEngine,
             embedder: embedder,
@@ -153,6 +162,7 @@ public enum BuiltinToolPlugins {
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
+        desktopConfig: DesktopConfig = DesktopConfig(),
         llmServerURLs: [String] = [],
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -170,6 +180,7 @@ public enum BuiltinToolPlugins {
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,
+            desktopConfig: desktopConfig,
             llmServerURLs: llmServerURLs,
             memoryEngine: memoryEngine,
             embedder: embedder,

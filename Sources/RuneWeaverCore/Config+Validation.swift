@@ -26,6 +26,7 @@ extension RuneWeaverConfig {
         try validateSchedulerSection()
         try validatePluginsSection()
         try validateMediaSection()
+        try validateDesktopSection()
     }
 
     private func validateEngineSection() throws {
@@ -545,6 +546,21 @@ extension RuneWeaverConfig {
         else {
             throw ConfigError.validationError(
                 field: field, message: "must be an absolute http(s) URL (e.g. http://127.0.0.1:8888)"
+            )
+        }
+    }
+
+    private func validateDesktopSection() throws {
+        if desktop.maxImageDimension < 256 || desktop.maxImageDimension > DesktopConfig.maxAllowedImageDimension {
+            throw ConfigError.validationError(
+                field: "desktop.max_image_dimension",
+                message: "must be between 256 and \(DesktopConfig.maxAllowedImageDimension) (got \(desktop.maxImageDimension))"
+            )
+        }
+        if desktop.jpegQuality < 0.1 || desktop.jpegQuality > 1.0 {
+            throw ConfigError.validationError(
+                field: "desktop.jpeg_quality",
+                message: "must be between 0.1 and 1.0 (got \(desktop.jpegQuality))"
             )
         }
     }
