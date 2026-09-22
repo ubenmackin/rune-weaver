@@ -167,6 +167,30 @@ search_timeout_seconds = 10
 # Maximum results per web.search call (1-50, bounding context fan-out).
 max_results = 10
 
+[desktop]
+# Native macOS desktop vision and gated control. Both tools always register
+# (visible in the tool list) but ship disabled, and each toggle below is a
+# fail-closed allow boundary: while false, the engine force-disables that
+# tool regardless of the dashboard's tool-state toggles. Both default off,
+# so a fresh install never captures the screen without an explicit opt-in.
+# Enabling a tool-state toggle while its boundary here is off is refused.
+# Captures stay in memory (hash plus dimensions only); every desktop.action
+# batch parks in the approvals inbox. A legacy `enabled` master key is no
+# longer written but still reads (ANDed into both toggles) so old configs
+# stay fail-closed across an upgrade.
+# Allow boundary for desktop.screenshot (readOnly capture).
+screen_capture_enabled = false
+# Allow boundary for desktop.action (approval-gated control).
+control_enabled = false
+# Longest edge of the downscaled screenshot in pixels (256-3840). Bounds
+# vision-model token cost.
+max_image_dimension = 1280
+# JPEG quality for the downscaled screenshot (0.1-1.0).
+jpeg_quality = 0.75
+# Application names desktop.action refuses to dispatch input to, protecting
+# sensitive apps from automated clicks and keystrokes.
+blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "System Preferences", "1Password", "Bitwarden"]
+
 [email]
 [[email.accounts]]
 name = "icloud"

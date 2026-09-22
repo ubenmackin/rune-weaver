@@ -1,5 +1,6 @@
 // Rune Weaver Dashboard — Memory browser for searching episodic/semantic recall and managing facts.
-// Hosts the Memory section's Search and Memory view plus the Indexing panel under one tabbed header.
+// Hosts the Memory section's Search and Memory view plus the Index Status dashboard (run controls,
+// stat cards, and frontend-only charts) under one tabbed header; policy editing stays in Settings.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -12,14 +13,19 @@ import {
   type MemoryResult,
   type UserFact,
 } from "../api";
+import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import type {
+  WSGenericFrame,
+  WSIncomingFrame,
+} from "../hooks/useSharedWebSocket";
 import IndexingPanel from "./IndexingPanel";
 import MarkdownText from "./MarkdownText";
 import Modal from "./Modal";
-import { CloseIcon, PlusIcon, RefreshIcon, SearchIcon, TrashIcon } from "./icons";
+import { CloseIcon, PlusIcon, SearchIcon, TrashIcon } from "./icons";
 
-// Memory section sub-views: recall/facts browsing and local index management.
-// Keeping both under one top-level Memory tab shows the whole memory surface
-// without adding another primary nav entry.
+// Memory section sub-views: recall/facts browsing and the local index status
+// dashboard. Keeping both under one top-level Memory tab shows the whole memory
+// surface without adding another primary nav entry.
 type MemoryTab = "memory" | "indexing";
 
 function hashContent(content: string): string {
@@ -79,6 +85,20 @@ export default function MemoryBrowser() {
       setError(failure instanceof ApiError ? failure.message : "Facts failed");
     }
   }, []);
+
+  // Live refresh without a manual control: any terminal run broadcast
+  // (scheduler, chat, or index pass) reloads stored facts so the list stays
+  // fresh while the view is open. Progress frames stay with the indexing pane.
+  const handleRunBroadcast = useCallback(
+    (frame: WSIncomingFrame) => {
+      const frameType = (frame as WSGenericFrame).type;
+      if (frameType !== "run_completed") return;
+      void loadFacts();
+    },
+    [loadFacts],
+  );
+
+  useSharedWebSocket(handleRunBroadcast);
 
   useEffect(() => {
     let cancelled = false;
@@ -169,35 +189,20 @@ export default function MemoryBrowser() {
         <div>
           <h2>Memory</h2>
           <p className="muted text-sm">
-            Search episodic recall, semantic embeddings, manage stored user facts,
-            and index local files, mail, and Messages.
+            Recall past conversations, manage stored facts, and monitor the
+            local document index.
           </p>
         </div>
-
-        {activeTab === "memory" ? (
-          <div className="row">
-            <button
-              type="button"
-              className="ghost icon-text-btn"
-              onClick={() => {
-                void loadFacts();
-                if (query.trim()) void search();
-              }}
-              disabled={busy}
-            >
-              <RefreshIcon size={14} className={busy ? "spin" : ""} />
-              <span>{busy ? "Refreshing…" : "Refresh"}</span>
-            </button>
-          </div>
-        ) : null}
       </div>
 
       <div className="memory-tabs" role="tablist" aria-label="Memory views">
         <button
           type="button"
           role="tab"
+          id="memory-tab-search"
           aria-selected={activeTab === "memory"}
-          className={`memory-tab-btn ${activeTab === "memory" ? "active" : ""}`}
+          aria-controls="memory-panel-search"
+          className={`memory-tab ${activeTab === "memory" ? "active" : ""}`}
           onClick={() => setActiveTab("memory")}
         >
           Search and Memory
@@ -205,44 +210,69 @@ export default function MemoryBrowser() {
         <button
           type="button"
           role="tab"
+          id="memory-tab-index"
           aria-selected={activeTab === "indexing"}
-          className={`memory-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
+          aria-controls="memory-panel-index"
+          className={`memory-tab ${activeTab === "indexing" ? "active" : ""}`}
           onClick={() => setActiveTab("indexing")}
         >
-          Indexing
+          Index Status
         </button>
       </div>
 
       {activeTab === "indexing" ? (
-        <IndexingPanel />
-      ) : (
-        <>
-      {error ? <p className="error">{error}</p> : null}
-
-      <div className="memory-search-section">
-        <h3>Search</h3>
-        <div className="row">
-          <input
-            type="text"
-            aria-label="Memory search"
-            placeholder="Search memories…"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void search();
-            }}
-          />
-          <button
-            type="button"
-            className="primary icon-text-btn"
-            disabled={busy || query.trim().length === 0}
-            onClick={() => void search()}
-          >
-            <SearchIcon size={14} />
-            <span>Search</span>
-          </button>
+        <div
+          role="tabpanel"
+          id="memory-panel-index"
+          aria-labelledby="memory-tab-index"
+        >
+          <div className="memory-view-header">
+            <h3>Index Status</h3>
+            <p className="muted text-sm">
+              Monitor the local file, mail, and Messages index.
+            </p>
+          </div>
+          <IndexingPanel hideHeader />
         </div>
-      </div>
+      ) : (
+        <div
+          role="tabpanel"
+          id="memory-panel-search"
+          aria-labelledby="memory-tab-search"
+        >
+          <div className="memory-view-header">
+            <h3>Search and Memory</h3>
+            <p className="muted text-sm">
+              Search episodic recall and semantic memory, manage stored user
+              facts.
+            </p>
+          </div>
+          {error ? <p className="error">{error}</p> : null}
+
+          <div className="memory-search-section">
+            <h3>Search</h3>
+            <div className="row">
+              <input
+                type="text"
+                aria-label="Memory search"
+                placeholder="Search memories…"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void search();
+                }}
+              />
+              <button
+                type="button"
+                className="primary icon-text-btn"
+                disabled={busy || query.trim().length === 0}
+                onClick={() => void search()}
+              >
+                <SearchIcon size={14} />
+                <span>Search</span>
+              </button>
+            </div>
+          </div>
 
       {results.length > 0 ? (
         <div className="memory-results-container">
@@ -347,8 +377,8 @@ export default function MemoryBrowser() {
             </div>
           </div>
         ) : null}
-      </div>
-        </>
+          </div>
+        </div>
       )}
       </section>
 

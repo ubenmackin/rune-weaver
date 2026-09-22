@@ -349,7 +349,6 @@ extension RuneWeaverConfig {
 
     private func renderDesktopTOML() -> [String] {
         var lines = ["[desktop]"]
-        lines.append("enabled = \(desktop.enabled)")
         lines.append("screen_capture_enabled = \(desktop.screenCaptureEnabled)")
         lines.append("control_enabled = \(desktop.controlEnabled)")
         lines.append("max_image_dimension = \(desktop.maxImageDimension)")

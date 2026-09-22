@@ -191,7 +191,7 @@ Apple Messages indexing reads `~/Library/Messages/chat.db`, which macOS protects
 
 ### Managing the index
 
-The Indexing pane in the dashboard starts a run, cancels a run in flight, prunes entries older than a cutoff, and resets the index. Prune deletes older indexed documents and their chunks; reset clears the whole index. Turning `enabled` back off, or deleting `~/.runeweaver/index.db`, leaves recall with episodic and semantic memory only.
+The Memory → Index Status pane in the dashboard starts a run, cancels a run in flight, prunes entries older than a cutoff, and resets the index. Prune deletes older indexed documents and their chunks; reset clears the whole index. Turning `enabled` back off, or deleting `~/.runeweaver/index.db`, leaves recall with episodic and semantic memory only.
 
 ## Releasing
 

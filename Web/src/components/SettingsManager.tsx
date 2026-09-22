@@ -20,9 +20,12 @@ import {
   DEFAULT_SEARCH_TIMEOUT_SECONDS,
   ensureSearch,
   getSearchHealth,
+  hasActiveRuns,
+  listRuns,
   removeSearch,
   resolveSearchDiagnostics,
   resolveSearchMessage,
+  RUN_LOG_POLL_LIMIT,
   searchStageCopy,
   getSettings,
   updateSettings,
@@ -37,6 +40,14 @@ import {
   uninstallPlugin,
   getTools,
   updateToolState,
+  DEFAULT_DESKTOP_BLOCKED_APPS_TEXT,
+  DEFAULT_DESKTOP_CONTROL_ENABLED,
+  DEFAULT_DESKTOP_JPEG_QUALITY,
+  DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
+  DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED,
+  formatBlockedAppsText,
+  parseBlockedAppsText,
+  type DesktopConfigData,
   type EmailAccountData,
   type MediaConfigData,
   type ProviderConfigData,
@@ -64,7 +75,9 @@ import {
 } from "./icons";
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
-import IndexingPanel from "./IndexingPanel";
+import { IndexPolicyPanel } from "./IndexingPanel";
+import Toast from "./Toast";
+import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
 // Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
@@ -98,6 +111,25 @@ function getEmailPasswordEnv(name: string): string {
   // Unicode letters/numbers and maps everything else to `_`.
   const safeName = name.toUpperCase().replace(/[^\p{L}\p{N}]/gu, "_");
   return `EMAIL_${safeName}_PASSWORD`;
+}
+
+// Shared desktop capture bounds check for the full-save and Configure
+// modal-save paths so both reject a bad dimension or quality before any
+// network write with one message. Mirrors Config+Validation bounds
+// (256-3840, 0.1-1.0).
+function validateDesktopCaptureBounds(
+  maxImageDimension: number | string,
+  jpegQuality: number | string
+): string | null {
+  const dimNum = Number(maxImageDimension);
+  if (!Number.isInteger(dimNum) || dimNum < 256 || dimNum > 3840) {
+    return "Invalid desktop image dimension: max image dimension must be between 256 and 3840.";
+  }
+  const qualityNum = Number(jpegQuality);
+  if (!Number.isFinite(qualityNum) || qualityNum < 0.1 || qualityNum > 1.0) {
+    return "Invalid desktop JPEG quality: jpeg quality must be between 0.1 and 1.0.";
+  }
+  return null;
 }
 
 // Managed browser Python (Playwright) staged progress, mirroring the search
@@ -207,6 +239,35 @@ export default function SettingsManager() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  // Active-run guard: staged when a save is requested while in-flight work
+  // exists. Cancel aborts the PUT; Continue saves and hot-reloads.
+  const [showActiveGuard, setShowActiveGuard] = useState(false);
+  // Shared run-log snapshot feeding the guard fallback when the fresh probe
+  // fails; parked approvals never count because only running lights the guard.
+  const { runs: sharedRuns } = useRunningRuns();
+
+  // Clears the transient success toast without touching persistent error
+  // banners. Stable so the toast auto-dismiss timer never restarts on
+  // unrelated renders.
+  const clearSuccessToast = useCallback(() => {
+    setSuccess(null);
+  }, []);
+
+  // Selects a settings tab while clearing any transient success toast so it
+  // never follows navigation. Errors stay persistent banners.
+  const selectSettingsTab = useCallback(
+    (tab: SettingsTab) => {
+      setSuccess(null);
+      setActiveTab(tab);
+    },
+    []
+  );
+
+  // Clears the toast whenever the tab changes through any path so a save
+  // notice never lingers across navigation.
+  useEffect(() => {
+    setSuccess(null);
+  }, [activeTab]);
 
   // Form state
   const [engineName, setEngineName] = useState("");
@@ -387,6 +448,34 @@ export default function SettingsManager() {
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
   const browserSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Native desktop vision and gated control ([desktop]): per-tool allow
+  // boundaries plus capture knobs. Both tools always register (visible but
+  // disabled in the tool toggles) and each toggle force-disables its tool
+  // while off; both default off so a stock install stays fail-closed. The
+  // blocked-apps editor holds raw textarea text (one app per line) so blank
+  // lines survive editing and only collapse on save.
+  const [desktopScreenCaptureEnabled, setDesktopScreenCaptureEnabled] = useState(
+    DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED
+  );
+  const [desktopControlEnabled, setDesktopControlEnabled] = useState(
+    DEFAULT_DESKTOP_CONTROL_ENABLED
+  );
+  const [desktopMaxImageDimension, setDesktopMaxImageDimension] = useState<
+    number | string
+  >(DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION);
+  const [desktopJpegQuality, setDesktopJpegQuality] = useState<number | string>(
+    DEFAULT_DESKTOP_JPEG_QUALITY
+  );
+  const [desktopBlockedAppsText, setDesktopBlockedAppsText] = useState<string>(
+    DEFAULT_DESKTOP_BLOCKED_APPS_TEXT
+  );
+  const [desktopSaveSuccess, setDesktopSaveSuccess] = useState(false);
+  const [desktopSaveLoading, setDesktopSaveLoading] = useState(false);
+  const [desktopModalError, setDesktopModalError] = useState<string | null>(null);
+  // Short-lived success-then-close timer for the desktop modal: held in a ref
+  // (not bare setTimeout) so unmount or a second save clears the pending tick
+  // instead of firing setState on an unmounted pane or closing a fresh edit.
+  const desktopSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Access-management flow: rotating the single owner token signs out every
   // other device the moment the engine swaps it, so the dashboard asks twice
   // before calling the route, then reveals the new token once. The API client
@@ -1006,6 +1095,53 @@ export default function SettingsManager() {
     ]
   );
 
+  // Copies one settings fetch into the desktop fields, tolerating an absent
+  // [desktop] section from older engines by keeping the form defaults.
+  // Only overwrites sections the engine returns so older engines without
+  // desktop leave the form defaults untouched.
+  const populateDesktopSettings = useCallback(
+    (desktop: DesktopConfigData | undefined | null) => {
+      if (!desktop) return;
+      if (typeof desktop.screen_capture_enabled === "boolean") {
+        setDesktopScreenCaptureEnabled(desktop.screen_capture_enabled);
+      }
+      if (typeof desktop.control_enabled === "boolean") {
+        setDesktopControlEnabled(desktop.control_enabled);
+      }
+      if (typeof desktop.max_image_dimension === "number") {
+        setDesktopMaxImageDimension(desktop.max_image_dimension);
+      }
+      if (typeof desktop.jpeg_quality === "number") {
+        setDesktopJpegQuality(desktop.jpeg_quality);
+      }
+      if (Array.isArray(desktop.blocked_apps)) {
+        setDesktopBlockedAppsText(formatBlockedAppsText(desktop.blocked_apps));
+      }
+    },
+    []
+  );
+
+  // Builds the [desktop] delta from the form fields so the full-settings save
+  // and the modal-only save share one shape. Numeric fields preserve the raw
+  // input (including empty/invalid) so the modal validation surfaces range
+  // errors instead of silently coercing back to defaults.
+  const buildDesktopPayload = useCallback(
+    (): DesktopConfigData => ({
+      screen_capture_enabled: desktopScreenCaptureEnabled,
+      control_enabled: desktopControlEnabled,
+      max_image_dimension: Number(desktopMaxImageDimension),
+      jpeg_quality: Number(desktopJpegQuality),
+      blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
+    }),
+    [
+      desktopScreenCaptureEnabled,
+      desktopControlEnabled,
+      desktopMaxImageDimension,
+      desktopJpegQuality,
+      desktopBlockedAppsText,
+    ]
+  );
+
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
     setEngineName(data.engineName);
@@ -1099,7 +1235,10 @@ export default function SettingsManager() {
     // Media fields share one helper so load and save stay symmetric; an
     // absent [media] keeps the form defaults instead of blanking the modal.
     populateMediaSettings(data.media);
-  }, [populateMediaSettings]);
+    // Desktop fields share one helper so load and save stay symmetric; an
+    // absent [desktop] keeps the form defaults instead of blanking the modal.
+    populateDesktopSettings(data.desktop);
+  }, [populateMediaSettings, populateDesktopSettings]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1130,12 +1269,13 @@ export default function SettingsManager() {
     }
   }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
 
-  // Unmount must never leave the browser provision poll or media tick
+  // Unmount must never leave the browser provision poll or media/desktop tick
   // running behind a closed pane.
   useEffect(() => {
     const pollRef = browserTimerRef;
     const mediaRef = mediaSaveTimerRef;
     const browserSaveRef = browserSaveTimerRef;
+    const desktopSaveRef = desktopSaveTimerRef;
     return () => {
       if (pollRef.current !== null) {
         clearInterval(pollRef.current);
@@ -1148,6 +1288,10 @@ export default function SettingsManager() {
       if (browserSaveRef.current !== null) {
         clearTimeout(browserSaveRef.current);
         browserSaveRef.current = null;
+      }
+      if (desktopSaveRef.current !== null) {
+        clearTimeout(desktopSaveRef.current);
+        desktopSaveRef.current = null;
       }
     };
   }, []);
@@ -1162,8 +1306,11 @@ export default function SettingsManager() {
     }
   }, [browserError]);
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Validates the form and persists it through PUT /settings, then hot-reloads
+  // safe sections live. Providers, engine identity, and DB paths still need a
+  // restart to take effect, but the notice stays a plain saved confirmation
+  // without blanket restart claims.
+  const executeSave = async () => {
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -1411,6 +1558,18 @@ export default function SettingsManager() {
       setSaving(false);
       return;
     }
+    // Desktop capture knobs fail closed before any network write so a bad
+    // dimension or quality never persists to config.toml, via the shared
+    // bounds helper (Mirrors Config+Validation bounds: 256-3840, 0.1-1.0).
+    const desktopBoundsError = validateDesktopCaptureBounds(
+      desktopMaxImageDimension,
+      desktopJpegQuality
+    );
+    if (desktopBoundsError) {
+      setError(desktopBoundsError);
+      setSaving(false);
+      return;
+    }
     const emailAccounts: EmailAccountData[] = emailAccountsList.map((entry) => {
       const rawHost = entry.account.smtp_host ?? entry.account.smtpHost ?? "";
       const trimmedSmtpHost = String(rawHost).trim();
@@ -1495,18 +1654,67 @@ export default function SettingsManager() {
         pluginsMarketplaceIndexURL,
         pluginsAutoRescan,
         media: buildMediaPayload(),
+        desktop: buildDesktopPayload(),
       });
       populateForm(updated);
-      // Settings persist to the config file only; live providers, system
-      // prompt, and memory pick them up after a restart.
-      setSuccess(
-        `Settings saved successfully to ${updated.configPath}. Restart engine/app to apply.`
-      );
+      // Saved confirmation stays exact so operators recognize it; safe
+      // sections hot-reload live while providers, engine identity, and DB
+      // paths take effect on restart without blanket restart claims here.
+      setSuccess("Settings saved.");
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to save settings");
     } finally {
       setSaving(false);
     }
+  };
+
+  // Checks for actively-running work before any PUT so a save never silently
+  // cancels an in-flight turn. Only running counts; parked or awaiting_approval
+  // rows wait on the inbox and never trigger the guard. A fresh run-log read
+  // keeps the check honest when the shared poller has not ticked yet; the
+  // shared snapshot backs the probe only when it fails, so a stale poll never
+  // overrides a fresh idle read.
+  const hasRunningWork = async (): Promise<boolean> => {
+    try {
+      const live = await listRuns(RUN_LOG_POLL_LIMIT);
+      const raw = (live as unknown as { runs?: unknown })?.runs;
+      const rows = Array.isArray(raw)
+        ? (raw as Array<{ status?: unknown }>)
+        : [];
+      return hasActiveRuns(rows);
+    } catch {
+      if (Array.isArray(sharedRuns)) {
+        return hasActiveRuns(sharedRuns);
+      }
+      return false;
+    }
+  };
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (saving) return;
+    let active = false;
+    try {
+      active = await hasRunningWork();
+    } catch {
+      active = false;
+    }
+    if (active) {
+      setShowActiveGuard(true);
+      return;
+    }
+    await executeSave();
+  };
+
+  // Continue path saves and hot-reloads after the operator accepts that
+  // in-progress chats will be cancelled.
+  const handleConfirmGuardSave = async () => {
+    setShowActiveGuard(false);
+    await executeSave();
+  };
+
+  const handleCancelGuard = () => {
+    setShowActiveGuard(false);
   };
 
   const handleSaveMediaConfig = async () => {
@@ -1559,6 +1767,46 @@ export default function SettingsManager() {
       setBrowserModalError(err instanceof ApiError ? err.message : "Failed to save browser settings");
     } finally {
       setBrowserSaveLoading(false);
+    }
+  };
+
+  // Saves only the [desktop] delta through PUT /settings, mirroring the
+  // media-only save shape so unsaved edits in other tabs survive. Numeric
+  // fields fail closed here through the same shared bounds helper as the
+  // full save instead of coercing to defaults, and the engine live-reloads
+  // capture knobs without a restart.
+  const handleSaveDesktopConfig = async () => {
+    const desktopBoundsError = validateDesktopCaptureBounds(
+      desktopMaxImageDimension,
+      desktopJpegQuality
+    );
+    if (desktopBoundsError) {
+      setDesktopModalError(desktopBoundsError);
+      return;
+    }
+    setDesktopSaveLoading(true);
+    setDesktopModalError(null);
+    try {
+      const updated = await updateSettings({
+        desktop: buildDesktopPayload(),
+      });
+      populateForm(updated);
+      setDesktopSaveSuccess(true);
+      // Re-arm the success-then-close tick through the ref so a repeat save
+      // replaces the pending tick and unmount clears it instead of leaking.
+      if (desktopSaveTimerRef.current !== null) {
+        clearTimeout(desktopSaveTimerRef.current);
+        desktopSaveTimerRef.current = null;
+      }
+      desktopSaveTimerRef.current = setTimeout(() => {
+        desktopSaveTimerRef.current = null;
+        setDesktopSaveSuccess(false);
+        setConfiguringToolName(null);
+      }, 1000);
+    } catch (err) {
+      setDesktopModalError(err instanceof ApiError ? err.message : "Failed to save desktop settings");
+    } finally {
+      setDesktopSaveLoading(false);
     }
   };
 
@@ -1863,7 +2111,7 @@ export default function SettingsManager() {
       )}
 
       {error && <div className="error-banner">{error}</div>}
-      {success && <div className="success-banner">{success}</div>}
+      {success ? <Toast message={success} onDismiss={clearSuccessToast} /> : null}
 
       {/* Vertical sidenav: stacked categories beside the content pane so every
           section stays visible without horizontal scrolling. */}
@@ -1874,11 +2122,10 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "providers"}
             className={`settings-tab-btn ${activeTab === "providers" ? "active" : ""}`}
-            onClick={() => setActiveTab("providers")}
+            onClick={() => selectSettingsTab("providers")}
           >
             <ChatIcon size={16} />
             <span>LLM Providers</span>
-            <span className="settings-tab-badge">{providersList.length}</span>
           </button>
 
           <button
@@ -1886,7 +2133,7 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "engine"}
             className={`settings-tab-btn ${activeTab === "engine" ? "active" : ""}`}
-            onClick={() => setActiveTab("engine")}
+            onClick={() => selectSettingsTab("engine")}
           >
             <SettingsIcon size={16} />
             <span>Engine and Logs</span>
@@ -1897,13 +2144,13 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "tools"}
             className={`settings-tab-btn ${activeTab === "tools" ? "active" : ""}`}
-            onClick={() => setActiveTab("tools")}
+            onClick={() => selectSettingsTab("tools")}
           >
             <WrenchIcon size={16} />
             <span>Tools and Runes</span>
             {/* Pending and tampered counts stay on the nav item so review and
                 quarantine signals remain visible without opening the pane. */}
-            {pendingCount > 0 ? (
+            {pendingCount > 0 && (
               <span
                 className="settings-tab-badge"
                 style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
@@ -1911,8 +2158,6 @@ export default function SettingsManager() {
               >
                 {pendingCount}
               </span>
-            ) : (
-              <span className="settings-tab-badge">{pluginsList.length}</span>
             )}
             {tamperedCount > 0 && (
               <span
@@ -1930,13 +2175,10 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "security"}
             className={`settings-tab-btn ${activeTab === "security" ? "active" : ""}`}
-            onClick={() => setActiveTab("security")}
+            onClick={() => selectSettingsTab("security")}
           >
             <ApprovalsIcon size={16} />
             <span>Security</span>
-            {denyPatternCount > 0 && (
-              <span className="settings-tab-badge">{denyPatternCount}</span>
-            )}
           </button>
 
           <button
@@ -1944,7 +2186,7 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "memory"}
             className={`settings-tab-btn ${activeTab === "memory" ? "active" : ""}`}
-            onClick={() => setActiveTab("memory")}
+            onClick={() => selectSettingsTab("memory")}
           >
             <MemoryIcon size={16} />
             <span>Memory and Storage</span>
@@ -1955,7 +2197,7 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "voice"}
             className={`settings-tab-btn ${activeTab === "voice" ? "active" : ""}`}
-            onClick={() => setActiveTab("voice")}
+            onClick={() => selectSettingsTab("voice")}
           >
             <MicIcon size={16} />
             <span>Voice</span>
@@ -1966,7 +2208,7 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "search"}
             className={`settings-tab-btn ${activeTab === "search" ? "active" : ""}`}
-            onClick={() => setActiveTab("search")}
+            onClick={() => selectSettingsTab("search")}
           >
             <SearchIcon size={16} />
             <span>Web</span>
@@ -1977,13 +2219,10 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "email"}
             className={`settings-tab-btn ${activeTab === "email" ? "active" : ""}`}
-            onClick={() => setActiveTab("email")}
+            onClick={() => selectSettingsTab("email")}
           >
             <MailIcon size={16} />
             <span>Email Accounts</span>
-            {emailAccountsList.length > 0 && (
-              <span className="settings-tab-badge">{emailAccountsList.length}</span>
-            )}
           </button>
 
           <button
@@ -1991,7 +2230,7 @@ export default function SettingsManager() {
             role="tab"
             aria-selected={activeTab === "indexing"}
             className={`settings-tab-btn ${activeTab === "indexing" ? "active" : ""}`}
-            onClick={() => setActiveTab("indexing")}
+            onClick={() => selectSettingsTab("indexing")}
           >
             <MemoryIcon size={16} />
             <span>Indexing</span>
@@ -1999,10 +2238,12 @@ export default function SettingsManager() {
         </nav>
 
         <div className="settings-content">
-          {/* The indexing pane owns its own save path (it patches only the
-              [index] section), so it renders outside the shared settings form
-              and its own controls never submit the unrelated config values. */}
-          {activeTab === "indexing" ? <IndexingPanel /> : null}
+          {/* The indexing pane hosts the index policy form, which owns its own
+              save path (it patches only the [index] section), so it renders
+              outside the shared settings form and its own controls never
+              submit the unrelated config values. Status cards, charts, and run
+              controls live on the Memory → Index Status tab instead. */}
+          {activeTab === "indexing" ? <IndexPolicyPanel /> : null}
           {activeTab !== "indexing" ? (
           <form onSubmit={handleSave} className="settings-form">
         {/* TAB 1: LLM Providers */}
@@ -2522,7 +2763,6 @@ export default function SettingsManager() {
             {/* External Runes List */}
             <h4 style={{ margin: "20px 0 12px 0", display: "flex", alignItems: "center", gap: "8px" }}>
               <span>Installed Runes & Plugins</span>
-              <span className="settings-tab-badge">{pluginsList.length}</span>
             </h4>
 
             {pluginsList.length === 0 ? (
@@ -2708,7 +2948,6 @@ export default function SettingsManager() {
             {/* Built-in Core Tools Section */}
             <h4 style={{ margin: "28px 0 12px 0", display: "flex", alignItems: "center", gap: "8px" }}>
               <span>Built-in Engine Tools</span>
-              <span className="settings-tab-badge">{safeTools.filter((t) => t.isBuiltIn).length}</span>
             </h4>
 
             {/* Responsive cards grid keeps 13 engine tools above the fold: dense
@@ -2786,10 +3025,12 @@ export default function SettingsManager() {
                               setMediaSaveSuccess(false);
                               setBrowserModalError(null);
                               setBrowserSaveSuccess(false);
+                              setDesktopModalError(null);
+                              setDesktopSaveSuccess(false);
                               setConfiguringToolName(tool.name);
                             }}
                             style={{ padding: "4px 8px", fontSize: "0.78rem" }}
-                            title="Configure instance endpoints, credentials, and defaults"
+                            title="Edit this tool's configuration"
                           >
                             <SettingsIcon size={12} />
                             <span>Configure</span>
@@ -4262,6 +4503,54 @@ export default function SettingsManager() {
         </Modal>
       ) : null}
 
+      {/* Active-run guard: saving while a chat turn, tool call, or scheduler
+          run is in flight cancels that work, so the operator confirms first.
+          Parked approvals never trigger this path. Cancel aborts the PUT;
+          Continue saves and hot-reloads. */}
+      {showActiveGuard ? (
+        <Modal
+          label="Confirm save during active run"
+          onClose={handleCancelGuard}
+          containerClassName="modal-container session-delete-modal"
+        >
+          <div className="modal-header">
+            <h3>Save while work is running?</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={handleCancelGuard}
+              disabled={saving}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body">
+            <p className="muted" style={{ margin: 0 }}>
+              If you continue, in progress chats will be cancelled. Do you want to continue?
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button
+              type="button"
+              className="ghost"
+              onClick={handleCancelGuard}
+              disabled={saving}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleConfirmGuardSave()}
+              disabled={saving}
+            >
+              {saving ? "Saving…" : "Continue"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
       {/* Browser and Web tools configuration modal (browser.navigate, browser.act, web.fetch).
           Configures homelab allowlist patterns and displays auto-allowed media servers. */}
       {configuringToolName === "browser.navigate" ||
@@ -4580,6 +4869,185 @@ export default function SettingsManager() {
               disabled={mediaSaveLoading}
             >
               {mediaSaveLoading ? "Saving…" : "Save Configuration"}
+            </button>
+          </div>
+        </Modal>
+      ) : configuringToolName === "desktop.screenshot" ||
+      configuringToolName === "desktop.action" ? (
+        <Modal
+          label="Configure Desktop Vision & Control"
+          onClose={() => {
+            if (!desktopSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Desktop Vision & Control</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!desktopSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={desktopSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {desktopModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{desktopModalError}</span>
+              </div>
+            )}
+            {desktopSaveSuccess && (
+              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <CheckIcon size={16} />
+                <span>Desktop settings saved!</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Both tools always appear in the tool toggles, but each runs only
+              when its gate here is on: <code>desktop.screenshot</code>{" "}
+              (read-only capture) stays force-disabled while screen capture is
+              off, and <code>desktop.action</code> (approval-gated control)
+              stays force-disabled while control is off. Both gates ship off by
+              default, an open gate still leaves the tool disabled until you
+              enable it in the tool toggles above, and captures stay in memory
+              for the turn with only the content hash plus dimensions retained
+              afterwards.
+            </p>
+
+            {/* Allow-boundary toggles */}
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>Screenshot (desktop.screenshot)</span>
+                </h4>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={desktopScreenCaptureEnabled}
+                    onChange={(e) => setDesktopScreenCaptureEnabled(e.target.checked)}
+                  />
+                  <span>Enabled</span>
+                </label>
+              </div>
+              <p className="muted text-sm" style={{ margin: 0 }}>
+                Read-only display or app-window capture with downscaled JPEG plus
+                coordinate metadata for control actions.
+              </p>
+            </div>
+
+            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>Control (desktop.action)</span>
+                </h4>
+                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={desktopControlEnabled}
+                    onChange={(e) => setDesktopControlEnabled(e.target.checked)}
+                  />
+                  <span>Enabled</span>
+                </label>
+              </div>
+              <p className="muted text-sm" style={{ margin: 0 }}>
+                Approval-gated mouse, keyboard, and app-switch actions. Every batch
+                parks in the approvals inbox and never runs without approval.
+              </p>
+            </div>
+
+            {/* Capture knobs */}
+            <div className="form-row" style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
+              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <label htmlFor="desktop-max-dimension" style={{ fontSize: "0.82rem" }}>Max Image Dimension (px)</label>
+                <input
+                  id="desktop-max-dimension"
+                  type="number"
+                  min={256}
+                  max={3840}
+                  step={1}
+                  className="input-field"
+                  value={desktopMaxImageDimension}
+                  onChange={(e) =>
+                    setDesktopMaxImageDimension(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    )
+                  }
+                  placeholder="1280"
+                />
+                <span className="form-group-hint">
+                  Longest edge of the downscaled screenshot (256-3840).
+                </span>
+              </div>
+              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                <label htmlFor="desktop-jpeg-quality" style={{ fontSize: "0.82rem" }}>JPEG Quality (0.1-1.0)</label>
+                <input
+                  id="desktop-jpeg-quality"
+                  type="number"
+                  min={0.1}
+                  max={1.0}
+                  step={0.05}
+                  className="input-field"
+                  value={desktopJpegQuality}
+                  onChange={(e) =>
+                    setDesktopJpegQuality(
+                      e.target.value === "" ? "" : Number(e.target.value)
+                    )
+                  }
+                  placeholder="0.75"
+                />
+                <span className="form-group-hint">
+                  In-memory JPEG quality for downscaled captures.
+                </span>
+              </div>
+            </div>
+
+            {/* Blocked apps */}
+            <div className="form-group" style={{ marginBottom: "10px" }}>
+              <label htmlFor="desktop-blocked-apps-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span>
+                  Blocked Apps{" "}
+                  <span className="muted text-sm">
+                    ({parseBlockedAppsText(desktopBlockedAppsText).length}{" "}
+                    {parseBlockedAppsText(desktopBlockedAppsText).length === 1 ? "app" : "apps"})
+                  </span>
+                </span>
+              </label>
+              <textarea
+                id="desktop-blocked-apps-textarea"
+                className="input-field allowed-origins-textarea"
+                value={desktopBlockedAppsText}
+                onChange={(e) => setDesktopBlockedAppsText(e.target.value)}
+                placeholder={"Terminal\nKeychain Access\n1Password"}
+              />
+              <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                One application name per line. Blocked targets refuse automated
+                input before dispatch. Blank lines are ignored.
+              </span>
+            </div>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={desktopSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveDesktopConfig()}
+              disabled={desktopSaveLoading}
+            >
+              {desktopSaveLoading ? "Saving…" : "Save Configuration"}
             </button>
           </div>
         </Modal>

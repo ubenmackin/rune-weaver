@@ -4,6 +4,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager from "./SettingsManager";
+import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
 
 const mockSettings = {
@@ -56,6 +57,7 @@ const mockSettings = {
 describe("SettingsManager", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
+    resetSharedRunsForTesting();
   });
 
   it("renders loaded providers and switches to other tabs", async () => {
@@ -175,7 +177,7 @@ describe("SettingsManager", () => {
     await user.click(saveButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
 
     expect(sentPayload).toBeDefined();
@@ -275,7 +277,7 @@ describe("SettingsManager", () => {
     await user.click(saveButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
 
     expect(sentPayload).toBeDefined();
@@ -825,7 +827,7 @@ describe("SettingsManager", () => {
     await user.click(saveButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
 
     expect(sentPayload).toBeDefined();
@@ -893,7 +895,7 @@ describe("SettingsManager", () => {
     await user.click(saveButton);
 
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*", "*.pem", ".ssh/*"]);
 
@@ -911,7 +913,7 @@ describe("SettingsManager", () => {
     await user.clear(denyTextarea);
     await user.click(saveButton);
     await waitFor(() => {
-      expect(screen.getByText(/Settings saved successfully/i)).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([]);
     expect(
@@ -1146,6 +1148,457 @@ describe("SettingsManager", () => {
     expect(screen.getByRole("heading", { name: /Configure Browser & Web Automation/i })).toBeDefined();
     // Must NOT show the fallback error message
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+  });
+
+  it("drops count-only badges while keeping pending and tampered attention badges", async () => {
+    const user = userEvent.setup();
+    const settingsWithCounts = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*", "*.pem"],
+      filesAllowRoots: ["~"],
+      filesRequireApprovalOnDeny: true,
+    };
+    const mockPlugins = [
+      {
+        id: "community.weather",
+        name: "Weather Reporter",
+        version: "1.0.0",
+        description: "Fetches current weather.",
+        runtime: "python",
+        source: "local_disk",
+        status: "discovered",
+        isEnabled: false,
+        integrityHash: null,
+        tools: [
+          {
+            name: "weather.get",
+            description: "Get weather",
+            permissionLevel: "readOnly",
+            inputSchema: "{}",
+            isEnabled: false,
+            isBuiltIn: false,
+            pluginID: "community.weather",
+            source: "plugin",
+            integrityStatus: "valid",
+          },
+        ],
+        permissionOverrides: {},
+        discoveredAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+      {
+        id: "community.notes",
+        name: "Notes Keeper",
+        version: "1.0.0",
+        description: "Keeps notes.",
+        runtime: "python",
+        source: "local_disk",
+        status: "tampered",
+        isEnabled: false,
+        integrityHash: "abcdef1234567890",
+        tools: [
+          {
+            name: "notes.save",
+            description: "Save note",
+            permissionLevel: "readOnly",
+            inputSchema: "{}",
+            isEnabled: false,
+            isBuiltIn: false,
+            pluginID: "community.notes",
+            source: "plugin",
+            integrityStatus: "tampered",
+          },
+        ],
+        permissionOverrides: {},
+        discoveredAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      },
+    ];
+    const mockTools = [
+      {
+        name: "remember_fact",
+        description: "Store persistent fact",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: mockPlugins });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(settingsWithCounts);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Count-only sidenav badges are gone even though backing counts are non-zero:
+    // two providers, two deny patterns, and one email account.
+    const providersTab = screen.getByRole("tab", { name: /LLM Providers/i });
+    expect(providersTab.querySelector(".settings-tab-badge")).toBeNull();
+    const securityTab = screen.getByRole("tab", { name: /Security/i });
+    expect(securityTab.querySelector(".settings-tab-badge")).toBeNull();
+    const emailTab = screen.getByRole("tab", { name: /Email Accounts/i });
+    expect(emailTab.querySelector(".settings-tab-badge")).toBeNull();
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/awaiting review/i)).toBeDefined();
+    });
+
+    // Attention-only nav badges remain: one orange pending-review and one red tampered.
+    const toolsTab = screen.getByRole("tab", { name: /Tools and Runes/i });
+    const navBadges = toolsTab.querySelectorAll(".settings-tab-badge");
+    expect(navBadges.length).toBe(2);
+    expect(toolsTab.querySelector('[title="1 runes pending human review"]')).not.toBeNull();
+    expect(toolsTab.querySelector('[title="1 runes modified since approval"]')).not.toBeNull();
+
+    // Attention metric cards and banners remain visible.
+    expect(screen.getByText("Pending Review")).toBeDefined();
+    expect(screen.getByText("Tampered")).toBeDefined();
+    expect(screen.getByText(/modified on disk since approval/i)).toBeDefined();
+
+    // Count-only section headers render without badge shells.
+    const installedHeader = screen.getByText("Installed Runes & Plugins").closest("h4");
+    expect(installedHeader?.querySelector(".settings-tab-badge")).toBeNull();
+    const builtinHeader = screen.getByText("Built-in Engine Tools").closest("h4");
+    expect(builtinHeader?.querySelector(".settings-tab-badge")).toBeNull();
+  });
+
+  it("renders no badge shells when nothing needs attention", async () => {
+    const user = userEvent.setup();
+    const settingsWithCounts = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*", "*.pem"],
+      filesAllowRoots: ["~"],
+      filesRequireApprovalOnDeny: true,
+    };
+    const mockTools = [
+      {
+        name: "remember_fact",
+        description: "Store persistent fact",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(settingsWithCounts);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // No attention items means the Tools nav renders without any badge element.
+    const toolsTabBefore = screen.getByRole("tab", { name: /Tools and Runes/i });
+    expect(toolsTabBefore.querySelector(".settings-tab-badge")).toBeNull();
+
+    await user.click(toolsTabBefore);
+
+    await waitFor(() => {
+      expect(screen.getByText("Installed Runes & Plugins")).toBeDefined();
+    });
+
+    // With counts removed and zero attention items, no badge shell remains anywhere.
+    expect(document.querySelectorAll(".settings-tab-badge").length).toBe(0);
+    expect(screen.queryByText(/awaiting review/i)).toBeNull();
+    expect(screen.queryByText(/modified on disk since approval/i)).toBeNull();
+  });
+
+  it("shows exactly Settings saved in a status toast without the config path", async () => {
+    const user = userEvent.setup();
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(_url);
+      if (urlStr.includes("/runs")) {
+        return jsonResponse({ runs: [], count: 0 });
+      }
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+
+    // Toast uses role=status so assistive technology announces it.
+    const toast = screen.getByRole("status");
+    expect(toast.textContent).toContain("Settings saved.");
+    // Dropped configPath from copy; the badge keeps the path separately.
+    expect(toast.textContent).not.toContain("/Users/test/.runeweaver/config.toml");
+    expect(toast.textContent).not.toMatch(/Restart/i);
+    expect(screen.getByText("/Users/test/.runeweaver/config.toml")).toBeDefined();
+    expect(sentPayload).toBeDefined();
+  });
+
+  it("clears the success toast on tab switch so it never follows navigation", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(_url);
+      if (urlStr.includes("/runs")) {
+        return jsonResponse({ runs: [], count: 0 });
+      }
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sent,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+
+    const engineTabBtn = screen.getByRole("tab", { name: /Engine and Logs/i });
+    await user.click(engineTabBtn);
+
+    await waitFor(() => {
+      expect(screen.queryByText("Settings saved.")).toBeNull();
+    });
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("guards saves while work is running with Cancel aborting the PUT", async () => {
+    const user = userEvent.setup();
+    const putCalls: Array<{ url: string; body: string }> = [];
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(_url);
+      if (urlStr.includes("/runs")) {
+        return jsonResponse({
+          runs: [
+            {
+              id: "run-1",
+              kind: "chat",
+              status: "running",
+              message: "thinking",
+              timestamp: Date.now() / 1000,
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (init?.method === "PUT") {
+        putCalls.push({ url: urlStr, body: init.body as string });
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sent,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "If you continue, in progress chats will be cancelled. Do you want to continue?"
+        )
+      ).toBeDefined();
+    });
+
+    // Cancel aborts the PUT so nothing persists and no toast appears.
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText(
+          "If you continue, in progress chats will be cancelled. Do you want to continue?"
+        )
+      ).toBeNull();
+    });
+    expect(putCalls.length).toBe(0);
+    expect(screen.queryByText("Settings saved.")).toBeNull();
+  });
+
+  it("guards saves while work is running with Continue saving and hot-reloading", async () => {
+    const user = userEvent.setup();
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(_url);
+      if (urlStr.includes("/runs")) {
+        return jsonResponse({
+          runs: [
+            {
+              id: "run-2",
+              kind: "scheduler",
+              status: "running",
+              message: "running job",
+              timestamp: Date.now() / 1000,
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "If you continue, in progress chats will be cancelled. Do you want to continue?"
+        )
+      ).toBeDefined();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+    expect(sentPayload).toBeDefined();
+  });
+
+  it("does not guard parked approvals awaiting human review", async () => {
+    const user = userEvent.setup();
+    let putCalled = false;
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(_url);
+      if (urlStr.includes("/runs")) {
+        return jsonResponse({
+          runs: [
+            {
+              id: "run-parked",
+              kind: "chat",
+              status: "awaiting_approval",
+              message: "waiting",
+              timestamp: Date.now() / 1000,
+            },
+          ],
+          count: 1,
+        });
+      }
+      if (init?.method === "PUT") {
+        putCalled = true;
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sent,
+        });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    await user.click(saveButton);
+
+    // Parked work saves directly with no confirm modal.
+    await waitFor(() => {
+      expect(screen.getByText("Settings saved.")).toBeDefined();
+    });
+    expect(
+      screen.queryByText(
+        "If you continue, in progress chats will be cancelled. Do you want to continue?"
+      )
+    ).toBeNull();
+    expect(putCalled).toBe(true);
   });
 });
 

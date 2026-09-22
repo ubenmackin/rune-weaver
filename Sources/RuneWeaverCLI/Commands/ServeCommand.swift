@@ -283,10 +283,15 @@ struct ServeCommand: AsyncParsableCommand {
             auth: auth
         )
         for tool in plugins {
-            await context.toolBus.register(tool: tool)
+            // Preserve live enabled state across re-registration: a bare
+            // register would reset every tool to enabled, and desktop tools
+            // ship disabled — without this, a fresh install would flip them
+            // live between registration and the restore below.
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
         }
-        // Registration resets each tool to enabled, so re-apply persisted
-        // toggles after late builtin registration; the cached load makes
+        // Registration preserves live state now, but re-apply persisted
+        // toggles plus the desktop allow gates anyway; the cached load makes
         // this a memory-only pass after the boot hydration in `make`.
         await context.restoreToolStates(forceReload: false)
         // Re-snapshot the live service registry so drift between the startup

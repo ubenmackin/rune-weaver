@@ -287,6 +287,22 @@ public final class ServerContext: Sendable {
     public let searchEnsurer: (any SearXNGEnsuring)?
     /// Media secrets resolver preserved across live-reloads so injected doubles survive.
     public let mediaSecrets: SecretsManager?
+    /// Hermetic desktop capture bridge preserved across live-reloads so a
+    /// settings PUT refreshes capture knobs without dropping test doubles.
+    public let desktopCaptureBridge: (any DesktopCapturing)?
+    /// Hermetic desktop control bridge preserved across live-reloads so a
+    /// settings PUT refreshes control knobs without dropping test doubles.
+    public let desktopControlBridge: (any DesktopControlling)?
+    /// Live `[desktop]` allow-boundary policy. Held behind a lock because
+    /// settings PUTs refresh it in place while this class stays Sendable;
+    /// `restoreToolStates` reads it on every reconcile so a toggle turned
+    /// off always wins over persisted tool-state rows.
+    private let desktopConfigBox: OSAllocatedUnfairLock<DesktopConfig>
+    /// Live `[desktop]` policy supplying the desktop allow gates.
+    public var desktopConfig: DesktopConfig {
+        get { desktopConfigBox.withLock { $0 } }
+        set { desktopConfigBox.withLock { $0 = newValue } }
+    }
 
     /// Creates a server context.
     /// The `steeringQueue` must be the identical instance handed to
@@ -329,7 +345,10 @@ public final class ServerContext: Sendable {
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
         searchEnsurer: (any SearXNGEnsuring)? = nil,
-        mediaSecrets: SecretsManager? = nil
+        mediaSecrets: SecretsManager? = nil,
+        desktopCaptureBridge: (any DesktopCapturing)? = nil,
+        desktopControlBridge: (any DesktopControlling)? = nil,
+        desktopConfig: DesktopConfig = DesktopConfig()
     ) {
         self.config = config
         self.conversations = conversations
@@ -373,6 +392,9 @@ public final class ServerContext: Sendable {
         self.mediaTransport = mediaTransport
         self.searchEnsurer = searchEnsurer
         self.mediaSecrets = mediaSecrets
+        self.desktopCaptureBridge = desktopCaptureBridge
+        self.desktopControlBridge = desktopControlBridge
+        self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
         // Fail fast when the context would enqueue through a different queue than
         // the turn loop dequeues through; such a pair accepts steering yet never
         // delivers it, so surface the wiring mistake at construction.
@@ -382,7 +404,11 @@ public final class ServerContext: Sendable {
         )
     }
 
-    /// Reapplies every persisted tool toggle onto the live bus.
+    /// Reapplies every persisted tool toggle onto the live bus, then enforces
+    /// the `[desktop]` allow boundary: stored intent wins over fresh
+    /// registration defaults, and a `[desktop]` toggle that is off always
+    /// wins over a stored enable row, so hand-edited configs, legacy
+    /// fail-closed installs, and settings toggles turned off stay closed.
     public func restoreToolStates(forceReload: Bool = false) async {
         let stored = await toolStates.loadAll(forceReload: forceReload)
         for (name, enabled) in stored {
@@ -392,6 +418,7 @@ public final class ServerContext: Sendable {
                 await toolBus.disableTool(named: name)
             }
         }
+        await DesktopTools.enforceConfigGates(from: desktopConfig, on: toolBus)
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -425,7 +452,9 @@ public final class ServerContext: Sendable {
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
         searchEnsurer: (any SearXNGEnsuring)? = nil,
-        mediaSecrets: SecretsManager? = nil
+        mediaSecrets: SecretsManager? = nil,
+        desktopCaptureBridge: (any DesktopCapturing)? = nil,
+        desktopControlBridge: (any DesktopControlling)? = nil
     ) async -> ServerContext {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
         // Durable stores bootstrap asynchronously: actor initializers never
@@ -457,7 +486,9 @@ public final class ServerContext: Sendable {
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
             ensurer: searchEnsurer,
-            mediaSecrets: mediaSecrets
+            mediaSecrets: mediaSecrets,
+            desktopCaptureBridge: desktopCaptureBridge,
+            desktopControlBridge: desktopControlBridge
         )
         let pluginStack = await resolvePluginStack(episodesDBPath: episodesDBPath, pluginConfig: pluginConfig, bus: bus)
         let pStore = pluginStack.store
@@ -520,7 +551,10 @@ public final class ServerContext: Sendable {
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
             searchEnsurer: searchEnsurer,
-            mediaSecrets: mediaSecrets
+            mediaSecrets: mediaSecrets,
+            desktopCaptureBridge: desktopCaptureBridge,
+            desktopControlBridge: desktopControlBridge,
+            desktopConfig: desktopConfig
         )
         reclaimSandboxDetonationMachines(config: sandboxConfig)
         await installLiveApprovalHandler(
@@ -1092,151 +1126,6 @@ func registerBrowserRoutes(_ app: Application) {
             message: report.message,
             diagnostics: report.diagnostics
         )
-    }
-}
-
-/// Registers settings routes for reading and persisting configuration.
-private func registerSettingsRoutes(_ app: Application) {
-    let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
-    settings.get { _ async throws -> SettingsResponse in
-        let url = RuneWeaverConfig.defaultConfigFileURL()
-        let config: RuneWeaverConfig
-        do {
-            config = try RuneWeaverConfig.loadDefault()
-        } catch let error as ConfigError {
-            throw Abort(.badRequest, reason: String(describing: error))
-        } catch {
-            throw Abort(.internalServerError, reason: error.localizedDescription)
-        }
-        return SettingsResponse(config: config, configPath: url.path)
-    }
-    settings.put { req async throws -> SettingsResponse in
-        let body = try req.content.decode(UpdateSettingsRequest.self)
-        let url = RuneWeaverConfig.defaultConfigFileURL()
-        var config: RuneWeaverConfig
-        do {
-            config = try RuneWeaverConfig.loadDefault()
-        } catch let error as ConfigError {
-            throw Abort(.badRequest, reason: String(describing: error))
-        } catch {
-            throw Abort(.internalServerError, reason: error.localizedDescription)
-        }
-        do {
-            try body.apply(to: &config)
-            // Validate the merged config before persisting so a single bad
-            // field cannot corrupt the stored file or live engine state.
-            try config.validate()
-            try config.save(to: url)
-            let liveContext = req.application.runeWeaver
-            await applyLiveOrchestratorTuning(body: body, context: liveContext)
-            await reloadLiveMediaTools(body: body, config: config, context: liveContext)
-            await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
-        } catch let error as ConfigError {
-            throw Abort(.badRequest, reason: String(describing: error))
-        } catch {
-            throw Abort(.internalServerError, reason: error.localizedDescription)
-        }
-        return SettingsResponse(config: config, configPath: url.path)
-    }
-}
-
-/// Pushes persisted engine budgets into the live orchestrator so saved values take effect without a restart.
-private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: ServerContext) async {
-    if let maxToolIterations = body.maxToolIterations {
-        await context.orchestrator.updateMaxToolIterations(maxToolIterations)
-    }
-    // Push the persisted compaction threshold into the live engine so
-    // the saved value takes effect immediately instead of staying stale
-    // until the next restart.
-    if let compactionThresholdPercent = body.compactionThresholdPercent {
-        await context.orchestrator.updateCompactionPercent(compactionThresholdPercent)
-    }
-}
-
-/// Reloads media tools when media settings changed so Sonarr / Radarr picks up URLs without a restart.
-/// Stored transports ride along so hermetic doubles survive a settings PUT instead of resetting to live defaults.
-private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
-    guard body.media != nil else { return }
-    for tool in MediaTools.makeTools(
-        mediaConfig: config.media, transport: context.mediaTransport, secrets: context.mediaSecrets
-    ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-    }
-}
-
-/// Rebuilds the Playwright bridge with fresh origins while preserving injected doubles.
-/// A managed subprocess gateway keeps its executable and budgets; a test double survives as-is.
-private func gatewayForLiveReload(
-    stored: (any BrowserPlaywrightGateway)?,
-    busGateway: (any BrowserPlaywrightGateway)?,
-    origins: Set<String>
-) -> (any BrowserPlaywrightGateway)? {
-    let baseGateway = stored ?? busGateway
-    if let baseGateway, let managed = baseGateway as? SubprocessPlaywrightGateway {
-        return SubprocessPlaywrightGateway(
-            pythonExecutable: managed.pythonExecutable,
-            timeoutSeconds: managed.timeoutSeconds,
-            maxOutputBytes: managed.maxOutputBytes,
-            allowlistedOrigins: origins
-        )
-    }
-    return baseGateway
-}
-
-/// Reloads browser, web, and API tools when origins may have changed so homelab hosts apply immediately.
-/// The stored gateway and transports ride along so a settings PUT refreshes origins without dropping the bridge.
-private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
-    // Provider endpoints feed the SSRF exemption set, so an LLM-endpoint change
-    // must refresh live tools immediately rather than waiting for a restart.
-    guard body.media != nil || body.browserAllowedOrigins != nil || body.browserSearxngURL != nil
-        || body.searchSearxngURL != nil || body.providers != nil || body.defaultProvider != nil
-        || body.fallbackProvider != nil
-    else {
-        return
-    }
-    let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
-    let browserOrigins = ApiSSRFGuard.allowlistedOrigins(
-        browserConfig: config.browser,
-        mediaConfig: config.media,
-        llmServerURLs: appLLMOrigins
-    )
-    let busGateway: (any BrowserPlaywrightGateway)? = if let existing =
-        await context.toolBus.tool(named: "browser.navigate") as? BrowserNavigateTool
-    {
-        existing.browserGateway
-    } else {
-        nil
-    }
-    if let gatewayForReload = gatewayForLiveReload(stored: context.browserGateway, busGateway: busGateway, origins: browserOrigins) {
-        for tool in BrowserTools.makeTools(gateway: gatewayForReload, allowlistedOrigins: browserOrigins) {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-        }
-    } else {
-        for tool in BrowserTools.makeTools(allowlistedOrigins: browserOrigins) {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-        }
-    }
-    for tool in WebTools.makeTools(
-        browserConfig: config.browser,
-        mediaConfig: config.media,
-        searchTransport: context.searchTransport,
-        fetchTransport: context.fetchTransport,
-        ensurer: context.searchEnsurer
-    ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-    }
-    for tool in ApiRequestTools.makeTools(
-        browserConfig: config.browser,
-        mediaConfig: config.media,
-        llmServerURLs: appLLMOrigins,
-        transport: context.apiTransport
-    ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
     }
 }
 

@@ -112,44 +112,119 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
 
 @Suite("Desktop Tools")
 struct DesktopToolsTests {
-    // MARK: - Registration & Gating
+    // MARK: - Registration & Gating (always registered, fail-closed gates)
 
     @Test
-    func `Desktop tools are not registered when desktop config is disabled`() {
+    func `Both tools always register regardless of toggles`() {
+        // Visibility in GET /tools never depends on a toggle: a stock
+        // install (both allow toggles off) still exposes both tools so the
+        // surface stays inspectable instead of shape-shifting.
         var config = DesktopConfig()
-        config.enabled = false
-        config.controlEnabled = true
-
-        let tools = DesktopTools.makeTools(desktopConfig: config)
-        #expect(tools.isEmpty)
-        #expect(DesktopTools.toolNames(for: config).isEmpty)
-    }
-
-    @Test
-    func `Only screenshot tool is registered when control is disabled`() {
-        var config = DesktopConfig()
-        config.enabled = true
-        config.screenCaptureEnabled = true
+        config.screenCaptureEnabled = false
         config.controlEnabled = false
 
         let tools = DesktopTools.makeTools(desktopConfig: config)
-        #expect(tools.count == 1)
-        #expect(tools.first?.name == DesktopTools.screenshotToolName)
-        #expect(DesktopTools.toolNames(for: config) == [DesktopTools.screenshotToolName])
+        #expect(tools.count == 2)
+        #expect(tools.map(\.name) == DesktopTools.allToolNames)
+        #expect(DesktopTools.toolNames(for: config) == DesktopTools.allToolNames)
     }
 
     @Test
-    func `Both tools are registered when enabled and controlEnabled are true`() {
+    func `Toggled and default configs still expose both tool names`() {
+        let configs: [DesktopConfig] = {
+            var bothOn = DesktopConfig()
+            bothOn.screenCaptureEnabled = true
+            bothOn.controlEnabled = true
+            return [DesktopConfig(), bothOn]
+        }()
+        for config in configs {
+            #expect(DesktopTools.toolNames(for: config) == DesktopTools.allToolNames)
+            #expect(DesktopTools.makeTools(desktopConfig: config).count == 2)
+        }
+    }
+
+    @Test
+    func `Default config fails closed with both toggles off`() {
+        // A stock install never exposes approval-free capture: capture and
+        // control both default off and the tools ship disabled at boot.
+        let config = DesktopConfig()
+        #expect(config.screenCaptureEnabled == false)
+        #expect(config.controlEnabled == false)
+    }
+
+    @Test
+    func `Builtin registration ships both desktop tools disabled`() async {
+        // Boot-path contract: every tool registers, non-desktop tools stay
+        // enabled, and desktop tools arrive disabled until the restore path
+        // re-applies persisted rows on top of the open allow boundary.
+        let bus = ToolBus()
+        await BuiltinToolPlugins.registerAll(on: bus)
+
+        #expect(await bus.tool(named: DesktopTools.screenshotToolName) != nil)
+        #expect(await bus.tool(named: DesktopTools.actionToolName) != nil)
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == false)
+        #expect(await bus.isToolEnabled(named: DesktopTools.actionToolName) == false)
+        #expect(await bus.isToolEnabled(named: "files.read") == true)
+        #expect(await !(bus.availableTools().contains { DesktopTools.allToolNames.contains($0.name) }))
+        #expect(await bus.allTools().contains { DesktopTools.allToolNames.contains($0.name) })
+    }
+
+    @Test
+    func `Config gates force-disable a desktop tool over its enabled state`() async {
+        // The [desktop] toggles are a fail-closed allow boundary applied
+        // after stored rows: off always wins over an enabled state, on
+        // leaves state untouched so the tool still ships disabled.
+        let bus = ToolBus()
+        for tool in DesktopTools.makeTools() {
+            await bus.register(tool: tool, isEnabled: true)
+        }
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == true)
+
         var config = DesktopConfig()
-        config.enabled = true
+        config.screenCaptureEnabled = false
+        config.controlEnabled = false
+        await DesktopTools.enforceConfigGates(from: config, on: bus)
+        #expect(await bus.tool(named: DesktopTools.screenshotToolName) != nil)
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == false)
+        #expect(await bus.isToolEnabled(named: DesktopTools.actionToolName) == false)
+
+        // Open boundary: gates leave state alone; the tool stays off until
+        // an explicit enable, and later gates keep an enabled tool enabled.
+        config.screenCaptureEnabled = true
+        await DesktopTools.enforceConfigGates(from: config, on: bus)
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == false)
+        await bus.enableTool(named: DesktopTools.screenshotToolName)
+        await DesktopTools.enforceConfigGates(from: config, on: bus)
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == true)
+
+        // Control boundary still closed: enabling action is overridden on
+        // the next enforce pass.
+        await bus.enableTool(named: DesktopTools.actionToolName)
+        #expect(await bus.isToolEnabled(named: DesktopTools.actionToolName) == true)
+        await DesktopTools.enforceConfigGates(from: config, on: bus)
+        #expect(await bus.isToolEnabled(named: DesktopTools.actionToolName) == false)
+    }
+
+    @Test
+    func `Newly registered desktop tools ship disabled until toggled`() async {
+        // Mirrors the media live-reload pattern: a tool absent from the bus
+        // reports disabled, so re-registration preserves live state while
+        // fresh entries arrive disabled rather than model-visible.
+        var config = DesktopConfig()
         config.screenCaptureEnabled = true
         config.controlEnabled = true
-
-        let tools = DesktopTools.makeTools(desktopConfig: config)
-        #expect(tools.count == 2)
-        let names = tools.map(\.name)
-        #expect(names.contains(DesktopTools.screenshotToolName))
-        #expect(names.contains(DesktopTools.actionToolName))
+        let bus = ToolBus()
+        for tool in DesktopTools.makeTools(desktopConfig: config) {
+            let isEnabled = await bus.isToolEnabled(named: tool.name)
+            #expect(isEnabled == false)
+            await bus.register(tool: tool, isEnabled: isEnabled)
+        }
+        #expect(await bus.tool(named: DesktopTools.screenshotToolName) != nil)
+        #expect(await bus.tool(named: DesktopTools.actionToolName) != nil)
+        #expect(await bus.isToolEnabled(named: DesktopTools.screenshotToolName) == false)
+        #expect(await bus.isToolEnabled(named: DesktopTools.actionToolName) == false)
+        #expect(await bus.availableTools().isEmpty)
+        #expect(await bus.allTools().count == 2)
     }
 
     @Test
