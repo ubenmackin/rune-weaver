@@ -35,7 +35,7 @@ private struct TrackingScriptedTurn: Sendable {
 }
 
 /// Scripted mock LLM provider.
-private final class TrackingScriptedLLM: LLMProvider, @unchecked Sendable {
+private final class TrackingScriptedLLM: LLMProvider, Sendable {
     let modelInfo = ModelInfo(
         name: "test-llm",
         provider: "mock",

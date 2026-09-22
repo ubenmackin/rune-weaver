@@ -163,18 +163,33 @@ final class CLILockedValue<Value: Sendable>: Sendable {
 
 /// Single shared store source for the CLI process.
 enum CLIShared {
-    /// Cached engines keyed by episodes + vector paths.
+    /// Cached engines keyed by episodes, vector, and document index paths.
     private static let engines = CLILockedValue<[String: MemoryEngine]>([:])
 
     /// Returns the shared engine for the given memory config,
     /// creating and caching it on first use.
-    static func memoryEngine(for config: MemoryConfig) -> MemoryEngine {
-        let key = "\(config.episodesDBPath)\0\(config.vectorDBPath)"
+    ///
+    /// The optional document index path points recall at the configured
+    /// `[index]` database; nil keeps the keyword-and-vector engine.
+    /// - Parameters:
+    ///   - config: Memory paths from `config.toml`.
+    ///   - docIndexDBPath: SQLite path for the document index, or nil for recall without it.
+    /// - Returns: The cached engine for these paths.
+    static func memoryEngine(for config: MemoryConfig, docIndexDBPath: String? = nil) -> MemoryEngine {
+        let key = "\(config.episodesDBPath)\0\(config.vectorDBPath)\0\(docIndexDBPath ?? "")"
         return engines.withLock { cached in
             if let existing = cached[key] {
                 return existing
             }
-            let engine = MemoryEngine(config: config)
+            let engine = if let docIndexDBPath {
+                MemoryEngine(
+                    episodesDBPath: config.episodesDBPath,
+                    vectorDBPath: config.vectorDBPath,
+                    docIndexDBPath: docIndexDBPath
+                )
+            } else {
+                MemoryEngine(config: config)
+            }
             cached[key] = engine
             return engine
         }

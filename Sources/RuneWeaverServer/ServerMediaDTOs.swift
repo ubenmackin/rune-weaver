@@ -92,3 +92,46 @@ public extension UpdateSettingsRequest {
         self.init(media: MediaSettingsUpdate(media))
     }
 }
+
+// MARK: - Media Settings Merge
+
+extension UpdateSettingsRequest {
+    /// Merges a partial media patch onto the stored config, preserving every
+    /// field and every service the request omits. A nil patch or a nil side
+    /// is a no-op, so touching Sonarr never resets Radarr.
+    ///
+    /// Internal so the shared settings `apply(to:)` keeps one merge path while
+    /// the media-specific logic lives beside its DTOs.
+    func applyMedia(to media: inout MediaConfig) {
+        guard let update = self.media else { return }
+        if let sonarr = update.sonarr {
+            applyArr(sonarr, to: &media.sonarr)
+        }
+        if let radarr = update.radarr {
+            applyArr(radarr, to: &media.radarr)
+        }
+    }
+
+    /// Merges one Arr patch key-by-key; omitted keys keep their stored values
+    /// and stored secrets are never cleared by an absent key. Blank text reads
+    /// as absent (cleared to nil) so a dashboard-cleared field falls through to
+    /// server auto-detect instead of persisting as an empty override. Sonarr and
+    /// Radarr share this path so the two services cannot drift.
+    func applyArr(_ update: ArrSettingsUpdate, to config: inout ArrInstanceConfig) {
+        if let enabled = update.enabled {
+            config.enabled = enabled
+        }
+        if let url = update.url {
+            config.url = NormalizedText.value(url)
+        }
+        if let apiKeyEnv = update.apiKeyEnv {
+            config.apiKeyEnv = NormalizedText.value(apiKeyEnv)
+        }
+        if let defaultQualityProfile = update.defaultQualityProfile {
+            config.defaultQualityProfile = NormalizedText.value(defaultQualityProfile)
+        }
+        if let defaultRootFolder = update.defaultRootFolder {
+            config.defaultRootFolder = NormalizedText.value(defaultRootFolder)
+        }
+    }
+}

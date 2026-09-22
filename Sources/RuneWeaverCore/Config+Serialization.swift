@@ -43,6 +43,7 @@ extension RuneWeaverConfig {
         lines += renderLLMTOML()
         lines += renderServicesTOML()
         lines += renderFilesTOML()
+        lines += renderIndexTOML()
         lines += renderBrowserTOML()
         lines += renderEmailTOML()
         lines += renderHomeTOML()
@@ -159,6 +160,28 @@ extension RuneWeaverConfig {
             "deny_patterns = \(Self.tomlStringArray(files.denyPatterns))",
             "allow_roots = \(Self.tomlStringArray(files.allowRoots))",
             "require_approval_on_deny = \(files.requireApprovalOnDeny ? "true" : "false")",
+            ""
+        ]
+    }
+
+    private func renderIndexTOML() -> [String] {
+        // Every key renders, including the disabled default, so a saved file
+        // documents the full indexer policy and a round-trip never depends on
+        // an implicit default silently diverging from what was written.
+        [
+            "[index]",
+            "enabled = \(index.enabled ? "true" : "false")",
+            "files = \(index.files ? "true" : "false")",
+            "mail = \(index.mail ? "true" : "false")",
+            "messages = \(index.messages ? "true" : "false")",
+            "roots = \(Self.tomlStringArray(index.roots))",
+            "exclude = \(Self.tomlStringArray(index.exclude))",
+            "max_file_mb = \(index.maxFileMB)",
+            "mail_vector_window = \(Self.tomlQuoted(index.mailVectorWindow))",
+            "icloud_evicted = \(Self.tomlQuoted(index.iCloudEvicted))",
+            "describe_images_with_llm = \(index.describeImagesWithLLM ? "true" : "false")",
+            "nightly_budget = \(index.nightlyBudget)",
+            "db_path = \(Self.tomlQuoted(index.dbPath))",
             ""
         ]
     }

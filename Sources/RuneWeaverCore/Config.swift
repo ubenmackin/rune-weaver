@@ -511,6 +511,150 @@ extension FilesConfig: Codable {
     }
 }
 
+/// `[index]` — local background indexer policy for files, mail, and messages.
+///
+/// The indexer is off by default (``enabled``), so a fresh install never
+/// reads a mailbox or walks the home directory until the operator opts in.
+/// Source toggles narrow what an enabled indexer may touch, `roots`/`exclude`
+/// bound the file walk, and the remaining knobs cap per-item work and where the
+/// index database lives. Secrets never appear here; the index stores content
+/// and derived vectors only.
+public struct IndexConfig: Sendable, Codable, Equatable {
+    /// Whether the background indexer runs at all. Defaults to off.
+    public var enabled: Bool
+    /// Whether local files are indexed. On by default once the indexer is enabled.
+    public var files: Bool
+    /// Whether mail is indexed. Off by default so enabling the indexer never
+    /// silently reads a mailbox.
+    public var mail: Bool
+    /// Whether Apple Messages are indexed. Off by default.
+    public var messages: Bool
+    /// Root directories scanned for files (`~` expands to home).
+    public var roots: [String]
+    /// Glob patterns skipped during a file scan (VCS directories, build output,
+    /// caches) so the walk never descends into material it should not index.
+    public var exclude: [String]
+    /// Largest file the indexer will read, in megabytes. Defaults to 20 MB.
+    public var maxFileMB: Int
+    /// How far back mail is vectorized: a window token (``allowedMailVectorWindows``)
+    /// or `all`. Defaults to `2y` to keep the local store bounded.
+    public var mailVectorWindow: String
+    /// Policy for iCloud files whose bytes are evicted: `skip` or `download`.
+    /// Defaults to `skip` so an index run never silently pulls a file down.
+    public var iCloudEvicted: String
+    /// Whether image files are described with the configured LLM. Off by
+    /// default; enabling it sends image content to the active provider.
+    public var describeImagesWithLLM: Bool
+    /// Maximum number of items processed per nightly index run. `0` means
+    /// unlimited. Defaults to unlimited.
+    public var nightlyBudget: Int
+    /// SQLite path for the index database.
+    public var dbPath: String
+
+    /// Default file source toggle.
+    public static let defaultFilesEnabled = true
+    /// Default mail source toggle.
+    public static let defaultMailEnabled = false
+    /// Default Messages source toggle.
+    public static let defaultMessagesEnabled = false
+    /// Default file roots (home directory).
+    public static let defaultRoots = ["~"]
+    /// Default exclude patterns skipped during a file scan.
+    public static let defaultExcludePatterns = [
+        ".git",
+        "node_modules",
+        ".build",
+        "DerivedData",
+        "Library",
+        ".Trash",
+        "*.app"
+    ]
+    /// Default maximum file size in megabytes.
+    public static let defaultMaxFileMB = 20
+    /// Hard upper bound for `max_file_mb`, keeping a typo from admitting a
+    /// multi-gigabyte file into the index.
+    public static let maxAllowedFileMB = 10240
+    /// Default `mail_vector_window` value.
+    public static let defaultMailVectorWindow = "2y"
+    /// Closed set of valid `mail_vector_window` values; `all` disables the window.
+    public static let allowedMailVectorWindows = ["30d", "6m", "1y", "2y", "all"]
+    /// Default `icloud_evicted` policy.
+    public static let defaultICloudEvicted = "skip"
+    /// Closed set of valid `icloud_evicted` policies.
+    public static let allowedICloudEvictions = ["skip", "download"]
+    /// Default `nightly_budget` value (unlimited).
+    public static let defaultNightlyBudget = 0
+    /// Hard upper bound for `nightly_budget`, keeping a stray extra digit from
+    /// scheduling an unbounded night's work.
+    public static let maxAllowedNightlyBudget = 100_000
+    /// Default SQLite path for the index database.
+    /// This is the single source for the on-disk index location;
+    /// `DocIndexStore.defaultDBPath` aliases this value.
+    public static let defaultDBPath = "~/.runeweaver/index.db"
+
+    /// Creates an index config.
+    public init(
+        enabled: Bool = false,
+        files: Bool = defaultFilesEnabled,
+        mail: Bool = defaultMailEnabled,
+        messages: Bool = defaultMessagesEnabled,
+        roots: [String] = defaultRoots,
+        exclude: [String] = defaultExcludePatterns,
+        maxFileMB: Int = defaultMaxFileMB,
+        mailVectorWindow: String = defaultMailVectorWindow,
+        iCloudEvicted: String = defaultICloudEvicted,
+        describeImagesWithLLM: Bool = false,
+        nightlyBudget: Int = defaultNightlyBudget,
+        dbPath: String = defaultDBPath
+    ) {
+        self.enabled = enabled
+        self.files = files
+        self.mail = mail
+        self.messages = messages
+        self.roots = roots
+        self.exclude = exclude
+        self.maxFileMB = maxFileMB
+        self.mailVectorWindow = mailVectorWindow
+        self.iCloudEvicted = iCloudEvicted
+        self.describeImagesWithLLM = describeImagesWithLLM
+        self.nightlyBudget = nightlyBudget
+        self.dbPath = dbPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case files
+        case mail
+        case messages
+        case roots
+        case exclude
+        case maxFileMB = "max_file_mb"
+        case mailVectorWindow = "mail_vector_window"
+        case iCloudEvicted = "icloud_evicted"
+        case describeImagesWithLLM = "describe_images_with_llm"
+        case nightlyBudget = "nightly_budget"
+        case dbPath = "db_path"
+    }
+
+    /// Decodes an index config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        files = try container.decodeIfPresent(Bool.self, forKey: .files) ?? Self.defaultFilesEnabled
+        mail = try container.decodeIfPresent(Bool.self, forKey: .mail) ?? Self.defaultMailEnabled
+        messages = try container.decodeIfPresent(Bool.self, forKey: .messages) ?? Self.defaultMessagesEnabled
+        roots = try container.decodeIfPresent([String].self, forKey: .roots) ?? Self.defaultRoots
+        exclude = try container.decodeIfPresent([String].self, forKey: .exclude) ?? Self.defaultExcludePatterns
+        maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB) ?? Self.defaultMaxFileMB
+        mailVectorWindow = try container.decodeIfPresent(String.self, forKey: .mailVectorWindow) ?? Self.defaultMailVectorWindow
+        iCloudEvicted = try container.decodeIfPresent(String.self, forKey: .iCloudEvicted) ?? Self.defaultICloudEvicted
+        describeImagesWithLLM = try container.decodeIfPresent(Bool.self, forKey: .describeImagesWithLLM) ?? false
+        nightlyBudget = try container.decodeIfPresent(Int.self, forKey: .nightlyBudget) ?? Self.defaultNightlyBudget
+        dbPath = try container.decodeIfPresent(String.self, forKey: .dbPath) ?? Self.defaultDBPath
+    }
+}
+
 /// SMTP transport security for an `[[email.accounts]]` entry.
 public enum EmailSMTPSecurity: String, Sendable, Codable, Equatable, CaseIterable {
     /// Implicit TLS (typically port 465).
@@ -866,6 +1010,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var browser = BrowserConfig()
     /// Home media automation (Sonarr & Radarr).
     public var media = MediaConfig()
+    /// Local background indexer policy for files, mail, and messages.
+    public var index = IndexConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -882,7 +1028,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         scheduler: SchedulerConfig = SchedulerConfig(),
         plugins: PluginConfig = PluginConfig(),
         browser: BrowserConfig = BrowserConfig(),
-        media: MediaConfig = MediaConfig()
+        media: MediaConfig = MediaConfig(),
+        index: IndexConfig = IndexConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -898,6 +1045,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.plugins = plugins
         self.browser = browser
         self.media = media
+        self.index = index
     }
 
     /// Config with sensible defaults matching `config.toml.example`.

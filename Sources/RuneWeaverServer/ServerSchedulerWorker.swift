@@ -25,6 +25,7 @@ public actor ServerSchedulerWorker {
     private let notifier: (any SchedulerNotifier)?
     private let logger: (@Sendable (String) async -> Void)?
     private let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
+    private let indexCoordinator: IndexCoordinator?
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -45,7 +46,8 @@ public actor ServerSchedulerWorker {
         intervalSeconds: TimeInterval = 60,
         notifier: (any SchedulerNotifier)? = nil,
         logger: (@Sendable (String) async -> Void)? = nil,
-        pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil
+        pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil,
+        indexCoordinator: IndexCoordinator? = nil
     ) {
         self.scheduler = scheduler
         self.runs = runs
@@ -59,6 +61,7 @@ public actor ServerSchedulerWorker {
         self.notifier = notifier
         self.logger = logger
         self.pollChecker = pollChecker
+        self.indexCoordinator = indexCoordinator
     }
 
     // Explicit stop() ends the background loop; actor-isolated loop state
@@ -160,6 +163,11 @@ public actor ServerSchedulerWorker {
             let outcome = await executeJob(job, reason: reason)
             results.append(outcome)
         }
+
+        // The nightly index trigger rides the same tick: a disabled or
+        // already-run coordinator returns immediately, so this is a no-op for
+        // the default configuration.
+        _ = await indexCoordinator?.fireNightly(now: now)
 
         return results
     }
@@ -330,5 +338,78 @@ public actor ServerSchedulerWorker {
 
         await runLock.release(id: job.id, name: job.name)
         return result
+    }
+}
+
+/// Adapter delivering index run lifecycle events onto the server's durable run
+/// log and live WebSocket hub.
+///
+/// A run's start event is appended as a `running` row and broadcast as
+/// `run_started`; its completion event updates that same row and broadcasts
+/// `run_completed`. Both events carry the coordinator's per-run session
+/// identifier, so index runs are filterable in run history exactly like
+/// scheduler turns.
+public struct ServerIndexRunReporter: IndexRunReporting {
+    /// Kind tag applied to index run log rows.
+    public static let kind = "index"
+
+    /// Durable run audit trail.
+    private let runs: RunLogStore
+    /// Live sockets receiving run broadcasts.
+    private let hub: WSHub
+
+    /// Creates a reporter.
+    /// - Parameters:
+    ///   - runs: Run audit trail to persist into.
+    ///   - hub: Socket hub to broadcast through.
+    public init(runs: RunLogStore, hub: WSHub) {
+        self.runs = runs
+        self.hub = hub
+    }
+
+    /// Persists and broadcasts a run start.
+    /// - Parameter event: The start event.
+    public func runStarted(_ event: IndexRunEvent) async {
+        let entry = RunLogEntry(
+            id: event.id,
+            sessionID: event.sessionID,
+            kind: Self.kind,
+            status: event.status.rawValue,
+            message: event.message,
+            timestamp: event.timestamp,
+            response: event.response,
+            durationMs: event.durationMs
+        )
+        await runs.append(entry)
+        await hub.broadcastRun(entry)
+    }
+
+    /// Persists and broadcasts a run completion.
+    ///
+    /// Falls back to appending the completed entry when the start row is not
+    /// present, so a completion never disappears because its start was pruned.
+    /// - Parameter event: The completion event.
+    public func runCompleted(_ event: IndexRunEvent) async {
+        if let updated = await runs.update(
+            id: event.id,
+            status: event.status.rawValue,
+            response: event.response,
+            durationMs: event.durationMs
+        ) {
+            await hub.broadcastRun(updated)
+            return
+        }
+        let entry = RunLogEntry(
+            id: event.id,
+            sessionID: event.sessionID,
+            kind: Self.kind,
+            status: event.status.rawValue,
+            message: event.message,
+            timestamp: event.timestamp,
+            response: event.response,
+            durationMs: event.durationMs
+        )
+        await runs.append(entry)
+        await hub.broadcastRun(entry)
     }
 }

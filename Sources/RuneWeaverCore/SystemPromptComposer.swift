@@ -441,6 +441,14 @@ public enum SystemPromptComposer {
                 + "Call recall_memories before answering from history without inventing; "
                 + "call remember_fact unprompted for durable facts."
         )
+        // Prompt-level index-freshness guardrail: the durable document index is
+        // rebuilt nightly, so freshness-sensitive questions must reach live tools
+        // instead of trusting a possibly stale indexed answer.
+        lines.append(
+            "- The local document index is current as of last night. For today, this-morning, latest, unread, "
+                + "or just-arrived questions prefer live email.search and files.grep over indexed results; "
+                + "the \(LiveSearchGuidance.forceLiveFlagName) flag forces the live path."
+        )
         if supportsVision {
             lines.append(
                 "- browser.navigate screenshot opt-in: includeScreenshot defaults false; "
@@ -638,5 +646,70 @@ public enum SystemPromptComposer {
     /// Removes the screenshot opt-in from a navigate schema.
     public static func strippedNavigateSchema(_ schema: JSONSchema) -> JSONSchema {
         VisionSchemaFilter.strippedNavigateSchema(schema)
+    }
+}
+
+/// Freshness-sensitive retrieval policy for choosing live tools over the index.
+///
+/// The composed prompt steers the model toward live `email.search` and
+/// `files.grep` when a question depends on state the nightly document index may
+/// not hold yet; this type exposes the same rule in code so callers and tools
+/// classify those queries identically.
+public enum LiveSearchGuidance: Sendable {
+    /// Runtime flag name tools expose to force the live retrieval path.
+    public static let forceLiveFlagName = "forceLiveSearch"
+
+    /// Query terms that imply state the durable index may not hold yet.
+    public static let freshnessTerms = [
+        "today",
+        "this-morning",
+        "this morning",
+        "latest",
+        "unread",
+        "just-arrived",
+        "just arrived"
+    ]
+
+    /// Whether a query asks for state the durable index may not hold yet.
+    /// - Parameter query: Raw user query.
+    /// - Returns: True when live tools should be preferred over indexed recall.
+    public static func prefersLiveSearch(for query: String) -> Bool {
+        let lowered = query.lowercased()
+        return freshnessTerms.contains { lowered.contains($0) }
+    }
+}
+
+/// Actor-isolated runtime override that forces the live retrieval path.
+///
+/// Tools consult the shared instance before trusting indexed results, so an
+/// operator can force live email and file reads while the index is stale or
+/// mid-rebuild without changing the query text.
+public actor LiveSearchOverride {
+    /// Process-wide override shared by tools that consult the index.
+    public static let shared = LiveSearchOverride()
+
+    /// Whether callers must bypass the index for live tools.
+    private var forced = false
+
+    /// Creates an override in the released state.
+    public init() {}
+
+    /// Whether the live path is currently forced.
+    /// - Returns: True when the index is bypassed regardless of query wording.
+    public func isForced() -> Bool {
+        forced
+    }
+
+    /// Forces or releases the live path.
+    /// - Parameter value: True to force live retrieval; false to release it.
+    public func setForced(_ value: Bool) {
+        forced = value
+    }
+
+    /// Resolves live-path selection for one query under the current override.
+    /// - Parameter query: Raw user query.
+    /// - Returns: True when tools should use the live path instead of the index.
+    public func shouldUseLiveSearch(for query: String) -> Bool {
+        forced || LiveSearchGuidance.prefersLiveSearch(for: query)
     }
 }

@@ -264,6 +264,12 @@ public final class ServerContext: Sendable {
     public let sandboxCleanup: SandboxCleanupScheduler
     /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
     public let browserConfig: BrowserConfig
+    /// Local document index coordinator backing the `/index` routes, or nil when
+    /// indexing is not wired.
+    public let indexCoordinator: IndexCoordinator?
+    /// Local document index store backing status, prune, and reset, or nil when
+    /// indexing is not wired.
+    public let indexStore: DocIndexStore?
     /// Owner bearer verifier, or nil for the no-auth loopback posture.
     public let auth: ServerAuth?
     /// Shared Playwright gateway reused across browser live-reloads so a settings PUT
@@ -314,6 +320,8 @@ public final class ServerContext: Sendable {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
+        indexCoordinator: IndexCoordinator? = nil,
+        indexStore: DocIndexStore? = nil,
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -344,7 +352,8 @@ public final class ServerContext: Sendable {
             runLock: runLock,
             orchestrator: orchestrator,
             conversations: conversations,
-            toolBus: toolBus
+            toolBus: toolBus,
+            indexCoordinator: indexCoordinator
         )
         let defaultDBPath = (MemoryConfig.defaultEpisodesDBPath as NSString).expandingTildeInPath
         let pStore = pluginStore ?? ToolRegistryStore(dbPath: defaultDBPath)
@@ -354,6 +363,8 @@ public final class ServerContext: Sendable {
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
+        self.indexCoordinator = indexCoordinator
+        self.indexStore = indexStore
         self.auth = auth
         self.browserGateway = browserGateway
         self.searchTransport = searchTransport
@@ -399,6 +410,8 @@ public final class ServerContext: Sendable {
         onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
+        indexCoordinator: IndexCoordinator? = nil,
+        indexStore: DocIndexStore? = nil,
         llmServerURLs: [String] = [],
         engineConfig: EngineConfig = EngineConfig(),
         emailConfig: EmailConfig? = nil,
@@ -472,7 +485,8 @@ public final class ServerContext: Sendable {
             orchestrator: orchestrator,
             conversations: conversations,
             toolBus: bus,
-            notifier: notifier
+            notifier: notifier,
+            indexCoordinator: indexCoordinator
         )
         let context = ServerContext(
             config: config,
@@ -495,6 +509,8 @@ public final class ServerContext: Sendable {
             toolStates: tStates,
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
+            indexCoordinator: indexCoordinator,
+            indexStore: indexStore,
             auth: auth,
             browserGateway: browserGateway,
             searchTransport: searchTransport,
@@ -803,6 +819,7 @@ public func registerRuneWeaverRoutes(_ app: Application) {
     registerSearchRoutes(app)
     registerBrowserRoutes(app)
     registerSettingsRoutes(app)
+    registerIndexRoutes(app)
     registerWebSocketRoute(app)
     registerDashboardRoutes(app, bundle: dashboardBundle)
 }
@@ -835,48 +852,6 @@ private func registerAuthRotateRoute(_ app: Application, auth: ServerAuth) {
         response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store")
         return response
     }
-}
-
-/// Bounds an integer limit to the closed range `minLimit...maxLimit`.
-func clampLimit(_ raw: Int, min minLimit: Int, max maxLimit: Int) -> Int {
-    min(max(raw, minLimit), maxLimit)
-}
-
-/// Parses the raw `limit` query string strictly.
-func parsedRawQueryLimit(_ req: Request, min minLimit: Int, max maxLimit: Int) throws -> Int? {
-    guard let rawString = req.query[String.self, at: "limit"] else {
-        return nil
-    }
-    let trimmed = rawString.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let raw = Int(trimmed) else {
-        throw Abort(.badRequest, reason: "limit must be an integer between \(minLimit) and \(maxLimit)")
-    }
-    guard raw >= minLimit, raw <= maxLimit else {
-        throw Abort(.badRequest, reason: "limit must be between \(minLimit) and \(maxLimit)")
-    }
-    return clampLimit(raw, min: minLimit, max: maxLimit)
-}
-
-/// Extracts, parses, and validates a query `limit` parameter with a fallback default.
-func parseQueryLimit(
-    _ req: Request,
-    default defaultLimit: Int,
-    min minLimit: Int = 1,
-    max maxLimit: Int
-) throws -> Int {
-    if let value = try parsedRawQueryLimit(req, min: minLimit, max: maxLimit) {
-        return value
-    }
-    return defaultLimit
-}
-
-/// Extracts, parses, and validates an optional query `limit` parameter.
-func parseQueryLimit(
-    _ req: Request,
-    min minLimit: Int = 1,
-    max maxLimit: Int
-) throws -> Int? {
-    try parsedRawQueryLimit(req, min: minLimit, max: maxLimit)
 }
 
 /// Registers the health probe route.

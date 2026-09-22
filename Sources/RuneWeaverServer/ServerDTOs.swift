@@ -1045,6 +1045,8 @@ public struct SettingsResponse: Content, Equatable {
     public let pluginsMarketplaceIndexURL: String
     public let pluginsAutoRescan: Bool
     public let media: MediaConfig
+    /// Local background indexer policy.
+    public let index: IndexConfig
     public let configPath: String
 
     public init(config: RuneWeaverConfig, configPath: String) {
@@ -1080,6 +1082,7 @@ public struct SettingsResponse: Content, Equatable {
         self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
         self.pluginsAutoRescan = config.plugins.autoRescan
         self.media = config.media
+        self.index = config.index
         self.configPath = configPath
     }
 }
@@ -1120,6 +1123,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let pluginsMarketplaceIndexURL: String?
     public let pluginsAutoRescan: Bool?
     public let media: MediaSettingsUpdate?
+    /// Partial local index patch; a nil patch preserves the stored `[index]` section.
+    public let index: IndexSettingsUpdate?
 
     public init(
         engineName: String? = nil,
@@ -1153,7 +1158,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
         pluginsDir: String? = nil,
         pluginsMarketplaceIndexURL: String? = nil,
         pluginsAutoRescan: Bool? = nil,
-        media: MediaSettingsUpdate? = nil
+        media: MediaSettingsUpdate? = nil,
+        index: IndexSettingsUpdate? = nil
     ) {
         self.engineName = engineName
         self.logLevel = logLevel
@@ -1187,6 +1193,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
         self.pluginsAutoRescan = pluginsAutoRescan
         self.media = media
+        self.index = index
     }
 
     /// Applies this update onto a loaded config, preserving every field
@@ -1203,6 +1210,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyEmail(to: &config.email)
         applyPlugins(to: &config.plugins)
         applyMedia(to: &config.media)
+        applyIndex(to: &config.index)
     }
 
     private func applyEngine(to engine: inout EngineConfig) throws {
@@ -1332,42 +1340,6 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let pluginsAutoRescan {
             plugins.autoRescan = pluginsAutoRescan
-        }
-    }
-
-    /// Merges a partial media patch onto the stored config, preserving every
-    /// field and every service the request omits. A nil patch or a nil side
-    /// is a no-op, so touching Sonarr never resets Radarr.
-    private func applyMedia(to media: inout MediaConfig) {
-        guard let update = self.media else { return }
-        if let sonarr = update.sonarr {
-            applyArr(sonarr, to: &media.sonarr)
-        }
-        if let radarr = update.radarr {
-            applyArr(radarr, to: &media.radarr)
-        }
-    }
-
-    /// Merges one Arr patch key-by-key; omitted keys keep their stored values
-    /// and stored secrets are never cleared by an absent key. Blank text reads
-    /// as absent (cleared to nil) so a dashboard-cleared field falls through to
-    /// server auto-detect instead of persisting as an empty override. Sonarr and
-    /// Radarr share this path so the two services cannot drift.
-    private func applyArr(_ update: ArrSettingsUpdate, to config: inout ArrInstanceConfig) {
-        if let enabled = update.enabled {
-            config.enabled = enabled
-        }
-        if let url = update.url {
-            config.url = NormalizedText.value(url)
-        }
-        if let apiKeyEnv = update.apiKeyEnv {
-            config.apiKeyEnv = NormalizedText.value(apiKeyEnv)
-        }
-        if let defaultQualityProfile = update.defaultQualityProfile {
-            config.defaultQualityProfile = NormalizedText.value(defaultQualityProfile)
-        }
-        if let defaultRootFolder = update.defaultRootFolder {
-            config.defaultRootFolder = NormalizedText.value(defaultRootFolder)
         }
     }
 }

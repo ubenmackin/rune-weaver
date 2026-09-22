@@ -3,8 +3,10 @@
 # MVP policy: silence non-critical style so the lint gate only fails on
 # real problems. Auto-fixable style (trailing commas, brace spacing) and
 # aspirational TODO tracking are disabled for now; length/complexity
-# budgets are raised to match the current codebase (largest file is
-# ~966 lines, longest line ~156 chars, hottest function complexity ~18).
+# budgets stay at 1000 lines per file and 350 lines per type body —
+# oversized stores/extractors/coordinators are split into focused helpers
+# instead of raising the gate (largest type body ~300 lines, longest line
+# ~156 chars, hottest function complexity ~18).
 # Tests are excluded from strict style rules: they favour readability
 # over production budgets.
 
@@ -27,7 +29,7 @@ line_length:
 
 file_length:
   warning: 1000
-  error: 1500
+  error: 1200
   ignore_comment_only_lines: true
 
 function_body_length:
@@ -36,7 +38,7 @@ function_body_length:
 
 type_body_length:
   warning: 350
-  error: 600
+  error: 450
 
 function_parameter_count:
   warning: 6
