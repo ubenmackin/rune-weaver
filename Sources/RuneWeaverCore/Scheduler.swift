@@ -701,6 +701,11 @@ public struct SchedulerRunResult: Sendable, Equatable {
     public let startedAt: Date
     /// When the attempt finished.
     public let finishedAt: Date
+    /// Goal this run advanced, when the turn was a goal fire rather than a job
+    /// fire. Skipped goal fires carry a fresh placeholder `sessionID` plus this
+    /// link, so consumers joining `sessionID` to `sessions` never meet a goal
+    /// identifier masquerading as a session.
+    public let goalID: UUID?
 
     /// Creates a run result.
     public init(
@@ -712,7 +717,8 @@ public struct SchedulerRunResult: Sendable, Equatable {
         errorMessage: String? = nil,
         fireReason: SchedulerFireReason? = nil,
         startedAt: Date = Date(),
-        finishedAt: Date = Date()
+        finishedAt: Date = Date(),
+        goalID: UUID? = nil
     ) {
         self.jobName = jobName
         self.sessionID = sessionID
@@ -723,6 +729,7 @@ public struct SchedulerRunResult: Sendable, Equatable {
         self.fireReason = fireReason
         self.startedAt = startedAt
         self.finishedAt = finishedAt
+        self.goalID = goalID
     }
 
     /// Whether the run was skipped without executing.

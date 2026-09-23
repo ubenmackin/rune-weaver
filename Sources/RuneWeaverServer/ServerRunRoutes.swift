@@ -20,7 +20,13 @@ func registerRunRoutes(_ app: Application) {
             .flatMap { UUID(uuidString: $0) }
             ?? req.query[String.self, at: "sessionId"].flatMap { UUID(uuidString: $0) }
             ?? req.query[String.self, at: "session_id"].flatMap { UUID(uuidString: $0) }
-        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID, sessionID: sessionID)
+        // Goal filters accept the same camelCase plus snake_case spellings as
+        // sessions so dashboards can scope run history to one tracked goal.
+        let goalID = req.query[String.self, at: "goalID"]
+            .flatMap { UUID(uuidString: $0) }
+            ?? req.query[String.self, at: "goalId"].flatMap { UUID(uuidString: $0) }
+            ?? req.query[String.self, at: "goal_id"].flatMap { UUID(uuidString: $0) }
+        let entries = await req.application.runeWeaver.runs.list(limit: limit, jobID: jobID, sessionID: sessionID, goalID: goalID)
         return RunLogsResponse(runs: entries)
     }
     app.get(PathComponent.constant(ServerPaths.runs), PathComponent.parameter("id")) { req async throws -> RunLogEntry in

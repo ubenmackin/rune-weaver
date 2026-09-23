@@ -281,6 +281,22 @@ api_key_env = "RADARR_API_KEY"
 # default_quality_profile = "HD-1080p"
 # default_root_folder = "/data/media/movies"
 
+[goals]
+# Steady long-horizon pursuit. Off by default so a fresh install never spends
+# planning calls or scheduler turns until you opt in. Goals advance on
+# `step_interval_minutes` cadence via the service worker and the CLI
+# foreground loop; creation links the chat session so the dashboard can badge it.
+enabled = false
+# Cadence hint in minutes stored on each new goal (5-20160).
+step_interval_minutes = 1440
+# Maximum goals in the active state at once (1-50, bounds scheduler fan-out).
+max_active_goals = 10
+# Maximum steps in one decomposed plan (1-24, bounds planning context).
+max_steps_per_goal = 12
+# Seconds the planner waits on the model before the resilient single-step
+# fallback keeps the goal (must stay positive).
+plan_timeout_seconds = 60
+
 [security]
 # Harness-level defense policy for external content. Both keys default ON;
 # an absent [security] section loads hardened so existing files need no

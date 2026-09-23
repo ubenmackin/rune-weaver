@@ -28,6 +28,7 @@ extension RuneWeaverConfig {
         try validateMediaSection()
         try validateDesktopSection()
         try validateSecuritySection()
+        try validateGoalsSection()
     }
 
     private func validateEngineSection() throws {
@@ -572,6 +573,66 @@ extension RuneWeaverConfig {
     /// nothing to reject: the method exists so the section joins the same
     /// validate-every-section contract as all prior sections.
     private func validateSecuritySection() throws {}
+
+    /// Validates the `[goals]` section.
+    ///
+    /// Bounds keep steady pursuit steady: a sub-five-minute cadence would
+    /// busy-loop the scheduler, a multi-week cadence reads as abandoned, and
+    /// unbounded active goals or plan lengths would crowd execution context.
+    /// The planning timeout only needs to stay positive here; the engine
+    /// clamps it again at use so an unvalidated path never waits forever.
+    private func validateGoalsSection() throws {
+        if goals.stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
+            || goals.stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
+        {
+            throw ConfigError.validationError(
+                field: "goals.step_interval_minutes",
+                message: "must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(goals.stepIntervalMinutes))"
+            )
+        }
+        if goals.maxActiveGoals < GoalsConfig.minActiveGoalsBound
+            || goals.maxActiveGoals > GoalsConfig.maxActiveGoalsBound
+        {
+            throw ConfigError.validationError(
+                field: "goals.max_active_goals",
+                message: "must be between \(GoalsConfig.minActiveGoalsBound) and \(GoalsConfig.maxActiveGoalsBound) (got \(goals.maxActiveGoals))"
+            )
+        }
+        if goals.maxStepsPerGoal < GoalsConfig.minStepsPerGoalBound
+            || goals.maxStepsPerGoal > GoalsConfig.maxStepsPerGoalBound
+        {
+            throw ConfigError.validationError(
+                field: "goals.max_steps_per_goal",
+                message: "must be between \(GoalsConfig.minStepsPerGoalBound) and \(GoalsConfig.maxStepsPerGoalBound) (got \(goals.maxStepsPerGoal))"
+            )
+        }
+        if goals.planTimeoutSeconds < 1 {
+            throw ConfigError.validationError(
+                field: "goals.plan_timeout_seconds",
+                message: "must be positive (got \(goals.planTimeoutSeconds))"
+            )
+        }
+    }
+}
+
+/// Bounds enforcement for goal pursuit when the config bypasses load-time validation.
+///
+/// Load-time validation above fails closed; this clamps instead so live
+/// engine paths constructed from hand-built configs degrade to the nearest
+/// sane bound rather than refusing to run. Both share the same range
+/// constants so the two postures cannot drift.
+public extension GoalsConfig {
+    /// Returns a copy clamped into the validated ranges.
+    /// - Returns: Config with interval, caps, and timeout pulled inside bounds.
+    func clamped() -> GoalsConfig {
+        GoalsConfig(
+            enabled: enabled,
+            stepIntervalMinutes: min(max(stepIntervalMinutes, Self.minStepIntervalMinutes), Self.maxStepIntervalMinutes),
+            maxActiveGoals: min(max(maxActiveGoals, Self.minActiveGoalsBound), Self.maxActiveGoalsBound),
+            maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
+            planTimeoutSeconds: max(1, planTimeoutSeconds)
+        )
+    }
 }
 
 // swiftformat:enable extensionAccessControl

@@ -122,6 +122,8 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
         case messages
         /// Graduated-trust grants.
         case trustGrants
+        /// Execution audit log shared by chat turns, scheduler runs, and goal advancements.
+        case runLogs
 
         /// Fixed `PRAGMA` statement for the table.
         package var pragmaSQL: String {
@@ -129,11 +131,19 @@ func extractiveSummary(lines: [String], truncationLength: Int) -> String {
             case .sessions: "PRAGMA table_info(sessions);"
             case .messages: "PRAGMA table_info(messages);"
             case .trustGrants: "PRAGMA table_info(trust_grants);"
+            case .runLogs: "PRAGMA table_info(run_logs);"
             }
         }
     }
 
     /// Shared SQLite primitives for the episode, session, scheduler, and run-log stores.
+    ///
+    /// `openHandle` is the single open path on this type: it creates parent
+    /// directories and applies the shared busy-timeout/WAL policy, mapping
+    /// failures through the caller's error factory. There is no `openLogged`
+    /// helper here — the log-on-open fallback some server stores use lives
+    /// separately as `SQLiteOpenHelper.openLogged` in the server layer, which
+    /// wraps this handle opener with one consistent log line.
     package enum SQLiteHelpers {
         /// Opens a database handle, creating parent directories.
         package static func openHandle(dbPath: String, unavailable: (String) -> some Error) throws -> OpaquePointer? {

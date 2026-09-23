@@ -19,13 +19,54 @@ public struct UserInput: Sendable, Codable, Equatable {
     public let source: String
     /// Optional turn-specific system prompt override.
     public let systemPrompt: String?
+    /// Goal this turn's session works toward, when the caller tags one.
+    /// The orchestrator stamps the session link on creation; untagged chat
+    /// turns carry nil and never disturb an existing link.
+    public let goalID: UUID?
+
+    /// Coding keys matching the persisted and wire shape, with the goal tag on
+    /// the shared `goalId` spelling plus a tolerant legacy fallback.
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case sessionID
+        case source
+        case systemPrompt
+        case goalID = "goalId"
+        case goalIDLegacy = "goalID"
+    }
 
     /// Creates user input.
-    public init(text: String, sessionID: UUID = UUID(), source: String = "text", systemPrompt: String? = nil) {
+    public init(text: String, sessionID: UUID = UUID(), source: String = "text", systemPrompt: String? = nil, goalID: UUID? = nil) {
         self.text = text
         self.sessionID = sessionID
         self.source = source
         self.systemPrompt = systemPrompt
+        self.goalID = goalID
+    }
+
+    /// Decodes user input, defaulting a missing goal tag to untagged so inputs
+    /// encoded before goal linkage still decode.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.text = try container.decode(String.self, forKey: .text)
+        self.sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.systemPrompt = try container.decodeIfPresent(String.self, forKey: .systemPrompt)
+        self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
+            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
+    }
+
+    /// Encodes user input, omitting an absent goal tag so older decoders see
+    /// no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(text, forKey: .text)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(source, forKey: .source)
+        try container.encodeIfPresent(systemPrompt, forKey: .systemPrompt)
+        try container.encodeIfPresent(goalID, forKey: .goalID)
     }
 }
 

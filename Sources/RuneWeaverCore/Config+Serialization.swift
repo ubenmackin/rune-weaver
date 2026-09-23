@@ -52,6 +52,7 @@ extension RuneWeaverConfig {
         lines += renderMediaTOML()
         lines += renderDesktopTOML()
         lines += renderSecurityTOML()
+        lines += renderGoalsTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -367,6 +368,23 @@ extension RuneWeaverConfig {
             "[security]",
             "untrusted_labeling = \(security.untrustedLabeling ? "true" : "false")",
             "email_credential_filter = \(security.emailCredentialFilter ? "true" : "false")",
+            ""
+        ]
+    }
+
+    /// Renders the additive `[goals]` section.
+    ///
+    /// Every key renders, including the opt-in default, so a saved file
+    /// documents the pursuit policy and a round-trip never depends on an
+    /// implicit default silently diverging from what was written.
+    private func renderGoalsTOML() -> [String] {
+        [
+            "[goals]",
+            "enabled = \(goals.enabled ? "true" : "false")",
+            "step_interval_minutes = \(goals.stepIntervalMinutes)",
+            "max_active_goals = \(goals.maxActiveGoals)",
+            "max_steps_per_goal = \(goals.maxStepsPerGoal)",
+            "plan_timeout_seconds = \(goals.planTimeoutSeconds)",
             ""
         ]
     }

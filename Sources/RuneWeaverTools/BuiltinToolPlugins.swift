@@ -1,11 +1,14 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
-// Single-sources the full built-in suite (Email, Files, Memory, Web, Browser,
+// Single-sources the full built-in suite (Email, Files, Memory, Goals, Web, Browser,
 // API, Media) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
 // under one `[browser]` policy; `api.request` additionally exempts the
-// configured LLM origins from the SSRF loopback deny.
+// configured LLM origins from the SSRF loopback deny. Goal tools register only
+// when both the engine and store arrive (nil means unregistered); a disabled
+// `[goals]` section still registers and fails closed inside each tool so the
+// surface stays visible instead of shape-shifting.
 
 import RuneWeaverCore
 
@@ -17,9 +20,9 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, files, memory, web, browser, api, media, desktop).
+    /// (email, files, memory, goals, web, browser, api, media, desktop).
     public static var allToolNames: [String] {
-        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + toolNames + MediaTools.toolNames + DesktopTools.allToolNames
+        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + GoalTools.toolNames + toolNames + MediaTools.toolNames + DesktopTools.allToolNames
     }
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -73,8 +76,13 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Files, Memory, Web, Browser, API, Media, Desktop)
+    /// Builds the full built-in tool suite (Email, Files, Memory, Goals, Web, Browser, API, Media, Desktop)
     /// from component configurations.
+    ///
+    /// Goal tools join only when both the engine and store arrive; nil keeps them
+    /// unregistered so callers without pursuit wiring see no shape change. A disabled
+    /// `[goals]` section still registers through the same path and fails closed inside
+    /// each tool, keeping `GET /tools` stable instead of shape-shifting with config.
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -95,7 +103,11 @@ public enum BuiltinToolPlugins {
         mediaSecrets: SecretsManager? = nil,
         secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
-        desktopControlBridge: (any DesktopControlling)? = nil
+        desktopControlBridge: (any DesktopControlling)? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalStore: GoalStore? = nil,
+        goalConversations: ConversationManager? = nil,
+        goalsConfig: GoalsConfig = GoalsConfig()
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -111,6 +123,14 @@ public enum BuiltinToolPlugins {
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
+        }
+        if let goalEngine, let goalStore {
+            tools += GoalTools.makeTools(
+                engine: goalEngine,
+                store: goalStore,
+                conversations: goalConversations,
+                goalsConfig: goalsConfig
+            )
         }
         tools += makeTools(
             browserConfig: browserConfig,
@@ -146,7 +166,10 @@ public enum BuiltinToolPlugins {
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
         mediaSecrets: SecretsManager? = nil,
-        secrets: SecretsManager? = nil
+        secrets: SecretsManager? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalStore: GoalStore? = nil,
+        goalConversations: ConversationManager? = nil
     ) -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return makeAllTools(
@@ -167,7 +190,11 @@ public enum BuiltinToolPlugins {
             mediaTransport: mediaTransport,
             ensurer: ensurer,
             mediaSecrets: mediaSecrets,
-            secrets: secrets
+            secrets: secrets,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: goalConversations,
+            goalsConfig: config.goals
         )
     }
 
@@ -178,7 +205,9 @@ public enum BuiltinToolPlugins {
     /// Desktop tools always register but arrive disabled: persisted
     /// tool-state rows re-apply via `restoreToolStates`, so a stock install
     /// never puts approval-free screen capture in front of the model at boot
-    /// until the operator enables the tool-state toggle.
+    /// until the operator enables the tool-state toggle. Goal tools register only
+    /// when both the engine and store arrive, and they arrive enabled even when
+    /// `[goals]` is off so the honest disabled copy (not a bus-disabled line) answers.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
@@ -200,7 +229,11 @@ public enum BuiltinToolPlugins {
         mediaSecrets: SecretsManager? = nil,
         secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
-        desktopControlBridge: (any DesktopControlling)? = nil
+        desktopControlBridge: (any DesktopControlling)? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalStore: GoalStore? = nil,
+        goalConversations: ConversationManager? = nil,
+        goalsConfig: GoalsConfig = GoalsConfig()
     ) async {
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in makeAllTools(
@@ -223,7 +256,11 @@ public enum BuiltinToolPlugins {
             mediaSecrets: mediaSecrets,
             secrets: secrets,
             desktopCaptureBridge: desktopCaptureBridge,
-            desktopControlBridge: desktopControlBridge
+            desktopControlBridge: desktopControlBridge,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: goalConversations,
+            goalsConfig: goalsConfig
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // desktop tools ship disabled so only an operator-enabled tool

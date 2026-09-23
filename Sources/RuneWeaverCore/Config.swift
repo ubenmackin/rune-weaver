@@ -1113,6 +1113,100 @@ extension SecurityConfig: Codable {
     }
 }
 
+// MARK: - Long-horizon goal pursuit
+
+/// `[goals]` — steady pursuit of long-horizon goals.
+///
+/// Goals stay opt-in so a fresh install never schedules background
+/// advancement or spends planning calls until the owner enables them.
+/// `stepIntervalMinutes` is the cadence hint stored on each new goal and
+/// reused when the engine bumps `next_due_at` after a run; the remaining
+/// caps bound how many goals stay active at once, how long a decomposed
+/// plan may grow, and how long planning may wait on the model before the
+/// resilient fallback keeps the goal.
+public struct GoalsConfig: Sendable, Equatable {
+    /// Whether goal creation and advancement run at all. Off by default.
+    public var enabled: Bool
+    /// Cadence hint in minutes stored on each new goal. Defaults to daily.
+    public var stepIntervalMinutes: Int
+    /// Maximum goals in the active state at once. Bounds scheduler fan-out.
+    public var maxActiveGoals: Int
+    /// Maximum steps in one decomposed plan. Bounds planning context.
+    public var maxStepsPerGoal: Int
+    /// Seconds the planner waits on the model before falling back.
+    public var planTimeoutSeconds: Int
+
+    /// Default keeps goals off so stock installs stay quiet.
+    public static let defaultEnabled = false
+    /// Default cadence is daily, matching the scheduler's overnight rhythm.
+    public static let defaultStepIntervalMinutes = 1440
+    /// Default active-goal cap keeps the due scan small.
+    public static let defaultMaxActiveGoals = 10
+    /// Default plan length fits one screen of numbered steps.
+    public static let defaultMaxStepsPerGoal = 12
+    /// Default planning budget waits out slow local models without stalling creation.
+    public static let defaultPlanTimeoutSeconds = 60
+    /// Smallest cadence that still counts as steady rather than busy-looping.
+    public static let minStepIntervalMinutes = 5
+    /// Largest cadence before a goal reads as abandoned rather than paced.
+    public static let maxStepIntervalMinutes = 20160
+    /// Fewest active goals worth configuring.
+    public static let minActiveGoalsBound = 1
+    /// Most active goals before due advancement fans out unbounded.
+    public static let maxActiveGoalsBound = 50
+    /// Shortest plan worth decomposing.
+    public static let minStepsPerGoalBound = 1
+    /// Longest plan before the prompt crowds out execution context.
+    public static let maxStepsPerGoalBound = 24
+
+    /// Creates a goals config.
+    public init(
+        enabled: Bool = defaultEnabled,
+        stepIntervalMinutes: Int = defaultStepIntervalMinutes,
+        maxActiveGoals: Int = defaultMaxActiveGoals,
+        maxStepsPerGoal: Int = defaultMaxStepsPerGoal,
+        planTimeoutSeconds: Int = defaultPlanTimeoutSeconds
+    ) {
+        self.enabled = enabled
+        self.stepIntervalMinutes = stepIntervalMinutes
+        self.maxActiveGoals = maxActiveGoals
+        self.maxStepsPerGoal = maxStepsPerGoal
+        self.planTimeoutSeconds = planTimeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case stepIntervalMinutes = "step_interval_minutes"
+        case maxActiveGoals = "max_active_goals"
+        case maxStepsPerGoal = "max_steps_per_goal"
+        case planTimeoutSeconds = "plan_timeout_seconds"
+    }
+}
+
+extension GoalsConfig: Codable {
+    /// Decodes a goals config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? Self.defaultEnabled
+        stepIntervalMinutes = try container.decodeIfPresent(Int.self, forKey: .stepIntervalMinutes) ?? Self.defaultStepIntervalMinutes
+        maxActiveGoals = try container.decodeIfPresent(Int.self, forKey: .maxActiveGoals) ?? Self.defaultMaxActiveGoals
+        maxStepsPerGoal = try container.decodeIfPresent(Int.self, forKey: .maxStepsPerGoal) ?? Self.defaultMaxStepsPerGoal
+        planTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .planTimeoutSeconds) ?? Self.defaultPlanTimeoutSeconds
+    }
+
+    /// Encodes a goals config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(stepIntervalMinutes, forKey: .stepIntervalMinutes)
+        try container.encode(maxActiveGoals, forKey: .maxActiveGoals)
+        try container.encode(maxStepsPerGoal, forKey: .maxStepsPerGoal)
+        try container.encode(planTimeoutSeconds, forKey: .planTimeoutSeconds)
+    }
+}
+
 // MARK: - Root config
 
 /// Root configuration mirroring `~/.runeweaver/config.toml`.
@@ -1151,6 +1245,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var desktop = DesktopConfig()
     /// Harness-level defense policy for external content.
     public var security = SecurityConfig()
+    /// Steady pursuit of long-horizon goals. Off by default.
+    public var goals = GoalsConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1170,7 +1266,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         media: MediaConfig = MediaConfig(),
         index: IndexConfig = IndexConfig(),
         desktop: DesktopConfig = DesktopConfig(),
-        security: SecurityConfig = SecurityConfig()
+        security: SecurityConfig = SecurityConfig(),
+        goals: GoalsConfig = GoalsConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1189,6 +1286,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.index = index
         self.desktop = desktop
         self.security = security
+        self.goals = goals
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1280,16 +1378,18 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case index
         case desktop
         case security
+        case goals
     }
 
-    /// Decodes a persisted config, defaulting an absent `[security]` section.
+    /// Decodes a persisted config, defaulting absent additive sections.
     ///
     /// TOML loading early-returns hardened when the section is missing, so JSON
-    /// must match: payloads written before the defense policy existed decode
-    /// with both keys on instead of throwing. Present-but-wrong-typed values
-    /// still throw like every prior section. Only the security section is
-    /// absent-tolerant; every other section decodes strictly so a truncated
-    /// payload cannot silently load as hardened defaults.
+    /// must match: payloads written before the defense policy or goal pursuit
+    /// existed decode with hardened and disabled defaults instead of throwing.
+    /// Present-but-wrong-typed values still throw like every prior section.
+    /// Only the security and goals sections are absent-tolerant; every other
+    /// section decodes strictly so a truncated payload cannot silently load
+    /// as hardened defaults.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1310,9 +1410,10 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.index = try container.decode(IndexConfig.self, forKey: .index)
         self.desktop = try container.decode(DesktopConfig.self, forKey: .desktop)
         self.security = try container.decodeIfPresent(SecurityConfig.self, forKey: .security) ?? SecurityConfig()
+        self.goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
     }
 
-    /// Encodes every section, including the defense policy.
+    /// Encodes every section, including the defense policy and goal pursuit.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1333,6 +1434,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(index, forKey: .index)
         try container.encode(desktop, forKey: .desktop)
         try container.encode(security, forKey: .security)
+        try container.encode(goals, forKey: .goals)
     }
 }
 

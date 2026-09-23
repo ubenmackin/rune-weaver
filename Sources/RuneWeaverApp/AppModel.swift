@@ -100,44 +100,6 @@ public final class AppModel {
         }
     }
 
-    /// Builds the permission gate and served prompt from the live registry so served turns see
-    /// every registered tool including discovered runes.
-    private func buildGateAndSystemPrompt(
-        plugins: [any Tool],
-        config: RuneWeaverConfig
-    ) async -> (PermissionGate, String) {
-        let episodesDB = (config.memory.episodesDBPath as NSString).expandingTildeInPath
-        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
-        let permissionGate = await PermissionGate.load(
-            store: trustStore,
-            pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
-        )
-        await permissionGate.startPeriodicCleanup()
-        let previewBus = ToolBus(permissionGate: permissionGate)
-        let desktopNames = Set(DesktopTools.allToolNames)
-        for tool in plugins {
-            // Mirror the served boot path: desktop tools ship disabled so the
-            // startup prompt never advertises capture the model cannot call.
-            await previewBus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
-        }
-        let previewPluginsURL = URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
-        let previewStore = ToolRegistryStore(dbPath: (config.memory.episodesDBPath as NSString).expandingTildeInPath)
-        let previewDiscovery = PluginDiscoveryService(pluginsDirectory: previewPluginsURL, store: previewStore)
-        await previewDiscovery.discoverAndSync(toolBus: previewBus)
-        // Same reconcile as the live bus: stored toggles decide, so the
-        // prompt matches what is runnable.
-        let stored = await ToolStateStore(dbPath: episodesDB).loadAll()
-        for (name, enabled) in stored {
-            if enabled {
-                await previewBus.enableTool(named: name)
-            } else {
-                await previewBus.disableTool(named: name)
-            }
-        }
-        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: nil, toolBus: previewBus)
-        return (permissionGate, effectiveSystemPrompt)
-    }
-
     /// Preconditions a snapshot of the published bind values against the
     /// resolved owner-auth posture.
     ///
@@ -306,92 +268,12 @@ public final class AppModel {
                 authConfigured: auth != nil
             ) else { return }
 
-            let secrets = SecretsManager()
-            let keysByEntry = await resolveBootAPIKeys(config: config, secrets: secrets)
+            let pipeline = await buildBootPipeline(config: config, bindConfig: bindConfig, auth: auth)
+            self.providerName = pipeline.selectedProvider.name
+            bootGate = pipeline.permissionGate
 
-            let providers = LLMProviderFactory.makeProviders(from: config.llm, apiKeysByEntry: keysByEntry)
-            let selectedProvider = selectBootProvider(config: config, providers: providers)
-
-            self.providerName = selectedProvider.name
-
-            let memoryEngine = makeBootMemoryEngine(config: config)
-            let conversations = await loadBootConversations(config: config)
-
-            let embedder = makeBootEmbedder(config: config, providers: providers)
-
-            // Build the document index pipeline once so served recall, the nightly
-            // trigger, and the `/index` routes share one store and coordinator; nil
-            // when disabled keeps routes failing closed and recall unchanged.
-            let indexComponents = ServerIndexBoot.makeComponents(
-                config: config,
-                embedder: embedder,
-                visionLLM: selectedProvider
-            )
-
-            // Keep the menu-bar registry identical to the serve command's shared
-            // plugin set so served turns see the same tools as terminal use.
-            // The boot secrets instance backs both surrogate resolution and
-            // media credential lookups so per-tool fresh instances cannot
-            // diverge from the served context.
-            let plugins = BuiltinToolPlugins.makeAllTools(
-                config: config,
-                memoryEngine: memoryEngine,
-                embedder: embedder,
-                mediaSecrets: secrets,
-                secrets: secrets
-            )
-            let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
-
-            let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
-                plugins: plugins,
-                config: config
-            )
-            bootGate = permissionGate
-
-            let context = await ServerContext.make(
-                config: bindConfig,
-                conversations: conversations,
-                memoryEngine: memoryEngine,
-                embedder: embedder,
-                permissionGate: permissionGate,
-                llm: selectedProvider,
-                systemPrompt: effectiveSystemPrompt,
-                schedulerConfig: config.scheduler,
-                episodesDBPath: config.memory.episodesDBPath,
-                pluginConfig: config.plugins,
-                notifier: notificationManager,
-                onApprovalRequested: { [weak self] req in
-                    await self?.notificationManager.postApprovalNotification(req)
-                    await self?.refreshPendingApprovals()
-                },
-                sandboxConfig: config.sandbox,
-                browserConfig: config.browser,
-                indexCoordinator: indexComponents?.coordinator,
-                indexStore: indexComponents?.store,
-                llmServerURLs: appLLMOrigins,
-                engineConfig: config.engine,
-                emailConfig: config.email,
-                filesConfig: config.files,
-                mediaConfig: config.media,
-                desktopConfig: config.desktop,
-                securityConfig: config.security,
-                auth: auth,
-                mediaSecrets: secrets,
-                secrets: secrets
-            )
-
-            for tool in plugins {
-                // Preserve live enabled state across re-registration: a bare
-                // register would reset every tool to enabled, and desktop
-                // tools ship disabled — without this, a fresh install would
-                // flip them live between registration and the restore below.
-                let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-                await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-            }
-            // Registration resets no state now, but re-apply persisted
-            // toggles anyway; the cached load makes this a memory-only pass
-            // after the boot hydration in `make`.
-            await context.restoreToolStates(forceReload: false)
+            let context = await makeBootServerContext(pipeline: pipeline)
+            await registerBootTools(context: context, plugins: pipeline.plugins)
 
             self.serverContext = context
             // Seed the menu section from the live tool-state toggles;

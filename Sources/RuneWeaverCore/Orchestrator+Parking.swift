@@ -297,7 +297,7 @@ extension Orchestrator {
         let source = await conversations.session(id: parked.sessionID)?.source
         let supportsVision = llm.modelInfo.supportsVision
         let includeToolSchemas = !llm.modelInfo.supportsTools
-        if source == "scheduler" {
+        if Orchestrator.isBackgroundSource(source) {
             return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         }
         return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)

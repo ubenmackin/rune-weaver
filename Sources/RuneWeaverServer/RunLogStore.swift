@@ -11,7 +11,11 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     public let jobID: UUID?
     /// Owning chat session, when the run came from an interactive turn or a deterministic scheduler session.
     public let sessionID: UUID?
-    /// Run kind (`"chat"`, `"scheduler"`, or `"tool"`).
+    /// Linked goal identifier, when the run works toward a tracked goal.
+    /// Nil for untagged runs; persisted in the `run_logs.goal_id` column so
+    /// goal history stays queryable without joining against sessions.
+    public let goalID: UUID?
+    /// Run kind (`"chat"`, `"scheduler"`, `"goal"`, `"index"`, or `"tool"`).
     public let kind: String
     /// Outcome (`"ok"`, `"error"`, `"skipped"`, `"running"`, `"interrupted"`,
     /// `"cancelled"`, `"awaiting_approval"`, or `"denied"`).
@@ -29,7 +33,9 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
     /// Execution duration in milliseconds.
     public let durationMs: Int?
 
-    /// Coding keys matching the JSON wire shape.
+    /// Coding keys matching the JSON wire shape. The goal link rides the
+    /// shared `goalId` spelling; the legacy `goalID` spelling still decodes
+    /// so mixed-version payloads never fail.
     private enum CodingKeys: String, CodingKey {
         /// Stable entry identifier.
         case id
@@ -37,6 +43,10 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         case jobID
         /// Owning session, when tagged.
         case sessionID
+        /// Linked goal, when tagged.
+        case goalID = "goalId"
+        /// Legacy goal spelling, decode-only.
+        case goalIDLegacy = "goalID"
         /// Run kind.
         case kind
         /// Outcome status.
@@ -60,6 +70,7 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         id: UUID = UUID(),
         jobID: UUID? = nil,
         sessionID: UUID? = nil,
+        goalID: UUID? = nil,
         kind: String,
         status: String,
         message: String,
@@ -72,6 +83,7 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         self.id = id
         self.jobID = jobID
         self.sessionID = sessionID
+        self.goalID = goalID
         self.kind = kind
         self.status = status
         self.message = message
@@ -82,13 +94,15 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         self.durationMs = durationMs
     }
 
-    /// Decodes an entry, tolerating payloads written before session tagging.
+    /// Decodes an entry, tolerating payloads written before session or goal tagging.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
         self.jobID = try container.decodeIfPresent(UUID.self, forKey: .jobID)
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.goalID = try container.decodeIfPresent(UUID.self, forKey: .goalID)
+            ?? container.decodeIfPresent(UUID.self, forKey: .goalIDLegacy)
         self.kind = try container.decode(String.self, forKey: .kind)
         self.status = try container.decode(String.self, forKey: .status)
         self.message = try container.decode(String.self, forKey: .message)
@@ -99,13 +113,14 @@ public struct RunLogEntry: Sendable, Codable, Equatable, Identifiable {
         self.durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
     }
 
-    /// Encodes an entry, omitting the session tag when untagged.
+    /// Encodes an entry, omitting the session and goal tags when untagged.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
         try container.encodeIfPresent(jobID, forKey: .jobID)
         try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(goalID, forKey: .goalID)
         try container.encode(kind, forKey: .kind)
         try container.encode(status, forKey: .status)
         try container.encode(message, forKey: .message)
@@ -167,6 +182,7 @@ public actor RunLogStore {
                     id: loaded[index].id,
                     jobID: loaded[index].jobID,
                     sessionID: loaded[index].sessionID,
+                    goalID: loaded[index].goalID,
                     kind: loaded[index].kind,
                     status: "interrupted",
                     message: loaded[index].message,
@@ -193,6 +209,7 @@ public actor RunLogStore {
         message: String,
         jobID: UUID? = nil,
         sessionID: UUID? = nil,
+        goalID: UUID? = nil,
         response: String? = nil,
         toolActions: [ToolAction] = [],
         totalTokens: Int? = nil,
@@ -201,6 +218,7 @@ public actor RunLogStore {
         let entry = RunLogEntry(
             jobID: jobID,
             sessionID: sessionID,
+            goalID: goalID,
             kind: kind,
             status: status,
             message: Self.truncated(message),
@@ -219,6 +237,7 @@ public actor RunLogStore {
             id: entry.id,
             jobID: entry.jobID,
             sessionID: entry.sessionID,
+            goalID: entry.goalID,
             kind: entry.kind,
             status: entry.status,
             message: Self.truncated(entry.message),
@@ -265,6 +284,7 @@ public actor RunLogStore {
             id: existing.id,
             jobID: existing.jobID,
             sessionID: existing.sessionID,
+            goalID: existing.goalID,
             kind: existing.kind,
             status: status,
             message: existing.message,
@@ -329,6 +349,7 @@ public actor RunLogStore {
             id: entry.id,
             jobID: entry.jobID,
             sessionID: entry.sessionID,
+            goalID: entry.goalID,
             kind: entry.kind,
             status: entry.status,
             message: entry.message,
@@ -341,13 +362,16 @@ public actor RunLogStore {
     }
 
     /// Lists entries, newest first.
-    public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil) async -> [RunLogEntry] {
+    public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil, goalID: UUID? = nil) async -> [RunLogEntry] {
         guard limit > 0 else { return [] }
         let matching = entries.filter { entry in
             if let jobID, entry.jobID != jobID {
                 return false
             }
             if let sessionID, entry.sessionID != sessionID {
+                return false
+            }
+            if let goalID, entry.goalID != goalID {
                 return false
             }
             return true
@@ -440,6 +464,7 @@ enum SQLiteOpenHelper {
                     id TEXT PRIMARY KEY,
                     job_id TEXT,
                     session_id TEXT,
+                    goal_id TEXT,
                     kind TEXT NOT NULL,
                     status TEXT NOT NULL,
                     message TEXT NOT NULL,
@@ -474,6 +499,29 @@ enum SQLiteOpenHelper {
             } catch {
                 RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating session_id index: \(error.localizedDescription)")
             }
+            // Best-effort migration for databases created before goal linkage:
+            // the probe keeps replays a no-op and concurrent opens safe, while
+            // a failed ALTER only logs and the store keeps serving memory state.
+            if !SQLiteHelpers.columnNames(handle: handle, table: .runLogs).contains("goal_id") {
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: "ALTER TABLE run_logs ADD COLUMN goal_id TEXT;",
+                        failure: { RunLogError(message: $0) }
+                    )
+                } catch {
+                    RuneWeaverLog.stores.debug("SQLiteRunLogStore: goal_id column migration note: \(error.localizedDescription)")
+                }
+            }
+            do {
+                try SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: "CREATE INDEX IF NOT EXISTS idx_run_logs_goal_id ON run_logs(goal_id);",
+                    failure: { RunLogError(message: $0) }
+                )
+            } catch {
+                RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating goal_id index: \(error.localizedDescription)")
+            }
             return handle
         }
 
@@ -489,10 +537,17 @@ enum SQLiteOpenHelper {
             }
             defer { sqlite3_close(handle) }
 
+            // Databases whose goal-link migration has not landed carry no
+            // `goal_id` column; appending it only when present keeps the
+            // legacy indices stable and decodes absent links as nil.
+            let hasGoalID = SQLiteHelpers.columnNames(handle: handle, table: .runLogs).contains("goal_id")
+            let projection = hasGoalID
+                ? "id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms, goal_id"
+                : "id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms"
             let sql = """
-            SELECT id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
+            SELECT \(projection)
             FROM (
-                SELECT rowid, id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms
+                SELECT rowid, \(projection)
                 FROM run_logs
                 ORDER BY timestamp DESC, rowid DESC
                 LIMIT ?
@@ -532,11 +587,19 @@ enum SQLiteOpenHelper {
                 } ?? []
                 let totalTokens = SQLiteHelpers.columnInt64(statement, index: 9).map { Int($0) }
                 let durationMs = SQLiteHelpers.columnInt64(statement, index: 10).map { Int($0) }
+                // A missing column (pre-migration table) or malformed link text
+                // degrades to untagged so one bad row cannot fail the history load.
+                let goalID: UUID? = if hasGoalID {
+                    SQLiteHelpers.columnText(statement, index: 11).flatMap { UUID(uuidString: $0) }
+                } else {
+                    nil
+                }
 
                 loaded.append(RunLogEntry(
                     id: id,
                     jobID: jobID,
                     sessionID: sessionID,
+                    goalID: goalID,
                     kind: kind,
                     status: status,
                     message: message,
@@ -562,8 +625,9 @@ enum SQLiteOpenHelper {
             defer { sqlite3_close(handle) }
 
             let sql = """
-            INSERT OR REPLACE INTO run_logs(id, job_id, session_id, kind, status, message, timestamp, response, tool_actions, total_tokens, duration_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT OR REPLACE INTO run_logs(id, job_id, session_id, goal_id, kind, status, message,
+            timestamp, response, tool_actions, total_tokens, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
@@ -576,15 +640,16 @@ enum SQLiteOpenHelper {
             SQLiteHelpers.bindText(statement, index: 1, value: entry.id.uuidString)
             SQLiteHelpers.bindText(statement, index: 2, value: entry.jobID?.uuidString)
             SQLiteHelpers.bindText(statement, index: 3, value: entry.sessionID?.uuidString)
-            SQLiteHelpers.bindText(statement, index: 4, value: entry.kind)
-            SQLiteHelpers.bindText(statement, index: 5, value: entry.status)
-            SQLiteHelpers.bindText(statement, index: 6, value: entry.message)
-            SQLiteHelpers.bindDouble(statement, index: 7, value: entry.timestamp.timeIntervalSince1970)
-            SQLiteHelpers.bindText(statement, index: 8, value: entry.response)
+            SQLiteHelpers.bindText(statement, index: 4, value: entry.goalID?.uuidString)
+            SQLiteHelpers.bindText(statement, index: 5, value: entry.kind)
+            SQLiteHelpers.bindText(statement, index: 6, value: entry.status)
+            SQLiteHelpers.bindText(statement, index: 7, value: entry.message)
+            SQLiteHelpers.bindDouble(statement, index: 8, value: entry.timestamp.timeIntervalSince1970)
+            SQLiteHelpers.bindText(statement, index: 9, value: entry.response)
             let toolActionsJSON = (try? JSONEncoder().encode(entry.toolActions)).flatMap { String(data: $0, encoding: .utf8) }
-            SQLiteHelpers.bindText(statement, index: 9, value: toolActionsJSON)
-            SQLiteHelpers.bindInt64(statement, index: 10, value: entry.totalTokens.map { Int64($0) })
-            SQLiteHelpers.bindInt64(statement, index: 11, value: entry.durationMs.map { Int64($0) })
+            SQLiteHelpers.bindText(statement, index: 10, value: toolActionsJSON)
+            SQLiteHelpers.bindInt64(statement, index: 11, value: entry.totalTokens.map { Int64($0) })
+            SQLiteHelpers.bindInt64(statement, index: 12, value: entry.durationMs.map { Int64($0) })
 
             guard sqlite3_step(statement) == SQLITE_DONE else {
                 let code = sqlite3_errcode(handle)

@@ -135,15 +135,18 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         print(TerminalStyle.dim("Scheduler running \(schedulerJobs.count) job(s) every \(interval)s. Ctrl+C to stop."))
         var lastCheck = Date().addingTimeInterval(TimeInterval(-interval))
         if once {
-            let results = await engine.runAllDue(at: Date(), lastCheck: lastCheck)
+            let now = Date()
+            var results = await engine.runAllDue(at: now, lastCheck: lastCheck)
+            results += try await advanceDueGoals(now: now, runtime: runtime, goalsConfig: loaded.config.goals)
             await report(results: results, queue: approvalQueue)
             await permissionGate.stopPeriodicCleanup()
             return
         }
         while true {
             let now = Date()
-            let results = await engine.runAllDue(at: now, lastCheck: lastCheck)
+            var results = await engine.runAllDue(at: now, lastCheck: lastCheck)
             lastCheck = now
+            results += try await advanceDueGoals(now: now, runtime: runtime, goalsConfig: loaded.config.goals)
             await report(results: results, queue: approvalQueue)
             do {
                 try await Task.sleep(for: .seconds(interval))
@@ -165,7 +168,20 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         let approvalQueue: ApprovalQueue
         /// Trust gate owning the periodic cleanup reaper for this run.
         let permissionGate: PermissionGate
+        /// Durable goal registry backing headless due advancement.
+        let goalStore: GoalStore
+        /// Pursuit engine composing advancement prompts and bumping due dates.
+        let goalEngine: GoalEngine
+        /// Sessions owner for per-run goal sessions and chip linkage.
+        let conversations: ConversationManager
+        /// Headless goal turn runner: prompt plus fresh session plus goal link.
+        let goalTurnRunner: GoalHeadlessTurnRunner
     }
+
+    /// Headless goal turn runner shape: prompt, fresh session, goal link.
+    /// Returns the full turn outcome so parked approvals skip their due bump
+    /// exactly like the service worker instead of mis-recording as finished.
+    private typealias GoalHeadlessTurnRunner = @Sendable (String, UUID, UUID) async throws -> GoalAdvancementTurn
 
     /// Wires headless collaborators for the foreground loop.
     private static func makeHeadlessRuntime(
@@ -197,6 +213,12 @@ struct SchedulerRunCommand: AsyncParsableCommand {
         // One shared secrets instance per scheduler invocation so the headless
         // bus observes one fallback store instead of per-tool state.
         let sharedSecrets = SecretsManager()
+        // The headless bus carries the same goal stack the service advances so
+        // headless turns can create, read, and record goal progress instead of
+        // answering `invalid_tool`; a disabled `[goals]` section still
+        // registers and fails closed inside each tool.
+        let goalStore = GoalStore(dbPath: loaded.config.memory.episodesDBPath)
+        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals)
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
@@ -211,7 +233,11 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             llmConfig: loaded.config.llm,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
-            secrets: sharedSecrets
+            secrets: sharedSecrets,
+            goalsConfig: loaded.config.goals,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: conversations
         )
         let orchestrator = Orchestrator(
             conversations: conversations,
@@ -234,6 +260,24 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             ))
             return response.text
         }
+        // Goal advancement rides the same orchestrator but tags the goal link
+        // so the turn stamps the session linkage the dashboard chips resolve.
+        // The full outcome travels so a parked turn stays due instead of
+        // bumping like a finished one.
+        let goalTurnRunner: GoalHeadlessTurnRunner = { prompt, sessionID, goalID in
+            let response = try await orchestrator.process(input: UserInput(
+                text: prompt,
+                sessionID: sessionID,
+                source: "goal",
+                goalID: goalID
+            ))
+            return GoalAdvancementTurn(
+                text: response.text,
+                isParked: response.isParked,
+                toolActions: response.toolActions,
+                totalTokens: response.totalTokens
+            )
+        }
         let engine = SchedulerEngine(
             jobs: jobs,
             turnRunner: turnRunner,
@@ -243,7 +287,98 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             },
             notifier: MacOSSchedulerNotifier()
         )
-        return HeadlessRuntime(engine: engine, approvalQueue: approvalQueue, permissionGate: permissionGate)
+        return HeadlessRuntime(
+            engine: engine,
+            approvalQueue: approvalQueue,
+            permissionGate: permissionGate,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            conversations: conversations,
+            goalTurnRunner: goalTurnRunner
+        )
+    }
+
+    /// Advances due goals headless through the shared advancement runner.
+    ///
+    /// The CLI foreground loop is the second auto-fire runner alongside the
+    /// service, so it scans `next_due_at` on every tick just like the worker:
+    /// each due goal runs one advancement turn in a fresh goal-linked session,
+    /// then bumps its due date so the next firing keeps its rhythm. A disabled
+    /// `[goals]` section never spends turns even when stale rows linger. A
+    /// parked turn skips its bump until the inbox resume completes, mirroring
+    /// the service parked branch; the per-run session supplies the audit
+    /// correlation because the headless loop keeps no durable run log.
+    /// Cancelled turns stay due and rethrow instead of recording an error
+    /// result, so cooperative cancellation always propagates.
+    private func advanceDueGoals(now: Date, runtime: HeadlessRuntime, goalsConfig: GoalsConfig) async throws -> [SchedulerRunResult] {
+        guard goalsConfig.enabled, await runtime.goalEngine.isEnabled else { return [] }
+        let dueGoals: [Goal]
+        do {
+            dueGoals = try await runtime.goalStore.advanceDue(now: now)
+        } catch {
+            print(TerminalStyle.dim("Goals due scan failed: \(error.localizedDescription)"))
+            return []
+        }
+        var results: [SchedulerRunResult] = []
+        for goal in dueGoals {
+            let sessionID = UUID()
+            await runtime.conversations.ensureSession(
+                id: sessionID,
+                title: goal.title,
+                source: "goal",
+                overwrite: true,
+                goalID: goal.id
+            )
+            let startedAt = Date()
+            do {
+                let turnRunner = runtime.goalTurnRunner
+                let turnSessionID = sessionID
+                let turnGoalID = goal.id
+                let turnTitle = goal.title
+                let outcome = try await GoalAdvancementRunner.advance(
+                    goal: goal,
+                    store: runtime.goalStore,
+                    engine: runtime.goalEngine,
+                    runID: sessionID,
+                    turn: { prompt in
+                        try await turnRunner(prompt, turnSessionID, turnGoalID)
+                    },
+                    onPostAdvanceFailure: { error in
+                        print(TerminalStyle.dim("Goal '\(turnTitle)' post-advance failed: \(error.localizedDescription)"))
+                    }
+                )
+                if outcome.isParked {
+                    print(TerminalStyle.dim("Goal '\(goal.title)' parked awaiting approval."))
+                }
+                results.append(SchedulerRunResult(
+                    jobName: goal.title,
+                    sessionID: sessionID,
+                    fired: true,
+                    responseText: outcome.text,
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    goalID: goal.id
+                ))
+            } catch is CancellationError {
+                // Cancelled turns did not advance, so they stay due for the
+                // next tick instead of converting the cancel into an error
+                // result.
+                throw CancellationError()
+            } catch {
+                let detail = error.localizedDescription
+                cliPrintError(TerminalStyle.error("Goal '\(goal.title)' failed: \(detail)"))
+                results.append(SchedulerRunResult(
+                    jobName: goal.title,
+                    sessionID: sessionID,
+                    fired: true,
+                    errorMessage: detail,
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    goalID: goal.id
+                ))
+            }
+        }
+        return results
     }
 
     /// Reports one check batch: per-job outcomes plus pending approvals.

@@ -1,0 +1,146 @@
+// Rune Weaver Core — Shared goal advancement runner for service and CLI loops.
+//
+// Purpose: runs one due-goal advancement turn with the same bounded reads and
+// parked-aware due handling everywhere: a bounded audit tail feeds the prompt,
+// a parked turn skips its due bump until the inbox resume completes, and
+// terminal turns bump even on failure so one bad run never pins a goal due.
+// Cancelled turns never bump and stay due, propagating cancellation instead.
+// Scope: prompt composition plus turn execution plus due bookkeeping only;
+// sessions, run logs, locks, and user notifications stay with each caller.
+// Architectural role: the single advancement implementation behind the
+// service worker and the CLI foreground loop so the two runners cannot drift.
+
+import Foundation
+
+/// Outcome of one advancement turn, preserving the parked signal for due handling.
+public struct GoalAdvancementTurn: Sendable, Equatable {
+    /// Final assistant text for the turn.
+    public let text: String
+    /// Whether the turn parked awaiting approval instead of finishing.
+    public let isParked: Bool
+    /// Tool invocations performed while answering, for run audit rows.
+    public let toolActions: [ToolAction]
+    /// Session-billed tokens for the turn, when reported.
+    public let totalTokens: Int?
+
+    /// Creates a turn outcome.
+    public init(text: String, isParked: Bool, toolActions: [ToolAction] = [], totalTokens: Int? = nil) {
+        self.text = text
+        self.isParked = isParked
+        self.toolActions = toolActions
+        self.totalTokens = totalTokens
+    }
+}
+
+/// Single advancement implementation shared by the service worker and the CLI loop.
+public enum GoalAdvancementRunner {
+    /// Bounded audit rows read per tick. Single-sourced from the engine's quoted
+    /// tail so the read never fans wider than the prompt consumes.
+    public static let recentEventLimit = GoalEngine.eventTailLimit
+
+    /// Composes the advancement prompt with bounded reads.
+    ///
+    /// Steps travel whole because plans stay small by config bound; events travel
+    /// bounded because audit trails grow without bound over a goal's lifetime.
+    /// - Parameters:
+    ///   - goal: Goal being advanced.
+    ///   - store: Durable goal persistence.
+    ///   - engine: Prompt composer owning the tail contract.
+    /// - Returns: Prompt text for the advancement turn.
+    public static func advancementPrompt(goal: Goal, store: GoalStore, engine: GoalEngine) async throws -> String {
+        let steps = try await store.steps(goalID: goal.id)
+        let events = try await store.events(goalID: goal.id, limit: recentEventLimit)
+        return engine.advancePrompt(goal: goal, steps: steps, events: events)
+    }
+
+    /// Records a finished turn, skipping the due bump while parked.
+    ///
+    /// A parked turn stays due so the inbox resume completes the same cadence
+    /// instead of advancing the due date underneath an unresolved approval and
+    /// letting the next tick fire a second turn. Terminal turns always bump.
+    /// The run identifier is opaque correlation: the service passes its run-log
+    /// row while the headless loop passes its per-run session, because the CLI
+    /// keeps no durable run log to link.
+    /// - Parameters:
+    ///   - goalID: Goal that just ran.
+    ///   - engine: Due bookkeeper.
+    ///   - runID: Opaque correlation for the audit event.
+    ///   - isParked: Whether the turn parked awaiting approval.
+    public static func completeAfterTurn(
+        goalID: UUID,
+        engine: GoalEngine,
+        runID: UUID,
+        isParked: Bool
+    ) async throws {
+        guard !isParked else { return }
+        try await engine.postAdvance(goalID: goalID, runID: runID)
+    }
+
+    /// Records a failed turn by bumping the due date.
+    ///
+    /// One bad turn never pins the goal due forever; the next tick retries on
+    /// the regular cadence instead of wedging behind the failure.
+    /// - Parameters:
+    ///   - goalID: Goal whose turn threw.
+    ///   - engine: Due bookkeeper.
+    ///   - runID: Opaque correlation for the audit event.
+    public static func completeAfterFailure(goalID: UUID, engine: GoalEngine, runID: UUID) async throws {
+        try await engine.postAdvance(goalID: goalID, runID: runID)
+    }
+
+    /// Runs one advancement turn with parked-aware due handling.
+    ///
+    /// The prompt comes from bounded reads, the turn closure performs the model
+    /// call, and the due bump follows the parked contract: skipped while parked,
+    /// applied on terminal success, retried on failure. Due-bump failures report
+    /// through the handler without failing an otherwise finished turn.
+    /// - Parameters:
+    ///   - goal: Goal being advanced.
+    ///   - store: Durable goal persistence.
+    ///   - engine: Prompt composer and due bookkeeper.
+    ///   - runID: Opaque correlation for the audit event.
+    ///   - turn: Model turn performing the prompt.
+    ///   - onPostAdvanceFailure: Handler for due-bump failures.
+    /// - Returns: Turn outcome for run logging and result reporting.
+    public static func advance(
+        goal: Goal,
+        store: GoalStore,
+        engine: GoalEngine,
+        runID: UUID,
+        turn: @Sendable (String) async throws -> GoalAdvancementTurn,
+        onPostAdvanceFailure: (@Sendable (any Error & Sendable) async -> Void)? = nil
+    ) async throws -> GoalAdvancementTurn {
+        let prompt = try await advancementPrompt(goal: goal, store: store, engine: engine)
+        let outcome: GoalAdvancementTurn
+        do {
+            outcome = try await turn(prompt)
+        } catch is CancellationError {
+            // Cancelled turns did not advance, so they stay due for the next
+            // tick instead of bumping the due date underneath the cancel.
+            throw CancellationError()
+        } catch {
+            do {
+                try await completeAfterFailure(goalID: goal.id, engine: engine, runID: runID)
+            } catch {
+                // Erased through Any so the Sendable check stays conditional
+                // instead of folding as always-succeeds; only Sendable
+                // failures cross the handler boundary.
+                if let onPostAdvanceFailure, let sendableError = (error as Any) as? (any Error & Sendable) {
+                    await onPostAdvanceFailure(sendableError)
+                }
+            }
+            throw error
+        }
+        guard !outcome.isParked else { return outcome }
+        do {
+            try await completeAfterTurn(goalID: goal.id, engine: engine, runID: runID, isParked: outcome.isParked)
+        } catch {
+            // Same Sendable-only forwarding as above: erase to Any so the
+            // conditional check survives without an always-succeeds warning.
+            if let onPostAdvanceFailure, let sendableError = (error as Any) as? (any Error & Sendable) {
+                await onPostAdvanceFailure(sendableError)
+            }
+        }
+        return outcome
+    }
+}
