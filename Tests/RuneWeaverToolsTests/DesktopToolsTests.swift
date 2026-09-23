@@ -9,6 +9,7 @@ import Testing
 private struct StubDesktopCaptureBridge: DesktopCapturing, Sendable {
     var shouldFail: Bool = false
     var failWithPermissionDenied: Bool = false
+    var failWindowsListWithPermissionDenied: Bool = false
     var windowsToReturn: [DesktopWindowInfo] = []
 
     func captureDisplay(
@@ -41,6 +42,12 @@ private struct StubDesktopCaptureBridge: DesktopCapturing, Sendable {
         maxDimension _: Int,
         jpegQuality _: Double
     ) async throws -> DesktopCaptureResult {
+        // Mirror the display path so window captures exercise the same
+        // fail-closed denial instead of succeeding while the display path
+        // denies; keeps the stub honest about the shared silent gate.
+        if failWithPermissionDenied {
+            throw DesktopCaptureError.screenRecordingPermissionDenied
+        }
         if appName == "NonExistentApp" {
             throw DesktopCaptureError.windowNotFound(appName: appName)
         }
@@ -58,14 +65,21 @@ private struct StubDesktopCaptureBridge: DesktopCapturing, Sendable {
         )
     }
 
-    func listWindows() async -> [DesktopWindowInfo] {
-        windowsToReturn
+    func listWindows() async throws -> [DesktopWindowInfo] {
+        // Throw instead of returning an empty list so the tool-level test
+        // can verify denials surface permission guidance rather than a
+        // silent omission of the window section.
+        if failWindowsListWithPermissionDenied || failWithPermissionDenied {
+            throw DesktopCaptureError.screenRecordingPermissionDenied
+        }
+        return windowsToReturn
     }
 }
 
 private struct StubDesktopControlBridge: DesktopControlling, Sendable {
     var shouldFailCorner: Bool = false
     var shouldFailBlocked: String?
+    var shouldDenyAccessibilityPermission: Bool = false
 
     func executeBatch(
         actions: [DesktopAction],
@@ -73,6 +87,9 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
         scaleY: Double,
         blockedApps _: [String]
     ) async throws -> [DesktopActionStepResult] {
+        if shouldDenyAccessibilityPermission {
+            throw DesktopControlError.accessibilityPermissionDenied
+        }
         if actions.count > DesktopControlBridge.maxBatchSize {
             throw DesktopControlError.batchTooLarge(count: actions.count, max: DesktopControlBridge.maxBatchSize)
         }
@@ -298,6 +315,31 @@ struct DesktopToolsTests {
 
         #expect(output.isError)
         #expect(output.content.contains("Screen Recording permission is required"))
+        #expect(output.content.contains("Screen Recording"))
+        #expect(output.content.contains("System Settings"))
+    }
+
+    @Test
+    func `Desktop screenshot denial guides through Settings toggle and relaunch`() async throws {
+        // Fail-closed copy contract: a denied capture must leave the operator
+        // with the exact Settings path, the toggle plus relaunch recovery,
+        // and the first-capture prompt note, not just a bare permission sentence.
+        var stub = StubDesktopCaptureBridge()
+        stub.failWithPermissionDenied = true
+        let tool = DesktopScreenshotTool(captureBridge: stub)
+
+        let input = ToolInput(
+            toolName: "desktop.screenshot",
+            argumentsJSON: "{}"
+        )
+        let context = ToolContext(conversationID: UUID())
+        let output = try await tool.execute(input: input, context: context)
+
+        #expect(output.isError)
+        #expect(output.content.contains("System Settings > Privacy & Security > Screen Recording"))
+        #expect(output.content.contains("toggle the app/terminal on"))
+        #expect(output.content.contains("quit + relaunch"))
+        #expect(output.content.contains("auto-prompts on first capture"))
     }
 
     // MARK: - Action Tool Execution
@@ -382,6 +424,56 @@ struct DesktopToolsTests {
     }
 
     @Test
+    func `Desktop action surfaces accessibility denial with recovery steps`() async throws {
+        // Fail-closed copy contract: a denied turn must leave the operator
+        // with the exact Settings path and toggle action, not just a bare
+        // permission sentence, so they can unblock without another attempt.
+        var stub = StubDesktopControlBridge()
+        stub.shouldDenyAccessibilityPermission = true
+        let tool = DesktopActionTool(controlBridge: stub)
+
+        let json = """
+        {
+            "actions": [
+                {"action": "click", "x": 100, "y": 100}
+            ]
+        }
+        """
+        let input = ToolInput(toolName: "desktop.action", argumentsJSON: json)
+        let context = ToolContext(conversationID: UUID())
+        let output = try await tool.execute(input: input, context: context)
+
+        #expect(output.isError)
+        #expect(output.content.contains("Accessibility permission is required"))
+        #expect(output.content.contains("System Settings > Privacy & Security > Accessibility"))
+        #expect(output.content.contains("toggle the app/terminal on"))
+        #expect(output.content.contains("quit + relaunch"))
+    }
+
+    @Test
+    func `Desktop action accessibility denial explains CGEvent need`() async throws {
+        // The why matters for trust: operators approve faster when the denial
+        // names the gated capability instead of reading as a generic macOS nag.
+        var stub = StubDesktopControlBridge()
+        stub.shouldDenyAccessibilityPermission = true
+        let tool = DesktopActionTool(controlBridge: stub)
+
+        let json = """
+        {
+            "actions": [
+                {"action": "type_text", "text": "hello"}
+            ]
+        }
+        """
+        let input = ToolInput(toolName: "desktop.action", argumentsJSON: json)
+        let context = ToolContext(conversationID: UUID())
+        let output = try await tool.execute(input: input, context: context)
+
+        #expect(output.isError)
+        #expect(output.content.contains("CGEvent"))
+    }
+
+    @Test
     func `Desktop action rejects batches exceeding maximum size`() async throws {
         let stub = StubDesktopControlBridge()
         let tool = DesktopActionTool(controlBridge: stub)
@@ -412,5 +504,118 @@ struct DesktopToolsTests {
         let actionParsed = try JSONSerialization.jsonObject(with: actionData) as? [String: Any]
         #expect(actionParsed?["type"] as? String == "object")
         #expect(actionParsed?["properties"] != nil)
+    }
+
+    // MARK: - Bridge Permission Gates (live gate, injected denial)
+
+    @Test
+    func `Capture bridge silent gate denies every entry point`() async {
+        // Exercises the real fail-closed gate with an injected denial so the
+        // test proves the bridge itself refuses before touching shareable
+        // content, rather than trusting the stub to throw on its behalf.
+        // The denial runs before the platform gate so it holds even where
+        // ScreenCaptureKit is unavailable.
+        let denied = DesktopCaptureBridge(screenRecordingAccess: { false })
+        await #expect(throws: DesktopCaptureError.screenRecordingPermissionDenied) {
+            try await denied.captureDisplay(displayIndex: 0, maxDimension: 1280, jpegQuality: 0.75)
+        }
+        await #expect(throws: DesktopCaptureError.screenRecordingPermissionDenied) {
+            try await denied.captureWindow(appName: "Safari", maxDimension: 1280, jpegQuality: 0.75)
+        }
+        await #expect(throws: DesktopCaptureError.screenRecordingPermissionDenied) {
+            try await denied.listWindows()
+        }
+    }
+
+    @Test
+    func `Control bridge silent gate denies without dispatch`() async {
+        // Same hermetic pattern as the capture gate: the live bridge with a
+        // denied silent check must refuse before validating the batch or
+        // reaching CGEvent dispatch.
+        let denied = DesktopControlBridge(accessibilityAccess: { false })
+        await #expect(throws: DesktopControlError.accessibilityPermissionDenied) {
+            try await denied.executeBatch(
+                actions: [.delay(milliseconds: 10)],
+                scaleX: 1.0,
+                scaleY: 1.0,
+                blockedApps: []
+            )
+        }
+    }
+
+    @Test
+    func `Control bridge prefers emergency stop over permission denial`() async {
+        // Ordering contract: an operator stop latched before the first step
+        // aborts without paying a TCC syscall, so a stopped turn never
+        // reports a permission error instead of the stop.
+        let denied = DesktopControlBridge(accessibilityAccess: { false })
+        await DesktopControlMonitor.shared.requestEmergencyStop()
+        do {
+            _ = try await denied.executeBatch(
+                actions: [.delay(milliseconds: 10)],
+                scaleX: 1.0,
+                scaleY: 1.0,
+                blockedApps: []
+            )
+            #expect(Bool(false), "Stopped batch should throw instead of succeeding")
+        } catch let error as DesktopControlError {
+            #expect(error == .emergencyStopped)
+        } catch {
+            #expect(Bool(false), "Expected an emergency stop, got \(error)")
+        }
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Control bridge prefers cancellation over permission denial`() async {
+        // Same ordering contract for task cancellation: a cancelled turn
+        // must surface cancellation rather than masking it behind a
+        // permission error that would invite a pointless Settings trip.
+        let denied = DesktopControlBridge(accessibilityAccess: { false })
+        let task = Task {
+            try await denied.executeBatch(
+                actions: [.delay(milliseconds: 10)],
+                scaleX: 1.0,
+                scaleY: 1.0,
+                blockedApps: []
+            )
+        }
+        task.cancel()
+        let result = await task.result
+        switch result {
+        case .success:
+            Issue.record("Cancelled batch should not succeed")
+        case let .failure(error):
+            // A cancelled turn must never mask cancellation behind a
+            // permission error that would invite a pointless Settings trip.
+            if let controlError = error as? DesktopControlError {
+                #expect(controlError != .accessibilityPermissionDenied)
+            }
+        }
+    }
+
+    @Test
+    func `Screenshot tool surfaces window-list denial instead of silent empty`() async throws {
+        // Fail-closed list contract: a denied window scan fails the turn
+        // with permission guidance so the model can tell "no permission"
+        // apart from "no windows"; an empty success still means a genuine
+        // scan found nothing.
+        var stub = StubDesktopCaptureBridge()
+        stub.failWindowsListWithPermissionDenied = true
+        stub.windowsToReturn = [
+            DesktopWindowInfo(appName: "Photos", windowTitle: "Library", x: 0, y: 0, width: 800, height: 600, isFrontmost: true)
+        ]
+        let tool = DesktopScreenshotTool(captureBridge: stub)
+
+        let input = ToolInput(
+            toolName: "desktop.screenshot",
+            argumentsJSON: #"{"display": 0, "include_windows_list": true}"#
+        )
+        let context = ToolContext(conversationID: UUID())
+        let output = try await tool.execute(input: input, context: context)
+
+        #expect(output.isError)
+        #expect(output.content.contains("Screen Recording permission is required"))
+        #expect(output.content.contains("System Settings > Privacy & Security > Screen Recording"))
     }
 }

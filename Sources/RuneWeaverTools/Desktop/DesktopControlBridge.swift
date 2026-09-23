@@ -284,7 +284,21 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
     /// Corner margin in points for the fail-safe check.
     static let failSafeCornerMargin: CGFloat = 5.0
 
-    public init() {}
+    /// Silent Accessibility gate injected for tests; live turns query TCC.
+    private let accessibilityAccess: @Sendable () async -> Bool
+
+    /// Creates the live bridge.
+    ///
+    /// The injected gate exists so bridge-level tests can exercise the
+    /// fail-closed denial without touching real TCC trust; live turns keep
+    /// the silent non-prompting query as the default.
+    public init(
+        accessibilityAccess: @escaping @Sendable () async -> Bool = {
+            await MainActor.run { DesktopPermissionCheck.isAccessibilityTrusted() }
+        }
+    ) {
+        self.accessibilityAccess = accessibilityAccess
+    }
 
     public func executeBatch(
         actions: [DesktopAction],
@@ -292,6 +306,21 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
         scaleY: Double,
         blockedApps: [String]
     ) async throws -> [DesktopActionStepResult] {
+        // Cancellation and operator stop win over the permission gate so a
+        // cancelled turn never pays a TCC syscall or masks cancellation
+        // behind a permission error. A stop requested before the first step
+        // aborts without dispatching.
+        try Task.checkCancellation()
+        if await DesktopControlMonitor.shared.shouldAbort() {
+            throw DesktopControlError.emergencyStopped
+        }
+        // Fail closed before validating the batch so an untrusted process
+        // never reaches CGEvent dispatch. The silent check avoids popping a
+        // system dialog mid-turn; the enable path requests trust
+        // explicitly on user intent instead.
+        guard await accessibilityAccess() else {
+            throw DesktopControlError.accessibilityPermissionDenied
+        }
         guard !actions.isEmpty else {
             throw DesktopControlError.actionFailed(
                 index: 0, reason: "No actions provided: batch must contain at least one action"
@@ -308,11 +337,6 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 index: 0, reason: "Invalid scale factors (scale_x: \(scaleX), scale_y: \(scaleY)): must be finite, positive, and at most \(Self.maxScaleFactor)"
             )
         }
-        // A stop requested before the first step aborts without dispatching.
-        if await DesktopControlMonitor.shared.shouldAbort() {
-            throw DesktopControlError.emergencyStopped
-        }
-        try Task.checkCancellation()
 
         #if canImport(CoreGraphics) && canImport(AppKit)
             var results: [DesktopActionStepResult] = []

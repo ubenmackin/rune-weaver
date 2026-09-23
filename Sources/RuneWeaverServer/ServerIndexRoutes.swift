@@ -44,7 +44,26 @@ private func registerIndexStatusRoute(_ app: Application) {
         // same snapshot, so status performs a single store query with a fixed
         // cap instead of two full-history scans that could race new rows.
         let indexRuns = await recentIndexRuns(context: context)
-        let lastErrors = recentIndexErrors(from: indexRuns)
+        var lastErrors = recentIndexErrors(from: indexRuns)
+        // Fail-closed pre-run hint: there is no prompt API for Full Disk
+        // Access, so a fresh install that enabled Messages would otherwise
+        // waste its first Rebuild before learning access is missing. The probe
+        // is a single read-only open with no copy, cheap enough to run on
+        // every status poll the dashboard performs. It checks the same path
+        // the next run will copy so a custom-path run never disagrees with a
+        // default-path probe.
+        if config.messages, !MessagesIndexer.hasMessagesDatabaseAccess(chatDatabasePath: messagesDatabasePathForProbe()) {
+            let alreadyWarned = lastErrors.contains {
+                $0.range(of: "Full Disk Access", options: .caseInsensitive) != nil
+            }
+            if !alreadyWarned {
+                // Appended, not prepended: `lastErrors` is newest-first from
+                // the run log and the probe hint carries no timestamp, so
+                // inserting at zero would masquerade as the newest failure.
+                // The hint trails run-log errors instead.
+                lastErrors.append(messagesFullDiskAccessWarning)
+            }
+        }
         let lastRun = latestIndexRun(from: indexRuns)
         return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun)
     }
@@ -166,6 +185,28 @@ private func loadedIndexConfiguration() throws -> IndexConfig {
 private enum IndexStatusScan {
     /// Maximum newest run rows examined per status poll.
     static let cap = 100
+}
+
+/// Pre-run warning surfaced in `lastErrors` when Messages is enabled but the
+/// chat database is unreadable.
+///
+/// Kept as a single shared string so the dashboard's Full Disk Access
+/// detection matches on one stable phrase whether the warning came from this
+/// cheap status probe or from a run-time denial recorded in the run log.
+private let messagesFullDiskAccessWarning =
+    "Messages indexing needs Full Disk Access to read ~/Library/Messages/chat.db. "
+        + "Grant it in System Settings > Privacy & Security > Full Disk Access, then run Rebuild / Run Now."
+
+/// Resolves the Messages database path the status probe checks.
+///
+/// Single-sourced so the probe and the next run agree: boot builds its
+/// Messages stage over the indexer's default path, and this helper returns
+/// that same path. Holders of a custom-path indexer must probe through the
+/// instance `hasMessagesDatabaseAccess()` instead, otherwise a custom-path run
+/// would disagree with a default-path probe.
+/// - Returns: Live Messages database path the next run will copy.
+private func messagesDatabasePathForProbe() -> String {
+    MessagesIndexer.defaultChatDatabasePath
 }
 
 /// Cached count patterns for the durable run summary line.
