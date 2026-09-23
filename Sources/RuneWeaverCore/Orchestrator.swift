@@ -194,7 +194,10 @@ public actor Orchestrator {
             throw OrchestratorError.emptyInput
         }
         let sessionID = input.sessionID
-        _ = await conversations.ensureSession(id: sessionID)
+        // Goal-tagged turns overwrite the session link so an explicit tag wins
+        // over a stale link and runs stay joinable; a nil tag never clears, so
+        // plain chat turns keep a link set by an earlier tagged turn.
+        _ = await conversations.ensureSession(id: sessionID, overwrite: input.goalID != nil, goalID: input.goalID)
         // Raw pre-turn copy (messages plus rolling summary, never the
         // synthetic summary-prefix view) so cancellation restores both
         // without duplicating the summary or keeping truncated growth.
@@ -390,9 +393,19 @@ extension Orchestrator {
         return true
     }
 
+    /// Whether a turn source runs detached from interactive chat.
+    /// Scheduler and goal turns share the background system prompt and the
+    /// parked-resume background branch so future detached sources extend in
+    /// one place instead of scattering string matches across the loop.
+    /// - Parameter source: Turn or session source label, nil when untagged.
+    /// - Returns: True for known background sources.
+    public static func isBackgroundSource(_ source: String?) -> Bool {
+        source == "scheduler" || source == "goal"
+    }
+
     /// Resolves the effective system prompt for one turn.
     /// Custom overrides bypass composition verbatim so live turns and parked
-    /// resumes honor the same prompt instead of diverging; scheduler turns
+    /// resumes honor the same prompt instead of diverging; background turns
     /// recompose on the background branch with the vision-aware snapshot.
     private func resolveEffectiveSystemPrompt(input: UserInput, tools: [any Tool]) -> String? {
         if let custom = input.systemPrompt, !custom.isEmpty {
@@ -406,7 +419,7 @@ extension Orchestrator {
         }
         let supportsVision = llm.modelInfo.supportsVision
         let includeToolSchemas = !llm.modelInfo.supportsTools
-        if input.source == "scheduler" {
+        if Self.isBackgroundSource(input.source) {
             return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
         }
         return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)

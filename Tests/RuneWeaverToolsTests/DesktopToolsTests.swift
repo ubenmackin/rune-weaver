@@ -127,8 +127,11 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
 
 // MARK: - Test Suite
 
-@Suite("Desktop Tools")
+@Suite("Desktop Tools", .serialized)
 struct DesktopToolsTests {
+    // The control bridge reads the process-wide emergency-stop latch, so this
+    // suite serializes internally: a stop latched by one test must never leak
+    // into a neighbor expecting a permission denial.
     // MARK: - Registration & Gating (always registered, fail-closed gates)
 
     @Test
@@ -531,7 +534,9 @@ struct DesktopToolsTests {
     func `Control bridge silent gate denies without dispatch`() async {
         // Same hermetic pattern as the capture gate: the live bridge with a
         // denied silent check must refuse before validating the batch or
-        // reaching CGEvent dispatch.
+        // reaching CGEvent dispatch. Starts from a cleared latch because the
+        // stop flag is shared process state that a neighbor test may latch.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
         await #expect(throws: DesktopControlError.accessibilityPermissionDenied) {
             try await denied.executeBatch(
@@ -547,7 +552,9 @@ struct DesktopToolsTests {
     func `Control bridge prefers emergency stop over permission denial`() async {
         // Ordering contract: an operator stop latched before the first step
         // aborts without paying a TCC syscall, so a stopped turn never
-        // reports a permission error instead of the stop.
+        // reports a permission error instead of the stop. Starts clean and
+        // clears on every exit so the latched stop never leaks into neighbors.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
         await DesktopControlMonitor.shared.requestEmergencyStop()
         do {
@@ -571,6 +578,9 @@ struct DesktopToolsTests {
         // Same ordering contract for task cancellation: a cancelled turn
         // must surface cancellation rather than masking it behind a
         // permission error that would invite a pointless Settings trip.
+        // Starts from a cleared latch so a neighbor's stop cannot mask the
+        // cancellation signal under test.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
         let denied = DesktopControlBridge(accessibilityAccess: { false })
         let task = Task {
             try await denied.executeBatch(

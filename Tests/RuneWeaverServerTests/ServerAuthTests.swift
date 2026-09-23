@@ -1083,7 +1083,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
     @Test
     func `presentedBearer accepts rw_session cookie`() async throws {
         try await withTestApp { app in
-            var request = Request(application: app, on: app.eventLoopGroup.next())
+            let request = Request(application: app, on: app.eventLoopGroup.next())
             request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: "cookie-secret")
             #expect(ServerAuthRequest.presentedBearer(for: request, allowQueryToken: false) == "cookie-secret")
         }
@@ -1100,7 +1100,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             registerRuneWeaverRoutes(app)
 
             // 1. POST /auth/session with valid token
-            var loginReq = Request(
+            let loginReq = Request(
                 application: app,
                 method: .POST,
                 url: URI(string: "/auth/session"),
@@ -1119,7 +1119,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(unwrappedCookie.path == "/")
 
             // 2. Access protected route using the cookie
-            var protectedReq = Request(
+            let protectedReq = Request(
                 application: app,
                 method: .GET,
                 url: URI(string: "/settings"),
@@ -1130,7 +1130,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(protectedRes.status == .ok)
 
             // 3. POST /auth/session with invalid token fails
-            var badLoginReq = Request(
+            let badLoginReq = Request(
                 application: app,
                 method: .POST,
                 url: URI(string: "/auth/session"),
@@ -1141,7 +1141,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(badLoginRes.status == .unauthorized)
 
             // 4. DELETE /auth/session revokes session server-side and expires cookie
-            var logoutReq = Request(
+            let logoutReq = Request(
                 application: app,
                 method: .DELETE,
                 url: URI(string: "/auth/session"),
@@ -1156,7 +1156,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(unwrappedExpired.maxAge == 0)
 
             // 5. Subsequent request using revoked cookie is rejected
-            var afterLogoutReq = Request(
+            let afterLogoutReq = Request(
                 application: app,
                 method: .GET,
                 url: URI(string: "/settings"),
@@ -1178,7 +1178,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             app.runeWeaverAuth = auth
             registerRuneWeaverRoutes(app)
 
-            var req = Request(
+            let req = Request(
                 application: app,
                 method: .POST,
                 url: URI(string: "/auth/rotate"),
@@ -1202,11 +1202,11 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             let req1 = Request(application: app, method: .GET, url: URI(string: "https://localhost/auth/session"), on: app.eventLoopGroup.next())
             #expect(ServerAuthRequest.isRequestSecure(req1) == true)
 
-            var req2 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
+            let req2 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
             req2.headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "https")
             #expect(ServerAuthRequest.isRequestSecure(req2) == true)
 
-            var req3 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
+            let req3 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
             req3.headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "https, http")
             #expect(ServerAuthRequest.isRequestSecure(req3) == true)
 
@@ -1221,19 +1221,19 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             let middleware = HostValidationMiddleware(hostname: "127.0.0.1", allowMissingHostInTesting: false)
 
             // Valid host header
-            var validReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let validReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
             validReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1:8082")
             let validRes = try await middleware.respond(to: validReq, chainingTo: AuthProbeResponder())
             #expect(validRes.status == .ok)
 
             // Valid localhost header
-            var localhostReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let localhostReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
             localhostReq.headers.replaceOrAdd(name: .host, value: "localhost:8082")
             let localhostRes = try await middleware.respond(to: localhostReq, chainingTo: AuthProbeResponder())
             #expect(localhostRes.status == .ok)
 
             // Rebinding attack host header rejected with 403
-            var evilReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let evilReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
             evilReq.headers.replaceOrAdd(name: .host, value: "attacker.com:8082")
             let evilRes = try await middleware.respond(to: evilReq, chainingTo: AuthProbeResponder())
             #expect(evilRes.status == .forbidden)
@@ -1256,7 +1256,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             registerRuneWeaverRoutes(app)
 
             // Health probe carries defensive headers
-            var healthReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let healthReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
             healthReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1")
             let healthRes = try await app.responder.respond(to: healthReq).get()
             #expect(healthRes.headers.first(name: "X-Content-Type-Options") == "nosniff")
@@ -1264,7 +1264,7 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(healthRes.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
 
             // Settings carries no-store, private Cache-Control
-            var settingsReq = Request(application: app, method: .GET, url: URI(string: "/settings"), on: app.eventLoopGroup.next())
+            let settingsReq = Request(application: app, method: .GET, url: URI(string: "/settings"), on: app.eventLoopGroup.next())
             settingsReq.headers.bearerAuthorization = .init(token: "sec-token")
             settingsReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1")
             let settingsRes = try await app.responder.respond(to: settingsReq).get()

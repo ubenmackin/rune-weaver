@@ -419,6 +419,7 @@ extension RuneWeaverConfig {
         try Self.decodeMedia(root, into: &config)
         try Self.decodeDesktop(root, into: &config)
         try Self.decodeSecurity(root, into: &config)
+        try Self.decodeGoals(root, into: &config)
         self = config
     }
 
@@ -851,6 +852,31 @@ extension RuneWeaverConfig {
         }
         if let credentialFilter = try security.strictBool("email_credential_filter", field: "security.email_credential_filter") {
             config.security.emailCredentialFilter = credentialFilter
+        }
+    }
+
+    /// Decodes the additive `[goals]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the opt-in defaults so existing files load
+    /// untouched; present-but-wrong-typed values throw instead of silently
+    /// defaulting, matching the `[index]` decode style, and range checks land
+    /// in validation so decode stays type-only.
+    static func decodeGoals(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let goals = root.tables["goals"] else { return }
+        if let enabled = try goals.strictBool("enabled", field: "goals.enabled") {
+            config.goals.enabled = enabled
+        }
+        if let interval = try goals.strictInt("step_interval_minutes", field: "goals.step_interval_minutes") {
+            config.goals.stepIntervalMinutes = interval
+        }
+        if let maxActive = try goals.strictInt("max_active_goals", field: "goals.max_active_goals") {
+            config.goals.maxActiveGoals = maxActive
+        }
+        if let maxSteps = try goals.strictInt("max_steps_per_goal", field: "goals.max_steps_per_goal") {
+            config.goals.maxStepsPerGoal = maxSteps
+        }
+        if let timeout = try goals.strictInt("plan_timeout_seconds", field: "goals.plan_timeout_seconds") {
+            config.goals.planTimeoutSeconds = timeout
         }
     }
 }

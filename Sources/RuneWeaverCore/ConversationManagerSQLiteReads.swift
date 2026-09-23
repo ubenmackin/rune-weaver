@@ -9,6 +9,8 @@ import Foundation
     /// Row decoding shared by full and single-session SQLite reads.
     enum SQLiteSessionReadSupport {
         /// Loads every session row without messages, preserving file order.
+        /// Databases whose goal-link migration has not landed carry no `goal_id`
+        /// column; those rows decode as unlinked instead of failing the read.
         /// - Parameter handle: Open database handle.
         /// - Returns: Sessions keyed by string identifier plus file order.
         static func loadAllSessions(
@@ -17,7 +19,14 @@ import Foundation
             var sessionsByID: [String: ConversationSession] = [:]
             var order: [String] = []
             var statement: OpaquePointer?
-            let selectSQL = "SELECT id, title, summary, created_at, updated_at, source FROM sessions;"
+            // The probe keeps the projection honest when the additive migration
+            // has not landed: selecting a missing column would fail the whole
+            // read, while appending it only when present keeps old indices
+            // stable and decodes absent links as nil.
+            let hasGoalID = SQLiteHelpers.columnNames(handle: handle, table: .sessions).contains("goal_id")
+            let selectSQL = hasGoalID
+                ? "SELECT id, title, summary, created_at, updated_at, source, goal_id FROM sessions;"
+                : "SELECT id, title, summary, created_at, updated_at, source FROM sessions;"
             guard sqlite3_prepare_v2(handle, selectSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read sessions")
             }
@@ -26,7 +35,7 @@ import Foundation
                 guard let idText = columnText(statement, index: 0),
                       let id = UUID(uuidString: idText)
                 else { continue }
-                let fields = sessionFields(from: statement)
+                let fields = sessionFields(from: statement, hasGoalID: hasGoalID)
                 sessionsByID[idText] = ConversationSession(
                     id: id,
                     title: fields.title,
@@ -34,7 +43,8 @@ import Foundation
                     summary: fields.summary,
                     createdAt: fields.createdAt,
                     updatedAt: fields.updatedAt,
-                    source: fields.source
+                    source: fields.source,
+                    goalID: fields.goalID
                 )
                 order.append(idText)
             }
@@ -78,12 +88,17 @@ import Foundation
         }
 
         /// Loads one session row without messages.
+        /// A missing `goal_id` column (pre-migration database) decodes as
+        /// unlinked rather than failing the lookup.
         static func loadSingleSessionBase(
             handle: OpaquePointer?,
             sessionID: UUID
         ) throws -> ConversationSession? {
             var statement: OpaquePointer?
-            let sessionSQL = "SELECT id, title, summary, created_at, updated_at, source FROM sessions WHERE id = ?;"
+            let hasGoalID = SQLiteHelpers.columnNames(handle: handle, table: .sessions).contains("goal_id")
+            let sessionSQL = hasGoalID
+                ? "SELECT id, title, summary, created_at, updated_at, source, goal_id FROM sessions WHERE id = ?;"
+                : "SELECT id, title, summary, created_at, updated_at, source FROM sessions WHERE id = ?;"
             guard sqlite3_prepare_v2(handle, sessionSQL, -1, &statement, nil) == SQLITE_OK else {
                 throw ConversationManagerError.persistenceFailed("Could not read session \(sessionID)")
             }
@@ -92,7 +107,7 @@ import Foundation
             guard sqlite3_step(statement) == SQLITE_ROW else {
                 return nil
             }
-            let fields = sessionFields(from: statement)
+            let fields = sessionFields(from: statement, hasGoalID: hasGoalID)
             return ConversationSession(
                 id: sessionID,
                 title: fields.title,
@@ -100,7 +115,8 @@ import Foundation
                 summary: fields.summary,
                 createdAt: fields.createdAt,
                 updatedAt: fields.updatedAt,
-                source: fields.source
+                source: fields.source,
+                goalID: fields.goalID
             )
         }
 
@@ -146,16 +162,27 @@ import Foundation
             let createdAt: Date
             let updatedAt: Date
             let source: String?
+            /// Linked goal, nil for unlinked sessions and for rows read from
+            /// tables that predate the goal-link column.
+            let goalID: UUID?
         }
 
         /// Decodes session field columns for one stepped row.
-        static func sessionFields(from statement: OpaquePointer?) -> SessionFields {
+        /// The link column is only read when the projection includes it; older
+        /// tables decode as unlinked. Malformed link text degrades to nil so
+        /// one bad row cannot fail the whole history load.
+        static func sessionFields(from statement: OpaquePointer?, hasGoalID: Bool = false) -> SessionFields {
             let title = nonemptyText(statement, index: 1)
             let summary = nonemptyText(statement, index: 2)
             let createdAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 3))
             let updatedAt = Date(timeIntervalSince1970: sqlite3_column_double(statement, 4))
             let source = nonemptyText(statement, index: 5)
-            return SessionFields(title: title, summary: summary, createdAt: createdAt, updatedAt: updatedAt, source: source)
+            let goalID: UUID? = if hasGoalID {
+                columnText(statement, index: 6).flatMap { UUID(uuidString: $0) }
+            } else {
+                nil
+            }
+            return SessionFields(title: title, summary: summary, createdAt: createdAt, updatedAt: updatedAt, source: source, goalID: goalID)
         }
 
         /// Decoded error-flag, timestamp, and category columns for one message row.

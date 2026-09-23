@@ -121,7 +121,8 @@ enum SessionStoreIO {
                     summary TEXT,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
-                    source TEXT
+                    source TEXT,
+                    goal_id TEXT
                 );
                 CREATE TABLE IF NOT EXISTS messages(
                     id TEXT PRIMARY KEY,
@@ -145,11 +146,12 @@ enum SessionStoreIO {
             let needsMigration = !migratedPaths.contains(cacheKey)
             if needsMigration {
                 // Best-effort migration for existing databases created without title, source,
-                // error-flag, or error-category columns.
+                // goal-link, error-flag, or error-category columns.
                 let existingSessions = SQLiteHelpers.columnNames(handle: handle, table: .sessions)
                 let sessionColumnsToAdd: [(name: String, sql: String)] = [
                     ("title", "ALTER TABLE sessions ADD COLUMN title TEXT;"),
-                    ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;")
+                    ("source", "ALTER TABLE sessions ADD COLUMN source TEXT;"),
+                    ("goal_id", "ALTER TABLE sessions ADD COLUMN goal_id TEXT;")
                 ]
                 for (col, alterSQL) in sessionColumnsToAdd where !existingSessions.contains(col) {
                     do {
@@ -230,8 +232,9 @@ enum SessionStoreIO {
         /// Upserts one session and rewrites its messages.
         private static func upsert(session: ConversationSession, handle: OpaquePointer?) throws {
             var sessionStatement: OpaquePointer?
-            let sessionSQL = "INSERT INTO sessions(id, title, summary, created_at, updated_at, source) VALUES(?, ?, ?, ?, ?, ?) "
-                + "ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary, updated_at=excluded.updated_at, source=excluded.source;"
+            let sessionSQL = "INSERT INTO sessions(id, title, summary, created_at, updated_at, source, goal_id) VALUES(?, ?, ?, ?, ?, ?, ?) "
+                + "ON CONFLICT(id) DO UPDATE SET title=excluded.title, summary=excluded.summary, "
+                + "updated_at=excluded.updated_at, source=excluded.source, goal_id=excluded.goal_id;"
             guard sqlite3_prepare_v2(handle, sessionSQL, -1, &sessionStatement, nil) == SQLITE_OK else {
                 let code = sqlite3_errcode(handle)
                 throw ConversationManagerError.persistenceFailed("Could not prepare session upsert (code \(code))")
@@ -243,6 +246,7 @@ enum SessionStoreIO {
             sqlite3_bind_double(sessionStatement, 4, session.createdAt.timeIntervalSince1970)
             sqlite3_bind_double(sessionStatement, 5, session.updatedAt.timeIntervalSince1970)
             bindText(sessionStatement, index: 6, value: session.source)
+            bindText(sessionStatement, index: 7, value: session.goalID?.uuidString)
             guard sqlite3_step(sessionStatement) == SQLITE_DONE else {
                 throw ConversationManagerError.persistenceFailed("Could not write session \(session.id)")
             }

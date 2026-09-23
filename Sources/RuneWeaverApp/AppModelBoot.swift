@@ -83,4 +83,150 @@ extension AppModel {
             router: LLMRouter(providers: providers)
         )
     }
+
+    /// Encapsulates collaborators assembled during menu bar server boot.
+    struct BootPipeline {
+        let config: RuneWeaverConfig
+        let bindConfig: ServerConfig
+        let auth: ServerAuth?
+        let secrets: SecretsManager
+        let selectedProvider: any LLMProvider
+        let memoryEngine: MemoryEngine
+        let conversations: ConversationManager
+        let embedder: (any EmbeddingsBackend)?
+        let indexComponents: ServerIndexComponents?
+        let plugins: [any Tool]
+        let permissionGate: PermissionGate
+        let effectiveSystemPrompt: String
+    }
+
+    /// Builds the permission gate and served prompt from the live registry so served turns see
+    /// every registered tool including discovered runes.
+    func buildGateAndSystemPrompt(
+        plugins: [any Tool],
+        config: RuneWeaverConfig
+    ) async -> (PermissionGate, String) {
+        let episodesDB = (config.memory.episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        let permissionGate = await PermissionGate.load(
+            store: trustStore,
+            pluginsDir: URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        )
+        await permissionGate.startPeriodicCleanup()
+        let previewBus = ToolBus(permissionGate: permissionGate)
+        let desktopNames = Set(DesktopTools.allToolNames)
+        for tool in plugins {
+            await previewBus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
+        }
+        let previewPluginsURL = URL(fileURLWithPath: (config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        let previewStore = ToolRegistryStore(dbPath: (config.memory.episodesDBPath as NSString).expandingTildeInPath)
+        let previewDiscovery = PluginDiscoveryService(pluginsDirectory: previewPluginsURL, store: previewStore)
+        await previewDiscovery.discoverAndSync(toolBus: previewBus)
+        let stored = await ToolStateStore(dbPath: episodesDB).loadAll()
+        for (name, enabled) in stored {
+            if enabled {
+                await previewBus.enableTool(named: name)
+            } else {
+                await previewBus.disableTool(named: name)
+            }
+        }
+        let effectiveSystemPrompt = await SystemPromptComposer.resolve(flag: nil, toolBus: previewBus)
+        return (permissionGate, effectiveSystemPrompt)
+    }
+
+    /// Assembles the boot pipeline collaborators.
+    func buildBootPipeline(
+        config: RuneWeaverConfig,
+        bindConfig: ServerConfig,
+        auth: ServerAuth?
+    ) async -> BootPipeline {
+        let secrets = SecretsManager()
+        let keysByEntry = await resolveBootAPIKeys(config: config, secrets: secrets)
+        let providers = LLMProviderFactory.makeProviders(from: config.llm, apiKeysByEntry: keysByEntry)
+        let selectedProvider = selectBootProvider(config: config, providers: providers)
+        let memoryEngine = makeBootMemoryEngine(config: config)
+        let conversations = await loadBootConversations(config: config)
+        let embedder = makeBootEmbedder(config: config, providers: providers)
+        let indexComponents = ServerIndexBoot.makeComponents(
+            config: config,
+            embedder: embedder,
+            visionLLM: selectedProvider
+        )
+        let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
+        let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)
+        let plugins = BuiltinToolPlugins.makeAllTools(
+            config: config,
+            memoryEngine: memoryEngine,
+            embedder: embedder,
+            mediaSecrets: secrets,
+            secrets: secrets,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: conversations
+        )
+        let (permissionGate, effectiveSystemPrompt) = await buildGateAndSystemPrompt(
+            plugins: plugins,
+            config: config
+        )
+        return BootPipeline(
+            config: config,
+            bindConfig: bindConfig,
+            auth: auth,
+            secrets: secrets,
+            selectedProvider: selectedProvider,
+            memoryEngine: memoryEngine,
+            conversations: conversations,
+            embedder: embedder,
+            indexComponents: indexComponents,
+            plugins: plugins,
+            permissionGate: permissionGate,
+            effectiveSystemPrompt: effectiveSystemPrompt
+        )
+    }
+
+    /// Constructs the live ServerContext from the assembled boot pipeline.
+    func makeBootServerContext(pipeline: BootPipeline) async -> ServerContext {
+        let appLLMOrigins = LLMOrigins.serverURLs(from: pipeline.config.llm)
+        return await ServerContext.make(
+            config: pipeline.bindConfig,
+            conversations: pipeline.conversations,
+            memoryEngine: pipeline.memoryEngine,
+            embedder: pipeline.embedder,
+            permissionGate: pipeline.permissionGate,
+            llm: pipeline.selectedProvider,
+            systemPrompt: pipeline.effectiveSystemPrompt,
+            schedulerConfig: pipeline.config.scheduler,
+            episodesDBPath: pipeline.config.memory.episodesDBPath,
+            pluginConfig: pipeline.config.plugins,
+            notifier: notificationManager,
+            onApprovalRequested: { [weak self] req in
+                await self?.notificationManager.postApprovalNotification(req)
+                await self?.refreshPendingApprovals()
+            },
+            sandboxConfig: pipeline.config.sandbox,
+            browserConfig: pipeline.config.browser,
+            indexCoordinator: pipeline.indexComponents?.coordinator,
+            indexStore: pipeline.indexComponents?.store,
+            llmServerURLs: appLLMOrigins,
+            engineConfig: pipeline.config.engine,
+            emailConfig: pipeline.config.email,
+            filesConfig: pipeline.config.files,
+            mediaConfig: pipeline.config.media,
+            desktopConfig: pipeline.config.desktop,
+            securityConfig: pipeline.config.security,
+            goalsConfig: pipeline.config.goals,
+            auth: pipeline.auth,
+            mediaSecrets: pipeline.secrets,
+            secrets: pipeline.secrets
+        )
+    }
+
+    /// Registers the builtin plugin tools and restores persisted states on the context.
+    func registerBootTools(context: ServerContext, plugins: [any Tool]) async {
+        for tool in plugins {
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        }
+        await context.restoreToolStates(forceReload: false)
+    }
 }

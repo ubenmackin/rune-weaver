@@ -206,6 +206,10 @@ enum CLIShared {
     }
 
     /// Built-in plugin tools registered into every CLI `ToolBus`.
+    ///
+    /// Goal tools join only when both the engine and store arrive (nil keeps them
+    /// unregistered); a disabled `[goals]` section still registers through the same
+    /// path and fails closed inside each tool so the surface stays inspectable.
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -218,7 +222,11 @@ enum CLIShared {
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         securityConfig: SecurityConfig = SecurityConfig(),
-        secrets: SecretsManager? = nil
+        secrets: SecretsManager? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalStore: GoalStore? = nil,
+        goalConversations: ConversationManager? = nil,
+        goalsConfig: GoalsConfig = GoalsConfig()
     ) -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -235,7 +243,11 @@ enum CLIShared {
             memoryEngine: memoryEngine,
             embedder: embedder,
             mediaSecrets: secrets,
-            secrets: secrets
+            secrets: secrets,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: goalConversations,
+            goalsConfig: goalsConfig
         )
     }
 
@@ -245,6 +257,12 @@ enum CLIShared {
     /// persisted tool-state rows re-apply (the same restore the service runs),
     /// so the CLI sees exactly the tool set the dashboard governs instead of
     /// a permissive side door. The tool-state toggle is the sole authority.
+    /// Goal tools follow the shared registration path: callers pass a store built
+    /// from `config.memory.episodes_db_path` plus its engine (and the live
+    /// conversations manager for chip linkage); nil keeps them unregistered while
+    /// a disabled `[goals]` section still registers and fails closed inside each
+    /// tool. When only the policy plus an LLM arrive, the store and engine build
+    /// here from the episodes path so chat and serve need no second wiring step.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -261,12 +279,29 @@ enum CLIShared {
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         securityConfig: SecurityConfig = SecurityConfig(),
-        secrets: SecretsManager? = nil
+        secrets: SecretsManager? = nil,
+        goalsConfig: GoalsConfig? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalStore: GoalStore? = nil,
+        goalConversations: ConversationManager? = nil,
+        goalLLM: (any LLMProvider)? = nil
     ) async -> ToolBus {
         let bus = ToolBus(
             approvalHandler: approvalHandler,
             permissionGate: permissionGate
         )
+        // Resolve the goal stack: explicit collaborators win, otherwise a supplied
+        // policy plus LLM builds the store from the episodes path and the engine
+        // over it, so disabled installs still register fail-closed tools.
+        var effectiveStore = goalStore
+        if effectiveStore == nil, goalsConfig != nil {
+            let rawPath = episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
+            effectiveStore = GoalStore(dbPath: rawPath)
+        }
+        var effectiveEngine = goalEngine
+        if effectiveEngine == nil, let store = effectiveStore, let goalsConfig, let llm = goalLLM {
+            effectiveEngine = GoalEngine(store: store, llm: llm, config: goalsConfig)
+        }
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in pluginTools(
             emailConfig: emailConfig,
@@ -280,7 +315,11 @@ enum CLIShared {
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig,
             securityConfig: securityConfig,
-            secrets: secrets
+            secrets: secrets,
+            goalEngine: effectiveEngine,
+            goalStore: effectiveStore,
+            goalConversations: goalConversations,
+            goalsConfig: goalsConfig ?? GoalsConfig()
         ) {
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }

@@ -260,7 +260,10 @@ struct ChatCommand: AsyncParsableCommand {
             llmConfig: loaded.config.llm,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
-            secrets: sharedSecrets
+            secrets: sharedSecrets,
+            goalsConfig: loaded.config.goals,
+            goalConversations: conversations,
+            goalLLM: active
         )
         await configureApprovalHandler(on: toolBus, permissionGate: permissionGate)
         await printStartupBanners(toolBus: toolBus, emailConfig: loaded.config.email)

@@ -1,8 +1,17 @@
 // Rune Weaver Server — In-process background scheduler worker.
+//
+// Fires cron and poll jobs plus steady goal advancements inside the service
+// process. Jobs drive on cron windows while goals drive on `next_due_at`;
+// both share the per-process single-flight spirit so overlapping fires skip
+// instead of stacking. Downtime carries no catch-up: a firing missed while
+// down simply becomes due and advances once on the next tick, then re-dueues
+// on its regular interval rather than replaying every missed slot.
 
 import Foundation
 import Logging
 import RuneWeaverCore
+
+// swiftformat:disable docComments
 
 /// Internal decode envelope for `email.search` tool outputs.
 private struct EmailSearchResponseEnvelope: Decodable {
@@ -13,6 +22,8 @@ private struct EmailSearchResponseEnvelope: Decodable {
     let messages: [MessageItem]
 }
 
+/// ServerSchedulerWorker keeps cron, poll, and goal firing behind one single-flight worker so overlapping ticks skip together.
+///
 /// In-process scheduler worker executing scheduled jobs inside `RuneWeaverServer`.
 public actor ServerSchedulerWorker {
     private let scheduler: SchedulerStore
@@ -26,6 +37,13 @@ public actor ServerSchedulerWorker {
     private let logger: (@Sendable (String) async -> Void)?
     private let pollChecker: (@Sendable (EmailPollRule) async -> [String])?
     private let indexCoordinator: IndexCoordinator?
+    /// Durable goal registry backing due advancement, nil when goals are unwired.
+    private let goalStore: GoalStore?
+    /// Pursuit engine composing advancement prompts and bumping due dates.
+    private let goalEngine: GoalEngine?
+    /// Dedicated single-flight lock for goal fires so a slow goal turn never
+    /// blocks job fires sharing the job lock, and vice versa.
+    private let goalRunLock: SchedulerRunLock
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -47,7 +65,10 @@ public actor ServerSchedulerWorker {
         notifier: (any SchedulerNotifier)? = nil,
         logger: (@Sendable (String) async -> Void)? = nil,
         pollChecker: (@Sendable (EmailPollRule) async -> [String])? = nil,
-        indexCoordinator: IndexCoordinator? = nil
+        indexCoordinator: IndexCoordinator? = nil,
+        goalStore: GoalStore? = nil,
+        goalEngine: GoalEngine? = nil,
+        goalRunLock: SchedulerRunLock? = nil
     ) {
         self.scheduler = scheduler
         self.runs = runs
@@ -62,6 +83,9 @@ public actor ServerSchedulerWorker {
         self.logger = logger
         self.pollChecker = pollChecker
         self.indexCoordinator = indexCoordinator
+        self.goalStore = goalStore
+        self.goalEngine = goalEngine
+        self.goalRunLock = goalRunLock ?? SchedulerRunLock()
     }
 
     // Explicit stop() ends the background loop; actor-isolated loop state
@@ -169,6 +193,36 @@ public actor ServerSchedulerWorker {
         // for a later same-day launch, while a disabled or already-run
         // coordinator returns immediately, so this is a no-op for the default
         // configuration.
+        if let goalStore, let goalEngine {
+            // Disabled installs never spend advancement turns even when stale
+            // rows linger from an earlier enabled period.
+            if await goalEngine.isEnabled {
+                let dueGoals: [Goal]
+                do {
+                    dueGoals = try await goalStore.advanceDue(now: now)
+                } catch {
+                    await logger?("Goals due scan failed: \(error.localizedDescription)")
+                    dueGoals = []
+                }
+                for goal in dueGoals {
+                    do {
+                        let outcome = try await executeGoal(goal, store: goalStore, engine: goalEngine)
+                        results.append(outcome)
+                    } catch is CancellationError {
+                        // Cancelled turns stay due with no error result; halt
+                        // further fires in this tick and preserve cancellation
+                        // (the outer task remains cancelled and exits on sleep).
+                        break
+                    } catch {
+                        // Defensive: advancement records its own failures, so an
+                        // escape here is unexpected; continue to the next due goal
+                        // so one throw never starves the rest of the tick.
+                        await logger?("Goal fire failed: \(error.localizedDescription)")
+                        continue
+                    }
+                }
+            }
+        }
         _ = await indexCoordinator?.fireNightly(now: now)
 
         return results
@@ -301,8 +355,7 @@ public actor ServerSchedulerWorker {
             ) ?? initialEntry
             await hub.broadcastRun(entry)
 
-            let preview = response.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let short = preview.count > 160 ? String(preview.prefix(160)) + "…" : preview
+            let short = schedulerRunPreview(response.text)
             await logger?("Scheduler fired '\(job.name)' (\(reason.displayName)): \(short)")
             await notifier?.notify(title: "Rune Weaver: \(job.name)", body: short.isEmpty ? job.prompt : short)
 
@@ -341,6 +394,237 @@ public actor ServerSchedulerWorker {
         await runLock.release(id: job.id, name: job.name)
         return result
     }
+}
+
+// MARK: - Goal Advancement Execution
+
+/// Dedicated goal advancement execution methods.
+extension ServerSchedulerWorker {
+    /// Records an audit run entry for a goal that skipped firing because it is already running.
+    private func recordGoalSkipped(goal: Goal, startTime: Date) async -> SchedulerRunResult {
+        let skipMsg = "Skipped goal '\(goal.title)': already running"
+        await logger?(skipMsg)
+        // Skipped goals create no conversation, so the audit entry stays
+        // untagged like the job skip path instead of inventing an orphan
+        // session, while still carrying the goal link for filtering.
+        let entry = await runs.append(
+            kind: "goal",
+            status: "skipped",
+            message: skipMsg,
+            sessionID: nil,
+            goalID: goal.id,
+            durationMs: 0
+        )
+        await hub.broadcastRun(entry)
+        // The ephemeral result still needs a session-shaped identifier for
+        // filtering, so it carries a fresh placeholder that is never
+        // persisted: the audit entry above stays untagged (nil session)
+        // plus the goal link, mirroring the job skip path's untagged row.
+        return SchedulerRunResult(
+            jobName: goal.title,
+            sessionID: UUID(),
+            fired: false,
+            skippedReason: "already running",
+            fireReason: nil,
+            startedAt: startTime,
+            finishedAt: Date(),
+            goalID: goal.id
+        )
+    }
+
+    /// Records an audit run entry and broadcasts results for a successfully advanced or parked goal.
+    private func recordGoalSuccess(
+        goal: Goal,
+        sessionID: UUID,
+        runID: UUID,
+        outcome: GoalAdvancementTurn,
+        startTime: Date
+    ) async -> SchedulerRunResult {
+        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        // Parked goal turns remain as awaiting_approval like scheduler
+        // turns, resolving through the same inbox resume path in their
+        // session. The per-turn parked flag keeps a stale prior park in
+        // this session from mis-marking a fresh normal turn.
+        let parkedStatus = outcome.isParked ? "awaiting_approval" : "ok"
+        let entry = await runs.update(
+            id: runID,
+            status: parkedStatus,
+            response: outcome.text,
+            toolActions: outcome.toolActions,
+            totalTokens: outcome.totalTokens,
+            durationMs: durationMs
+        )
+        if let entry {
+            await hub.broadcastRun(entry)
+        }
+        let short = schedulerRunPreview(outcome.text)
+        if outcome.isParked {
+            await logger?("Goal '\(goal.title)' parked awaiting approval.")
+        } else {
+            await logger?("Goal fired '\(goal.title)': \(short)")
+        }
+        await notifier?.notify(title: "Rune Weaver: \(goal.title)", body: short.isEmpty ? goal.title : short)
+        return SchedulerRunResult(
+            jobName: goal.title,
+            sessionID: sessionID,
+            fired: true,
+            responseText: outcome.text,
+            fireReason: nil,
+            startedAt: startTime,
+            finishedAt: Date(),
+            goalID: goal.id
+        )
+    }
+
+    /// Records an audit run entry and broadcasts error details for a failed goal advancement.
+    private func recordGoalFailure(
+        goal: Goal,
+        sessionID: UUID,
+        runID: UUID,
+        error: any Error,
+        startTime: Date
+    ) async -> SchedulerRunResult {
+        let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+        let detail = error.localizedDescription
+        let entry = await runs.update(
+            id: runID,
+            status: "error",
+            response: detail,
+            durationMs: durationMs
+        )
+        if let entry {
+            await hub.broadcastRun(entry)
+        }
+        await logger?("Goal failed '\(goal.title)': \(detail)")
+        return SchedulerRunResult(
+            jobName: goal.title,
+            sessionID: sessionID,
+            fired: true,
+            errorMessage: detail,
+            fireReason: nil,
+            startedAt: startTime,
+            finishedAt: Date(),
+            goalID: goal.id
+        )
+    }
+
+    /// Executes one due goal under the dedicated goal single-flight lock.
+    /// Mirrors `executeJob` exactly: a fresh per-run session linked to the
+    /// goal, a `goal` run row cycling running to ok, awaiting_approval, or
+    /// error, then a due-date bump so the next firing keeps its rhythm.
+    /// Parked goal turns stay in their session for the inbox resume path.
+    /// Cancelled turns stay due with a `cancelled` row and rethrow instead of
+    /// recording an error, so cooperative cancellation always propagates.
+    private func executeGoal(_ goal: Goal, store: GoalStore, engine: GoalEngine) async throws -> SchedulerRunResult {
+        let startTime = Date()
+
+        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
+            return await recordGoalSkipped(goal: goal, startTime: startTime)
+        }
+
+        let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
+
+        let initialEntry = await runs.append(
+            kind: "goal",
+            status: "running",
+            message: goal.title,
+            sessionID: sessionID,
+            goalID: goal.id,
+            durationMs: 0
+        )
+        await hub.broadcastRun(initialEntry)
+
+        // The goal lock is held for the whole turn and released with a
+        // structured await before returning, so the next tick never observes
+        // a stale held lock from a detached release racing the return.
+        let result: SchedulerRunResult
+        do {
+            // One shared advancement path keeps the service and CLI loops from
+            // drifting: bounded audit reads feed the prompt, a parked turn
+            // skips its due bump until the inbox resume completes, and the
+            // run-log row supplies the audit correlation.
+            let turnOrchestrator = orchestrator
+            let turnSessionID = sessionID
+            let turnGoalID = goal.id
+            let bumpLogger = logger
+            let bumpTitle = goal.title
+            let outcome = try await GoalAdvancementRunner.advance(
+                goal: goal,
+                store: store,
+                engine: engine,
+                runID: initialEntry.id,
+                turn: { prompt in
+                    let response = try await turnOrchestrator.process(input: UserInput(
+                        text: prompt,
+                        sessionID: turnSessionID,
+                        source: "goal",
+                        goalID: turnGoalID
+                    ))
+                    return GoalAdvancementTurn(
+                        text: response.text,
+                        isParked: response.isParked,
+                        toolActions: response.toolActions,
+                        totalTokens: response.totalTokens
+                    )
+                },
+                onPostAdvanceFailure: { error in
+                    await bumpLogger?("Goal '\(bumpTitle)' post-advance failed: \(error.localizedDescription)")
+                }
+            )
+            result = await recordGoalSuccess(
+                goal: goal,
+                sessionID: sessionID,
+                runID: initialEntry.id,
+                outcome: outcome,
+                startTime: startTime
+            )
+        } catch is CancellationError {
+            // Cancelled turns did not advance, so they stay due: mark the run
+            // cancelled (never error), release the lock, then propagate.
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            if let entry = await runs.update(
+                id: initialEntry.id,
+                status: "cancelled",
+                durationMs: durationMs
+            ) {
+                await hub.broadcastRun(entry)
+            }
+            await goalRunLock.release(id: goal.id, name: goal.title)
+            throw CancellationError()
+        } catch {
+            result = await recordGoalFailure(
+                goal: goal,
+                sessionID: sessionID,
+                runID: initialEntry.id,
+                error: error,
+                startTime: startTime
+            )
+        }
+
+        await goalRunLock.release(id: goal.id, name: goal.title)
+        return result
+    }
+}
+
+/// Creates an isolated per-run goal session for one advancement fire.
+/// Mirrors `makeSchedulerRunSession`: a fresh identifier keeps background
+/// runs isolated from chat and from each other, while the goal link keeps
+/// runs and sessions joinable without a second lookup.
+func makeGoalRunSession(goal: Goal, conversations: ConversationManager) async -> UUID {
+    let sessionID = UUID()
+    await conversations.ensureSession(id: sessionID, title: goal.title, source: "goal", overwrite: true, goalID: goal.id)
+    return sessionID
+}
+
+/// Truncates a run response for log and notification previews.
+///
+/// Shared by job and goal fires so both surfaces quote the same bounded
+/// prefix instead of each reimplementing the trim logic.
+/// - Parameter text: Full response text.
+/// - Returns: Trimmed prefix capped at 160 characters.
+func schedulerRunPreview(_ text: String) -> String {
+    let preview = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return preview.count > 160 ? String(preview.prefix(160)) + "…" : preview
 }
 
 /// Adapter delivering index run lifecycle events onto the server's durable run
@@ -415,3 +699,5 @@ public struct ServerIndexRunReporter: IndexRunReporting {
         await hub.broadcastRun(entry)
     }
 }
+
+// swiftformat:enable docComments

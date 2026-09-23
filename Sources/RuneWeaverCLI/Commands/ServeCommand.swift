@@ -181,6 +181,77 @@ struct ServeCommand: AsyncParsableCommand {
         return (selected, providers)
     }
 
+    private struct ToolBootstrapDependencies {
+        let memoryEngine: MemoryEngine
+        let embedder: (any EmbeddingsBackend)?
+        let goalStore: GoalStore
+        let goalEngine: GoalEngine
+        let conversations: ConversationManager
+    }
+
+    private func makePreviewBus(
+        loaded: CLIConfigLoader.LoadedConfig,
+        selected: any LLMProvider,
+        mediaConfig: MediaConfig,
+        sharedSecrets: SecretsManager,
+        permissionGate: PermissionGate,
+        deps: ToolBootstrapDependencies
+    ) async -> ToolBus {
+        await CLIShared.makeToolBus(
+            emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
+            memoryEngine: deps.memoryEngine,
+            permissionGate: permissionGate,
+            sandboxConfig: loaded.config.sandbox,
+            embedder: deps.embedder,
+            pluginConfig: loaded.config.plugins,
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm,
+            mediaConfig: mediaConfig,
+            desktopConfig: loaded.config.desktop,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets,
+            goalsConfig: loaded.config.goals,
+            goalEngine: deps.goalEngine,
+            goalStore: deps.goalStore,
+            goalConversations: deps.conversations,
+            goalLLM: selected
+        )
+    }
+
+    private func registerAndVerifyTools(
+        context: ServerContext,
+        plugins: [any Tool],
+        selected: any LLMProvider,
+        effectiveSystemPrompt: String
+    ) async {
+        for tool in plugins {
+            // Preserve live enabled state across re-registration: a bare
+            // register would reset every tool to enabled, and desktop tools
+            // ship disabled — without this, a fresh install would flip them
+            // live between registration and the restore below.
+            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        }
+        // Registration preserves live state now, but re-apply persisted
+        // toggles anyway; the cached load makes this a memory-only pass after
+        // the boot hydration in `make`.
+        await context.restoreToolStates(forceReload: false)
+        // Re-snapshot the live service registry so drift between the startup
+        // preview and the serving bus surfaces instead of silently omitting
+        // a rune from the prompt.
+        let livePrompt = await SystemPromptComposer.resolve(
+            flag: systemPrompt,
+            toolBus: context.toolBus,
+            supportsVision: selected.modelInfo.supportsVision,
+            includeToolSchemas: !selected.modelInfo.supportsTools
+        )
+        if livePrompt != effectiveSystemPrompt {
+            print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
+        }
+    }
+
     private func buildContext(
         loaded: CLIConfigLoader.LoadedConfig,
         selected: any LLMProvider,
@@ -227,6 +298,12 @@ struct ServeCommand: AsyncParsableCommand {
         // the plugin snapshot, and the served context observe one fallback
         // store instead of minting per-tool instances that diverge.
         let sharedSecrets = SecretsManager()
+        // Build the goal stack over the shared episodes database so the preview
+        // registry, the prompt snapshot, and the served context advance the
+        // same goals; a disabled `[goals]` section still registers and fails
+        // closed inside each tool instead of shape-shifting the surface.
+        let goalStore = GoalStore(dbPath: loaded.config.memory.episodesDBPath)
+        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals)
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.
@@ -240,26 +317,29 @@ struct ServeCommand: AsyncParsableCommand {
             llmConfig: loaded.config.llm,
             mediaConfig: resolvedMediaConfig,
             securityConfig: loaded.config.security,
-            secrets: sharedSecrets
+            secrets: sharedSecrets,
+            goalEngine: goalEngine,
+            goalStore: goalStore,
+            goalConversations: conversations,
+            goalsConfig: loaded.config.goals
+        )
+        let deps = ToolBootstrapDependencies(
+            memoryEngine: memoryEngine,
+            embedder: embedder,
+            goalStore: goalStore,
+            goalEngine: goalEngine,
+            conversations: conversations
         )
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
         // directory again on boot, keeping both views consistent.
-        let previewBus = await CLIShared.makeToolBus(
-            emailConfig: loaded.config.email,
-            filesConfig: loaded.config.files,
-            memoryEngine: memoryEngine,
-            permissionGate: permissionGate,
-            sandboxConfig: loaded.config.sandbox,
-            embedder: embedder,
-            pluginConfig: loaded.config.plugins,
-            episodesDBPath: loaded.config.memory.episodesDBPath,
-            browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm,
+        let previewBus = await makePreviewBus(
+            loaded: loaded,
+            selected: selected,
             mediaConfig: resolvedMediaConfig,
-            desktopConfig: loaded.config.desktop,
-            securityConfig: loaded.config.security,
-            secrets: sharedSecrets
+            sharedSecrets: sharedSecrets,
+            permissionGate: permissionGate,
+            deps: deps
         )
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
@@ -289,34 +369,17 @@ struct ServeCommand: AsyncParsableCommand {
             mediaConfig: resolvedMediaConfig,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
+            goalsConfig: loaded.config.goals,
             auth: auth,
             mediaSecrets: sharedSecrets,
             secrets: sharedSecrets
         )
-        for tool in plugins {
-            // Preserve live enabled state across re-registration: a bare
-            // register would reset every tool to enabled, and desktop tools
-            // ship disabled — without this, a fresh install would flip them
-            // live between registration and the restore below.
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
-        }
-        // Registration preserves live state now, but re-apply persisted
-        // toggles anyway; the cached load makes this a memory-only pass after
-        // the boot hydration in `make`.
-        await context.restoreToolStates(forceReload: false)
-        // Re-snapshot the live service registry so drift between the startup
-        // preview and the serving bus surfaces instead of silently omitting
-        // a rune from the prompt.
-        let livePrompt = await SystemPromptComposer.resolve(
-            flag: systemPrompt,
-            toolBus: context.toolBus,
-            supportsVision: selected.modelInfo.supportsVision,
-            includeToolSchemas: !selected.modelInfo.supportsTools
+        await registerAndVerifyTools(
+            context: context,
+            plugins: plugins,
+            selected: selected,
+            effectiveSystemPrompt: effectiveSystemPrompt
         )
-        if livePrompt != effectiveSystemPrompt {
-            print(TerminalStyle.dim("Served prompt differs from live registry; continuing with startup snapshot."))
-        }
         return (context, permissionGate)
     }
 
