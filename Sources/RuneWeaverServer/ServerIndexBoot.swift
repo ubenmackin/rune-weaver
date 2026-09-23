@@ -66,7 +66,7 @@ public enum ServerIndexBoot {
         let mailStage = IndexClosureStage.mail(
             config: indexConfig,
             emailConfig: config.email,
-            gateway: EmailIMAPMailIndexGateway(gateway: SubprocessIMAPGateway()),
+            gateway: EmailIMAPMailIndexGateway(gateway: SubprocessIMAPGateway(), securityConfig: config.security),
             store: store,
             embedder: embedder
         )

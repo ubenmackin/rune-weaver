@@ -1157,3 +1157,132 @@ public enum EmailSearchMerge: Sendable {
         return Array(sorted.prefix(capped).map(\.hit))
     }
 }
+
+// MARK: - Agent-visible credential filtering
+
+public extension EmailSearchHit {
+    /// Returns the agent-visible copy of this hit, redacting credential links and codes.
+    ///
+    /// Snippet and subject rewrite together; sender, date, and mailbox stay
+    /// visible so the agent knows what arrived and can tell the user. The
+    /// human inbox is untouched — this applies solely to tool output. A
+    /// disabled filter or a non-bearing verdict returns self byte-identically.
+    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
+    /// - Returns: Redacted copy, or self when no redaction applies.
+    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchHit {
+        EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
+            let visibleSnippet = EmailCredentialFilter.agentVisibleSnippet(
+                subject: subject,
+                snippet: snippet,
+                enabled: credentialFilterEnabled
+            )
+            let visibleSubject = EmailCredentialFilter.agentVisibleSubject(
+                subject: subject,
+                body: snippet,
+                enabled: credentialFilterEnabled
+            )
+            return EmailSearchHit(
+                id: id,
+                subject: visibleSubject,
+                from: from,
+                date: date,
+                snippet: visibleSnippet,
+                mailbox: mailbox,
+                hasAttachments: hasAttachments,
+                attachmentCount: attachmentCount
+            )
+        }
+    }
+}
+
+public extension EmailFullMessage {
+    /// Returns the agent-visible copy of this message, redacting credential links and codes.
+    ///
+    /// Body and subject rewrite together; sender, recipients, and attachment
+    /// metadata stay visible. A disabled filter or a non-bearing verdict
+    /// returns self byte-identically.
+    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
+    /// - Returns: Redacted copy, or self when no redaction applies.
+    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailFullMessage {
+        EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
+            let visibleBody = EmailCredentialFilter.agentVisibleBody(
+                subject: subject,
+                body: body,
+                enabled: credentialFilterEnabled
+            )
+            let visibleSubject = EmailCredentialFilter.agentVisibleSubject(
+                subject: subject,
+                body: body,
+                enabled: credentialFilterEnabled
+            )
+            return EmailFullMessage(
+                id: id,
+                subject: visibleSubject,
+                from: from,
+                to: to,
+                date: date,
+                body: visibleBody,
+                attachments: attachments,
+                attachmentsDeferred: attachmentsDeferred,
+                attachmentsNote: attachmentsNote
+            )
+        }
+    }
+}
+
+public extension EmailSearchEnvelope {
+    /// Returns the agent-visible envelope with every hit filtered.
+    ///
+    /// Filtering maps over hits so the count and ordering stay identical and
+    /// only snippet and subject text can change; sender and mailbox headers
+    /// never redact.
+    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
+    /// - Returns: Envelope whose messages are agent-visible.
+    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailSearchEnvelope {
+        EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
+            let visible = messages.map { $0.agentVisible(credentialFilterEnabled: credentialFilterEnabled) }
+            return EmailSearchEnvelope(
+                account: account,
+                query: query,
+                messages: visible,
+                mailbox: mailbox,
+                mailboxes: mailboxes
+            )
+        }
+    }
+}
+
+public extension EmailReadEnvelope {
+    /// Returns the agent-visible read envelope with subject and body filtered.
+    ///
+    /// Only subject and body can change; every other header and the mailbox
+    /// label pass through so the agent keeps full routing context.
+    /// - Parameter credentialFilterEnabled: False passes through byte-identically.
+    /// - Returns: Envelope whose subject and body are agent-visible.
+    func agentVisible(credentialFilterEnabled: Bool = true) -> EmailReadEnvelope {
+        EmailCredentialFilter.applyFilter(enabled: credentialFilterEnabled, original: self) {
+            let visibleBody = EmailCredentialFilter.agentVisibleBody(
+                subject: subject,
+                body: body,
+                enabled: credentialFilterEnabled
+            )
+            let visibleSubject = EmailCredentialFilter.agentVisibleSubject(
+                subject: subject,
+                body: body,
+                enabled: credentialFilterEnabled
+            )
+            let message = EmailFullMessage(
+                id: id,
+                subject: visibleSubject,
+                from: from,
+                to: to,
+                date: date,
+                body: visibleBody,
+                attachments: attachments,
+                attachmentsDeferred: attachmentsDeferred,
+                attachmentsNote: attachmentsNote
+            )
+            return EmailReadEnvelope(account: account, message: message, mailbox: mailbox)
+        }
+    }
+}

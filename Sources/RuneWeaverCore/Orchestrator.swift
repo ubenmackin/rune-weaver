@@ -52,6 +52,10 @@ public actor Orchestrator {
     /// at context construction; safe because the reference never mutates after
     /// init and the queue actor guards its own mutable state.
     private nonisolated let steeringQueue: SteeringQueue?
+    /// Defense policy carrying the `[security] untrusted_labeling` off-switch.
+    /// Stored so every tool-result message conversion honors the configured
+    /// labeling posture instead of a hardcoded default.
+    private let securityConfig: SecurityConfig
 
     /// Creates an orchestrator.
     public init(
@@ -65,7 +69,8 @@ public actor Orchestrator {
         approvalQueue: ApprovalQueue? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
         compactionThresholdPercent: Int = 80,
-        steeringQueue: SteeringQueue? = nil
+        steeringQueue: SteeringQueue? = nil,
+        securityConfig: SecurityConfig = SecurityConfig()
     ) {
         self.conversationManager = conversations
         self.toolRegistry = toolBus
@@ -78,6 +83,7 @@ public actor Orchestrator {
         self.embedder = embedder
         self.compactionPercent = max(10, min(100, compactionThresholdPercent))
         self.steeringQueue = steeringQueue
+        self.securityConfig = securityConfig
     }
 
     /// Dynamically updates the maximum tool iterations allowed per turn.
@@ -134,6 +140,12 @@ public actor Orchestrator {
     /// hopping; the immutable reference stays safe to share synchronously.
     public nonisolated var sharedSteeringQueue: SteeringQueue? {
         steeringQueue
+    }
+
+    /// Whether untrusted external tool output is wrapped before model context.
+    /// Reads `[security] untrusted_labeling` so the debugging off-switch is honored.
+    var labelingEnabled: Bool {
+        securityConfig.untrustedLabeling
     }
 
     // MARK: - Parked state mutation
@@ -214,22 +226,14 @@ public actor Orchestrator {
             // as its wire; mid-loop rounds reuse the snapshot, so a toggle takes effect on
             // the next user message. An explicit operator override bypasses composition verbatim.
             let tools = await VisionSchemaFilter.sortedByName(toolBus.availableTools(), name: { $0.name })
-            let supportsVision = llm.modelInfo.supportsVision
-            let includeToolSchemas = !llm.modelInfo.supportsTools
-            let effectiveSystemPrompt: String? = if let custom = input.systemPrompt, !custom.isEmpty {
-                // Custom override bypasses composition and its cache verbatim.
-                custom
-            } else if let stored = systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
-                // Explicit stored override wins over scheduler composition so live turns
-                // and parked resumes honor the same custom prompt instead of diverging.
-                stored
-            } else if input.source == "scheduler" {
-                SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
-            } else {
-                SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
-            }
+            let effectiveSystemPrompt = resolveEffectiveSystemPrompt(input: input, tools: tools)
             let recall: Message? = if let memoryEngine {
-                try await memoryEngine.recallMessage(for: text, sessionID: sessionID, embedder: embedder)
+                try await memoryEngine.recallMessage(
+                    for: text,
+                    sessionID: sessionID,
+                    embedder: embedder,
+                    labelingEnabled: securityConfig.untrustedLabeling
+                )
             } else {
                 nil
             }
@@ -384,6 +388,28 @@ extension Orchestrator {
             finalText = ""
         }
         return true
+    }
+
+    /// Resolves the effective system prompt for one turn.
+    /// Custom overrides bypass composition verbatim so live turns and parked
+    /// resumes honor the same prompt instead of diverging; scheduler turns
+    /// recompose on the background branch with the vision-aware snapshot.
+    private func resolveEffectiveSystemPrompt(input: UserInput, tools: [any Tool]) -> String? {
+        if let custom = input.systemPrompt, !custom.isEmpty {
+            // Custom override bypasses composition and its cache verbatim.
+            return custom
+        }
+        if let stored = systemPrompt, !stored.isEmpty, !SystemPromptComposer.isComposedPrompt(stored) {
+            // Explicit stored override wins over scheduler composition so live turns
+            // and parked resumes honor the same custom prompt instead of diverging.
+            return stored
+        }
+        let supportsVision = llm.modelInfo.supportsVision
+        let includeToolSchemas = !llm.modelInfo.supportsTools
+        if input.source == "scheduler" {
+            return SystemPromptComposer.composeScheduled(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
+        }
+        return SystemPromptComposer.compose(tools: tools, supportsVision: supportsVision, includeToolSchemas: includeToolSchemas)
     }
 
     /// Resolves valid tool calls for the latest assistant turn.
@@ -744,8 +770,23 @@ extension Orchestrator {
                     result: result,
                     roundIndex: roundIndex
                 ))
-                await conversations.append(result.asMessage(), to: sessionID)
-                if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
+                // Declaration-driven labeling: untrusted web/browser/mail/api bytes
+                // enter model context delimited as data while trusted bytes pass
+                // through byte-identical, honoring `[security] untrusted_labeling`.
+                let tool = await OrchestratorToolLoop.appendLabeledResult(
+                    on: toolBus,
+                    to: conversations,
+                    toolName: call.toolName,
+                    result: result,
+                    sessionID: sessionID,
+                    labelingEnabled: securityConfig.untrustedLabeling
+                )
+                if let record = OrchestratorToolLoop.episodicToolRecord(
+                    toolName: call.toolName,
+                    result: result,
+                    for: tool,
+                    labelingEnabled: securityConfig.untrustedLabeling
+                ) {
                     pendingEpisodic.append((record, .tool))
                 }
                 try Task.checkCancellation()
@@ -761,7 +802,14 @@ extension Orchestrator {
                     content: "Tool execution cancelled",
                     isError: true
                 )
-                await conversations.append(cancelledResult.asMessage(), to: sessionID)
+                await OrchestratorToolLoop.appendLabeledResult(
+                    on: toolBus,
+                    to: conversations,
+                    toolName: call.toolName,
+                    result: cancelledResult,
+                    sessionID: sessionID,
+                    labelingEnabled: securityConfig.untrustedLabeling
+                )
             }
             throw error
         }

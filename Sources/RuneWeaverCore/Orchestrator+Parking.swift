@@ -73,7 +73,13 @@ extension Orchestrator {
                 result: result,
                 roundIndex: parked.roundIndex
             ))
-            await conversations.append(result.asMessage(), to: sessionID)
+            await OrchestratorToolLoop.appendLabeledResult(
+                for: nil,
+                result: result,
+                to: conversations,
+                sessionID: sessionID,
+                labelingEnabled: labelingEnabled
+            )
             return try await finishParkedBatch(
                 parked: parked,
                 baseText: "",
@@ -422,9 +428,20 @@ extension Orchestrator {
             result: result,
             roundIndex: roundIndex
         ))
-        await conversations.append(result.asMessage(), to: sessionID)
+        await OrchestratorToolLoop.appendLabeledResult(
+            for: tool,
+            result: result,
+            to: conversations,
+            sessionID: sessionID,
+            labelingEnabled: labelingEnabled
+        )
         var pending: [(content: String, role: Message.Role)] = []
-        if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
+        if let record = OrchestratorToolLoop.episodicToolRecord(
+            toolName: call.toolName,
+            result: result,
+            for: tool,
+            labelingEnabled: labelingEnabled
+        ) {
             pending.append((record, .tool))
         }
         await flushEpisodic(pending, sessionID: sessionID)

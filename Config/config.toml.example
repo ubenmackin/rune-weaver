@@ -281,3 +281,16 @@ api_key_env = "RADARR_API_KEY"
 # default_quality_profile = "HD-1080p"
 # default_root_folder = "/data/media/movies"
 
+[security]
+# Harness-level defense policy for external content. Both keys default ON;
+# an absent [security] section loads hardened so existing files need no
+# migration. Every key renders on save so a round-trip never depends on an
+# implicit default silently diverging from what was written.
+# Untrusted labeling wraps network-derived tool output as data-only context
+# (debugging off-switch only; false restores the pre-labeling shape byte-identically).
+untrusted_labeling = true
+# Credential filtering redacts one-time codes, magic links, and password-reset
+# links from agent-visible mail while leaving the human inbox untouched
+# (false passes mail through byte-identically).
+email_credential_filter = true
+

@@ -32,6 +32,7 @@ public enum BuiltinToolPlugins {
     ///   - fetchTransport: Hermetic fetch transport for tests; live session when nil.
     ///   - apiTransport: Hermetic API transport for tests; live session when nil.
     ///   - ensurer: Lifecycle ensurer for tests; shared actor when nil.
+    ///   - secrets: Shared secrets backing surrogate resolution; fresh instance when nil.
     /// - Returns: Tools in registration order.
     public static func makeTools(
         browserConfig: BrowserConfig = BrowserConfig(),
@@ -41,7 +42,8 @@ public enum BuiltinToolPlugins {
         searchTransport: (any WebSearchTransport)? = nil,
         fetchTransport: (any WebFetchTransport)? = nil,
         apiTransport: (any ApiRequestTransport)? = nil,
-        ensurer: (any SearXNGEnsuring)? = nil
+        ensurer: (any SearXNGEnsuring)? = nil,
+        secrets: SecretsManager? = nil
     ) -> [any Tool] {
         let origins = ApiSSRFGuard.allowlistedOrigins(
             browserConfig: browserConfig,
@@ -55,9 +57,19 @@ public enum BuiltinToolPlugins {
             fetchTransport: fetchTransport,
             ensurer: ensurer
         )
-            + BrowserTools.makeTools(gateway: gateway, allowlistedOrigins: origins)
+            + BrowserTools.makeTools(
+                gateway: gateway,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                allowlistedOrigins: origins
+            )
             + ApiRequestTools.makeTools(
-                browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: apiTransport
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                transport: apiTransport,
+                secrets: secrets
             )
     }
 
@@ -71,6 +83,7 @@ public enum BuiltinToolPlugins {
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         llmServerURLs: [String] = [],
+        securityConfig: SecurityConfig = SecurityConfig(),
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
         gateway: (any BrowserPlaywrightGateway)? = nil,
@@ -80,6 +93,7 @@ public enum BuiltinToolPlugins {
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
         mediaSecrets: SecretsManager? = nil,
+        secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
         desktopControlBridge: (any DesktopControlling)? = nil
     ) -> [any Tool] {
@@ -90,7 +104,8 @@ public enum BuiltinToolPlugins {
             tools += EmailTools.makeTools(
                 emailConfig: emailConfig,
                 sandboxConfig: sandboxConfig ?? SandboxConfig(),
-                filesConfig: filesConfig ?? FilesConfig()
+                filesConfig: filesConfig ?? FilesConfig(),
+                securityConfig: securityConfig
             )
         }
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
@@ -105,7 +120,8 @@ public enum BuiltinToolPlugins {
             searchTransport: searchTransport,
             fetchTransport: fetchTransport,
             apiTransport: apiTransport,
-            ensurer: ensurer
+            ensurer: ensurer,
+            secrets: secrets
         )
         if let mediaConfig {
             tools += MediaTools.makeTools(mediaConfig: mediaConfig, transport: mediaTransport, secrets: mediaSecrets)
@@ -129,7 +145,8 @@ public enum BuiltinToolPlugins {
         apiTransport: (any ApiRequestTransport)? = nil,
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
-        mediaSecrets: SecretsManager? = nil
+        mediaSecrets: SecretsManager? = nil,
+        secrets: SecretsManager? = nil
     ) -> [any Tool] {
         let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
         return makeAllTools(
@@ -140,6 +157,7 @@ public enum BuiltinToolPlugins {
             mediaConfig: config.media,
             desktopConfig: config.desktop,
             llmServerURLs: appLLMOrigins,
+            securityConfig: config.security,
             memoryEngine: memoryEngine,
             embedder: embedder,
             gateway: gateway,
@@ -148,7 +166,8 @@ public enum BuiltinToolPlugins {
             apiTransport: apiTransport,
             mediaTransport: mediaTransport,
             ensurer: ensurer,
-            mediaSecrets: mediaSecrets
+            mediaSecrets: mediaSecrets,
+            secrets: secrets
         )
     }
 
@@ -169,6 +188,7 @@ public enum BuiltinToolPlugins {
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         llmServerURLs: [String] = [],
+        securityConfig: SecurityConfig = SecurityConfig(),
         memoryEngine: MemoryEngine? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
         gateway: (any BrowserPlaywrightGateway)? = nil,
@@ -178,6 +198,7 @@ public enum BuiltinToolPlugins {
         mediaTransport: (any MediaArrTransport)? = nil,
         ensurer: (any SearXNGEnsuring)? = nil,
         mediaSecrets: SecretsManager? = nil,
+        secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
         desktopControlBridge: (any DesktopControlling)? = nil
     ) async {
@@ -190,6 +211,7 @@ public enum BuiltinToolPlugins {
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig,
             llmServerURLs: llmServerURLs,
+            securityConfig: securityConfig,
             memoryEngine: memoryEngine,
             embedder: embedder,
             gateway: gateway,
@@ -199,6 +221,7 @@ public enum BuiltinToolPlugins {
             mediaTransport: mediaTransport,
             ensurer: ensurer,
             mediaSecrets: mediaSecrets,
+            secrets: secrets,
             desktopCaptureBridge: desktopCaptureBridge,
             desktopControlBridge: desktopControlBridge
         ) {

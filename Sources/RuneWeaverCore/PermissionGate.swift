@@ -54,6 +54,29 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
         self.target = target
     }
 
+    /// Maximum argument bytes parsed for approval targets.
+    ///
+    /// Bounds the JSON parse so an oversized arguments blob fails closed to
+    /// an empty target instead of inflating the grant store; mirrors the
+    /// hardened object-shape checks on the bus path.
+    static let maxArgumentsJSONBytes = 64 * 1024
+
+    /// Parses tool arguments as a hardened JSON object.
+    ///
+    /// Pins `options: []` and requires the top-level object shape so
+    /// fragments (arrays, strings, numbers) reject, matching the bus execute
+    /// and narration gates. Oversized payloads fail closed before parsing.
+    /// - Parameter argumentsJSON: Raw tool arguments.
+    /// - Returns: Argument object, or nil when oversized, non-UTF8, or not an object.
+    static func parsedArgumentsObject(from argumentsJSON: String) -> [String: Any]? {
+        guard argumentsJSON.utf8.count <= maxArgumentsJSONBytes else { return nil }
+        guard let data = argumentsJSON.data(using: .utf8) else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
     /// Derives a descriptor from a tool call.
     /// - Parameters:
     ///   - toolCall: Raw invocation arguments.
@@ -93,8 +116,7 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
 
     /// Extracts a target string from raw tool arguments.
     public static func target(from toolCall: ToolInput) -> String {
-        guard let data = toolCall.argumentsJSON.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
         else { return "" }
         for key in ["to", "recipient", "email"] {
             if let joined = normalizedEmailTarget(object[key]) {
@@ -123,8 +145,7 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
 
     /// Builds the approval target for a browser action call.
     private static func browserActTarget(from toolCall: ToolInput) -> String? {
-        guard let data = toolCall.argumentsJSON.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
         else { return nil }
         let action = trimmedString(object["action"])
             ?? trimmedString(object["type"])
@@ -155,9 +176,15 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
     }
 
     /// Builds the approval target for a constrained API request call.
+    ///
+    /// The target carries the header summary alongside method, URL, and body
+    /// preview so the approver can verify the secret slot: a surrogate
+    /// reference (`rwsecret:<KEY>`) stays visible while a pasted live value
+    /// redacts to the shared placeholder and never reaches the grant store.
+    /// Calls without headers keep the historical `METHOD URL [body:preview]`
+    /// shape so existing narrow grants keep covering.
     private static func apiRequestTarget(from toolCall: ToolInput) -> String? {
-        guard let data = toolCall.argumentsJSON.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let object = parsedArgumentsObject(from: toolCall.argumentsJSON)
         else { return nil }
         let rawMethod = trimmedString(object["method"])
             ?? trimmedString(object["verb"])
@@ -170,11 +197,69 @@ public struct ActionDescriptor: Sendable, Codable, Equatable, Hashable {
             ?? trimmedString(object["payload"])
             ?? trimmedString(object["data"])
         guard let url, !url.isEmpty else { return nil }
+        var target = "\(effectiveMethod) \(url)"
+        if let headers = apiRequestHeaders(from: object), !headers.isEmpty {
+            target += " headers:\(apiRedactedHeaderSummary(headers))"
+        }
         guard let body, !body.isEmpty else {
-            return "\(effectiveMethod) \(url)"
+            return target
         }
         let preview = apiBodyPreview(body)
-        return "\(effectiveMethod) \(url) body:\(preview)"
+        return "\(target) body:\(preview)"
+    }
+
+    /// Extracts model-authored headers from API request arguments.
+    ///
+    /// Accepts the `headers`/`header` aliases the tool decoder honors so the
+    /// approval target sees what the transport will validate. Entries with
+    /// blank names or non-string values drop; blank values drop so an empty
+    /// header object reads as absent and keeps the historical target shape.
+    private static func apiRequestHeaders(from object: [String: Any]) -> [String: String]? {
+        let raw: Any? = object["headers"] ?? object["header"]
+        guard let raw else { return nil }
+        var checked: [String: String] = [:]
+        if let stringMap = raw as? [String: String] {
+            for (name, value) in stringMap {
+                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { continue }
+                let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedValue.isEmpty else { continue }
+                checked[trimmedName] = trimmedValue
+            }
+        } else if let anyMap = raw as? [String: Any] {
+            for (name, value) in anyMap {
+                let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { continue }
+                guard let text = value as? String else { continue }
+                let trimmedValue = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedValue.isEmpty else { continue }
+                checked[trimmedName] = trimmedValue
+            }
+        } else {
+            return nil
+        }
+        return checked.isEmpty ? nil : checked
+    }
+
+    /// Summarizes headers for the approval target with secrets redacted.
+    ///
+    /// Delegates to the shared core header rule so approval targets and the
+    /// tools-layer preview policy agree on surrogate visibility: an
+    /// `Authorization` value carrying a `rwsecret:<KEY>` reference stays
+    /// visible so dry-run previews and approval targets agree, while any other
+    /// `Authorization` value redacts to the shared placeholder and never
+    /// persists a live secret in the grant store. Other headers pass through
+    /// the shared sweep (no resolved values exist at approval time to sweep).
+    private static func apiRedactedHeaderSummary(_ headers: [String: String]) -> String {
+        var redacted: [String: String] = [:]
+        redacted.reserveCapacity(headers.count)
+        for (name, value) in headers {
+            let isAuth = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "authorization"
+            redacted[name] = SecretsManager.redactedHeaderValue(value, isAuthorization: isAuth, resolvedSecrets: [])
+        }
+        return redacted.sorted(by: { $0.key.lowercased() < $1.key.lowercased() })
+            .map { "\($0.key):\($0.value)" }
+            .joined(separator: ", ")
     }
 
     /// Collapses a request body to the short preview used in API targets.
@@ -927,8 +1012,7 @@ public actor PermissionGate {
 
     /// Checks whether a tool call targets a protected engine path.
     private func isProtectedTarget(toolCall: ToolInput) -> Bool {
-        guard let data = toolCall.argumentsJSON.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let object = ActionDescriptor.parsedArgumentsObject(from: toolCall.argumentsJSON)
         else {
             let target = ActionDescriptor.target(from: toolCall)
             guard !target.isEmpty else { return false }

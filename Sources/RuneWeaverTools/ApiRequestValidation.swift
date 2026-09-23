@@ -5,13 +5,20 @@
 // and the fetch classifier cannot diverge on what counts as text.
 
 import Foundation
+import RuneWeaverCore
 
 /// Header allowlist and secret redaction for `api.request`.
 public enum ApiHeaderPolicy: Sendable {
     /// Lowercased header names the model may supply.
     public static let allowedHeaders: Set<String> = ["accept", "content-type", "authorization"]
     /// Placeholder standing in for the secret in logs and previews.
-    public static let redactedPlaceholder = "[redacted]"
+    ///
+    /// Single-sourced through `SecretsManager` so header redaction and output
+    /// sweeping agree on one redacted shape; the dependency runs tools → core
+    /// only, never the reverse, so no import cycle is introduced.
+    public static var redactedPlaceholder: String {
+        SecretsManager.redactedPlaceholder
+    }
 
     /// Whether a header name is on the allowlist (case-insensitive).
     /// - Parameter name: Raw header name.
@@ -45,25 +52,45 @@ public enum ApiHeaderPolicy: Sendable {
         return checked
     }
 
-    /// Redacts the secret for logs and preview envelopes.
-    public static func redacted(_ headers: [String: String]) -> [String: String] {
+    /// Redacts secrets for logs and preview envelopes, sweeping echoes.
+    ///
+    /// `Authorization` values always redact to the placeholder, except a
+    /// still-unresolved surrogate reference (`rwsecret:<key>`), which carries
+    /// no secret bytes and stays visible so dry-run previews keep the
+    /// reference the model authored. Any resolved value echoing in a
+    /// non-`Authorization` header sweeps to the same placeholder, giving
+    /// belt-and-suspenders parity with the transport output sweep.
+    /// Delegates to the shared core rule so the tools preview and the
+    /// approval-target summary cannot diverge on surrogate visibility.
+    public static func redacted(_ headers: [String: String], resolvedSecrets: [String] = []) -> [String: String] {
         var sanitized: [String: String] = [:]
         sanitized.reserveCapacity(headers.count)
         for (name, value) in headers {
-            if name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "authorization" {
-                sanitized[name] = redactedPlaceholder
-            } else {
-                sanitized[name] = value
-            }
+            let isAuth = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "authorization"
+            sanitized[name] = SecretsManager.redactedHeaderValue(value, isAuthorization: isAuth, resolvedSecrets: resolvedSecrets)
         }
         return sanitized
     }
 
+    /// Sweeps resolved secret values out of one header value.
+    ///
+    /// Delegates to the shared core sweep so header and output echoes follow
+    /// one longest-first rule with one placeholder.
+    /// - Parameters:
+    ///   - value: Header value possibly echoing a resolved secret.
+    ///   - secrets: Live values inserted at the transport boundary.
+    /// - Returns: Value with every non-empty secret replaced by the placeholder.
+    static func sweepResolved(_ value: String, secrets: [String]) -> String {
+        SecretsManager.sweepResolved(value, secrets: secrets)
+    }
+
     /// Single-line log-safe header summary with the secret already redacted.
-    /// - Parameter headers: Validated headers.
+    /// - Parameters:
+    ///   - headers: Validated headers.
+    ///   - resolvedSecrets: Live values to sweep from echoed headers.
     /// - Returns: Compact `Name:value` pairs joined by commas, or `(none)`.
-    public static func logSummary(_ headers: [String: String]) -> String {
-        let sanitized = redacted(headers)
+    public static func logSummary(_ headers: [String: String], resolvedSecrets: [String] = []) -> String {
+        let sanitized = redacted(headers, resolvedSecrets: resolvedSecrets)
         guard !sanitized.isEmpty else { return "(none)" }
         return sanitized.sorted(by: { $0.key.lowercased() < $1.key.lowercased() })
             .map { "\($0.key):\($0.value)" }
@@ -81,6 +108,8 @@ public enum ApiRequestError: Error, Sendable, Equatable {
     case unsafeURL(String)
     /// The request body exceeded the 64KB cap.
     case bodyTooLarge(String)
+    /// A header surrogate named a key with no stored secret.
+    case unknownSurrogate(String)
 
     /// Human-readable message without secret values.
     public var message: String {
@@ -89,6 +118,7 @@ public enum ApiRequestError: Error, Sendable, Equatable {
         case let .invalidHeaders(detail): detail
         case let .unsafeURL(detail): detail
         case let .bodyTooLarge(detail): detail
+        case let .unknownSurrogate(detail): detail
         }
     }
 }

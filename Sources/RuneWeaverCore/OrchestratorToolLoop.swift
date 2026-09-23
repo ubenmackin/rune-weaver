@@ -122,8 +122,55 @@ public enum OrchestratorToolLoop {
     }
 
     /// Builds the compact episodic record for one tool execution.
+    ///
+    /// Fail-closed legacy path: provenance is unknown here, so the record
+    /// labels as untrusted. Callers with a declared trust level use the
+    /// overload below.
     public static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
         MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
+    }
+
+    /// Builds the compact episodic record with declared provenance.
+    ///
+    /// Declaration-driven like the model-context path: untrusted outcomes wrap
+    /// in the single-sourced labeled block while trusted outcomes keep the
+    /// historical shape. The flag is the `[security] untrusted_labeling`
+    /// off-switch plumbed from config for debugging.
+    public static func episodicToolRecord(
+        toolName: String,
+        result: ToolResult,
+        trustLevel: ContentTrustLevel,
+        labelingEnabled: Bool = true
+    ) -> String? {
+        MemoryEngine.episodicToolRecord(
+            toolName: toolName,
+            result: result,
+            trustLevel: trustLevel,
+            labelingEnabled: labelingEnabled
+        )
+    }
+
+    /// Builds the compact episodic record from the producing tool's declaration.
+    ///
+    /// Nil tools (unknown names) fail closed to untrusted: the bus usually
+    /// answers those with engine-authored failures, but an unknown name
+    /// carries no declaration to trust, so labeling keeps a future
+    /// attacker-influenced failure from persisting as trusted history.
+    public static func episodicToolRecord(
+        toolName: String,
+        result: ToolResult,
+        for tool: (any Tool)?,
+        labelingEnabled: Bool = true
+    ) -> String? {
+        guard let tool else {
+            return MemoryEngine.episodicToolRecord(toolName: toolName, result: result)
+        }
+        return MemoryEngine.episodicToolRecord(
+            toolName: toolName,
+            result: result,
+            trustLevel: tool.contentTrustLevel,
+            labelingEnabled: labelingEnabled
+        )
     }
 
     /// Normalizes an input source label, defaulting blanks to `"chat"`.
@@ -273,6 +320,127 @@ public enum OrchestratorToolLoop {
         // Silent partition: the prompt and wire filters already log each skip,
         // so warning collection stays quiet to keep one log site per turn.
         degradedSchemaNames(for: tools).sorted().map { degradedToolWarning(for: $0) }
+    }
+
+    /// Returns the model-context content for one tool result, labeling untrusted output.
+    ///
+    /// Declaration-driven: the verdict comes from the tool's own
+    /// `contentTrustLevel`, never from a name list, so a renamed tool keeps its
+    /// provenance. Trusted results pass through byte-identical so local tools
+    /// (files, memory, goals, media) pay zero diff; untrusted results wrap in the
+    /// single-sourced labeled block. The flag is the `[security]
+    /// untrusted_labeling` off-switch plumbed from config for debugging.
+    /// - Parameters:
+    ///   - content: Raw tool result content.
+    ///   - trustLevel: Declared provenance of the producing tool.
+    ///   - toolName: Declaring tool attributed on the opening delimiter.
+    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    /// - Returns: Labeled content for untrusted tools, otherwise the input verbatim.
+    public static func labeledResultContent(
+        _ content: String,
+        trustLevel: ContentTrustLevel,
+        toolName: String,
+        labelingEnabled: Bool = true
+    ) -> String {
+        guard labelingEnabled else { return content }
+        guard trustLevel == .untrustedExternal else { return content }
+        return ContentTrustLabeler.label(toolName: toolName, content: content)
+    }
+
+    /// Returns the model-context content for one tool's result.
+    ///
+    /// Nil tools (unknown or unregistered names) stay trusted and pass through:
+    /// the bus already answers those with an `invalid_tool` failure whose text is
+    /// engine-authored, not attacker-controlled, so wrapping it would only add
+    /// noise.
+    /// - Parameters:
+    ///   - content: Raw tool result content.
+    ///   - tool: Producing tool, or nil when unknown.
+    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    /// - Returns: Labeled content for untrusted tools, otherwise the input verbatim.
+    public static func labeledResultContent(
+        _ content: String,
+        for tool: (any Tool)?,
+        labelingEnabled: Bool = true
+    ) -> String {
+        guard let tool else { return content }
+        return labeledResultContent(content, trustLevel: tool.contentTrustLevel, toolName: tool.name, labelingEnabled: labelingEnabled)
+    }
+
+    /// Builds the `tool`-role message carrying one result into model context.
+    ///
+    /// Single-sourced composition point so the orchestrator, the parked resume
+    /// path, and the CLI agree: untrusted payloads arrive delimited as data while
+    /// trusted payloads keep their exact bytes. Role, call identifier, and error
+    /// taxonomy ride through untouched so history reloads keep their badges.
+    /// - Parameters:
+    ///   - tool: Producing tool, or nil when unknown.
+    ///   - result: Bus outcome to carry.
+    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    /// - Returns: Tool message with labeled or verbatim content.
+    public static func toolResultMessage(
+        for tool: (any Tool)?,
+        result: ToolResult,
+        labelingEnabled: Bool = true
+    ) -> Message {
+        let content = labeledResultContent(result.content, for: tool, labelingEnabled: labelingEnabled)
+        return Message(
+            role: .tool,
+            content: content,
+            toolCallID: result.toolCallID,
+            isError: result.isError,
+            errorKind: result.errorKind
+        )
+    }
+
+    /// Appends one labeled tool result for an already-resolved tool.
+    /// Single-sources message composition with the lookup variant so parked
+    /// calls holding their tool avoid a redundant registry round-trip.
+    /// - Parameters:
+    ///   - tool: Producing tool, or nil when unknown.
+    ///   - result: Bus outcome to carry.
+    ///   - conversations: Session owner receiving the message.
+    ///   - sessionID: Session receiving the message.
+    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    public static func appendLabeledResult(
+        for tool: (any Tool)?,
+        result: ToolResult,
+        to conversations: ConversationManager,
+        sessionID: UUID,
+        labelingEnabled: Bool = true
+    ) async {
+        await conversations.append(
+            toolResultMessage(for: tool, result: result, labelingEnabled: labelingEnabled),
+            to: sessionID
+        )
+    }
+
+    /// Appends one labeled tool result to its session in a single lookup.
+    /// Single-sources the repeated `tool(named:)` plus
+    /// `toolResultMessage(labelingEnabled:)` pair so the orchestrator, the
+    /// parked resume path, and the CLI cannot drift on lookup versus labeling.
+    /// Returns the producing tool so callers reuse it for the episodic record
+    /// without a second lookup.
+    /// - Parameters:
+    ///   - bus: Registry owning the tool lookup.
+    ///   - conversations: Session owner receiving the message.
+    ///   - toolName: Tool that produced the result.
+    ///   - result: Bus outcome to carry.
+    ///   - sessionID: Session receiving the message.
+    ///   - labelingEnabled: False bypasses labeling byte-identically for debugging.
+    /// - Returns: Producing tool, or nil when unknown.
+    @discardableResult
+    public static func appendLabeledResult(
+        on bus: ToolBus,
+        to conversations: ConversationManager,
+        toolName: String,
+        result: ToolResult,
+        sessionID: UUID,
+        labelingEnabled: Bool = true
+    ) async -> (any Tool)? {
+        let tool = await bus.tool(named: toolName)
+        await appendLabeledResult(for: tool, result: result, to: conversations, sessionID: sessionID, labelingEnabled: labelingEnabled)
+        return tool
     }
 
     /// Whether raw narration arguments are a JSON object.

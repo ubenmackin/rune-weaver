@@ -15,11 +15,26 @@ import RuneWeaverCore
 public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     /// Underlying IMAP gateway (subprocess bridge by default).
     private let gateway: any EmailIMAPGateway
+    /// Whether indexed bodies carry the redacted agent-visible form. Defaults
+    /// on so search recall cannot resurrect a redacted link; false keeps the
+    /// raw body for debugging parity checks.
+    private let credentialFilterEnabled: Bool
 
     /// Creates an adapter over an IMAP gateway.
-    /// - Parameter gateway: Gateway whose read-only operations back the seam.
-    public init(gateway: any EmailIMAPGateway) {
+    /// - Parameters:
+    ///   - gateway: Gateway whose read-only operations back the seam.
+    ///   - credentialFilterEnabled: False indexes raw bodies byte-identically.
+    public init(gateway: any EmailIMAPGateway, credentialFilterEnabled: Bool = true) {
         self.gateway = gateway
+        self.credentialFilterEnabled = credentialFilterEnabled
+    }
+
+    /// Creates an adapter honoring the `[security]` defense policy.
+    /// - Parameters:
+    ///   - gateway: Gateway whose read-only operations back the seam.
+    ///   - securityConfig: Defense policy carrying the filter toggle.
+    public init(gateway: any EmailIMAPGateway, securityConfig: SecurityConfig) {
+        self.init(gateway: gateway, credentialFilterEnabled: securityConfig.emailCredentialFilter)
     }
 
     /// Lists selectable mailboxes for an account.
@@ -52,13 +67,27 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
         messages.reserveCapacity(hits.count)
         for hit in hits {
             let full = try await gateway.fetch(credentials: resolved, mailbox: mailbox, messageID: hit.id)
+            // Index parity: the store keeps the redacted agent-visible form so
+            // a later recall cannot resurrect a link or code the tools would
+            // hide. Senders stay visible; subject links and codes redact like
+            // body links and codes, and a disabled filter indexes byte-identically.
+            let visibleBody = EmailCredentialFilter.agentVisibleBody(
+                subject: full.subject,
+                body: full.body,
+                enabled: credentialFilterEnabled
+            )
+            let visibleSubject = EmailCredentialFilter.agentVisibleSubject(
+                subject: full.subject,
+                body: full.body,
+                enabled: credentialFilterEnabled
+            )
             messages.append(
                 MailIndexMessage(
                     id: hit.id,
-                    subject: full.subject,
+                    subject: visibleSubject,
                     from: full.from,
                     date: Self.date(from: full.date),
-                    body: full.body,
+                    body: visibleBody,
                     attachments: full.attachments.map {
                         MailIndexAttachmentInfo(
                             filename: $0.filename,

@@ -14,10 +14,13 @@
 // and payload parsing here, so the screenshot budget and envelope shapes
 // cannot drift across files; deny behavior is pinned single-source by the
 // shared web-safety fixture. Fail-closed validation rejects non-web schemes
-// and SSRF targets before the helper spawns; screenshots are opt-in per
-// navigate call, downscaled to a 1280px longest edge and re-encoded to bounded
-// JPEG under 500KB held in memory for the turn only (never written to disk),
-// persisting just a content hash in the audit trail. Refs keep the `eNN`
+// and SSRF targets through the canonical guard before the helper spawns,
+// and every bridge-reported redirect or post-action URL re-vets the same way
+// so a public start cannot bounce into sensitive ranges; screenshots are
+// opt-in per navigate call, downscaled to a 1280px longest edge and
+// re-encoded to bounded JPEG under 500KB held in memory for the turn only
+// (never written to disk), persisting just a content hash in the audit trail.
+// Refs keep the `eNN`
 // shape numbering from e1, and redirect chains collapse to a final URL plus
 // count so the UI never sees a dead count.
 
@@ -265,6 +268,220 @@ public enum BrowserValidation: Sendable {
         return trimmed
     }
 
+    /// Configured exemption set for one browser egress check.
+    /// Bundles the four-part seam so the six public validators share one
+    /// origins computation and one deny core instead of threading four params
+    /// through near-identical literal-guard-DNS bodies.
+    private struct EgressPolicy: Sendable {
+        let browserConfig: BrowserConfig
+        let mediaConfig: MediaConfig?
+        let llmServerURLs: [String]
+        let extraAllowlistedOrigins: Set<String>
+
+        func effectiveOrigins() -> Set<String> {
+            var effective = ApiSSRFGuard.allowlistedOrigins(
+                browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs
+            )
+            effective.formUnion(extraAllowlistedOrigins)
+            return effective
+        }
+
+        func denyReason(for trimmed: String) -> String? {
+            if extraAllowlistedOrigins.isEmpty {
+                return ApiSSRFGuard.denyReason(
+                    for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs
+                )
+            }
+            return ApiSSRFGuard.denyReason(for: trimmed, allowlistedOrigins: effectiveOrigins())
+        }
+
+        func denyReasonAsync(for trimmed: String) async -> String? {
+            if extraAllowlistedOrigins.isEmpty {
+                return await ApiSSRFGuard.denyReasonAsync(
+                    for: trimmed, browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs
+                )
+            }
+            return await ApiSSRFGuard.denyReasonAsync(for: trimmed, allowlistedOrigins: effectiveOrigins())
+        }
+
+        func validateURL(_ url: String) throws -> String {
+            let trimmed = try BrowserValidation.validatedURLLiteral(url)
+            if let refusal = denyReason(for: trimmed) {
+                throw BrowserError.invalidURL("Invalid URL: \(refusal)")
+            }
+            return trimmed
+        }
+
+        func validateURLAsync(_ url: String) async throws -> String {
+            let trimmed = try BrowserValidation.validatedURLLiteral(url)
+            if let refusal = await denyReasonAsync(for: trimmed) {
+                throw BrowserError.invalidURL("Invalid URL: \(refusal)")
+            }
+            return trimmed
+        }
+
+        func validateEgressURL(_ url: String) throws -> String {
+            let trimmed = try BrowserValidation.egressTrimmed(url)
+            return try validateURL(trimmed)
+        }
+
+        func validateEgressURLAsync(_ url: String) async throws -> String {
+            let trimmed = try BrowserValidation.egressTrimmed(url)
+            return try await validateURLAsync(trimmed)
+        }
+    }
+
+    /// Builds the egress policy for one call's configured exemption set.
+    private static func egressPolicy(
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig?,
+        llmServerURLs: [String],
+        extraAllowlistedOrigins: Set<String>
+    ) -> EgressPolicy {
+        EgressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        )
+    }
+
+    /// Shared bridge-reported URL literal check without any resolver use.
+    /// Centralized so egress entry and redirect hops cannot drift on empty
+    /// versus unsafe-target wording; each caller adds only its DNS stage after.
+    private static func egressTrimmed(_ url: String) throws -> String {
+        guard let trimmed = NormalizedText.value(url), !trimmed.isEmpty else {
+            throw BrowserError.invalidURL("Invalid URL: bridge reported an empty redirect URL")
+        }
+        guard WebURLSafety.isSafeUrl(trimmed) else {
+            throw BrowserError.invalidURL("Invalid URL: Unsafe redirect target: refusing to dereference \(trimmed).")
+        }
+        return trimmed
+    }
+
+    /// Validates a navigation or act URL against the configured exemption set.
+    /// Delegates to the canonical guard so loopback stays dialable only for the
+    /// configured search, media, and model origins while metadata, link-local,
+    /// and private ranges stay denied; any refusal fails closed before the
+    /// bridge spawns.
+    public static func validateURL(
+        _ url: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) throws -> String {
+        try egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        ).validateURL(url)
+    }
+
+    /// Async URL validation against the configured exemption set.
+    /// Literal checks run inline while hostnames needing the resolver hop to
+    /// the bounded pool, so a wedged resolver fails closed without stalling
+    /// shared tasks; unverified hosts deny rather than dial.
+    public static func validateURLAsync(
+        _ url: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) async throws -> String {
+        try await egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        ).validateURLAsync(url)
+    }
+
+    /// Re-validates one bridge-reported URL before it enters tool output.
+    /// Mirrors the fetch redirect chain: the shared allowlist rejects smuggled
+    /// schemes first, then the canonical guard re-vets the hop so a public
+    /// start cannot bounce into loopback, link-local, metadata, or private
+    /// ranges through a redirect or a post-action navigation.
+    public static func validateEgressURL(
+        _ url: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) throws -> String {
+        try egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        ).validateEgressURL(url)
+    }
+
+    /// Async re-validation for one bridge-reported URL.
+    /// DNS vetting hops to the bounded pool so redirect re-checks cannot stall
+    /// shared tasks; an unverified hop fails closed like the entry check.
+    public static func validateEgressURLAsync(
+        _ url: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) async throws -> String {
+        try await egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        ).validateEgressURLAsync(url)
+    }
+
+    /// Re-validates a full bridge-reported redirect chain plus its final URL.
+    /// Every hop re-enters the allowlist plus the canonical guard, so a safe
+    /// start cannot launder an unsafe hop through the helper's chain surfacing.
+    public static func validateRedirectChain(
+        _ chain: [BrowserRedirectStep],
+        finalURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) throws {
+        let policy = egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        )
+        for step in chain {
+            _ = try policy.validateEgressURL(step.url)
+        }
+        _ = try policy.validateEgressURL(finalURL)
+    }
+
+    /// Async re-validation for a bridge-reported redirect chain plus its final URL.
+    /// Hop checks share the bounded-pool DNS path with the entry check, keeping
+    /// a wedged resolver from stalling shared tasks while staying fail-closed.
+    public static func validateRedirectChainAsync(
+        _ chain: [BrowserRedirectStep],
+        finalURL: String,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        extraAllowlistedOrigins: Set<String> = []
+    ) async throws {
+        let policy = egressPolicy(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: extraAllowlistedOrigins
+        )
+        for step in chain {
+            _ = try await policy.validateEgressURLAsync(step.url)
+        }
+        _ = try await policy.validateEgressURLAsync(finalURL)
+    }
+
     /// Shared literal URL checks without any resolver use.
     /// Centralized so the synchronous and async SSRF stages cannot drift on
     /// length, control-byte, or scheme policy; each caller adds only its own
@@ -443,24 +660,67 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     public let maxOutputBytes: Int
     /// Allowlisted origin and host patterns exempted from SSRF refusals.
     public let allowlistedOrigins: Set<String>
+    /// Browser policy supplying the search origin exemption.
+    public let browserConfig: BrowserConfig
+    /// Media policy supplying Sonarr/Radarr auto-allowed origins.
+    public let mediaConfig: MediaConfig?
+    /// Configured model endpoints exempted from the loopback deny.
+    public let llmServerURLs: [String]
+
+    /// Resolves the Python executable from the explicit path or the env override.
+    /// Single-sourced so the legacy and config-bound inits cannot drift on
+    /// trim versus env precedence; nil keeps the managed-venv fast path.
+    private static func resolvePythonBin(explicit: String?) -> String? {
+        if let trimmed = NormalizedText.value(explicit) {
+            return trimmed
+        }
+        if let configured = NormalizedText.value(ProcessInfo.processInfo.environment[Self.pythonEnvVar]) {
+            return configured
+        }
+        return nil
+    }
 
     /// Creates a subprocess gateway.
+    /// Delegates to the designated config-bound init with a neutral policy so
+    /// the precomputed explicit set stays the sole exemption source instead of
+    /// gaining a default search origin the caller never configured.
     public init(
         pythonExecutable: String? = nil,
         timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
         maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
         allowlistedOrigins: Set<String> = []
     ) {
-        if let trimmed = NormalizedText.value(pythonExecutable) {
-            self.pythonExecutable = trimmed
-        } else if let configured = NormalizedText.value(ProcessInfo.processInfo.environment[Self.pythonEnvVar]) {
-            self.pythonExecutable = configured
-        } else {
-            self.pythonExecutable = nil
-        }
+        self.init(
+            pythonExecutable: pythonExecutable,
+            timeoutSeconds: timeoutSeconds,
+            maxOutputBytes: maxOutputBytes,
+            browserConfig: BrowserConfig(searxngURL: ""),
+            mediaConfig: nil,
+            llmServerURLs: [],
+            allowlistedOrigins: allowlistedOrigins
+        )
+    }
+
+    /// Creates a subprocess gateway bound to the configured exemption set.
+    /// Entry URLs vet through the canonical guard with search, media, and
+    /// model origins exempted, and every bridge-reported hop re-vets the same
+    /// way so a public start cannot bounce into sensitive ranges.
+    public init(
+        pythonExecutable: String? = nil,
+        timeoutSeconds: TimeInterval = ContainerMachineManager.defaultProcessTimeoutSeconds,
+        maxOutputBytes: Int = ContainerMachineManager.maxProcessOutputBytes,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        allowlistedOrigins: Set<String> = []
+    ) {
+        self.pythonExecutable = Self.resolvePythonBin(explicit: pythonExecutable)
         self.timeoutSeconds = timeoutSeconds
         self.maxOutputBytes = maxOutputBytes
         self.allowlistedOrigins = allowlistedOrigins
+        self.browserConfig = browserConfig
+        self.mediaConfig = mediaConfig
+        self.llmServerURLs = llmServerURLs
     }
 
     /// Navigates in a fresh isolated context and returns a bounded snapshot.
@@ -470,13 +730,32 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
 
     /// Navigates resolving the interpreter from the fast path only when dry-running.
     public func navigate(url: String, includeScreenshot: Bool, dryRun: Bool) async throws -> BrowserSnapshot {
-        let validated = try await BrowserValidation.validateURLAsync(url, allowlistedOrigins: allowlistedOrigins)
+        let validated = try await BrowserValidation.validateURLAsync(
+            url,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: allowlistedOrigins
+        )
         var payload: [String: Any] = ["op": "navigate", "url": validated]
         if includeScreenshot {
             payload["includeScreenshot"] = true
         }
         let data = try await run(payload: payload, dryRun: dryRun)
-        return try BrowserBridgeParsing.parseSnapshotPayload(data, fallbackURL: validated)
+        let snapshot = try BrowserBridgeParsing.parseSnapshotPayload(data, fallbackURL: validated)
+        // The helper surfaces its redirect chain, so every reported hop
+        // re-enters the allowlist plus the canonical guard before the
+        // snapshot leaves the gateway; a public start cannot launder a
+        // sensitive hop through the bridge.
+        try await BrowserValidation.validateRedirectChainAsync(
+            snapshot.redirectChain,
+            finalURL: snapshot.url,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: allowlistedOrigins
+        )
+        return snapshot
     }
 
     /// Re-navigates in a fresh isolated context and performs one action.
@@ -486,7 +765,13 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
     /// dry-run path because read-only opens still validate through the fast
     /// interpreter without provisioning.
     public func act(action: BrowserActAction, ref: String, text: String?, url: String) async throws -> BrowserActResult {
-        let validatedURL = try await BrowserValidation.validateURLAsync(url, allowlistedOrigins: allowlistedOrigins)
+        let validatedURL = try await BrowserValidation.validateURLAsync(
+            url,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: allowlistedOrigins
+        )
         let validatedRef = try BrowserValidation.validateRef(ref)
         let validatedText = try BrowserValidation.validateActText(action: action, text: text)
         var payload: [String: Any] = [
@@ -499,7 +784,18 @@ public struct SubprocessPlaywrightGateway: BrowserPlaywrightGateway, Sendable {
             payload["text"] = validatedText
         }
         let data = try await run(payload: payload, dryRun: false)
-        return try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
+        let result = try BrowserBridgeParsing.parseActPayload(data, action: action, ref: validatedRef, fallbackURL: validatedURL)
+        // Post-action navigation can land elsewhere (click-through or
+        // meta-refresh), so the reported URL re-vets before the result leaves
+        // the gateway rather than trusting the helper's landing page.
+        _ = try await BrowserValidation.validateEgressURLAsync(
+            result.url,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            extraAllowlistedOrigins: allowlistedOrigins
+        )
+        return result
     }
 
     /// Runs the helper once with the given request document.

@@ -62,6 +62,9 @@ struct StatusCommand: AsyncParsableCommand {
 
         print("")
         print("Tools:")
+        // One shared secrets instance so this probe observes the same
+        // fallback store as the tools it lists instead of minting per-tool state.
+        let sharedSecrets = SecretsManager()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: config.email,
             filesConfig: config.files,
@@ -70,7 +73,9 @@ struct StatusCommand: AsyncParsableCommand {
             pluginConfig: config.plugins,
             episodesDBPath: config.memory.episodesDBPath,
             browserConfig: config.browser,
-            llmConfig: config.llm
+            llmConfig: config.llm,
+            securityConfig: config.security,
+            secrets: sharedSecrets
         )
         let toolNames = await toolBus.toolNames().sorted()
         if toolNames.isEmpty {

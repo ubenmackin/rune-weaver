@@ -241,7 +241,13 @@ public actor ToolBus {
     private var activeCalls: [ToolCallKey: ToolCallCancellation] = [:]
 
     /// Creates a bus.
-    public init(approvalHandler: ToolApprovalHandler? = nil, permissionGate: PermissionGate? = nil) {
+    /// Labeling posture lives with the turn owner (`Orchestrator` /
+    /// `ChatTurnContext`), never here: the bus carries no `SecurityConfig`
+    /// copy so the two can never diverge silently.
+    public init(
+        approvalHandler: ToolApprovalHandler? = nil,
+        permissionGate: PermissionGate? = nil
+    ) {
         self.approvalHandler = approvalHandler
         self.permissionGate = permissionGate
     }

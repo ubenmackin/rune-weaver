@@ -330,10 +330,15 @@ public final class AppModel {
 
             // Keep the menu-bar registry identical to the serve command's shared
             // plugin set so served turns see the same tools as terminal use.
+            // The boot secrets instance backs both surrogate resolution and
+            // media credential lookups so per-tool fresh instances cannot
+            // diverge from the served context.
             let plugins = BuiltinToolPlugins.makeAllTools(
                 config: config,
                 memoryEngine: memoryEngine,
-                embedder: embedder
+                embedder: embedder,
+                mediaSecrets: secrets,
+                secrets: secrets
             )
             let appLLMOrigins = LLMOrigins.serverURLs(from: config.llm)
 
@@ -369,7 +374,10 @@ public final class AppModel {
                 filesConfig: config.files,
                 mediaConfig: config.media,
                 desktopConfig: config.desktop,
-                auth: auth
+                securityConfig: config.security,
+                auth: auth,
+                mediaSecrets: secrets,
+                secrets: secrets
             )
 
             for tool in plugins {

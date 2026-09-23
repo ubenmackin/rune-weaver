@@ -99,6 +99,9 @@ private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeave
 private func gatewayForLiveReload(
     stored: (any BrowserPlaywrightGateway)?,
     busGateway: (any BrowserPlaywrightGateway)?,
+    browserConfig: BrowserConfig,
+    mediaConfig: MediaConfig?,
+    llmServerURLs: [String],
     origins: Set<String>
 ) -> (any BrowserPlaywrightGateway)? {
     let baseGateway = stored ?? busGateway
@@ -107,6 +110,9 @@ private func gatewayForLiveReload(
             pythonExecutable: managed.pythonExecutable,
             timeoutSeconds: managed.timeoutSeconds,
             maxOutputBytes: managed.maxOutputBytes,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
             allowlistedOrigins: origins
         )
     }
@@ -137,13 +143,31 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
     } else {
         nil
     }
-    if let gatewayForReload = gatewayForLiveReload(stored: context.browserGateway, busGateway: busGateway, origins: browserOrigins) {
-        for tool in BrowserTools.makeTools(gateway: gatewayForReload, allowlistedOrigins: browserOrigins) {
+    if let gatewayForReload = gatewayForLiveReload(
+        stored: context.browserGateway,
+        busGateway: busGateway,
+        browserConfig: config.browser,
+        mediaConfig: config.media,
+        llmServerURLs: appLLMOrigins,
+        origins: browserOrigins
+    ) {
+        for tool in BrowserTools.makeTools(
+            gateway: gatewayForReload,
+            browserConfig: config.browser,
+            mediaConfig: config.media,
+            llmServerURLs: appLLMOrigins,
+            allowlistedOrigins: browserOrigins
+        ) {
             let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
             await context.toolBus.register(tool: tool, isEnabled: isEnabled)
         }
     } else {
-        for tool in BrowserTools.makeTools(allowlistedOrigins: browserOrigins) {
+        for tool in BrowserTools.makeTools(
+            browserConfig: config.browser,
+            mediaConfig: config.media,
+            llmServerURLs: appLLMOrigins,
+            allowlistedOrigins: browserOrigins
+        ) {
             let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
             await context.toolBus.register(tool: tool, isEnabled: isEnabled)
         }
@@ -162,7 +186,8 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
         browserConfig: config.browser,
         mediaConfig: config.media,
         llmServerURLs: appLLMOrigins,
-        transport: context.apiTransport
+        transport: context.apiTransport,
+        secrets: context.secrets
     ) {
         let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
         await context.toolBus.register(tool: tool, isEnabled: isEnabled)

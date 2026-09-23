@@ -223,6 +223,10 @@ struct ServeCommand: AsyncParsableCommand {
         // Resolve the media section once so the preview registry, the prompt
         // snapshot, and the served context register the same media tools.
         let resolvedMediaConfig = mediaConfig ?? loaded.config.media
+        // One shared secrets instance per serve invocation so the preview bus,
+        // the plugin snapshot, and the served context observe one fallback
+        // store instead of minting per-tool instances that diverge.
+        let sharedSecrets = SecretsManager()
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.
@@ -234,7 +238,9 @@ struct ServeCommand: AsyncParsableCommand {
             embedder: embedder,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            mediaConfig: resolvedMediaConfig
+            mediaConfig: resolvedMediaConfig,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets
         )
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
@@ -251,7 +257,9 @@ struct ServeCommand: AsyncParsableCommand {
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
             mediaConfig: resolvedMediaConfig,
-            desktopConfig: loaded.config.desktop
+            desktopConfig: loaded.config.desktop,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets
         )
         let effectiveSystemPrompt = await SystemPromptComposer.resolve(
             flag: systemPrompt,
@@ -280,7 +288,10 @@ struct ServeCommand: AsyncParsableCommand {
             filesConfig: loaded.config.files,
             mediaConfig: resolvedMediaConfig,
             desktopConfig: loaded.config.desktop,
-            auth: auth
+            securityConfig: loaded.config.security,
+            auth: auth,
+            mediaSecrets: sharedSecrets,
+            secrets: sharedSecrets
         )
         for tool in plugins {
             // Preserve live enabled state across re-registration: a bare

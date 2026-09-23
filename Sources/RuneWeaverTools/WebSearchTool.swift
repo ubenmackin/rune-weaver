@@ -809,6 +809,10 @@ public struct WebSearchTool: Tool, Sendable {
         )
     /// Always allowed: search never changes engine or remote state.
     public let permissionLevel = PermissionLevel.readOnly
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Browser policy supplying the base URL, timeout, and cap.
     private let browserConfig: BrowserConfig

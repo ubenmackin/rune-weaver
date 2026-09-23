@@ -315,6 +315,8 @@ public final class ServerContext: Sendable {
     public let searchEnsurer: (any SearXNGEnsuring)?
     /// Media secrets resolver preserved across live-reloads so injected doubles survive.
     public let mediaSecrets: SecretsManager?
+    /// Shared secrets backing surrogate resolution preserved across live-reloads.
+    public let secrets: SecretsManager?
     /// Hermetic desktop capture bridge preserved across live-reloads so a
     /// settings PUT refreshes capture knobs without dropping test doubles.
     public let desktopCaptureBridge: (any DesktopCapturing)?
@@ -374,6 +376,7 @@ public final class ServerContext: Sendable {
         mediaTransport: (any MediaArrTransport)? = nil,
         searchEnsurer: (any SearXNGEnsuring)? = nil,
         mediaSecrets: SecretsManager? = nil,
+        secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
         desktopControlBridge: (any DesktopControlling)? = nil,
         desktopConfig: DesktopConfig = DesktopConfig()
@@ -420,6 +423,7 @@ public final class ServerContext: Sendable {
         self.mediaTransport = mediaTransport
         self.searchEnsurer = searchEnsurer
         self.mediaSecrets = mediaSecrets
+        self.secrets = secrets
         self.desktopCaptureBridge = desktopCaptureBridge
         self.desktopControlBridge = desktopControlBridge
         self.desktopConfigBox = OSAllocatedUnfairLock(initialState: desktopConfig)
@@ -487,6 +491,7 @@ public final class ServerContext: Sendable {
         filesConfig: FilesConfig = FilesConfig(),
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
+        securityConfig: SecurityConfig = SecurityConfig(),
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -495,6 +500,7 @@ public final class ServerContext: Sendable {
         mediaTransport: (any MediaArrTransport)? = nil,
         searchEnsurer: (any SearXNGEnsuring)? = nil,
         mediaSecrets: SecretsManager? = nil,
+        secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
         desktopControlBridge: (any DesktopControlling)? = nil
     ) async -> ServerContext {
@@ -520,6 +526,7 @@ public final class ServerContext: Sendable {
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig,
             llmServerURLs: llmServerURLs,
+            securityConfig: securityConfig,
             memoryEngine: memoryEngine,
             embedder: embedder,
             gateway: browserGateway,
@@ -529,6 +536,7 @@ public final class ServerContext: Sendable {
             mediaTransport: mediaTransport,
             ensurer: searchEnsurer,
             mediaSecrets: mediaSecrets,
+            secrets: secrets,
             desktopCaptureBridge: desktopCaptureBridge,
             desktopControlBridge: desktopControlBridge
         )
@@ -550,7 +558,8 @@ public final class ServerContext: Sendable {
             approvalQueue: approvals,
             embedder: embedder,
             compactionThresholdPercent: engineConfig.compactionThresholdPercent,
-            steeringQueue: steeringQueue
+            steeringQueue: steeringQueue,
+            securityConfig: securityConfig
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: scheduler,
@@ -595,6 +604,7 @@ public final class ServerContext: Sendable {
             mediaTransport: mediaTransport,
             searchEnsurer: searchEnsurer,
             mediaSecrets: mediaSecrets,
+            secrets: secrets,
             desktopCaptureBridge: desktopCaptureBridge,
             desktopControlBridge: desktopControlBridge,
             desktopConfig: desktopConfig

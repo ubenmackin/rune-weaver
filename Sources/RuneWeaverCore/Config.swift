@@ -1056,6 +1056,63 @@ extension DesktopConfig: Codable {
     }
 }
 
+// MARK: - Untrusted-content labeling policy
+
+/// `[security]` — harness-level defense policy for external content.
+///
+/// Labeling stays default-ON: untrusted tool output is wrapped as data so the
+/// model cannot mistake it for instructions, at roughly twenty tokens per
+/// result. The labeling key is a debugging off-switch, not a hardening knob —
+/// turning it off restores the pre-labeling context shape byte-identically.
+/// The credential filter stays default-ON so one-time codes, magic links, and
+/// password-reset links never reach the agent; the human inbox is untouched
+/// and only agent-visible mail plus the local index carry the redacted form.
+public struct SecurityConfig: Sendable, Equatable {
+    /// Whether untrusted external tool output is wrapped before model context.
+    /// Defaults to true; false disables labeling for debugging only.
+    public var untrustedLabeling: Bool
+    /// Whether agent-visible mail redacts one-time codes and credential links.
+    /// Defaults to true; false passes mail through byte-identically.
+    public var emailCredentialFilter: Bool
+
+    /// Default keeps labeling on so stock installs stay hardened.
+    public static let defaultUntrustedLabeling = true
+    /// Default keeps credential redaction on so stock installs stay hardened.
+    public static let defaultEmailCredentialFilter = true
+
+    /// Creates a security config.
+    public init(
+        untrustedLabeling: Bool = defaultUntrustedLabeling,
+        emailCredentialFilter: Bool = defaultEmailCredentialFilter
+    ) {
+        self.untrustedLabeling = untrustedLabeling
+        self.emailCredentialFilter = emailCredentialFilter
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case untrustedLabeling = "untrusted_labeling"
+        case emailCredentialFilter = "email_credential_filter"
+    }
+}
+
+extension SecurityConfig: Codable {
+    /// Decodes a security config, defaulting omitted keys so existing files load untouched.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        untrustedLabeling = try container.decodeIfPresent(Bool.self, forKey: .untrustedLabeling) ?? Self.defaultUntrustedLabeling
+        emailCredentialFilter = try container.decodeIfPresent(Bool.self, forKey: .emailCredentialFilter) ?? Self.defaultEmailCredentialFilter
+    }
+
+    /// Encodes a security config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(untrustedLabeling, forKey: .untrustedLabeling)
+        try container.encode(emailCredentialFilter, forKey: .emailCredentialFilter)
+    }
+}
+
 // MARK: - Root config
 
 /// Root configuration mirroring `~/.runeweaver/config.toml`.
@@ -1092,6 +1149,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var index = IndexConfig()
     /// macOS desktop vision and gated control policy.
     public var desktop = DesktopConfig()
+    /// Harness-level defense policy for external content.
+    public var security = SecurityConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1110,7 +1169,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         browser: BrowserConfig = BrowserConfig(),
         media: MediaConfig = MediaConfig(),
         index: IndexConfig = IndexConfig(),
-        desktop: DesktopConfig = DesktopConfig()
+        desktop: DesktopConfig = DesktopConfig(),
+        security: SecurityConfig = SecurityConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1128,6 +1188,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.media = media
         self.index = index
         self.desktop = desktop
+        self.security = security
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1199,6 +1260,79 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         let config = try RuneWeaverConfig(decoding: parsed)
         try config.validate()
         return config
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case engine
+        case server
+        case auth
+        case llm
+        case memory
+        case voice
+        case sandbox
+        case files
+        case email
+        case home
+        case scheduler
+        case plugins
+        case browser
+        case media
+        case index
+        case desktop
+        case security
+    }
+
+    /// Decodes a persisted config, defaulting an absent `[security]` section.
+    ///
+    /// TOML loading early-returns hardened when the section is missing, so JSON
+    /// must match: payloads written before the defense policy existed decode
+    /// with both keys on instead of throwing. Present-but-wrong-typed values
+    /// still throw like every prior section. Only the security section is
+    /// absent-tolerant; every other section decodes strictly so a truncated
+    /// payload cannot silently load as hardened defaults.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.engine = try container.decode(EngineConfig.self, forKey: .engine)
+        self.server = try container.decode(ServerEndpointConfig.self, forKey: .server)
+        self.auth = try container.decode(AuthConfig.self, forKey: .auth)
+        self.llm = try container.decode(LLMConfig.self, forKey: .llm)
+        self.memory = try container.decode(MemoryConfig.self, forKey: .memory)
+        self.voice = try container.decode(VoiceConfig.self, forKey: .voice)
+        self.sandbox = try container.decode(SandboxConfig.self, forKey: .sandbox)
+        self.files = try container.decode(FilesConfig.self, forKey: .files)
+        self.email = try container.decode(EmailConfig.self, forKey: .email)
+        self.home = try container.decode(HomeConfig.self, forKey: .home)
+        self.scheduler = try container.decode(SchedulerConfig.self, forKey: .scheduler)
+        self.plugins = try container.decode(PluginConfig.self, forKey: .plugins)
+        self.browser = try container.decode(BrowserConfig.self, forKey: .browser)
+        self.media = try container.decode(MediaConfig.self, forKey: .media)
+        self.index = try container.decode(IndexConfig.self, forKey: .index)
+        self.desktop = try container.decode(DesktopConfig.self, forKey: .desktop)
+        self.security = try container.decodeIfPresent(SecurityConfig.self, forKey: .security) ?? SecurityConfig()
+    }
+
+    /// Encodes every section, including the defense policy.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(engine, forKey: .engine)
+        try container.encode(server, forKey: .server)
+        try container.encode(auth, forKey: .auth)
+        try container.encode(llm, forKey: .llm)
+        try container.encode(memory, forKey: .memory)
+        try container.encode(voice, forKey: .voice)
+        try container.encode(sandbox, forKey: .sandbox)
+        try container.encode(files, forKey: .files)
+        try container.encode(email, forKey: .email)
+        try container.encode(home, forKey: .home)
+        try container.encode(scheduler, forKey: .scheduler)
+        try container.encode(plugins, forKey: .plugins)
+        try container.encode(browser, forKey: .browser)
+        try container.encode(media, forKey: .media)
+        try container.encode(index, forKey: .index)
+        try container.encode(desktop, forKey: .desktop)
+        try container.encode(security, forKey: .security)
     }
 }
 
