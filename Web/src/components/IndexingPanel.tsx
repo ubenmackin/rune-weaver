@@ -16,11 +16,15 @@ import {
   INDEX_ICLOUD_EVICTIONS,
   INDEX_MAIL_VECTOR_WINDOWS,
   cancelIndex,
+  formatToolProgressElapsedMs,
   getIndexStatus,
   getSettings,
+  indexRunTriggerLabel,
   indexWatermarkAgeMs,
+  parseIndexRunTrigger,
   parseRunTimestamp,
   pruneIndex,
+  relativeProgressCurrent,
   resetIndex,
   runIndex,
   updateSettings,
@@ -40,6 +44,8 @@ import type {
 import { formatRelativeAgo } from "../relativeTime";
 import { AlertTriangleIcon, StopIcon, TrashIcon } from "./icons";
 import Modal from "./Modal";
+import { ToastStack } from "./Toast";
+import { useToastStack } from "../hooks/useToastStack";
 
 // Engine index source kinds in canonical run order, each with its display label.
 // The Messages label carries the Full Disk Access hint because reading the chat
@@ -64,9 +70,15 @@ function sourceLabel(kind: string): string {
 // line names the current step by matching the phase token in the frame message.
 const INDEX_PHASES = ["discovering", "extracting", "embedding", "committing"] as const;
 
+// Ordered index stages, mirroring IndexSourceKind on the engine. The live
+// header names the active corpus by matching the stage token in the frame
+// message ("Indexing extracting files: …"); discovering and committing frames
+// carry no stage so the header falls back to the phase copy there.
+export const INDEX_STAGES = ["files", "mail", "messages", "vision"] as const;
+
 // Tool identity the engine stamps on index progress frames. Progress is only
-// adopted while a run is active and either carries this name or, on older
-// engines that omit it, arrives during our own in-flight run.
+// adopted while a run is in flight and either carries this name or, on older
+// engines that omit it, arrives during any run in flight.
 export const INDEX_PROGRESS_TOOL_NAME = "index";
 
 // User copy per phase so the step list renders plain language rather than the
@@ -77,6 +89,69 @@ const INDEX_PHASE_COPY: Record<string, string> = {
   embedding: "Vectorizing",
   committing: "Committing",
 };
+
+// Explained phase steps for the live list, in display order. Vision is its own
+// step even though the engine reports it as a stage token: it stays active
+// whenever the stage is vision, regardless of the phase token in the message.
+// Labels reuse the phase copy so the wire-token wording stays in one place.
+export const INDEX_STEPS: Array<{ id: string; label: string; title: string }> = [
+  { id: "discovering", label: INDEX_PHASE_COPY.discovering, title: "Finding candidates to index" },
+  { id: "extracting", label: INDEX_PHASE_COPY.extracting, title: "Extracting text from documents" },
+  { id: "embedding", label: INDEX_PHASE_COPY.embedding, title: "Building embeddings for search" },
+  { id: "vision", label: "Describing images", title: "Describing images with LLM" },
+  { id: "committing", label: INDEX_PHASE_COPY.committing, title: "Saving to the index" },
+];
+
+// Maps a live frame's phase and stage tokens onto one explained step. Vision
+// wins over any phase token so image description never reads as vectorizing.
+export function resolveIndexStep(
+  phase: string | null | undefined,
+  stage: string | null | undefined,
+): string | null {
+  if (stage === "vision") return "vision";
+  if (
+    typeof phase === "string" &&
+    (INDEX_PHASES as readonly string[]).includes(phase)
+  ) {
+    return phase;
+  }
+  return null;
+}
+
+// Step ids a single frame marks as visited. A vision frame marks both its
+// phase and the vision step so vectorizing reads done while describing stays
+// active; any other frame marks only its phase step.
+export function indexStepsForFrame(
+  phase: string | null | undefined,
+  stage: string | null | undefined,
+): string[] {
+  const steps: string[] = [];
+  if (
+    typeof phase === "string" &&
+    (INDEX_PHASES as readonly string[]).includes(phase)
+  ) {
+    steps.push(phase);
+  }
+  if (stage === "vision" && !steps.includes("vision")) {
+    steps.push("vision");
+  }
+  return steps;
+}
+
+// Done/active/pending state for one explained step: the live step stays
+// active, every other visited step reads done, and the rest stay pending. The
+// completed summary reuses the same rule with no active step, so every visited
+// step renders checked and the rest stay pending.
+export function resolveIndexStepStatus(
+  stepID: string,
+  activeStep: string | null | undefined,
+  visited: Set<string> | string[] | null | undefined,
+): "done" | "active" | "pending" {
+  if (activeStep != null && stepID === activeStep) return "active";
+  const has =
+    visited instanceof Set ? visited.has(stepID) : Array.isArray(visited) ? visited.includes(stepID) : false;
+  return has ? "done" : "pending";
+}
 
 // Chart palette drawn from the dashboard theme tokens: the vector segment uses
 // the accent purple, the keyword segment the accent blue, and the tracks reuse
@@ -208,11 +283,17 @@ export function extractStatusLabel(status: string): string {
 }
 
 // One-line human summary of the last index run for the strip: status plus the
-// outcome counts and the finish time, omitting any count the summary line did
-// not carry so a drifted payload still renders its status and time.
+// trigger label, outcome counts, and finish time, omitting any count the
+// summary line did not carry so a drifted payload still renders its status
+// and time. The trigger label stays parenthesized after the status so the
+// `Last run <status>` prefix survives verbatim for older assertions.
 export function describeIndexLastRun(lastRun: IndexLastRunStatus | null | undefined): string {
   if (!lastRun) return "No runs yet";
-  const parts: string[] = [`Last run ${lastRun.status}`];
+  const head =
+    typeof lastRun.trigger === "string" && lastRun.trigger.trim()
+      ? `Last run ${lastRun.status} (${indexRunTriggerLabel(lastRun.trigger)})`
+      : `Last run ${lastRun.status}`;
+  const parts: string[] = [head];
   if (typeof lastRun.indexed === "number" && Number.isFinite(lastRun.indexed)) {
     parts.push(`${lastRun.indexed} indexed`);
   }
@@ -232,8 +313,9 @@ export function describeIndexLastRun(lastRun: IndexLastRunStatus | null | undefi
 }
 
 // Extracts the phase token from a live progress frame message
-// ("Indexing extracting: …"), degrading to null when the engine changes the
-// wording so the step list simply holds its previous position.
+// ("Indexing extracting: …" or "Indexing extracting files: …"), degrading to
+// null when the engine changes the wording so the step list simply holds its
+// previous position.
 export function resolveIndexPhase(message: string | null | undefined): string | null {
   if (typeof message !== "string") return null;
   const match = /Indexing\s+(\w+)/.exec(message);
@@ -242,15 +324,52 @@ export function resolveIndexPhase(message: string | null | undefined): string | 
   return INDEX_PHASES.includes(phase as (typeof INDEX_PHASES)[number]) ? phase : null;
 }
 
-// Reports whether a live progress frame belongs to an index run. The engine
-// stamps the index tool name when present; otherwise a frame is adopted only
-// while the caller has an active run, so unrelated tool progress never leaks in.
+// Extracts the stage token from a live progress frame message
+// ("Indexing extracting files: …"), degrading to null when the frame carries
+// no stage (discovering and committing frames) or the engine changes the
+// wording so the header falls back to the phase copy.
+export function resolveIndexStage(message: string | null | undefined): string | null {
+  if (typeof message !== "string") return null;
+  const match = /Indexing\s+\w+\s+(\w+)/.exec(message);
+  if (!match) return null;
+  const stage = match[1].toLowerCase();
+  return (INDEX_STAGES as readonly string[]).includes(stage) ? stage : null;
+}
+
+// Stage-aware header copy for the live progress line. Vision always describes
+// images, embedding vectorizes, extracting reads the named corpus, and the
+// phase-only frames keep their plain copy; anything unrecognized degrades to
+// the generic running copy so the header never sticks on a wire token.
+export function resolveIndexLiveTitle(
+  phase: string | null | undefined,
+  stage: string | null | undefined,
+): string {
+  if (stage === "vision") return "Describing images…";
+  if (phase === "embedding") return "Vectorizing…";
+  if (phase === "extracting") {
+    if (stage === "files") return "Reading files…";
+    if (stage === "mail") return "Reading mail…";
+    if (stage === "messages") return "Reading messages…";
+    return "Reading…";
+  }
+  if (phase === "discovering") return "Discovering…";
+  if (phase === "committing") return "Committing…";
+  if (stage === "files") return "Reading files…";
+  if (stage === "mail") return "Reading mail…";
+  if (stage === "messages") return "Reading messages…";
+  return "Running…";
+}
+
+// Reports whether a live progress frame belongs to an index run. The frame is
+// adopted only while a run is in flight — either carrying the index tool name
+// or, on older engines that omit it, arriving during any run — so a delayed
+// frame after the run settles never resurrects cleared progress.
 export function isIndexProgressFrame(
   frame: Pick<WSToolProgressFrame, "toolName">,
   runActive: boolean,
 ): boolean {
   const name = typeof frame.toolName === "string" ? frame.toolName.trim().toLowerCase() : "";
-  if (name === INDEX_PROGRESS_TOOL_NAME) return true;
+  if (name === INDEX_PROGRESS_TOOL_NAME) return runActive;
   if (name.length > 0) return false;
   return runActive;
 }
@@ -259,6 +378,7 @@ export function isIndexProgressFrame(
 // regardless of which counters the engine populates.
 export interface IndexLiveProgress {
   phase: string | null;
+  stage: string | null;
   message: string;
   scanned: number;
   indexed: number;
@@ -280,18 +400,31 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [status, setStatus] = useState<IndexStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // One in-flight slot names the action so Run, Cancel, Prune, and Reset stay
-  // mutually exclusive while a request is pending.
-  const [action, setAction] = useState<
-    "run" | "cancel" | "prune" | "reset" | null
-  >(null);
+  // One in-flight slot names the action so Run, Prune, and Reset stay
+  // mutually exclusive while a request is pending. Cancel rides a separate
+  // flag so it can run concurrent with Run: a local run holds `action="run"`
+  // for the whole pass, and Cancel must still reach the engine during it.
+  const [action, setAction] = useState<"run" | "prune" | "reset" | null>(null);
   const actionBusy = action !== null;
+  const [cancelBusy, setCancelBusy] = useState(false);
   const [liveProgress, setLiveProgress] = useState<IndexLiveProgress | null>(null);
+  // Client-side visited steps for the explained phase list. Marked as frames
+  // arrive, kept through the terminal broadcast as a post-run mini-summary of
+  // what ran, and cleared only when the next run starts or the store resets.
+  const [visitedSteps, setVisitedSteps] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
   // Synchronous guard for the run flight: state commits asynchronously, so a
   // double-click before re-render would otherwise start two runs. The ref flips
   // immediately and the state mirrors it for rendering.
   const runActiveRef = useRef(false);
   const [runActive, setRunActive] = useState(false);
+  // Cancelling window after a successful cancel request: the engine has been
+  // asked to stop but the run has not settled yet. The ref flips immediately
+  // so broadcast handlers observe it without waiting for a re-render, while
+  // the state drives the Cancelling pill, header, and disabled buttons.
+  const cancellingRef = useRef(false);
+  const [cancelling, setCancelling] = useState(false);
   // Non-blocking destructive confirmations: prune and reset each render a
   // true modal so stored memory is never cleared by an accidental click. Each
   // modal carries its own description, so the button row stays label-only.
@@ -302,11 +435,35 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // to now and silently clearing the store.
   const [pruneBefore, setPruneBefore] = useState<string>("");
   const [pruneError, setPruneError] = useState<string | null>(null);
+  // Reset refusal surfaced inside the confirm modal, mirroring the prune
+  // error slot so a confirm blocked by an in-flight run explains itself
+  // instead of landing as a dead click.
+  const [resetError, setResetError] = useState<string | null>(null);
 
   // True whenever the engine reports a run in flight or this panel started one,
-  // so progress frames are only adopted during a real run.
+  // so progress frames are only adopted during a real run. The Status pill
+  // below stays the authoritative running source; this flag only gates frame
+  // adoption and the live block.
   const progressActive = runActive || status?.running === true;
   const indexingEnabled = status?.enabled === true;
+  // Mirrors the engine running flag for the broadcast consumer without
+  // re-subscribing the shared socket on every status poll.
+  const statusRunningRef = useRef(false);
+  useEffect(() => {
+    statusRunningRef.current = status?.running === true;
+  }, [status?.running]);
+  // Fallback so a run with no frame never freezes on "Starting…": after ~3s
+  // without live progress the header reads "Running…" until a frame arrives
+  // or the run settles.
+  const [staleRunning, setStaleRunning] = useState(false);
+  useEffect(() => {
+    if (!progressActive || liveProgress || cancelling) {
+      setStaleRunning(false);
+      return;
+    }
+    const timer = setTimeout(() => setStaleRunning(true), 3000);
+    return () => clearTimeout(timer);
+  }, [progressActive, liveProgress, cancelling]);
 
   const vectorChunks = status?.vectorChunks ?? 0;
   const keywordChunks = status?.keywordChunks ?? 0;
@@ -341,33 +498,105 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     void loadStatus();
   }, [loadStatus]);
 
-  // Live progress consumer: adopts `tool_progress` frames for the index run,
-  // distilling the phase token plus counters and the relative current item. The
-  // tail is relative-only server-side, so the panel never renders a filesystem
-  // path even though the frame could not carry one. Any run broadcast — a pass
-  // starting elsewhere or reaching its terminal summary — reloads status so the
-  // cards stay fresh without a manual Refresh control.
+  // Live progress consumer: adopts `tool_progress` frames whenever a run is in
+  // flight (engine status or local flight), distilling the phase and stage
+  // tokens plus counters and the relative current item. The tail is
+  // relative-only server-side, so the panel never renders a filesystem path
+  // even though the frame could not carry one. Each frame also marks its
+  // explained step visited so the phase list can render a post-run summary.
+  // A new index run clears the visited set so the summary never leaks across
+  // passes, while the terminal broadcast keeps it and drops only the live
+  // counts. Any run broadcast — a pass starting elsewhere or reaching its
+  // terminal summary — reloads status so the cards stay fresh without a manual
+  // Refresh control. A launch-triggered nightly or catch-up pass this panel
+  // did not start also raises an auto-start notice naming the trigger display
+  // label explicitly.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as WSGenericFrame).type;
       if (frameType === "run_started" || frameType === "run_completed") {
-        void loadStatus();
+        const nested = (frame as WSGenericFrame).run as
+          | { kind?: unknown; message?: unknown; response?: unknown }
+          | undefined;
+        const isIndexKind =
+          typeof nested?.kind === "string" && nested.kind === "index";
+        if (frameType === "run_started" && isIndexKind) {
+          // The next run starts fresh: drop the previous summary and any stale
+          // live line so the steps rebuild from the incoming frames.
+          setVisitedSteps(new Set<string>());
+          setLiveProgress(null);
+          if (!runActiveRef.current && !cancellingRef.current) {
+            const notice = describeAutoStartNotice({
+              message: nested.message,
+              response: nested.response,
+            });
+            if (notice) {
+              setNotice(notice);
+            }
+          }
+        }
+        if (frameType === "run_completed" && isIndexKind) {
+          // The pass settled: keep the visited steps as a checked summary and
+          // drop only the live counts, so idle still shows what ran.
+          setLiveProgress(null);
+          if (cancellingRef.current) {
+            // The cancelling window ends on the terminal broadcast. A run this
+            // panel started still resolves through its awaiting run request with
+            // full counts, so only a remote run needs the generic kept-work
+            // notice here; the status reload below settles the pill either way.
+            if (!runActiveRef.current) {
+              setNotice(
+                "Index run cancelled: committed work is kept and the next run resumes from there.",
+              );
+            }
+            cancellingRef.current = false;
+            setCancelling(false);
+          }
+        }
+        // A completed index pass started elsewhere still refreshes the
+        // last-run strip through the status reload; the strip itself carries
+        // the trigger label via describeIndexLastRun.
+        if (isIndexKind) {
+          void loadStatus();
+        }
         return;
       }
       if (frameType !== "tool_progress") return;
       const progress = frame as WSToolProgressFrame;
-      if (!isIndexProgressFrame(progress, runActiveRef.current)) return;
+      if (
+        !isIndexProgressFrame(
+          progress,
+          runActiveRef.current || cancellingRef.current || statusRunningRef.current,
+        )
+      )
+        return;
+      const phase = resolveIndexPhase(progress.message);
+      const stage = resolveIndexStage(progress.message);
       setLiveProgress({
-        phase: resolveIndexPhase(progress.message),
+        phase,
+        stage,
         message: typeof progress.message === "string" ? progress.message : "",
         scanned: progress.scanned,
         indexed: progress.matched,
         elapsedMs: progress.elapsedMs,
-        current:
-          typeof progress.current === "string" && progress.current.trim()
-            ? progress.current.trim()
-            : null,
+        current: relativeProgressCurrent(progress.current),
       });
+      const frameSteps = indexStepsForFrame(phase, stage);
+      if (frameSteps.length > 0) {
+        setVisitedSteps((previous) => {
+          let changed = false;
+          for (const step of frameSteps) {
+            if (!previous.has(step)) {
+              changed = true;
+              break;
+            }
+          }
+          if (!changed) return previous;
+          const next = new Set(previous);
+          for (const step of frameSteps) next.add(step);
+          return next;
+        });
+      }
     },
     [loadStatus],
   );
@@ -375,28 +604,67 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   useSharedWebSocket(handleIndexBroadcast);
 
   // Clears the local run flight once the engine reports no run in flight, so a
-  // run started from another tab still settles the panel's busy state.
+  // run started from another tab still settles the panel's busy state. The
+  // cancelling window settles the same way when the broadcast is missed: the
+  // status probe is authoritative, so a remote cancel still reaches its kept-
+  // work notice and re-enables Run without a separate Stopped variant.
   useEffect(() => {
     if (status?.running !== false) return;
-    if (!runActiveRef.current) return;
-    runActiveRef.current = false;
-    setRunActive(false);
+    // Capture locality before clearing: a run this panel started resolves
+    // through its awaiting request with full counts, so only a remote run
+    // needs the generic kept-work notice here.
+    const wasLocalRun = runActiveRef.current;
+    if (wasLocalRun) {
+      runActiveRef.current = false;
+      setRunActive(false);
+    }
+    if (!cancellingRef.current) return;
+    if (!wasLocalRun) {
+      setNotice(
+        "Index run cancelled: committed work is kept and the next run resumes from there.",
+      );
+      setLiveProgress(null);
+    }
+    cancellingRef.current = false;
+    setCancelling(false);
   }, [status?.running]);
+
+  // Re-polls status while the cancelling window is open so a missed broadcast
+  // still observes the settled run promptly instead of stranding the pill.
+  useEffect(() => {
+    if (!cancelling) return;
+    const timer = setInterval(() => {
+      void loadStatus();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [cancelling, loadStatus]);
 
   // Starts an on-demand run and awaits its terminal summary. Progress frames
   // keep the live line honest while the request is in flight; the summary fills
   // the notice so a skipped run explains why instead of appearing silent.
+  // A locally cancelled run settles here with its full counts, clearing the
+  // cancelling window without overwriting the detailed summary. The visited
+  // set clears here so the previous summary collapses before the new frames
+  // rebuild it.
   const handleRun = async () => {
-    if (actionBusy || runActiveRef.current) return;
+    if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     runActiveRef.current = true;
     setRunActive(true);
     setAction("run");
     setError(null);
     setNotice(null);
     setLiveProgress(null);
+    setVisitedSteps(new Set<string>());
     try {
       const summary = await runIndex();
       setNotice(describeRunSummary(summary));
+      // The run reached its terminal summary, so any cancelling window opened
+      // by a concurrent cancel request is over; the detailed summary above
+      // already carries the kept-work copy for the cancelled case.
+      if (cancellingRef.current) {
+        cancellingRef.current = false;
+        setCancelling(false);
+      }
       await loadStatus();
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Index run failed");
@@ -408,42 +676,76 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // Asks the engine to stop an in-flight run at its next safe point. Committed
-  // work survives, so a cancelled run simply resumes from the first unfinished
-  // item on the next run.
+  // Asks the engine to stop an in-flight run, then holds the cancelling window
+  // until the terminal broadcast or the status probe reports a settled run.
+  // Committed work survives, so a cancelled run simply resumes from the first
+  // unfinished item on the next run. Cancel rides its own busy flag so it can
+  // run concurrent with Run instead of multiplexing one shared action slot.
   const handleCancel = async () => {
-    if (actionBusy) return;
-    setAction("cancel");
+    if (cancelBusy || cancellingRef.current) return;
+    if (action === "prune" || action === "reset") return;
+    setCancelBusy(true);
     setError(null);
-    setNotice(null);
     try {
       const response = await cancelIndex();
-      setNotice(
-        response?.cancelled
-          ? "Cancellation requested; committed work is kept and the next run resumes from there."
-          : "No index run was in flight.",
-      );
+      if (response?.cancelled) {
+        // Enter the cancelling window: the pill flips to Cancelling, both Run
+        // and Cancel stay disabled, and the kept-work notice lands only once
+        // the run actually settles instead of on the request itself.
+        cancellingRef.current = true;
+        setCancelling(true);
+      } else {
+        setNotice("No index run was in flight.");
+      }
       await loadStatus();
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Failed to cancel index run",
       );
     } finally {
-      setAction(null);
+      setCancelBusy(false);
     }
   };
 
   const handleConfirmPrune = async () => {
-    if (actionBusy) return;
+    if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) {
+      setPruneError("An index run is in flight — wait for it to settle before pruning.");
+      return;
+    }
     const trimmed = pruneBefore.trim();
     if (!trimmed) {
       setPruneError("Choose a cutoff date before pruning.");
       return;
     }
-    const cutoff = new Date(trimmed);
-    if (Number.isNaN(cutoff.getTime())) {
-      setPruneError("Choose a valid cutoff date before pruning.");
-      return;
+    // The date input yields a calendar day with no zone; build local midnight
+    // from its parts so toISOString ships the operator's day instead of a
+    // UTC-midnight value shifted by the timezone offset.
+    const dateParts = trimmed.split("-").map(Number);
+    let cutoff: Date;
+    if (
+      dateParts.length === 3 &&
+      dateParts.every((part) => Number.isFinite(part)) &&
+      Number.isInteger(dateParts[0]) &&
+      Number.isInteger(dateParts[1]) &&
+      Number.isInteger(dateParts[2])
+    ) {
+      const [year, month, day] = dateParts as [number, number, number];
+      cutoff = new Date(year, month - 1, day);
+      if (
+        Number.isNaN(cutoff.getTime()) ||
+        cutoff.getFullYear() !== year ||
+        cutoff.getMonth() !== month - 1 ||
+        cutoff.getDate() !== day
+      ) {
+        setPruneError("Choose a valid cutoff date before pruning.");
+        return;
+      }
+    } else {
+      cutoff = new Date(trimmed);
+      if (Number.isNaN(cutoff.getTime())) {
+        setPruneError("Choose a valid cutoff date before pruning.");
+        return;
+      }
     }
     setPruneError(null);
     setPendingPrune(false);
@@ -464,7 +766,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   };
 
   const handleConfirmRebuild = async () => {
-    if (actionBusy) return;
+    if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) {
+      setResetError("An index run is in flight — wait for it to settle before resetting.");
+      return;
+    }
+    setResetError(null);
     setPendingRebuild(false);
     setAction("reset");
     setError(null);
@@ -472,6 +778,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     try {
       await resetIndex();
       setNotice("Index cleared. Run Rebuild to re-index from scratch.");
+      // The store is empty again, so the previous summary has nothing to
+      // describe and the live line has nothing to continue.
+      setVisitedSteps(new Set<string>());
+      setLiveProgress(null);
       await loadStatus();
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to reset the index");
@@ -479,6 +789,24 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       setAction(null);
     }
   };
+
+  // Explained step active right now, or null once the run settles. The idle
+  // summary keeps the visited set with no active step so every visited step
+  // renders checked and no step carries live counts.
+  const activeStep = liveProgress
+    ? resolveIndexStep(liveProgress.phase, liveProgress.stage)
+    : null;
+  // The Progress card stays visible while a run is in flight and while a
+  // completed summary exists. Idle with a previous run keeps the checked steps
+  // without live counts; a fresh panel with no run yet stays hidden, and the
+  // next run or a reset collapses the summary back to hidden before new steps
+  // arrive.
+  const showProgressBlock =
+    progressActive ||
+    liveProgress != null ||
+    cancelling ||
+    visitedSteps.size > 0;
+  const showLiveLiveness = progressActive || liveProgress != null || cancelling;
 
   return (
     <section className="panel indexing-panel" aria-label="Index Status">
@@ -506,7 +834,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             type="button"
             className="primary icon-text-btn"
             onClick={() => void handleRun()}
-            disabled={actionBusy || !indexingEnabled}
+            disabled={actionBusy || cancelBusy || cancelling || !indexingEnabled || progressActive}
             title={
               indexingEnabled
                 ? "Run an on-demand index pass"
@@ -522,10 +850,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             type="button"
             className="ghost icon-text-btn"
             onClick={() => void handleCancel()}
-            disabled={actionBusy || !progressActive}
+            disabled={cancelBusy || cancelling || !progressActive || action === "prune" || action === "reset"}
           >
             <StopIcon size={14} />
-            <span>{action === "cancel" ? "Cancelling…" : "Cancel"}</span>
+            <span>{cancelBusy || cancelling ? "Cancelling…" : "Cancel"}</span>
           </button>
 
           <button
@@ -536,7 +864,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               setPruneError(null);
               setPendingPrune(true);
             }}
-            disabled={actionBusy}
+            disabled={actionBusy || cancelBusy || progressActive || cancelling}
           >
             <TrashIcon size={14} />
             <span>{action === "prune" ? "Pruning…" : "Prune"}</span>
@@ -545,8 +873,11 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           <button
             type="button"
             className="danger icon-text-btn"
-            onClick={() => setPendingRebuild(true)}
-            disabled={actionBusy}
+            onClick={() => {
+              setResetError(null);
+              setPendingRebuild(true);
+            }}
+            disabled={actionBusy || cancelBusy || progressActive || cancelling}
           >
             <TrashIcon size={14} />
             <span>{action === "reset" ? "Clearing…" : "Reset Index"}</span>
@@ -561,52 +892,98 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         ) : null}
       </div>
 
-      {/* Live phase steps + shimmer while a run is in flight: the engine
-          publishes no fraction, so an animated shimmer proves liveness. */}
-      {(progressActive || liveProgress) && (
+      {/* Explained phase steps + shimmer while a run is in flight: the engine
+          publishes no fraction, so an animated shimmer proves liveness. The
+          header names the active stage ("Reading files…", "Vectorizing…",
+          "Describing images…") with live counts, falling back to "Running…"
+          when no frame arrives within ~3s so it never freezes on "Starting…".
+          A cancelling run keeps the same block with a Cancelling pill and
+          header so every Running indicator flips together until the run
+          settles. After the terminal broadcast the visited steps stay visible
+          as a checked summary with no live counts until the next run or a
+          reset collapses them. */}
+      {showProgressBlock && (
         <div className="index-live-progress" data-testid="index-live-progress">
-          <div className="index-live-header">
-            <span className="status-pill running">Indexing</span>
-            {liveProgress ? (
-              <span className="muted text-xs">
-                {liveProgress.scanned} scanned · {liveProgress.indexed} indexed ·{" "}
-                {formatElapsed(liveProgress.elapsedMs)}
-              </span>
-            ) : (
-              <span className="muted text-xs">Starting…</span>
-            )}
-          </div>
-          {/* Phase steps: the current phase is highlighted from the frame
-              message; unknown wording holds the previous position. */}
-          <ol className="index-phase-steps">
-            {INDEX_PHASES.map((phase) => (
-              <li
-                key={phase}
-                className={liveProgress?.phase === phase ? "active" : ""}
+          <div className="card">
+            <h3>Progress</h3>
+            <div className="index-live-header">
+              <span
+                className={`status-pill ${cancelling || showLiveLiveness ? "running" : "ok"}`}
               >
-                {INDEX_PHASE_COPY[phase]}
-              </li>
-            ))}
-          </ol>
-          {liveProgress?.message ? (
-            <div className="index-live-message">{liveProgress.message}</div>
-          ) : null}
-          {liveProgress?.current ? (
-            <div
-              className="tool-progress-current"
-              data-testid="index-progress-current"
-              title={liveProgress.current}
-            >
-              current: {liveProgress.current}
+                {cancelling ? "Cancelling" : showLiveLiveness ? "Indexing" : "Completed"}
+              </span>
+              {cancelling ? (
+                <span className="muted text-xs">
+                  Cancelling…
+                  {liveProgress ? (
+                    <>
+                      {" "}
+                      {liveProgress.scanned} scanned · {liveProgress.indexed}{" "}
+                      indexed · {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
+                    </>
+                  ) : null}
+                </span>
+              ) : liveProgress ? (
+                <span className="muted text-xs">
+                  {resolveIndexLiveTitle(liveProgress.phase, liveProgress.stage)}{" "}
+                  {liveProgress.scanned} scanned · {liveProgress.indexed} indexed ·{" "}
+                  {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
+                </span>
+              ) : progressActive ? (
+                <span className="muted text-xs">{staleRunning ? "Running…" : "Starting…"}</span>
+              ) : (
+                <span className="muted text-xs">Completed — steps visited this run</span>
+              )}
             </div>
-          ) : null}
-          <div
-            className="tool-progress-shimmer"
-            data-testid="index-progress-shimmer"
-            role="progressbar"
-            aria-label="Index run in progress"
-            aria-valuetext="In progress"
-          />
+            {/* Explained steps in run order: the live step stays active with
+                its counts, visited steps read done, and the rest stay pending.
+                The completed summary reuses the same list with no active step,
+                so visited steps render checked and carry no live counts.
+                Unknown wording holds the previous position. */}
+            <ol className="index-phase-steps">
+              {INDEX_STEPS.map((step) => {
+                const stepStatus = resolveIndexStepStatus(step.id, activeStep, visitedSteps);
+                const isActiveStep = stepStatus === "active";
+                const isDoneStep = stepStatus === "done";
+                return (
+                  <li key={step.id} className={stepStatus} title={step.title}>
+                    {isDoneStep ? <span aria-hidden="true">✓ </span> : null}
+                    <span>{step.label}</span>
+                    {isActiveStep && liveProgress ? (
+                      <span
+                        className="muted text-xs"
+                        data-testid={`index-step-counts-${step.id}`}
+                      >
+                        {" "}
+                        {liveProgress.scanned} scanned · {liveProgress.indexed} indexed
+                      </span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
+            {liveProgress?.message ? (
+              <div className="index-live-message">{liveProgress.message}</div>
+            ) : null}
+            {liveProgress?.current ? (
+              <div
+                className="tool-progress-current"
+                data-testid="index-progress-current"
+                title={liveProgress.current}
+              >
+                current: {liveProgress.current}
+              </div>
+            ) : null}
+            {showLiveLiveness ? (
+              <div
+                className="tool-progress-shimmer"
+                data-testid="index-progress-shimmer"
+                role="progressbar"
+                aria-label="Index run in progress"
+                aria-valuetext="In progress"
+              />
+            ) : null}
+          </div>
         </div>
       )}
 
@@ -616,7 +993,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       <div className="index-status-section">
         <h3>Status</h3>
         <div className="index-status-line">
-          {status?.running || runActive ? (
+          {cancelling ? (
+            <span className="status-pill running">Cancelling</span>
+          ) : status?.running || runActive ? (
             <span className="status-pill running">Running</span>
           ) : status?.enabled ? (
             <span className="status-pill ok">Enabled</span>
@@ -967,6 +1346,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               This clears every indexed document and chunk. The next run rebuilds
               the index from scratch. This cannot be undone.
             </p>
+            {resetError ? <p className="error">{resetError}</p> : null}
           </div>
           <div className="modal-footer">
             <button
@@ -1002,8 +1382,12 @@ export function IndexPolicyPanel() {
     DEFAULT_INDEX_CONFIG.exclude.join("\n"),
   );
   const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  // Transient save feedback in a top-right stack so the confirmation never
+  // blocks the form. Distinct notices stack with independent timers; an
+  // identical copy replaces its sibling so repeat saves refresh one notice
+  // instead of duplicating, matching the Settings save pattern.
+  const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
+    useToastStack();
 
   // Loads the [index] section through the shared settings read so the editable
   // form starts from the stored policy. An older engine without the section
@@ -1077,13 +1461,11 @@ export function IndexPolicyPanel() {
   const handleSave = async () => {
     if (saving) return;
     setSaving(true);
-    setError(null);
-    setNotice(null);
     try {
       await persistConfig();
-      setNotice("Index settings saved.");
+      pushSuccessToast("Index settings saved.");
     } catch (failure) {
-      setError(
+      pushErrorToast(
         failure instanceof ApiError ? failure.message : "Failed to save index settings",
       );
     } finally {
@@ -1109,8 +1491,7 @@ export function IndexPolicyPanel() {
         </div>
       </div>
 
-      {error ? <p className="error">{error}</p> : null}
-      {notice ? <p className="muted text-sm">{notice}</p> : null}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       <div className="index-policy-section">
         <h3>Policy</h3>
@@ -1249,24 +1630,38 @@ export function IndexPolicyPanel() {
   );
 }
 
-// Formats the live elapsed time with a tenth of a second under ten seconds and
-// whole seconds beyond, matching the chat tool progress convention.
-function formatElapsed(elapsedMs: number): string {
-  const seconds = Math.max(0, elapsedMs) / 1000;
-  const rounded = seconds >= 10 ? Math.round(seconds) : Math.round(seconds * 10) / 10;
-  return `${rounded}s`;
-}
-
 // One-line human summary of a completed run, naming why a skipped run did
-// nothing so the notice never reads as a silent no-op.
-function describeRunSummary(summary: IndexRunResponse): string {
+// nothing so the notice never reads as a silent no-op. The trigger display
+// label prefixes the machine-readable summary so the `Index run <status>`
+// wording survives verbatim while the notice still names Manual, Nightly,
+// and Catch-Up runs explicitly.
+export function describeRunSummary(summary: IndexRunResponse): string {
+  const label = indexRunTriggerLabel(summary.trigger);
   if (summary.status === "skipped") {
     return summary.skippedReason
-      ? `Index run skipped: ${summary.skippedReason}`
-      : "Index run skipped.";
+      ? `${label} — Index run skipped: ${summary.skippedReason}`
+      : `${label} — Index run skipped.`;
   }
   if (summary.status === "cancelled") {
-    return `Index run cancelled: ${summary.documentsIndexed} indexed, ${summary.scanned} scanned.`;
+    return `${label} — Index run cancelled: ${summary.documentsIndexed} indexed, ${summary.scanned} scanned. Committed work is kept and the next run resumes from there.`;
   }
-  return `Index run ${summary.status}: ${summary.documentsIndexed} indexed, ${summary.vectorChunks} vectors, ${summary.keywordChunks} keyword-only, ${summary.scanned} scanned, ${summary.errors} errors.`;
+  return `${label} — Index run ${summary.status}: ${summary.documentsIndexed} indexed, ${summary.vectorChunks} vectors, ${summary.keywordChunks} keyword-only, ${summary.scanned} scanned, ${summary.errors} errors.`;
+}
+
+// Auto-start notice for a run broadcast that this panel did not initiate:
+// a launch-triggered nightly or catch-up pass announces itself by display
+// label so a missed nightly window names the catch-up explicitly instead of
+// reading as a generic index run.
+export function describeAutoStartNotice(
+  run: { message?: unknown; response?: unknown } | null | undefined,
+): string | null {
+  if (!run) return null;
+  const message = typeof run.message === "string" ? run.message : undefined;
+  const response = typeof run.response === "string" ? run.response : undefined;
+  const trigger = parseIndexRunTrigger({ message: message ?? "", response: response ?? null });
+  const label = indexRunTriggerLabel(trigger);
+  if (trigger === "catchUp") {
+    return `${label} started — catching up on missed nightly indexing.`;
+  }
+  return `${label} started.`;
 }

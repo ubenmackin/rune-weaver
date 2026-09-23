@@ -10,7 +10,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoginView from "./LoginView";
-import { clearAuthToken, getAuthToken } from "../api";
+import { AUTH_TOKEN_STORAGE_KEY, clearAuthToken, getAuthToken, isSessionAuthenticated } from "../api";
 
 describe("LoginView owner-token gate", () => {
   beforeEach(() => {
@@ -21,7 +21,13 @@ describe("LoginView owner-token gate", () => {
 
   it("adopts a candidate token, clears the form, and notifies the parent", async () => {
     const user = userEvent.setup();
-    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ status: "ok" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const onAuthenticated = vi.fn();
     render(<LoginView onAuthenticated={onAuthenticated} />);
@@ -31,15 +37,18 @@ describe("LoginView owner-token gate", () => {
     await user.click(screen.getByRole("button", { name: "Sign in" }));
 
     await waitFor(() => expect(onAuthenticated).toHaveBeenCalledOnce());
-    expect(getAuthToken()).toBe("owner-token");
+    expect(isSessionAuthenticated()).toBe(true);
+    // Secret token is NOT retained in client-side memory or sessionStorage to prevent XSS exfiltration
+    expect(getAuthToken()).toBeNull();
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     // The typed credential is dropped as soon as it is adopted so it does not
     // linger in the replaced form.
     expect(input.value).toBe("");
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(path).toBe("/settings");
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer owner-token",
-    );
+    expect(path).toBe("/auth/session");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ token: "owner-token" });
+    expect(init.credentials).toBe("same-origin");
   });
 
   it("shows one generic rejection without echoing the typed token", async () => {
@@ -65,6 +74,7 @@ describe("LoginView owner-token gate", () => {
     // A near-miss guess must not be confirmable from the rendered wording.
     expect(document.body.textContent).not.toContain("guess-token-123");
     expect(getAuthToken()).toBeNull();
+    expect(isSessionAuthenticated()).toBe(false);
   });
 
   it("reports throttling and transport failures distinctly", async () => {

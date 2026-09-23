@@ -207,9 +207,32 @@ final class ChatTurnAuditProgress: Sendable {
 /// closed instead of handing out a live socket. The credential itself is never
 /// read here: the middleware validates it once and strips the upgrade query
 /// token, so this guard cannot reintroduce it into logs.
+/// Validates whether an incoming HTTP Origin header is permitted to open a WebSocket connection.
+/// Browser clients connecting across origins must be restricted; non-browser clients (omitting Origin) pass.
+func isAllowedWebSocketOrigin(_ origin: String, request: Request) -> Bool {
+    guard let originURL = URL(string: origin), let originHost = originURL.host?.lowercased() else {
+        return false
+    }
+    // Loopback hosts are always permitted:
+    if originHost == "127.0.0.1" || originHost == "localhost" || originHost == "::1" || originHost == "[::1]" {
+        return true
+    }
+    // Configured server hostname:
+    let serverHost = request.application.runeWeaver.config.hostname.lowercased()
+    if originHost == serverHost {
+        return true
+    }
+    return false
+}
+
 /// - Parameter request: Upgrade handshake request.
 /// - Returns: Empty headers to proceed, or nil to refuse the upgrade.
 func authorizeWebSocketUpgrade(_ request: Request) -> HTTPHeaders? {
+    if let origin = request.headers.first(name: .origin) {
+        guard isAllowedWebSocketOrigin(origin, request: request) else {
+            return nil
+        }
+    }
     guard request.application.runeWeaverAuth != nil else {
         return [:]
     }

@@ -13,13 +13,14 @@ private struct MockMediaTransport: MediaArrTransport {
     }
 }
 
-private func makeHTTPResponse(url: URL, statusCode: Int = 200) -> HTTPURLResponse {
-    HTTPURLResponse(
-        url: url,
+private func makeHTTPResponse(url: URL?, statusCode: Int = 200) -> HTTPURLResponse {
+    let targetURL = url ?? URL(fileURLWithPath: "/")
+    return HTTPURLResponse(
+        url: targetURL,
         statusCode: statusCode,
         httpVersion: "HTTP/1.1",
         headerFields: ["Content-Type": "application/json"]
-    )!
+    ) ?? HTTPURLResponse()
 }
 
 /// Serialized plus credential gate: the media API key resolves via process-global
@@ -108,7 +109,7 @@ struct MediaArrToolTests {
             #expect(req.value(forHTTPHeaderField: "X-Api-Key") == "secret-test-token")
             #expect(req.url?.path == "/api/v3/system/status")
             let json = #"{"appName":"Sonarr","version":"4.0.5.1710"}"#
-            return (Data(json.utf8), makeHTTPResponse(url: req.url!))
+            return (Data(json.utf8), makeHTTPResponse(url: req.url))
         }
 
         let tool = MediaArrTool(mediaConfig: mediaConfig, transport: mockTransport)
@@ -145,7 +146,7 @@ struct MediaArrToolTests {
               ]
             }
             """
-            return (Data(json.utf8), makeHTTPResponse(url: req.url!))
+            return (Data(json.utf8), makeHTTPResponse(url: req.url))
         }
 
         let tool = MediaArrTool(mediaConfig: mediaConfig, transport: mockTransport)
@@ -182,7 +183,7 @@ struct MediaArrToolTests {
               }
             ]
             """
-            return (Data(json.utf8), makeHTTPResponse(url: req.url!))
+            return (Data(json.utf8), makeHTTPResponse(url: req.url))
         }
 
         let tool = MediaArrTool(mediaConfig: mediaConfig, transport: mockTransport)
@@ -251,7 +252,7 @@ struct MediaArrToolTests {
                   }
                 ]
                 """
-                return (Data(json.utf8), makeHTTPResponse(url: req.url!))
+                return (Data(json.utf8), makeHTTPResponse(url: req.url))
             } else if path == "/api/v3/qualityprofile" {
                 let json = """
                 [
@@ -259,7 +260,7 @@ struct MediaArrToolTests {
                   { "id": 4, "name": "HD-1080p" }
                 ]
                 """
-                return (Data(json.utf8), makeHTTPResponse(url: req.url!))
+                return (Data(json.utf8), makeHTTPResponse(url: req.url))
             } else if path == "/api/v3/series" {
                 #expect(req.httpMethod == "POST")
                 let body = String(decoding: req.httpBody ?? Data(), as: UTF8.self)
@@ -267,9 +268,9 @@ struct MediaArrToolTests {
                 #expect(body.contains("\"rootFolderPath\":\"\\/data\\/media\\/tv\""))
                 #expect(body.contains("\"searchForMissingEpisodes\":true"))
                 let respJson = #"{"id":42,"title":"Fallout"}"#
-                return (Data(respJson.utf8), makeHTTPResponse(url: req.url!, statusCode: 201))
+                return (Data(respJson.utf8), makeHTTPResponse(url: req.url, statusCode: 201))
             } else {
-                return (Data(), makeHTTPResponse(url: req.url!, statusCode: 404))
+                return (Data(), makeHTTPResponse(url: req.url, statusCode: 404))
             }
         }
 

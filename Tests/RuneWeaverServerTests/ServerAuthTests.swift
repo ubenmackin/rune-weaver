@@ -1077,3 +1077,215 @@ struct ServerAuthCLILifecycleTests {
         #expect(persisted == minted)
     }
 }
+
+@Suite("Server Auth Session and Security Headers")
+struct ServerAuthSessionAndSecurityHeadersTests {
+    @Test
+    func `presentedBearer accepts rw_session cookie`() async throws {
+        try await withTestApp { app in
+            var request = Request(application: app, on: app.eventLoopGroup.next())
+            request.cookies[ServerAuthRequest.sessionCookieName] = HTTPCookies.Value(string: "cookie-secret")
+            #expect(ServerAuthRequest.presentedBearer(for: request, allowQueryToken: false) == "cookie-secret")
+        }
+    }
+
+    @Test
+    func `Auth session routes manage HttpOnly session cookie`() async throws {
+        let (auth, directory, _) = try makeAuth(token: "valid-owner-token")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withTestApp { app in
+            app.runeWeaver = makeConfigurationContext(config: .default)
+            app.runeWeaverAuth = auth
+            registerRuneWeaverRoutes(app)
+
+            // 1. POST /auth/session with valid token
+            var loginReq = Request(
+                application: app,
+                method: .POST,
+                url: URI(string: "/auth/session"),
+                on: app.eventLoopGroup.next()
+            )
+            try loginReq.content.encode(["token": "valid-owner-token"])
+            let loginRes = try await app.responder.respond(to: loginReq).get()
+            #expect(loginRes.status == .ok)
+            let sessionCookie = loginRes.cookies[ServerAuthRequest.sessionCookieName]
+            let unwrappedCookie = try #require(sessionCookie)
+            #expect(unwrappedCookie.string != "valid-owner-token")
+            #expect(!unwrappedCookie.string.isEmpty)
+            #expect(await auth.hasActiveSession(unwrappedCookie.string) == true)
+            #expect(unwrappedCookie.isHTTPOnly)
+            #expect(unwrappedCookie.sameSite == .strict)
+            #expect(unwrappedCookie.path == "/")
+
+            // 2. Access protected route using the cookie
+            var protectedReq = Request(
+                application: app,
+                method: .GET,
+                url: URI(string: "/settings"),
+                on: app.eventLoopGroup.next()
+            )
+            protectedReq.cookies[ServerAuthRequest.sessionCookieName] = sessionCookie
+            let protectedRes = try await app.responder.respond(to: protectedReq).get()
+            #expect(protectedRes.status == .ok)
+
+            // 3. POST /auth/session with invalid token fails
+            var badLoginReq = Request(
+                application: app,
+                method: .POST,
+                url: URI(string: "/auth/session"),
+                on: app.eventLoopGroup.next()
+            )
+            try badLoginReq.content.encode(["token": "wrong-token"])
+            let badLoginRes = try await app.responder.respond(to: badLoginReq).get()
+            #expect(badLoginRes.status == .unauthorized)
+
+            // 4. DELETE /auth/session revokes session server-side and expires cookie
+            var logoutReq = Request(
+                application: app,
+                method: .DELETE,
+                url: URI(string: "/auth/session"),
+                on: app.eventLoopGroup.next()
+            )
+            logoutReq.cookies[ServerAuthRequest.sessionCookieName] = sessionCookie
+            let logoutRes = try await app.responder.respond(to: logoutReq).get()
+            #expect(logoutRes.status == .ok)
+            #expect(await auth.hasActiveSession(unwrappedCookie.string) == false)
+            let expiredCookie = logoutRes.cookies[ServerAuthRequest.sessionCookieName]
+            let unwrappedExpired = try #require(expiredCookie)
+            #expect(unwrappedExpired.maxAge == 0)
+
+            // 5. Subsequent request using revoked cookie is rejected
+            var afterLogoutReq = Request(
+                application: app,
+                method: .GET,
+                url: URI(string: "/settings"),
+                on: app.eventLoopGroup.next()
+            )
+            afterLogoutReq.cookies[ServerAuthRequest.sessionCookieName] = sessionCookie
+            let afterLogoutRes = try await app.responder.respond(to: afterLogoutReq).get()
+            #expect(afterLogoutRes.status == .unauthorized)
+        }
+    }
+
+    @Test
+    func `Token rotation refreshes session cookie`() async throws {
+        let (auth, directory, _) = try makeAuth(token: "orig-token")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withTestApp { app in
+            app.runeWeaver = makeConfigurationContext(config: .default)
+            app.runeWeaverAuth = auth
+            registerRuneWeaverRoutes(app)
+
+            var req = Request(
+                application: app,
+                method: .POST,
+                url: URI(string: "/auth/rotate"),
+                on: app.eventLoopGroup.next()
+            )
+            req.headers.bearerAuthorization = .init(token: "orig-token")
+            let res = try await app.responder.respond(to: req).get()
+            #expect(res.status == .ok)
+            let cookie = res.cookies[ServerAuthRequest.sessionCookieName]
+            let unwrapped = try #require(cookie)
+            #expect(!unwrapped.string.isEmpty)
+            #expect(unwrapped.string != "orig-token")
+            #expect(await auth.hasActiveSession(unwrapped.string) == true)
+            #expect(unwrapped.isHTTPOnly)
+        }
+    }
+
+    @Test
+    func `isRequestSecure detects HTTPS direct and X-Forwarded-Proto`() async throws {
+        try await withTestApp { app in
+            let req1 = Request(application: app, method: .GET, url: URI(string: "https://localhost/auth/session"), on: app.eventLoopGroup.next())
+            #expect(ServerAuthRequest.isRequestSecure(req1) == true)
+
+            var req2 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
+            req2.headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "https")
+            #expect(ServerAuthRequest.isRequestSecure(req2) == true)
+
+            var req3 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
+            req3.headers.replaceOrAdd(name: "X-Forwarded-Proto", value: "https, http")
+            #expect(ServerAuthRequest.isRequestSecure(req3) == true)
+
+            let req4 = Request(application: app, method: .GET, url: URI(string: "http://localhost/auth/session"), on: app.eventLoopGroup.next())
+            #expect(ServerAuthRequest.isRequestSecure(req4) == false)
+        }
+    }
+
+    @Test
+    func `HostValidationMiddleware rejects rebinding and permits allowed hosts`() async throws {
+        try await withTestApp { app in
+            let middleware = HostValidationMiddleware(hostname: "127.0.0.1", allowMissingHostInTesting: false)
+
+            // Valid host header
+            var validReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            validReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1:8082")
+            let validRes = try await middleware.respond(to: validReq, chainingTo: AuthProbeResponder())
+            #expect(validRes.status == .ok)
+
+            // Valid localhost header
+            var localhostReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            localhostReq.headers.replaceOrAdd(name: .host, value: "localhost:8082")
+            let localhostRes = try await middleware.respond(to: localhostReq, chainingTo: AuthProbeResponder())
+            #expect(localhostRes.status == .ok)
+
+            // Rebinding attack host header rejected with 403
+            var evilReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            evilReq.headers.replaceOrAdd(name: .host, value: "attacker.com:8082")
+            let evilRes = try await middleware.respond(to: evilReq, chainingTo: AuthProbeResponder())
+            #expect(evilRes.status == .forbidden)
+
+            // Missing host header rejected with 400 when allowMissingHostInTesting is false
+            let missingReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            let missingRes = try await middleware.respond(to: missingReq, chainingTo: AuthProbeResponder())
+            #expect(missingRes.status == .badRequest)
+        }
+    }
+
+    @Test
+    func `Global security headers and Cache-Control applied to API responses`() async throws {
+        let (auth, directory, _) = try makeAuth(token: "sec-token")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withTestApp { app in
+            app.runeWeaver = makeConfigurationContext(config: .default)
+            app.runeWeaverAuth = auth
+            registerRuneWeaverRoutes(app)
+
+            // Health probe carries defensive headers
+            var healthReq = Request(application: app, method: .GET, url: URI(string: "/health"), on: app.eventLoopGroup.next())
+            healthReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1")
+            let healthRes = try await app.responder.respond(to: healthReq).get()
+            #expect(healthRes.headers.first(name: "X-Content-Type-Options") == "nosniff")
+            #expect(healthRes.headers.first(name: "X-Frame-Options") == "DENY")
+            #expect(healthRes.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
+
+            // Settings carries no-store, private Cache-Control
+            var settingsReq = Request(application: app, method: .GET, url: URI(string: "/settings"), on: app.eventLoopGroup.next())
+            settingsReq.headers.bearerAuthorization = .init(token: "sec-token")
+            settingsReq.headers.replaceOrAdd(name: .host, value: "127.0.0.1")
+            let settingsRes = try await app.responder.respond(to: settingsReq).get()
+            #expect(settingsRes.status == .ok)
+            #expect(settingsRes.headers.first(name: "Cache-Control") == "no-store, private")
+            #expect(settingsRes.headers.first(name: "X-Content-Type-Options") == "nosniff")
+        }
+    }
+
+    @Test
+    func `DashboardBundle responses carry Content Security Policy and frame headers`() async throws {
+        let (bundle, directory) = try makeBundle(files: ["index.html"])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withTestApp { app in
+            let req = Request(application: app, on: app.eventLoopGroup.next())
+            let res = try await bundle.response(for: req, requestPath: "/")
+            #expect(res.headers.first(name: "Content-Security-Policy")?.contains("default-src 'self'") == true)
+            #expect(res.headers.first(name: "X-Frame-Options") == "DENY")
+            #expect(res.headers.first(name: "X-Content-Type-Options") == "nosniff")
+            #expect(res.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
+        }
+    }
+}

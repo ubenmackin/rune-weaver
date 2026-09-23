@@ -164,9 +164,11 @@ public actor ServerSchedulerWorker {
             results.append(outcome)
         }
 
-        // The nightly index trigger rides the same tick: a disabled or
-        // already-run coordinator returns immediately, so this is a no-op for
-        // the default configuration.
+        // The nightly-or-catch-up index trigger rides the same tick: the
+        // coordinator selects `.nightly` at the nightly hour and `.catchUp`
+        // for a later same-day launch, while a disabled or already-run
+        // coordinator returns immediately, so this is a no-op for the default
+        // configuration.
         _ = await indexCoordinator?.fireNightly(now: now)
 
         return results

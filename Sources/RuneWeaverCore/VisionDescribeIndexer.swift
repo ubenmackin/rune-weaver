@@ -262,7 +262,17 @@ public actor VisionDescribeIndexer {
         }
         await reportProgress(message: "Describing document image", matched: 0, document: document)
         guard let raw = await provider.describeImage(boundedImage, prompt: Self.describePrompt) else {
+            // A cancel racing the LLM turn still stops before commit, bounding
+            // overrun to one document instead of storing a late description.
+            if Task.isCancelled {
+                return .skipped(.cancelled)
+            }
             return .skipped(.providerUnavailable)
+        }
+        // Honor cancellation per document: a description arriving after cancel
+        // is dropped instead of committed, so the run stops within one turn.
+        if Task.isCancelled {
+            return .skipped(.cancelled)
         }
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else {

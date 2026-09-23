@@ -13,6 +13,7 @@ import Foundation
 import NIOWebSocket
 @testable import RuneWeaverServer
 import Testing
+import Vapor
 
 /// Test double for a hub socket recording sends and close reasons without a
 /// live network handshake, so retirement is directly observable.
@@ -120,5 +121,62 @@ struct WSHubRetirementTests {
 
         #expect(await hub.count() == 0)
         #expect(await socket.policyClosed)
+    }
+
+    @Test
+    func `Failing socket is closed and pruned from hub on broadcast`() async {
+        let hub = WSHub()
+        let socket = FailingSocket()
+        let id = UUID()
+        _ = await hub.add(id: id, box: socket)
+        #expect(await hub.count() == 1)
+
+        await hub.broadcast(text: "alert")
+
+        #expect(await hub.count() == 0)
+        #expect(await socket.closed)
+    }
+
+    @Test
+    func `Origin check allows loopback and rejects arbitrary cross-site origins`() async throws {
+        let app = try await Application.make(.testing)
+        do {
+            let request = Request(application: app, on: app.eventLoopGroup.any())
+
+            #expect(isAllowedWebSocketOrigin("http://localhost:3000", request: request))
+            #expect(isAllowedWebSocketOrigin("http://127.0.0.1:8080", request: request))
+            #expect(isAllowedWebSocketOrigin("http://[::1]:8080", request: request))
+            #expect(!isAllowedWebSocketOrigin("https://evil.com", request: request))
+            #expect(!isAllowedWebSocketOrigin("https://attacker.org", request: request))
+            #expect(!isAllowedWebSocketOrigin("not-a-valid-url", request: request))
+
+            // DNS rebinding protection: even if Host matches Origin, non-loopback non-configured hosts are rejected
+            var rebindingHeaders = HTTPHeaders()
+            rebindingHeaders.replaceOrAdd(name: "Host", value: "rebind.attacker.com:8082")
+            let rebindingRequest = Request(
+                application: app,
+                headers: rebindingHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(!isAllowedWebSocketOrigin("http://rebind.attacker.com:8082", request: rebindingRequest))
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+}
+
+/// Socket fixture that throws on send to test pruning.
+private actor FailingSocket: WSConnectionSocket {
+    private(set) var closed = false
+
+    func send(_: String) async throws {
+        struct MockError: Error {}
+        throw MockError()
+    }
+
+    func close(code _: WebSocketErrorCode) async throws {
+        closed = true
     }
 }

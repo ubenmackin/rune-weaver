@@ -10,7 +10,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { clearAuthToken, getAuthToken } from "./api";
+import { clearAuthToken, getAuthToken, isSessionAuthenticated } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
 vi.mock("./components/ChatView", () => ({ default: () => null }));
@@ -66,13 +66,30 @@ describe("App owner-auth gate", () => {
     expect(document.querySelector(".app-root")).toBeNull();
   });
 
+  it("fails closed to the login gate when the health probe rejects with a network error", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("Network offline");
+      }),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Access token")).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".app-root")).toBeNull();
+  });
+
   it("opens the dashboard after a successful login", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string) => {
-        if (input === "/settings") {
-          return new Response(null, { status: 200 });
+        if (input === "/auth/session") {
+          return new Response(JSON.stringify({ status: "ok" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
         }
         return jsonResponse({ status: "ok", version: "0.1.0" });
       }),
@@ -88,7 +105,8 @@ describe("App owner-auth gate", () => {
     await waitFor(() =>
       expect(document.querySelector(".app-root")).not.toBeNull(),
     );
-    expect(getAuthToken()).toBe("owner-token");
+    expect(isSessionAuthenticated()).toBe(true);
+    expect(getAuthToken()).toBeNull();
   });
 
   it("renders only SettingsManager without TopNav in standalone mode", async () => {

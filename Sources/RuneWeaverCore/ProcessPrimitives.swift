@@ -246,17 +246,25 @@ public enum ProcessDrainHelpers: Sendable {
     /// The newline flag covers the JSON-RPC framing newline without forking the write path;
     /// the warning flag preserves the bridge diagnostic level while the runner stays debug.
     public static func writeInput(stdinPipe: Pipe, inputData: Data?, appendNewline: Bool = false, logAsWarning: Bool = false) {
-        guard let inputData, !inputData.isEmpty else { return }
-        do {
-            try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
-            if appendNewline {
-                try stdinPipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+        guard let inputData, !inputData.isEmpty else {
+            try? stdinPipe.fileHandleForWriting.close()
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            defer {
+                try? stdinPipe.fileHandleForWriting.close()
             }
-        } catch {
-            if logAsWarning {
-                RuneWeaverLog.tools.warning("SubprocessToolBridge: stdin write terminated early: \(error)")
-            } else {
-                RuneWeaverLog.tools.debug("BoundedProcessRunner: Child closed stdin before write completed: \(error.localizedDescription)")
+            do {
+                try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
+                if appendNewline {
+                    try stdinPipe.fileHandleForWriting.write(contentsOf: Data("\n".utf8))
+                }
+            } catch {
+                if logAsWarning {
+                    RuneWeaverLog.tools.warning("SubprocessToolBridge: stdin write terminated early: \(error)")
+                } else {
+                    RuneWeaverLog.tools.debug("BoundedProcessRunner: Child closed stdin before write completed: \(error.localizedDescription)")
+                }
             }
         }
     }

@@ -26,6 +26,7 @@ import {
   getJob,
   getRun,
   isAuthenticatedHealth,
+  isSessionAuthenticated,
   listApprovals,
   listJobs,
   listRuns,
@@ -879,6 +880,7 @@ describe("owner bearer auth client", () => {
 
   it("retires the token on a uniform 401 without echoing it", async () => {
     setAuthToken("secret-token-value");
+    expect(isSessionAuthenticated()).toBe(true);
     const transitions: boolean[] = [];
     const unsubscribe = subscribeAuthState((authenticated) =>
       transitions.push(authenticated),
@@ -896,37 +898,44 @@ describe("owner bearer auth client", () => {
     const failure = await getHealth().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ApiError);
     expect((failure as ApiError).status).toBe(401);
-    // The rejected credential is dropped from memory and the tab mirror, and
+    // The rejected credential is dropped from memory, and
     // holders fall back to the login gate without the value appearing anywhere.
     expect(getAuthToken()).toBeNull();
+    expect(isSessionAuthenticated()).toBe(false);
     expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     expect(transitions).toEqual([false]);
     expect((failure as ApiError).message).not.toContain("secret-token-value");
     unsubscribe();
   });
 
-  it("rotates the token and adopts the replacement before revealing it", async () => {
+  it("rotates the token and reveals the replacement without storing in sessionStorage", async () => {
     setAuthToken("old-token");
     const fetchMock = vi.fn(async () => jsonResponse({ token: "new-token" }));
     vi.stubGlobal("fetch", fetchMock);
     const rotated = await rotateToken();
     expect(rotated).toBe("new-token");
-    expect(getAuthToken()).toBe("new-token");
-    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBe("new-token");
+    expect(isSessionAuthenticated()).toBe(true);
+    // Token is NOT stored in sessionStorage
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/auth/rotate");
     expect(init.method).toBe("POST");
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer old-token",
-    );
+    expect(init.credentials).toBe("same-origin");
   });
 
-  it("clears memory and the tab mirror on logout and never gates the no-auth posture", () => {
+  it("clears memory and expires the session cookie on logout and never gates the no-auth posture", () => {
+    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
     setAuthToken("session-token");
-    expect(getAuthToken()).toBe("session-token");
+    expect(isSessionAuthenticated()).toBe(true);
     clearAuthToken();
     expect(getAuthToken()).toBeNull();
+    expect(isSessionAuthenticated()).toBe(false);
     expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(fetchMock).toHaveBeenCalledWith("/auth/session", {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
     // A logout with no credential present reports no transition, so the
     // loopback no-auth posture is never flipped to a login gate it does not
     // need; the value must not be recoverable from the session mirror either.
@@ -939,17 +948,20 @@ describe("owner bearer auth client", () => {
     unsubscribe();
   });
 
-  it("probes a login candidate against the protected settings route", async () => {
-    const fetchMock = vi.fn(async () => new Response(null, { status: 200 }));
+  it("authenticates a login candidate via POST /auth/session without exposing token to sessionStorage", async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ status: "ok" }));
     vi.stubGlobal("fetch", fetchMock);
     const accepted = await authenticateWithToken("  candidate-token  ");
     expect(accepted).toBe("ok");
-    expect(getAuthToken()).toBe("candidate-token");
+    expect(isSessionAuthenticated()).toBe(true);
+    // Token is NOT stored in sessionStorage or in-memory authToken
+    expect(getAuthToken()).toBeNull();
+    expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(path).toBe("/settings");
-    expect((init.headers as Record<string, string>).Authorization).toBe(
-      "Bearer candidate-token",
-    );
+    expect(path).toBe("/auth/session");
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("same-origin");
+    expect(JSON.parse(init.body as string)).toEqual({ token: "candidate-token" });
   });
 
   it("classifies rejected, throttled, and unreachable logins", async () => {

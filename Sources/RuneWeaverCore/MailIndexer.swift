@@ -940,6 +940,9 @@ private extension MailIndexer {
         staging: inout AttachmentStaging
     ) async throws {
         for (index, info) in message.attachments.enumerated() {
+            // Honor cancellation per attachment so a large attachment list
+            // stops within one fetch instead of draining the whole message.
+            try Task.checkCancellation()
             // The body structure reports a size before any bytes move, so an
             // oversized part is skipped without a fetch.
             if (info.sizeBytes ?? 0) > context.attachmentCap {
@@ -1005,7 +1008,9 @@ private extension MailIndexer {
     /// Embeds chunk text when the message is inside the vector window.
     ///
     /// Embedding failure degrades the affected chunks to keyword-only, matching
-    /// the shared fallback contract; cancellation still propagates.
+    /// the shared fallback contract; cancellation still propagates. The probe
+    /// runs before the batch so a cancel observed between messages never starts
+    /// another embedding batch, bounding overrun to one message.
     /// - Parameters:
     ///   - chunks: Chunks to embed.
     ///   - eligible: Whether the message falls inside the vector window.
@@ -1015,6 +1020,7 @@ private extension MailIndexer {
         guard eligible, let embedder else {
             return Array(repeating: [], count: chunks.count)
         }
+        try Task.checkCancellation()
         do {
             let vectors = try await embedder.embed(chunks.map(\.text))
             guard vectors.count == chunks.count else {

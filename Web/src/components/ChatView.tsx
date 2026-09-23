@@ -12,6 +12,7 @@ import {
   getSessionToolActions,
   groupToolActionsByRound,
   isActiveRunStatus,
+  isValidToolIDs,
   listApprovals,
   MAX_CHAT_TEXT_LENGTH,
   newSessionId,
@@ -694,8 +695,10 @@ function isToolResult(value: unknown): value is ToolResult {
 // history rendering honest about which executions actually ran.
 function isToolAction(value: unknown): value is ToolAction {
   if (!isRecord(value)) return false;
-  if (typeof value.toolName !== "string") return false;
-  if (typeof value.callID !== "string") return false;
+  if (typeof value.toolName !== "string" || value.toolName.trim().length === 0)
+    return false;
+  if (typeof value.callID !== "string" || value.callID.trim().length === 0)
+    return false;
   if (typeof value.argumentsJSON !== "string") return false;
   const result = value.result;
   return result == null || isToolResult(result);
@@ -1026,10 +1029,10 @@ export function reconstructMessages(
   );
 }
 
-// Single first-turn title policy: first line truncated to 40 characters,
-// sharing the engine's line-fold and terminator handling so concurrent
-// client pre-names and server auto-titles converge on one value instead of
-// flickering between two spellings under last-write-wins.
+// Single first-turn title policy: first line truncated to 40 graphemes,
+// sharing the engine's line-fold, terminator handling, and grapheme discipline
+// so concurrent client pre-names and server auto-titles converge on one value
+// instead of flickering between two spellings under last-write-wins.
 export function autoTitleFromPrompt(text: string): string {
   const normalized = normalizeLineEndings(text);
   const parts = normalized.split("\n");
@@ -1039,11 +1042,34 @@ export function autoTitleFromPrompt(text: string): string {
     parts.pop();
   }
   const firstLine = (parts[0] ?? text).trim();
-  // Code-point truncation avoids splitting a surrogate pair where the engine's
-  // Character prefix would keep the grapheme whole.
-  const chars = [...firstLine];
-  if (chars.length <= 40) return firstLine;
-  return chars.slice(0, 40).join("") + "…";
+  // Truncate on grapheme boundaries like the engine's Character prefix so a
+  // ZWJ emoji family stays whole instead of splitting mid-grapheme.
+  let graphemes: string[];
+  try {
+    const segmenterCtor = (
+      Intl as unknown as {
+        Segmenter?: new (
+          locales?: string | string[],
+          options?: { granularity?: string },
+        ) => { segment(input: string): Iterable<{ segment: string }> };
+      }
+    ).Segmenter;
+    if (typeof segmenterCtor === "function") {
+      graphemes = Array.from(
+        new segmenterCtor(undefined, { granularity: "grapheme" }).segment(
+          firstLine,
+        ),
+        (part) => part.segment,
+      );
+    } else {
+      graphemes = [...firstLine];
+    }
+  } catch {
+    // Segmenter unavailable; fall back to the code-point count.
+    graphemes = [...firstLine];
+  }
+  if (graphemes.length <= 40) return firstLine;
+  return graphemes.slice(0, 40).join("") + "…";
 }
 
 // Merges terminal warnings over live ones without duplicating the lines the
@@ -1748,16 +1774,15 @@ export default function ChatView({ health }: ChatViewProps) {
           const rawCallID: unknown = (data as unknown as Record<string, unknown>).callID;
           const rawArgs: unknown = (data as unknown as Record<string, unknown>).argumentsJSON;
           if (
-            typeof rawToolName !== "string" ||
-            typeof rawCallID !== "string" ||
+            !isValidToolIDs(rawToolName, rawCallID) ||
             typeof rawArgs !== "string"
           ) {
             return;
           }
           const started: ToolAction = {
-            toolName: rawToolName,
-            callID: rawCallID,
-            argumentsJSON: rawArgs,
+            toolName: (rawToolName as string).trim(),
+            callID: (rawCallID as string).trim(),
+            argumentsJSON: rawArgs as string,
             result: null,
             ...(normalizeRoundIndex(
               (data as WSToolStartFrame).roundIndex,
@@ -1778,19 +1803,18 @@ export default function ChatView({ health }: ChatViewProps) {
           const rawCallID: unknown = (data as unknown as Record<string, unknown>).callID;
           const rawToolName: unknown = (data as unknown as Record<string, unknown>).toolName;
           const rawResult: unknown = (data as unknown as Record<string, unknown>).result;
-          if (
-            typeof rawCallID !== "string" ||
-            typeof rawToolName !== "string"
-          ) {
+          if (!isValidToolIDs(rawToolName, rawCallID)) {
             return;
           }
           if (rawResult != null && !isToolResult(rawResult)) return;
           const result = isToolResult(rawResult) ? rawResult : null;
+          const callID = (rawCallID as string).trim();
+          const toolName = (rawToolName as string).trim();
           const round = normalizeRoundIndex(
             (data as WSToolEndFrame).roundIndex,
           );
           const hasMatch = flight.turn.toolActions.some(
-            (action) => action.callID === rawCallID,
+            (action) => action.callID === callID,
           );
           // One end frame belongs to one execution: call identity wins, and
           // without it only the first pending same-tool row completes so one
@@ -1798,7 +1822,7 @@ export default function ChatView({ health }: ChatViewProps) {
           // same-tool row the frame drops instead of guessing an owner.
           if (hasMatch) {
             flight.turn.toolActions = flight.turn.toolActions.map((action) =>
-              action.callID === rawCallID
+              action.callID === callID
                 ? {
                     ...action,
                     result,
@@ -1808,7 +1832,7 @@ export default function ChatView({ health }: ChatViewProps) {
             );
           } else {
             const fallbackIndex = flight.turn.toolActions.findIndex(
-              (action) => !action.result && action.toolName === rawToolName,
+              (action) => !action.result && action.toolName === toolName,
             );
             if (fallbackIndex !== -1) {
               flight.turn.toolActions = flight.turn.toolActions.map(
@@ -1825,17 +1849,16 @@ export default function ChatView({ health }: ChatViewProps) {
           }
           flight.turn.segments = updateToolEndInSegments(
             flight.turn.segments,
-            rawCallID,
-            rawToolName,
+            callID,
+            toolName,
             result,
             round,
           );
         } else if (frameType === "warning") {
           const rawWarning: unknown = (data as unknown as Record<string, unknown>).message;
           if (typeof rawWarning !== "string" || !rawWarning.trim()) return;
-          if (!flight.warnings.includes(rawWarning)) {
-            flight.warnings.push(rawWarning);
-          }
+          const trimmed = rawWarning.trim();
+          if (!flight.warnings.includes(trimmed)) flight.warnings.push(trimmed);
         } else if (frameType === "turn_tokens") {
           const rawTotal: unknown = (data as unknown as Record<string, unknown>)
             .turnTotalTokens;
@@ -2179,7 +2202,7 @@ export default function ChatView({ health }: ChatViewProps) {
       // filter already proved this frame belongs to the viewed session, so the
       // identity match is scoped.
       const rawMissCallID = (data as unknown as Record<string, unknown>).callID;
-      if (typeof rawMissCallID !== "string" || rawMissCallID.length === 0) {
+      if (typeof rawMissCallID !== "string" || rawMissCallID.trim().length === 0) {
         return;
       }
       forgetToolCancelMark(rawMissCallID);
@@ -2187,7 +2210,7 @@ export default function ChatView({ health }: ChatViewProps) {
         const rawMissMessage = (data as unknown as Record<string, unknown>)
           .message;
         setError(
-          typeof rawMissMessage === "string" && rawMissMessage.length > 0
+          typeof rawMissMessage === "string" && rawMissMessage.trim().length > 0
             ? rawMissMessage
             : "Tool cancel missed — the tool call already settled",
         );
@@ -2204,15 +2227,14 @@ export default function ChatView({ health }: ChatViewProps) {
       const rawCallID: unknown = data.callID;
       const rawArgumentsJSON: unknown = data.argumentsJSON;
       if (
-        typeof rawToolName !== "string" ||
-        typeof rawCallID !== "string" ||
+        !isValidToolIDs(rawToolName, rawCallID) ||
         typeof rawArgumentsJSON !== "string"
       ) {
         return;
       }
-      const toolName = rawToolName;
-      const callID = rawCallID;
-      const argumentsJSON = rawArgumentsJSON;
+      const toolName = (rawToolName as string).trim();
+      const callID = (rawCallID as string).trim();
+      const argumentsJSON = rawArgumentsJSON as string;
       // Round hints stay ordering-only: drifted shapes degrade to unordered rather
       // than dropping the execution, so malformed rounds never hide tools.
       const startRound = normalizeRoundIndex(
@@ -2268,7 +2290,7 @@ export default function ChatView({ health }: ChatViewProps) {
       const rawEndCallID: unknown = data.callID;
       const rawEndToolName: unknown = data.toolName;
       const rawEndResult: unknown = data.result;
-      if (typeof rawEndCallID !== "string" || typeof rawEndToolName !== "string") {
+      if (!isValidToolIDs(rawEndToolName, rawEndCallID)) {
         return;
       }
       // A malformed result must never enter turn state: absent results stay
@@ -2276,8 +2298,8 @@ export default function ChatView({ health }: ChatViewProps) {
       if (rawEndResult != null && !isToolResult(rawEndResult)) {
         return;
       }
-      const endCallID = rawEndCallID;
-      const endToolName = rawEndToolName;
+      const endCallID = (rawEndCallID as string).trim();
+      const endToolName = (rawEndToolName as string).trim();
       const endResult = isToolResult(rawEndResult) ? rawEndResult : null;
       // The call settled, so its live progress and any cancel mark are done:
       // clearing by identity keeps sibling executions of the same tool intact.
@@ -2764,8 +2786,8 @@ export default function ChatView({ health }: ChatViewProps) {
       clearAllToolProgress();
       const rawMessage: unknown = data.message;
       const message =
-        typeof rawMessage === "string" && rawMessage.length > 0
-          ? rawMessage
+        typeof rawMessage === "string" && rawMessage.trim().length > 0
+          ? rawMessage.trim()
           : "Chat turn failed";
       if (!cancelledRef.current) {
         setError(message);
@@ -2876,26 +2898,26 @@ export default function ChatView({ health }: ChatViewProps) {
       const rawRemovalRequest: unknown = data.request;
       const rawRemovalApproval: unknown = data.approval;
       let removalID: string | undefined;
-      if (typeof rawRemovalID === "string" && rawRemovalID.length > 0) {
+      if (typeof rawRemovalID === "string" && rawRemovalID.trim().length > 0) {
         removalID = rawRemovalID;
       } else if (
         typeof rawRemovalApprovalID === "string" &&
-        rawRemovalApprovalID.length > 0
+        rawRemovalApprovalID.trim().length > 0
       ) {
         removalID = rawRemovalApprovalID;
       } else if (
         typeof rawRemovalApprovalId === "string" &&
-        rawRemovalApprovalId.length > 0
+        rawRemovalApprovalId.trim().length > 0
       ) {
         removalID = rawRemovalApprovalId;
       } else if (isRecord(rawRemovalRequest)) {
         const nestedID: unknown = rawRemovalRequest.id;
-        if (typeof nestedID === "string" && nestedID.length > 0) {
+        if (typeof nestedID === "string" && nestedID.trim().length > 0) {
           removalID = nestedID;
         }
       } else if (isRecord(rawRemovalApproval)) {
         const nestedID: unknown = rawRemovalApproval.id;
-        if (typeof nestedID === "string" && nestedID.length > 0) {
+        if (typeof nestedID === "string" && nestedID.trim().length > 0) {
           removalID = nestedID;
         }
       }

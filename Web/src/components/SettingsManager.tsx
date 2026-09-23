@@ -27,12 +27,13 @@ import {
   resolveSearchMessage,
   RUN_LOG_POLL_LIMIT,
   searchStageCopy,
+  startElapsedSeconds,
   getSettings,
   updateSettings,
   rotateToken,
   clearAuthToken,
   authHeaders,
-  getAuthToken,
+  isSessionAuthenticated,
   getPlugins,
   rescanPlugins,
   stopSearch,
@@ -75,8 +76,9 @@ import {
 import Modal from "./Modal";
 import RuneMarketplaceModal from "./RuneMarketplaceModal";
 import { IndexPolicyPanel } from "./IndexingPanel";
-import Toast from "./Toast";
+import { ToastStack } from "./Toast";
 import { useRunningRuns } from "../hooks/useRunningRuns";
+import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
 // Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
@@ -208,22 +210,10 @@ export function isBrowserLongStage(stage: string | null | undefined): boolean {
   return stage === "installing" || stage === "browsers";
 }
 
-// Elapsed whole seconds since provisioning began, preferring the engine Start
-// time and falling back to the client-side instant. Clamped at zero so clock
-// skew never renders a negative count.
-export function browserElapsedSeconds(
-  startedAtSeconds: number | null | undefined,
-  clientStartMs: number,
-  nowMs: number = Date.now(),
-): number {
-  const baseMs =
-    startedAtSeconds != null &&
-    Number.isFinite(startedAtSeconds) &&
-    startedAtSeconds > 0
-      ? startedAtSeconds * 1000
-      : clientStartMs;
-  return Math.max(0, Math.floor((nowMs - baseMs) / 1000));
-}
+// Shared elapsed helper lives in the API client so browser provision and
+// search Start progress agree on one clamp; aliased here so existing call
+// sites keep a descriptive name without duplicating the clamp logic.
+export const browserElapsedSeconds = startElapsedSeconds;
 
 // Trims an engine banner or diagnostics string, normalizing blank payloads to
 // null so callers never render whitespace as detail.
@@ -237,7 +227,12 @@ export default function SettingsManager() {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  // Transient toast queue for action feedback (tool toggles, plugin ops, saves).
+  // Distinct notices stack with independent timers; an identical copy replaces
+  // its sibling so repeat saves refresh one notice instead of duplicating.
+  // Contextual health/state errors stay as persistent inline banners.
+  const { toasts, pushSuccessToast, pushErrorToast, dismissToast, clearToasts } =
+    useToastStack();
   // Active-run guard: staged when a save is requested while in-flight work
   // exists. Cancel aborts the PUT; Continue saves and hot-reloads.
   const [showActiveGuard, setShowActiveGuard] = useState(false);
@@ -245,28 +240,21 @@ export default function SettingsManager() {
   // fails; parked approvals never count because only running lights the guard.
   const { runs: sharedRuns } = useRunningRuns();
 
-  // Clears the transient success toast without touching persistent error
-  // banners. Stable so the toast auto-dismiss timer never restarts on
-  // unrelated renders.
-  const clearSuccessToast = useCallback(() => {
-    setSuccess(null);
-  }, []);
-
-  // Selects a settings tab while clearing any transient success toast so it
-  // never follows navigation. Errors stay persistent banners.
+  // Selects a settings tab while clearing any transient toasts so they
+  // never follow navigation. Contextual errors stay as persistent banners.
   const selectSettingsTab = useCallback(
     (tab: SettingsTab) => {
-      setSuccess(null);
+      clearToasts();
       setActiveTab(tab);
     },
-    []
+    [clearToasts]
   );
 
-  // Clears the toast whenever the tab changes through any path so a save
+  // Clears toasts whenever the tab changes through any path so a save
   // notice never lingers across navigation.
   useEffect(() => {
-    setSuccess(null);
-  }, [activeTab]);
+    clearToasts();
+  }, [activeTab, clearToasts]);
 
   // Form state
   const [engineName, setEngineName] = useState("");
@@ -431,7 +419,6 @@ export default function SettingsManager() {
   const [radarrDefaultRoot, setRadarrDefaultRoot] = useState("");
 
   const [configuringToolName, setConfiguringToolName] = useState<string | null>(null);
-  const [mediaSaveSuccess, setMediaSaveSuccess] = useState(false);
   const [mediaSaveLoading, setMediaSaveLoading] = useState(false);
   const [mediaModalError, setMediaModalError] = useState<string | null>(null);
   // Short-lived success-then-close timer for the media modal: held in a ref
@@ -443,7 +430,6 @@ export default function SettingsManager() {
   const [browserAllowedOriginsText, setBrowserAllowedOriginsText] = useState<string>(
     DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT
   );
-  const [browserSaveSuccess, setBrowserSaveSuccess] = useState(false);
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
   const browserSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -462,7 +448,6 @@ export default function SettingsManager() {
   const [desktopBlockedAppsText, setDesktopBlockedAppsText] = useState<string>(
     DEFAULT_DESKTOP_BLOCKED_APPS_TEXT
   );
-  const [desktopSaveSuccess, setDesktopSaveSuccess] = useState(false);
   const [desktopSaveLoading, setDesktopSaveLoading] = useState(false);
   const [desktopModalError, setDesktopModalError] = useState<string | null>(null);
   // Short-lived success-then-close timer for the desktop modal: held in a ref
@@ -484,8 +469,6 @@ export default function SettingsManager() {
   // Tracks the single builtin tool row with an in-flight toggle so sibling
   // rows stay interactive while one request is pending.
   const [togglingToolName, setTogglingToolName] = useState<string | null>(null);
-  const [pluginActionError, setPluginActionError] = useState<string | null>(null);
-  const [pluginActionSuccess, setPluginActionSuccess] = useState<string | null>(null);
 
   const loadPluginsData = useCallback(async () => {
     try {
@@ -550,7 +533,10 @@ export default function SettingsManager() {
   const refreshBrowserHealth = useCallback(async () => {
     setBrowserHealthLoading(true);
     try {
-      const res = await fetch("/browser/health", { headers: authHeaders() });
+      const res = await fetch("/browser/health", {
+        headers: authHeaders(),
+        credentials: "same-origin",
+      });
       if (!res.ok) {
         // Older engines predate the browser lifecycle; keep the pill Unknown
         // so the static venv path plus manual fallback still guides setup.
@@ -605,7 +591,10 @@ export default function SettingsManager() {
         void refreshBrowserHealth();
         return;
       }
-      fetch("/browser/health", { headers: authHeaders() })
+      fetch("/browser/health", {
+        headers: authHeaders(),
+        credentials: "same-origin",
+      })
         .then((res) => (res.ok ? res.json() : null))
         .then((payload) => {
           if (!payload || typeof payload !== "object") return;
@@ -614,7 +603,7 @@ export default function SettingsManager() {
           browserStageRef.current = stage;
           setBrowserStage(stage);
           setBrowserElapsed(
-            browserElapsedSeconds(
+            startElapsedSeconds(
               resolveBrowserStartedAt(typed),
               browserStartMsRef.current
             )
@@ -653,6 +642,7 @@ export default function SettingsManager() {
       const res = await fetch("/browser/ensure", {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
+        credentials: "same-origin",
         body: JSON.stringify({}),
       });
       if (!res.ok) {
@@ -829,16 +819,14 @@ export default function SettingsManager() {
 
   const handleRescanPlugins = async () => {
     setRescanLoading(true);
-    setPluginActionError(null);
-    setPluginActionSuccess(null);
     try {
       const res = await rescanPlugins();
       setPluginsList(Array.isArray(res?.plugins) ? res.plugins : []);
       const toolsRes = await getTools();
       setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
-      setPluginActionSuccess(`Discovered ${res.plugins?.length ?? 0} external runes.`);
+      pushSuccessToast(`Discovered ${res.plugins?.length ?? 0} external runes.`);
     } catch (err) {
-      setPluginActionError(err instanceof Error ? err.message : "Failed to rescan plugins.");
+      pushErrorToast(err instanceof Error ? err.message : "Failed to rescan plugins.");
     } finally {
       setRescanLoading(false);
     }
@@ -846,21 +834,19 @@ export default function SettingsManager() {
 
   const handleToggleEnable = async (plugin: PluginSummary) => {
     setUpdatingPluginId(plugin.id);
-    setPluginActionError(null);
-    setPluginActionSuccess(null);
     try {
       const action = plugin.isEnabled ? "disable" : "enable";
       const updated = await updatePluginState(plugin.id, { action });
       setPluginsList((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       const toolsRes = await getTools();
       setAllTools(toolsRes.tools);
-      setPluginActionSuccess(
+      pushSuccessToast(
         updated.isEnabled
           ? `Enabled rune '${updated.name}' (integrity hash verified).`
           : `Disabled rune '${updated.name}'.`
       );
     } catch (err) {
-      setPluginActionError(err instanceof Error ? err.message : "Failed to update plugin state.");
+      pushErrorToast(err instanceof Error ? err.message : "Failed to update plugin state.");
     } finally {
       setUpdatingPluginId(null);
     }
@@ -872,8 +858,6 @@ export default function SettingsManager() {
     value: string
   ) => {
     setUpdatingPluginId(pluginId);
-    setPluginActionError(null);
-    setPluginActionSuccess(null);
     try {
       let updated: PluginSummary;
       if (value === "default") {
@@ -888,9 +872,9 @@ export default function SettingsManager() {
       setPluginsList((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
       const toolsRes = await getTools();
       setAllTools(toolsRes.tools);
-      setPluginActionSuccess(`Updated permission for '${toolName}' to ${value}.`);
+      pushSuccessToast(`Updated permission for '${toolName}' to ${value}.`);
     } catch (err) {
-      setPluginActionError(err instanceof Error ? err.message : "Failed to override permission.");
+      pushErrorToast(err instanceof Error ? err.message : "Failed to override permission.");
     } finally {
       setUpdatingPluginId(null);
     }
@@ -900,17 +884,15 @@ export default function SettingsManager() {
     if (!pendingUninstallPlugin) return;
     const { id: pluginId, name } = pendingUninstallPlugin;
     setUpdatingPluginId(pluginId);
-    setPluginActionError(null);
-    setPluginActionSuccess(null);
     try {
       await uninstallPlugin(pluginId);
       setPluginsList((prev) => prev.filter((p) => p.id !== pluginId));
       const toolsRes = await getTools();
       setAllTools(toolsRes.tools);
-      setPluginActionSuccess(`Uninstalled '${name}'.`);
+      pushSuccessToast(`Uninstalled '${name}'.`);
       setPendingUninstallPlugin(null);
     } catch (err) {
-      setPluginActionError(err instanceof Error ? err.message : "Failed to uninstall plugin.");
+      pushErrorToast(err instanceof Error ? err.message : "Failed to uninstall plugin.");
     } finally {
       setUpdatingPluginId(null);
     }
@@ -973,24 +955,22 @@ export default function SettingsManager() {
   // posture never mints one, so offering "Log Out" there would present a
   // session-less control whose only effect is a login gate that accepts any
   // value; the button is omitted until a real token-backed session exists.
-  const hasOwnerSession = getAuthToken() !== null;
+  const hasOwnerSession = isSessionAuthenticated();
 
   // Flips one builtin engine tool without a protected list: every builtin toggles independently so
   // closely related tools (email.read vs email.attachment) never change together.
   const handleToggleTool = async (tool: ToolInfo) => {
     const nextEnabled = !tool.isEnabled;
     setTogglingToolName(tool.name);
-    setPluginActionError(null);
-    setPluginActionSuccess(null);
     try {
       await updateToolState(tool.name, nextEnabled);
       const toolsRes = await getTools();
       setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
-      setPluginActionSuccess(
+      pushSuccessToast(
         nextEnabled ? `Enabled tool '${tool.name}'.` : `Disabled tool '${tool.name}'.`
       );
     } catch (err) {
-      setPluginActionError(err instanceof Error ? err.message : `Failed to update tool '${tool.name}'.`);
+      pushErrorToast(err instanceof Error ? err.message : `Failed to update tool '${tool.name}'.`);
     } finally {
       setTogglingToolName(null);
     }
@@ -1313,7 +1293,6 @@ export default function SettingsManager() {
   const executeSave = async () => {
     setSaving(true);
     setError(null);
-    setSuccess(null);
 
     // Provider names become TOML table keys, so rejects must surface here
     // rather than silently dropping or overwriting an entry on save.
@@ -1660,7 +1639,7 @@ export default function SettingsManager() {
       // Saved confirmation stays exact so operators recognize it; safe
       // sections hot-reload live while providers, engine identity, and DB
       // paths take effect on restart without blanket restart claims here.
-      setSuccess("Settings saved.");
+      pushSuccessToast("Settings saved.");
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to save settings");
     } finally {
@@ -1725,16 +1704,15 @@ export default function SettingsManager() {
         media: buildMediaPayload(),
       });
       populateForm(updated);
-      setMediaSaveSuccess(true);
-      // Re-arm the success-then-close tick through the ref so a repeat save
-      // replaces the pending tick and unmount clears it instead of leaking.
+      pushSuccessToast("Media settings saved!");
+      // Re-arm the close tick through the ref so a repeat save replaces the
+      // pending tick and unmount clears it instead of leaking.
       if (mediaSaveTimerRef.current !== null) {
         clearTimeout(mediaSaveTimerRef.current);
         mediaSaveTimerRef.current = null;
       }
       mediaSaveTimerRef.current = setTimeout(() => {
         mediaSaveTimerRef.current = null;
-        setMediaSaveSuccess(false);
         setConfiguringToolName(null);
       }, 1000);
     } catch (err) {
@@ -1753,14 +1731,13 @@ export default function SettingsManager() {
       });
       // Refresh only the browser field so unsaved edits in other tabs survive.
       setBrowserAllowedOriginsText(formatAllowedOriginsText(updated.browserAllowedOrigins));
-      setBrowserSaveSuccess(true);
+      pushSuccessToast("Browser & web settings saved!");
       if (browserSaveTimerRef.current !== null) {
         clearTimeout(browserSaveTimerRef.current);
         browserSaveTimerRef.current = null;
       }
       browserSaveTimerRef.current = setTimeout(() => {
         browserSaveTimerRef.current = null;
-        setBrowserSaveSuccess(false);
         setConfiguringToolName(null);
       }, 1000);
     } catch (err) {
@@ -1795,16 +1772,15 @@ export default function SettingsManager() {
         desktop: buildDesktopPayload(configuringToolName),
       });
       populateForm(updated);
-      setDesktopSaveSuccess(true);
-      // Re-arm the success-then-close tick through the ref so a repeat save
-      // replaces the pending tick and unmount clears it instead of leaking.
+      pushSuccessToast("Desktop settings saved!");
+      // Re-arm the close tick through the ref so a repeat save replaces the
+      // pending tick and unmount clears it instead of leaking.
       if (desktopSaveTimerRef.current !== null) {
         clearTimeout(desktopSaveTimerRef.current);
         desktopSaveTimerRef.current = null;
       }
       desktopSaveTimerRef.current = setTimeout(() => {
         desktopSaveTimerRef.current = null;
-        setDesktopSaveSuccess(false);
         setConfiguringToolName(null);
       }, 1000);
     } catch (err) {
@@ -2115,7 +2091,7 @@ export default function SettingsManager() {
       )}
 
       {error && <div className="error-banner">{error}</div>}
-      {success ? <Toast message={success} onDismiss={clearSuccessToast} /> : null}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       {/* Vertical sidenav: stacked categories beside the content pane so every
           section stays visible without horizontal scrolling. */}
@@ -2672,18 +2648,6 @@ export default function SettingsManager() {
               </div>
             </div>
 
-            {pluginActionError && (
-              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <AlertTriangleIcon size={16} />
-                <span>{pluginActionError}</span>
-              </div>
-            )}
-            {pluginActionSuccess && (
-              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <CheckIcon size={16} />
-                <span>{pluginActionSuccess}</span>
-              </div>
-            )}
 
             {/* Metrics cards */}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "12px", margin: "16px 0" }}>
@@ -3026,11 +2990,8 @@ export default function SettingsManager() {
                             className="accent-ghost icon-text-btn"
                             onClick={() => {
                               setMediaModalError(null);
-                              setMediaSaveSuccess(false);
                               setBrowserModalError(null);
-                              setBrowserSaveSuccess(false);
                               setDesktopModalError(null);
-                              setDesktopSaveSuccess(false);
                               setConfiguringToolName(tool.name);
                             }}
                             style={{ padding: "4px 8px", fontSize: "0.78rem" }}
@@ -4588,12 +4549,6 @@ export default function SettingsManager() {
                 <span>{browserModalError}</span>
               </div>
             )}
-            {browserSaveSuccess && (
-              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <CheckIcon size={16} />
-                <span>Browser & web settings saved!</span>
-              </div>
-            )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
               Configure allowed homelab hosts and domain patterns for <code>browser.navigate</code>, <code>browser.act</code>, and <code>web.fetch</code>.
@@ -4711,12 +4666,6 @@ export default function SettingsManager() {
               <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
                 <AlertTriangleIcon size={16} />
                 <span>{mediaModalError}</span>
-              </div>
-            )}
-            {mediaSaveSuccess && (
-              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <CheckIcon size={16} />
-                <span>Media settings saved!</span>
               </div>
             )}
 
@@ -4905,12 +4854,6 @@ export default function SettingsManager() {
                 <span>{desktopModalError}</span>
               </div>
             )}
-            {desktopSaveSuccess && (
-              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <CheckIcon size={16} />
-                <span>Desktop settings saved!</span>
-              </div>
-            )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
               Read-only display or app-window capture with downscaled JPEG plus
@@ -5011,12 +4954,6 @@ export default function SettingsManager() {
               <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
                 <AlertTriangleIcon size={16} />
                 <span>{desktopModalError}</span>
-              </div>
-            )}
-            {desktopSaveSuccess && (
-              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <CheckIcon size={16} />
-                <span>Desktop settings saved!</span>
               </div>
             )}
 

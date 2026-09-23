@@ -3,7 +3,7 @@
 
 import { useEffect, useRef } from "react";
 import {
-  getAuthToken,
+  isValidToolIDs,
   parseToolProgress,
   subscribeAuthState,
   toNonNegativeInt,
@@ -202,6 +202,37 @@ export type WSIncomingFrame =
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 
+// Index runs may omit the tool name on older engines, so a progress frame
+// with a blank or missing tool name still passes when its message and
+// counters are otherwise valid. The index panel adopts such frames during any
+// run in flight, while chat keeps dropping them at its own parser.
+function isIndexProgressWithoutToolName(value: Record<string, unknown>): boolean {
+  if (!(value.sessionID === undefined || typeof value.sessionID === "string")) {
+    return false;
+  }
+  const rawToolName: unknown = value.toolName;
+  const omitted =
+    rawToolName === undefined ||
+    rawToolName === null ||
+    (typeof rawToolName === "string" && rawToolName.trim().length === 0);
+  if (!omitted) return false;
+  if (typeof value.message !== "string") return false;
+  if (toNonNegativeInt(value.scanned) === undefined) return false;
+  if (toNonNegativeInt(value.matched) === undefined) return false;
+  if (toNonNegativeInt(value.elapsedMs) === undefined) return false;
+  if (typeof value.callID !== "string" || value.callID.trim().length === 0) {
+    return false;
+  }
+  const rawCurrent: unknown = value.current;
+  if (rawCurrent !== undefined && rawCurrent !== null && typeof rawCurrent !== "string") {
+    return false;
+  }
+  // The tail is only type-checked here; the panel re-sanitizes it separately
+  // before display, so a handcrafted absolute or traversal tail never renders
+  // as a filesystem path.
+  return true;
+}
+
 // Validates an inbound payload before it reaches typed handlers so malformed engine frames never
 // enter view state.
 function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
@@ -212,14 +243,12 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       return typeof value.delta === "string";
     case "tool_start":
       return (
-        typeof value.toolName === "string" &&
-        typeof value.callID === "string" &&
+        isValidToolIDs(value.toolName, value.callID) &&
         typeof value.argumentsJSON === "string"
       );
     case "tool_end":
       return (
-        typeof value.toolName === "string" &&
-        typeof value.callID === "string" &&
+        isValidToolIDs(value.toolName, value.callID) &&
         (value.result == null || isRecord(value.result))
       );
     case "done":
@@ -258,11 +287,14 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
       // Per-tool progress rides the shared non-negative integer contract; the
       // guard reuses the API parser so a drifted shape drops here exactly as it
       // would at the keyed-map writer instead of validating twice.
-      return (
+      if (
         (value.sessionID === undefined ||
           typeof value.sessionID === "string") &&
         parseToolProgress(value) !== null
-      );
+      ) {
+        return true;
+      }
+      return isIndexProgressWithoutToolName(value);
     case "tool_cancel_miss":
       // A miss carries the call to clear and an optional non-terminal note. The
       // call identity stays required so a partial frame never clears the wrong
@@ -271,6 +303,7 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
         (value.sessionID === undefined ||
           typeof value.sessionID === "string") &&
         typeof value.callID === "string" &&
+        value.callID.trim().length > 0 &&
         (value.message === undefined ||
           value.message === null ||
           typeof value.message === "string")
@@ -330,14 +363,10 @@ class SharedWebSocketClient {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    // The browser cannot attach an Authorization header to a WebSocket
-    // handshake, so the owner token travels as a query ticket the engine
-    // accepts only on the `/ws` upgrade (a full handshake shape) and strips
-    // before anything downstream can log it. The dial still proceeds without a
-    // token for the no-auth loopback posture, where the upgrade is public.
-    const token = getAuthToken();
-    const ticket = token ? `?token=${encodeURIComponent(token)}` : "";
-    const wsUrl = `${protocol}//${host}/ws${ticket}`;
+    // The browser automatically attaches same-origin cookies (including the HttpOnly rw_session
+    // cookie) to the WebSocket upgrade request. We do not place credentials in the URL query string
+    // to prevent token exposure in server logs, proxy logs, browser history, and Referer headers.
+    const wsUrl = `${protocol}//${host}/ws`;
 
     try {
       const ws = new WebSocket(wsUrl);

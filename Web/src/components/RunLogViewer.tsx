@@ -6,6 +6,7 @@ import {
   ApiError,
   clearRuns,
   deleteRun,
+  indexRunLabelForRun,
   isActiveRunStatus,
   listApprovals,
   listRuns,
@@ -59,8 +60,8 @@ export function runPendingApprovals(
   const runCallIDs = new Set<string>();
   if (run.toolActions) {
     for (const action of run.toolActions) {
-      if (action.callID) {
-        runCallIDs.add(action.callID);
+      if (typeof action.callID === "string" && action.callID.trim()) {
+        runCallIDs.add(action.callID.trim());
       }
     }
   }
@@ -69,7 +70,10 @@ export function runPendingApprovals(
     if (isSameSession(approvalSID, runSID)) {
       return true;
     }
-    const approvalCallID = request.input?.callID;
+    const approvalCallID =
+      typeof request.input?.callID === "string"
+        ? request.input.callID.trim()
+        : "";
     if (approvalCallID && runCallIDs.has(approvalCallID)) {
       return true;
     }
@@ -417,7 +421,11 @@ export default function RunLogViewer() {
                     </span>
                   ) : null}
                   <span className="run-kind-tag">
-                    {run.kind === "scheduler" ? "Scheduled Job" : "Chat Turn"}
+                    {run.kind === "scheduler"
+                      ? "Scheduled Job"
+                      : run.kind === "index"
+                        ? indexRunLabelForRun(run)
+                        : "Chat Turn"}
                   </span>
                   <span className="run-time-muted">
                     {parseRunTimestamp(run.timestamp).toLocaleString()}

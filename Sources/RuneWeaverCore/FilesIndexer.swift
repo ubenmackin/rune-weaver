@@ -529,7 +529,10 @@ private extension FilesIndexer {
         let vectors: [[Float]]?
         if vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount), let embedder {
             vectors = await embedChunks(of: pending.extraction, embedder: embedder)
-            if isCancelled {
+            // Honor cancellation per embedding batch: a cancelled batch stops
+            // before its document commits, bounding overrun to one file.
+            if isCancelled || Task.isCancelled {
+                isCancelled = true
                 return
             }
         } else {
@@ -585,15 +588,25 @@ private extension FilesIndexer {
     /// Cancellation propagates instead of degrading: a cancelled run should
     /// stop rather than silently keep spending embedding work. A width or count
     /// mismatch is treated as a backend failure so a partial vector list never
-    /// pairs the wrong vector with a chunk.
+    /// pairs the wrong vector with a chunk. The probe runs before the batch so
+    /// a cancel observed between files never starts another embedding batch.
     /// - Parameters:
     ///   - extraction: Extracted document body.
     ///   - embedder: Backend to consult.
     /// - Returns: One vector per chunk, or nil when the document stays keyword-only.
     func embedChunks(of extraction: DocumentExtraction, embedder: any EmbeddingsBackend) async -> [[Float]]? {
         guard !extraction.chunks.isEmpty else { return nil }
+        if isCancelled || Task.isCancelled {
+            isCancelled = true
+            return nil
+        }
         do {
             let vectors = try await embedder.embed(extraction.chunks.map(\.text))
+            // A cancel arriving mid-batch still stops before commit.
+            if isCancelled || Task.isCancelled {
+                isCancelled = true
+                return nil
+            }
             return vectors.count == extraction.chunks.count ? vectors : nil
         } catch is CancellationError {
             isCancelled = true

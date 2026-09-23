@@ -76,3 +76,106 @@ final class NoRedirectDelegate: NSObject, URLSessionTaskDelegate {
         completionHandler(nil)
     }
 }
+
+/// Session delegate that surfaces redirects without following them and caps downloaded bytes,
+/// immediately cancelling the data task once maxBytes is reached to prevent unbounded memory exhaustion.
+final class CappedNoRedirectDelegate: NSObject, URLSessionTaskDelegate, URLSessionDataDelegate, @unchecked Sendable {
+    private let maxBytes: Int
+    private let lock = NSLock()
+    private var buffer = Data()
+    private var capturedResponse: URLResponse?
+    private var exceededCap = false
+    private var continuation: CheckedContinuation<(Data, URLResponse), Error>?
+
+    init(maxBytes: Int) {
+        self.maxBytes = maxBytes
+    }
+
+    func setContinuation(_ continuation: CheckedContinuation<(Data, URLResponse), Error>) {
+        lock.lock()
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    func urlSession(
+        _: URLSession,
+        task _: URLSessionTask,
+        willPerformHTTPRedirection _: HTTPURLResponse,
+        newRequest _: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    func urlSession(
+        _: URLSession,
+        dataTask _: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        lock.lock()
+        capturedResponse = response
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let needed = max(0, (maxBytes + 1) - buffer.count)
+        if needed > 0 {
+            buffer.append(data.prefix(needed))
+        }
+        if buffer.count > maxBytes {
+            exceededCap = true
+            dataTask.cancel()
+        }
+        lock.unlock()
+    }
+
+    func urlSession(_: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        lock.lock()
+        guard let continuation = self.continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        let response = capturedResponse ?? task.response ?? URLResponse()
+        let data = buffer
+        let didExceed = exceededCap
+        lock.unlock()
+
+        if let error {
+            if didExceed, (error as NSError).code == NSURLErrorCancelled {
+                continuation.resume(returning: (data, response))
+            } else {
+                continuation.resume(throwing: error)
+            }
+        } else {
+            continuation.resume(returning: (data, response))
+        }
+    }
+
+    /// Performs one capped HTTP download without following redirects.
+    static func downloadCapped(
+        request: URLRequest,
+        maxBytes: Int,
+        timeoutSeconds: Double
+    ) async throws -> (Data, URLResponse) {
+        var mutable = request
+        if mutable.timeoutInterval < 1 {
+            mutable.timeoutInterval = timeoutSeconds
+        }
+        let delegate = CappedNoRedirectDelegate(maxBytes: maxBytes)
+        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                delegate.setContinuation(continuation)
+                let task = session.dataTask(with: mutable)
+                task.resume()
+            }
+        } onCancel: {
+            session.invalidateAndCancel()
+        }
+    }
+}

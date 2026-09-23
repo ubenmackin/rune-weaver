@@ -318,15 +318,42 @@ public struct DashboardBundle: Sendable, Equatable {
         let bare = trimmed.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         return bare.isEmpty || bare == "index.html"
     }
+}
+
+// MARK: - Security Headers & Response Formatting
+
+extension DashboardBundle {
+    /// Content Security Policy applied to dashboard responses.
+    public static let contentSecurityPolicy = [
+        "default-src 'self';",
+        "script-src 'self';",
+        "style-src 'self' 'unsafe-inline';",
+        "img-src 'self' data: blob:;",
+        "font-src 'self';",
+        "connect-src 'self' ws: wss:;",
+        "frame-ancestors 'none';",
+        "base-uri 'self';",
+        "object-src 'none';"
+    ].joined(separator: " ")
+
+    /// Injects standard defense-in-depth HTTP security headers into dashboard responses.
+    public static func applySecurityHeaders(to headers: inout HTTPHeaders) {
+        headers.replaceOrAdd(name: "Content-Security-Policy", value: contentSecurityPolicy)
+        headers.replaceOrAdd(name: "X-Frame-Options", value: "DENY")
+        headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
+        headers.replaceOrAdd(name: "Referrer-Policy", value: "strict-origin-when-cross-origin")
+    }
 
     /// Placeholder page for `GET /` when the bundle was never built.
     private static func stubIndexResponse() -> Response {
-        Response(
+        var headers = HTTPHeaders([
+            ("Content-Type", "text/html; charset=utf-8"),
+            (bundleHeader, "stub")
+        ])
+        applySecurityHeaders(to: &headers)
+        return Response(
             status: .ok,
-            headers: HTTPHeaders([
-                ("Content-Type", "text/html; charset=utf-8"),
-                (bundleHeader, "stub")
-            ]),
+            headers: headers,
             body: .init(string: stubHTML)
         )
     }
@@ -345,12 +372,14 @@ public struct DashboardBundle: Sendable, Equatable {
         } catch {
             payload = Data(#"{"error":"dashboard-not-built","hint":"ok"}"#.utf8)
         }
+        var headers = HTTPHeaders([
+            ("Content-Type", "application/json; charset=utf-8"),
+            (Self.bundleHeader, "stub")
+        ])
+        applySecurityHeaders(to: &headers)
         return Response(
             status: .serviceUnavailable,
-            headers: HTTPHeaders([
-                ("Content-Type", "application/json; charset=utf-8"),
-                (Self.bundleHeader, "stub")
-            ]),
+            headers: headers,
             body: .init(data: payload)
         )
     }
@@ -369,6 +398,7 @@ public struct DashboardBundle: Sendable, Equatable {
         res.headers.replaceOrAdd(name: "Content-Type", value: Self.contentType(for: url.lastPathComponent))
         res.headers.replaceOrAdd(name: "Cache-Control", value: cacheControl)
         res.headers.replaceOrAdd(name: Self.bundleHeader, value: bundleState)
+        Self.applySecurityHeaders(to: &res.headers)
         return res
     }
 
@@ -379,13 +409,15 @@ public struct DashboardBundle: Sendable, Equatable {
         guard let url, let data = try? Data(contentsOf: url) else {
             return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
         }
+        var headers = HTTPHeaders([
+            ("Content-Type", Self.contentType(for: url.lastPathComponent)),
+            ("Cache-Control", cacheControl),
+            (Self.bundleHeader, bundleState)
+        ])
+        Self.applySecurityHeaders(to: &headers)
         return Response(
             status: .ok,
-            headers: HTTPHeaders([
-                ("Content-Type", Self.contentType(for: url.lastPathComponent)),
-                ("Cache-Control", cacheControl),
-                (Self.bundleHeader, bundleState)
-            ]),
+            headers: headers,
             body: .init(data: data)
         )
     }
@@ -398,12 +430,14 @@ public struct DashboardBundle: Sendable, Equatable {
         } catch {
             payload = Data(#"{"error":"ok"}"#.utf8)
         }
+        var headers = HTTPHeaders([
+            ("Content-Type", "application/json; charset=utf-8"),
+            (Self.bundleHeader, bundleAvailable(using: fileManager) ? "bundle" : "stub")
+        ])
+        Self.applySecurityHeaders(to: &headers)
         return Response(
             status: status,
-            headers: HTTPHeaders([
-                ("Content-Type", "application/json; charset=utf-8"),
-                (Self.bundleHeader, bundleAvailable(using: fileManager) ? "bundle" : "stub")
-            ]),
+            headers: headers,
             body: .init(data: payload)
         )
     }

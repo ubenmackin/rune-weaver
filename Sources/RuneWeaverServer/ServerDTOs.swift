@@ -70,6 +70,8 @@ public enum ServerPaths {
     public static let auth = "auth"
     /// Owner token rotation subpath under `/auth`.
     public static let rotate = "rotate"
+    /// Owner browser session subpath under `/auth`.
+    public static let session = "session"
     /// Plugins group.
     public static let plugins = "plugins"
     /// Plugin rescan subpath.

@@ -101,10 +101,14 @@ struct ZipArchiveReader: Sendable {
         return uncompressedData(for: entry)
     }
 
+    /// Maximum uncompressed bytes permitted per archive entry (50 MB) to guard against zip bombs.
+    static let defaultMaxUncompressedBytes: Int = 50 * 1024 * 1024
+
     /// Reads and decompresses one entry.
     /// - Parameter entry: Central directory entry.
     /// - Returns: Entry bytes, or nil when the local header or method is unsupported.
     private func uncompressedData(for entry: ZipEntry) -> Data? {
+        guard entry.uncompressedSize <= Self.defaultMaxUncompressedBytes else { return nil }
         guard data.uint32LE(at: entry.localHeaderOffset) == 0x0403_4B50 else { return nil }
         let nameLength = Int(data.uint16LE(at: entry.localHeaderOffset + 26) ?? 0)
         let extraLength = Int(data.uint16LE(at: entry.localHeaderOffset + 28) ?? 0)
@@ -114,7 +118,7 @@ struct ZipArchiveReader: Sendable {
         case 0:
             return compressed
         case 8:
-            return Self.inflateRawDeflate(compressed)
+            return Self.inflateRawDeflate(compressed, maxBytes: Self.defaultMaxUncompressedBytes)
         default:
             return nil
         }
@@ -140,8 +144,9 @@ struct ZipArchiveReader: Sendable {
 
     /// Inflates a raw DEFLATE stream (no zlib header) using the system zlib.
     /// - Parameter data: Raw DEFLATE bytes.
-    /// - Returns: Inflated bytes, or nil on a malformed stream.
-    private static func inflateRawDeflate(_ data: Data) -> Data? {
+    /// - Parameter maxBytes: Maximum uncompressed bytes allowed before aborting.
+    /// - Returns: Inflated bytes, or nil on a malformed stream or excessive output.
+    private static func inflateRawDeflate(_ data: Data, maxBytes: Int = defaultMaxUncompressedBytes) -> Data? {
         guard !data.isEmpty else { return Data() }
         var stream = z_stream()
         let version = String(cString: zlibVersion())
@@ -168,6 +173,9 @@ struct ZipArchiveReader: Sendable {
                 let produced = bufferSize - Int(stream.avail_out)
                 if produced > 0 {
                     output.append(outputBuffer, count: produced)
+                    if output.count > maxBytes {
+                        return nil
+                    }
                 }
                 if status == Int32(Z_STREAM_END) {
                     return output

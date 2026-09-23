@@ -20,6 +20,7 @@ import {
   createMockWebSocketCapture,
   dispatchFrameOrThrow,
 } from "../test-utils/mockWebSocket";
+import { clearAuthToken, setAuthToken } from "../api";
 
 // Minimal valid frame reused across cases; each test overrides only the field
 // under scrutiny so a failure isolates one guard condition.
@@ -54,6 +55,14 @@ describe("shared WebSocket tool_progress guard", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
     resetSharedSocket();
+  });
+
+  it("connects directly to /ws without exposing token in query parameters", async () => {
+    setAuthToken("secret-token-123");
+    const { capture } = await mountSharedSocket();
+    expect(capture.url).toBe("ws://localhost:3000/ws");
+    expect(capture.url).not.toContain("?token=");
+    clearAuthToken();
   });
 
   it("forwards a well-formed frame, including its optional warning", async () => {

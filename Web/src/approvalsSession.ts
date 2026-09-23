@@ -34,7 +34,7 @@ export function approvalSessionID(
   ];
   for (const candidate of candidates) {
     if (typeof candidate === "string" && candidate.trim().length > 0) {
-      return candidate;
+      return candidate.trim();
     }
   }
   return null;
@@ -48,7 +48,9 @@ export function runSessionID(
 ): string | null {
   if (!run) return null;
   const sid = run.sessionID;
-  return typeof sid === "string" && sid.trim().length > 0 ? sid : null;
+  if (typeof sid !== "string") return null;
+  const trimmed = sid.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // Validates an approval prompt before it joins the inbox badge, so a malformed socket frame cannot
@@ -56,14 +58,15 @@ export function runSessionID(
 // inbox, and run views filter the same inbox identically.
 export function isPermissionRequest(value: unknown): value is PermissionRequest {
   if (!isRecord(value)) return false;
-  if (typeof value.id !== "string" || value.id.length === 0) return false;
-  if (typeof value.toolName !== "string") return false;
-  if (typeof value.description !== "string") return false;
+  if (typeof value.id !== "string" || value.id.trim().length === 0) return false;
+  if (typeof value.toolName !== "string" || value.toolName.trim().length === 0) return false;
+  if (typeof value.description !== "string" || value.description.trim().length === 0)
+    return false;
   if (!isRecord(value.input)) return false;
   const input = value.input;
-  if (typeof input.toolName !== "string") return false;
+  if (typeof input.toolName !== "string" || input.toolName.trim().length === 0) return false;
   if (typeof input.argumentsJSON !== "string") return false;
-  if (typeof input.callID !== "string") return false;
+  if (typeof input.callID !== "string" || input.callID.trim().length === 0) return false;
   return true;
 }
 

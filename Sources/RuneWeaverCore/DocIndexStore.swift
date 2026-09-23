@@ -40,7 +40,7 @@ public actor DocIndexStore {
     @discardableResult
     public func upsertDocument(_ document: IndexedDocument) async throws -> IndexedDocument {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocument(document, dbPath: dbPath)
         }
     }
@@ -53,7 +53,7 @@ public actor DocIndexStore {
     @discardableResult
     public func upsertChunks(documentID: UUID, chunks: [IndexedChunk]) async throws -> Int {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertChunks(documentID: documentID, chunks: chunks, dbPath: dbPath)
         }
     }
@@ -63,7 +63,7 @@ public actor DocIndexStore {
     /// - Returns: True when a document row was removed.
     public func deleteDocument(id: UUID) async throws -> Bool {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.deleteDocument(id: id, dbPath: dbPath)
         }
     }
@@ -75,7 +75,7 @@ public actor DocIndexStore {
     /// - Returns: The stored document, or nil when absent.
     public func document(source: IndexSource, externalID: String) async throws -> IndexedDocument? {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.document(source: source, externalID: externalID, dbPath: dbPath)
         }
     }
@@ -91,7 +91,7 @@ public actor DocIndexStore {
     /// - Returns: True when the document should be re-indexed.
     public func needsReindex(source: IndexSource, externalID: String, contentHash: String) async throws -> Bool {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.needsReindex(
                 source: source,
                 externalID: externalID,
@@ -108,7 +108,7 @@ public actor DocIndexStore {
     /// - Returns: Matching chunks, best-ranked first.
     public func searchKeyword(query: String, limit: Int = 10) async throws -> [IndexedChunk] {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath)
         }
     }
@@ -120,7 +120,7 @@ public actor DocIndexStore {
     /// - Returns: Vector chunks, newest first.
     public func chunkVectors(limit: Int = 100) async throws -> [IndexedChunk] {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath)
         }
     }
@@ -129,7 +129,7 @@ public actor DocIndexStore {
     /// - Returns: An index statistics snapshot.
     public func stats() async throws -> IndexStats {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.stats(dbPath: dbPath)
         }
     }
@@ -140,7 +140,7 @@ public actor DocIndexStore {
     @discardableResult
     public func prune(before cutoff: Date) async throws -> Int {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run {
+        return try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.prune(before: cutoff, dbPath: dbPath)
         }
     }
@@ -148,7 +148,7 @@ public actor DocIndexStore {
     /// Clears every document, chunk, and search-index entry.
     public func reset() async throws {
         let dbPath = self.dbPath
-        try await SQLiteSerialIO.run {
+        try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
         }
     }

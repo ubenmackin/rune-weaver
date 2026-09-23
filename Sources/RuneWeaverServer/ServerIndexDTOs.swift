@@ -90,6 +90,10 @@ public struct IndexLastRunStatus: Content, Equatable {
     public let errors: Int?
     /// Instant the run finished (the run log timestamp).
     public let finishedAt: Date?
+    /// What caused the run (`"nightly"`, `"catchUp"`, or `"onDemand"`), when
+    /// the run message or response carried a trigger token. Nil for rows whose
+    /// wording predates trigger tracking so older engines still decode.
+    public let trigger: String?
 
     /// Creates a last-run row.
     /// - Parameters:
@@ -98,12 +102,14 @@ public struct IndexLastRunStatus: Content, Equatable {
     ///   - scanned: Items examined.
     ///   - errors: Items that could not be processed.
     ///   - finishedAt: Instant the run finished.
-    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil) {
+    ///   - trigger: What caused the run, when known.
+    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil, trigger: String? = nil) {
         self.status = status
         self.indexed = indexed
         self.scanned = scanned
         self.errors = errors
         self.finishedAt = finishedAt
+        self.trigger = trigger
     }
 }
 
@@ -235,7 +241,7 @@ func makeIndexStatusResponse(
 public struct IndexRunResponse: Content, Equatable {
     /// Per-run session identifier used to tag the run log row.
     public let sessionID: UUID
-    /// What caused the run (`"nightly"` or `"onDemand"`).
+    /// What caused the run (`"nightly"`, `"catchUp"`, or `"onDemand"`).
     public let trigger: String
     /// Terminal (or in-flight) state token.
     public let status: String

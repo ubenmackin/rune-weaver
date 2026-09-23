@@ -708,6 +708,7 @@ extension Orchestrator {
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async throws -> [ToolAction] {
         var actions: [ToolAction] = []
+        var executedCallIDs = Set<String>()
         // Forward advisory progress as a session-tagged event so the dashboard can
         // show a slow tool still working. The bus stamps each report with the
         // authoritative call identity before it reaches this sink, so the closure
@@ -715,39 +716,55 @@ extension Orchestrator {
         let context = ToolContext(conversationID: sessionID) { progress in
             await onEvent?(.toolProgress(progress))
         }
-        for call in calls {
-            try Task.checkCancellation()
-            await onEvent?(.toolStarted(
-                toolName: call.toolName,
-                callID: call.callID,
-                argumentsJSON: call.argumentsJSON,
-                roundIndex: roundIndex
-            ))
-            // A per-call cancellation surfaces from the bus as an ordinary failure
-            // result, so the loop records it and keeps going; only turn-level
-            // cancellation throws past the check below and aborts the turn.
-            let result = await toolBus.execute(toolCall: call, context: context)
-            let action = ToolAction(
-                toolName: call.toolName,
-                callID: call.callID,
-                argumentsJSON: call.argumentsJSON,
-                result: result,
-                roundIndex: roundIndex
-            )
-            actions.append(action)
-            await onEvent?(.toolCompleted(
-                toolName: call.toolName,
-                callID: call.callID,
-                result: result,
-                roundIndex: roundIndex
-            ))
-            await conversations.append(result.asMessage(), to: sessionID)
-            if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
-                pendingEpisodic.append((record, .tool))
+        do {
+            for call in calls {
+                try Task.checkCancellation()
+                await onEvent?(.toolStarted(
+                    toolName: call.toolName,
+                    callID: call.callID,
+                    argumentsJSON: call.argumentsJSON,
+                    roundIndex: roundIndex
+                ))
+                // A per-call cancellation surfaces from the bus as an ordinary failure
+                // result, so the loop records it and keeps going; only turn-level
+                // cancellation throws past the check below and aborts the turn.
+                let result = await toolBus.execute(toolCall: call, context: context)
+                let action = ToolAction(
+                    toolName: call.toolName,
+                    callID: call.callID,
+                    argumentsJSON: call.argumentsJSON,
+                    result: result,
+                    roundIndex: roundIndex
+                )
+                actions.append(action)
+                executedCallIDs.insert(call.callID)
+                await onEvent?(.toolCompleted(
+                    toolName: call.toolName,
+                    callID: call.callID,
+                    result: result,
+                    roundIndex: roundIndex
+                ))
+                await conversations.append(result.asMessage(), to: sessionID)
+                if let record = OrchestratorToolLoop.episodicToolRecord(toolName: call.toolName, result: result) {
+                    pendingEpisodic.append((record, .tool))
+                }
+                try Task.checkCancellation()
             }
-            try Task.checkCancellation()
+            return actions
+        } catch {
+            // Synthesize cancelled tool results for any unexecuted calls in the batch
+            // so an assistant message announcing multiple tool calls is never left with
+            // missing tool responses in persistent history.
+            for call in calls where !executedCallIDs.contains(call.callID) {
+                let cancelledResult = ToolResult(
+                    toolCallID: call.callID,
+                    content: "Tool execution cancelled",
+                    isError: true
+                )
+                await conversations.append(cancelledResult.asMessage(), to: sessionID)
+            }
+            throw error
         }
-        return actions
     }
 }
 

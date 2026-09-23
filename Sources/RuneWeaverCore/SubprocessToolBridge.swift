@@ -312,7 +312,6 @@ public struct SubprocessToolBridge: Tool, Sendable {
                 return
             }
             self.writeSubprocessInput(stdinPipe: stdinPipe, inputData: invocation.inputData)
-            try? stdinPipe.fileHandleForWriting.close()
             let timeoutTask = self.startSubprocessTimeout(
                 clampedTimeout: clampedTimeout,
                 timedOut: timedOut,
