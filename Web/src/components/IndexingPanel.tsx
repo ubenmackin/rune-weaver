@@ -56,7 +56,7 @@ const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }> = [
   {
     kind: "messages",
     label: "Messages",
-    hint: "Requires Full Disk Access in System Settings → Privacy & Security.",
+    hint: "Requires Full Disk Access — RuneWeaver.app, or your terminal emulator when running rune-weaver serve — then run Rebuild / Run Now.",
   },
 ];
 
@@ -64,6 +64,31 @@ const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }> = [
 // token so an unknown future source still renders honestly.
 function sourceLabel(kind: string): string {
   return INDEX_SOURCES.find((source) => source.kind === kind)?.label ?? kind;
+}
+
+// Deep link into the Full Disk Access pane. There is no prompt API for this
+// grant, so the dashboard can only open Settings and show copy-paste steps
+// alongside it. The link must navigate the top frame (anchor or location
+// assignment): the system scheme reads as a blocked popup under window.open.
+export const FULL_DISK_ACCESS_SETTINGS_URL =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+
+// Whether one status error is the Full Disk Access denial. Matched loosely on
+// the shared engine phrase so both the cheap status-probe warning and the
+// run-time denial from the run log trigger the same guided onboarding.
+export function isFullDiskAccessError(detail: string | null | undefined): boolean {
+  if (typeof detail !== "string") return false;
+  return /full disk access/i.test(detail);
+}
+
+// Whether any status error needs the Full Disk Access guided onboarding.
+// Checked over lastErrors so the dashboard surfaces guidance before the next
+// wasted run instead of only after one fails. The element narrows by typeof
+// so malformed payload entries degrade to no-match instead of relying on a
+// cast that would hide non-string values from the type checker.
+export function hasFullDiskAccessError(errors: unknown): boolean {
+  if (!Array.isArray(errors)) return false;
+  return errors.some((detail) => typeof detail === "string" && isFullDiskAccessError(detail));
 }
 
 // Ordered index phases, mirroring IndexPhase on the engine. The live progress
@@ -1090,6 +1115,43 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     <li key={`${index}-${detail.slice(0, 24)}`}>{detail}</li>
                   ))}
                 </ul>
+                {/* Guided onboarding for the Full Disk Access denial: macOS
+                    offers no prompt API, so the denial only surfaces at
+                    run time. The button navigates the top frame to the exact
+                    Settings pane, where window.open would be treated as a
+                    blocked popup for this system scheme. The steps name both
+                    grants because macOS attributes the read to the host
+                    process: RuneWeaver.app for the app, the terminal emulator
+                    for rune-weaver serve. */}
+                {hasFullDiskAccessError(status.lastErrors) ? (
+                  <div
+                    className="index-fda-guidance"
+                    data-testid="index-fda-guidance"
+                    style={{ marginTop: 8 }}
+                  >
+                    <p className="muted text-sm" style={{ marginBottom: 8 }}>
+                      Messages indexing needs Full Disk Access. Grant it to
+                      RuneWeaver.app — or to your terminal emulator (for example
+                      Terminal.app or iTerm2) when you run rune-weaver serve —
+                      then restart and run Rebuild / Run Now.
+                    </p>
+                    <button
+                      type="button"
+                      className="ghost icon-text-btn"
+                      onClick={() => {
+                        window.location.href = FULL_DISK_ACCESS_SETTINGS_URL;
+                      }}
+                    >
+                      <span>Open Full Disk Access Settings</span>
+                    </button>
+                    <ol className="muted text-sm" style={{ marginTop: 8, paddingLeft: 20 }}>
+                      <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
+                      <li>Click + and add RuneWeaver.app — or your terminal emulator (for example Terminal.app or iTerm2) when you run rune-weaver serve.</li>
+                      <li>Toggle the added entry ON and authenticate when prompted.</li>
+                      <li>Quit and restart the app or terminal, then run Rebuild / Run Now.</li>
+                    </ol>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </>

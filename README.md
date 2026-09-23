@@ -187,7 +187,12 @@ Files are vectorized only when extraction is clean and the document is under 2 M
 
 Describing images with the LLM sends document image content to the configured provider. When that provider is remote, the content leaves your machine. The description is stored as an AI-generated chunk marked with its origin and model, and the prompt instructs the model not to reproduce secrets. A text-only provider is never sent image content.
 
-Apple Messages indexing reads `~/Library/Messages/chat.db`, which macOS protects with TCC. Grant Full Disk Access to the app (or to the terminal or engine you run) under System Settings > Privacy & Security. Without it, a Messages run reports a permission error instead of crashing.
+Apple Messages indexing reads `~/Library/Messages/chat.db`, which macOS protects with TCC. There is no prompt API for Full Disk Access, so access is detected at run time: turning Messages on and saving succeeds, and the first Rebuild / Run Now (or nightly run) reports a permission error when access is missing. The dashboard surfaces that error with guided steps before the next run.
+
+- When you run the app, grant Full Disk Access to RuneWeaver.app under System Settings > Privacy & Security > Full Disk Access: click +, add RuneWeaver.app, toggle it ON, authenticate, then restart the app.
+- When you run `rune-weaver serve` from a terminal, macOS attributes the read to your terminal emulator, so grant Full Disk Access to that emulator (for example Terminal.app or iTerm2) in the same pane instead.
+
+The engine never bypasses TCC. Without the grant, a Messages run reports a permission error instead of crashing. You can open the pane directly with `x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles`.
 
 ### Managing the index
 

@@ -82,7 +82,14 @@ public struct DesktopScreenshotTool: Tool, Sendable {
 
         var windows: [DesktopWindowInfo]?
         if args.includeWindowsList {
-            windows = await captureBridge.listWindows()
+            // A denied window list fails the turn with permission guidance
+            // instead of silently omitting windows; an empty success still
+            // means the scan genuinely found nothing.
+            do {
+                windows = try await captureBridge.listWindows()
+            } catch let error as DesktopCaptureError {
+                return .failure(friendlyError(error))
+            }
         }
 
         let envelope = DesktopScreenshotEnvelope(
@@ -105,7 +112,12 @@ public struct DesktopScreenshotTool: Tool, Sendable {
     private func friendlyError(_ error: DesktopCaptureError) -> String {
         switch error {
         case .screenRecordingPermissionDenied:
-            "Screen Recording permission is required. Grant it in System Settings > Privacy & Security > Screen Recording for this application."
+            // Fail-closed guidance: keep the short grant sentence, then give
+            // the operator the exact recovery path plus relaunch and prompt
+            // behavior, so a denied turn explains how to unblock without guessing.
+            "Screen Recording permission is required. Grant it in System Settings > Privacy & Security > Screen Recording for this application. "
+                + "To enable: open System Settings > Privacy & Security > Screen Recording, toggle the app/terminal on, then quit + relaunch the app. "
+                + "macOS auto-prompts on first capture so no manual add step is needed."
         case let .displayNotFound(index):
             "Display \(index) not found. Use display index 0 for the main display."
         case let .windowNotFound(appName):
@@ -214,7 +226,12 @@ public struct DesktopActionTool: Tool, Sendable {
             "SAFETY: '\(appName)' is on the blocked-app list and cannot receive automated input. "
                 + "This protects sensitive apps from unintended actions."
         case .accessibilityPermissionDenied:
-            "Accessibility permission is required. Grant it in System Settings > Privacy & Security > Accessibility for this application."
+            // Fail-closed guidance: keep the short grant sentence, then give
+            // the operator the exact recovery path plus why control needs it,
+            // so a denied turn explains how to unblock without prompting again.
+            "Accessibility permission is required. Grant it in System Settings > Privacy & Security > Accessibility for this application. "
+                + "To enable: open System Settings > Privacy & Security > Accessibility, toggle the app/terminal on, then quit + relaunch the app. "
+                + "Desktop control drives the mouse and keyboard via CGEvent, which macOS blocks until approval is granted."
         case .failSafeTriggered:
             "FAIL-SAFE TRIGGERED: Mouse cursor was detected in a screen corner. "
                 + "All desktop actions have been aborted. Move the cursor away from corners to resume."
@@ -415,5 +432,23 @@ public enum DesktopTools {
     /// depends on config — the tool-state toggle is the sole authority.
     public static func toolNames(for _: DesktopConfig) -> [String] {
         allToolNames
+    }
+
+    /// Requests desktop TCC trust for an explicit enable toggle.
+    ///
+    /// Why a separate requesting path: the system dialogs take focus and
+    /// would derail an autonomous turn, so tool execution stays on the
+    /// silent checks and only the enable UI calls here in direct response
+    /// to the operator flipping desktop tools on. Each return reflects
+    /// trust at call time; the operator grants in Settings and relaunches
+    /// before the next turn re-checks silently.
+    /// - Returns: Trust at call time for capture and control, respectively.
+    @MainActor
+    public static func requestPermissionsForEnable() -> (
+        screenRecordingGranted: Bool, accessibilityGranted: Bool
+    ) {
+        let screenRecordingGranted = DesktopCaptureBridge.requestScreenRecordingAccess()
+        let accessibilityGranted = DesktopPermissionCheck.requestAccessibilityTrust()
+        return (screenRecordingGranted, accessibilityGranted)
     }
 }

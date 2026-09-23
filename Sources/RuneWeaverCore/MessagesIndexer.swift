@@ -20,6 +20,8 @@ import Foundation
 
 #if canImport(Darwin)
     import Darwin
+#elseif canImport(Glibc)
+    import Glibc
 #endif
 
 #if canImport(SQLite3)
@@ -351,8 +353,49 @@ public actor MessagesIndexer {
     /// Upper bound on any caller-supplied batch, keeping one pass bounded.
     static let maxBatchLimit = 5000
 
+    /// Cheap read-only probe for Full Disk Access, intended for status use.
+    ///
+    /// There is no prompt API for Full Disk Access, so the first denial would
+    /// otherwise surface only after a wasted Rebuild or nightly pass. The probe
+    /// opens the live database read-only and closes it immediately, never
+    /// copying or locking the live store, so the status poll can call it on
+    /// every tick. A read-only `open` exercises the same permission gate as the
+    /// copy the run performs, while `isReadableFile` consults only the
+    /// directory entry and can disagree with `open` under TCC.
+    /// - Parameter chatDatabasePath: Live database path; `~` is expanded.
+    /// - Returns: True when the chat database file opens read-only.
+    public static func hasMessagesDatabaseAccess(chatDatabasePath: String = defaultChatDatabasePath) -> Bool {
+        let expanded = (chatDatabasePath as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expanded, isDirectory: &isDirectory),
+              !isDirectory.boolValue
+        else { return false }
+        let descriptor: Int32 = expanded.withCString { cString in
+            open(cString, O_RDONLY)
+        }
+        guard descriptor >= 0 else { return false }
+        _ = close(descriptor)
+        return true
+    }
+
+    /// Cheap read-only probe against this indexer's configured database path.
+    ///
+    /// Callers that already hold an indexer must probe through the instance so
+    /// the warning reflects the same path the next run will copy; a custom
+    /// path probed through the static default would disagree with the run
+    /// outcome. The static variant stays primary for callers with no instance.
+    /// Nonisolated so a status poll reads it synchronously without hopping;
+    /// safe because the path never mutates after initialization.
+    /// - Returns: True when the configured chat database file opens read-only.
+    public nonisolated func hasMessagesDatabaseAccess() -> Bool {
+        Self.hasMessagesDatabaseAccess(chatDatabasePath: chatDatabasePath)
+    }
+
     /// Source database path, expanded on first use.
-    private let chatDatabasePath: String
+    ///
+    /// Held nonisolated so the synchronous probe can read it without hopping;
+    /// safe because the value never mutates after initialization.
+    private nonisolated let chatDatabasePath: String
     /// Durable retrieval store receiving documents and chunks.
     private let store: DocIndexStore
     /// Shared text-or-vision extractor used for attachment bodies.
