@@ -2323,6 +2323,25 @@ button.ghost:hover:not(:disabled) {
   border-color: var(--border-focus);
 }
 
+/* Dark-mode only accent-ghost for Tools Configure actions: blue border and
+ * blue text on a ghost background with a primary-blue hover. No light-mode
+ * variant; the dashboard ships a dark theme only. */
+button.accent-ghost {
+  padding: 7px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--accent-blue);
+  background: transparent;
+  color: var(--accent-blue);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button.accent-ghost:hover:not(:disabled) {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+
 button:disabled {
   opacity: 0.5;
   cursor: default;

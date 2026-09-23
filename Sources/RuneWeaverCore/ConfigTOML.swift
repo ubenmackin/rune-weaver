@@ -816,23 +816,10 @@ extension TOMLNode {
 extension RuneWeaverConfig {
     static func decodeDesktop(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
         guard let desktop = root.tables["desktop"] else { return }
-        // Each tool has its own allow-boundary toggle; the schema no longer
-        // writes a master `enabled` key. Legacy files that carried the
-        // documented master still read it: the value ANDs into both toggles
-        // so a fail-closed install (`enabled = false`) stays closed across
-        // the upgrade instead of silently gaining tools, while
-        // `enabled = true` leaves each per-tool toggle as decoded. The next
-        // save persists the resolved toggles without resurrecting the key.
-        if let capture = try desktop.strictBool("screen_capture_enabled", field: "desktop.screen_capture_enabled") {
-            config.desktop.screenCaptureEnabled = capture
-        }
-        if let control = try desktop.strictBool("control_enabled", field: "desktop.control_enabled") {
-            config.desktop.controlEnabled = control
-        }
-        if let legacyEnabled = try desktop.strictBool("enabled", field: "desktop.enabled") {
-            config.desktop.screenCaptureEnabled = config.desktop.screenCaptureEnabled && legacyEnabled
-            config.desktop.controlEnabled = config.desktop.controlEnabled && legacyEnabled
-        }
+        // Single-gate contract: retired `screen_capture_enabled`,
+        // `control_enabled`, and legacy `enabled` keys are silently ignored
+        // when present so old files load without migration; enablement flows
+        // solely through the persisted tool-state toggle.
         if let dim = try desktop.strictInt("max_image_dimension", field: "desktop.max_image_dimension") {
             config.desktop.maxImageDimension = dim
         }

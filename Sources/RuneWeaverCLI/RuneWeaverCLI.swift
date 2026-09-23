@@ -237,9 +237,9 @@ enum CLIShared {
     /// Builds a `ToolBus` pre-populated from the shared plugin source.
     ///
     /// Desktop tools register disabled like every other boot path, then the
-    /// persisted tool-state rows re-apply (the same restore the service runs)
-    /// followed by the `[desktop]` allow gates, so the CLI sees exactly the
-    /// tool set the dashboard governs instead of a permissive side door.
+    /// persisted tool-state rows re-apply (the same restore the service runs),
+    /// so the CLI sees exactly the tool set the dashboard governs instead of
+    /// a permissive side door. The tool-state toggle is the sole authority.
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
@@ -282,8 +282,7 @@ enum CLIShared {
             await discovery.discoverAndSync(toolBus: bus)
         }
         // Stored toggles are the restart source of truth for the CLI bus the
-        // same way they are for the service; the `[desktop]` allow gates then
-        // force any toggle-off tool back off over a stored enable row.
+        // same way they are for the service.
         let stored = await ToolStateStore(dbPath: dbPath).loadAll()
         for (name, enabled) in stored {
             if enabled {
@@ -292,7 +291,6 @@ enum CLIShared {
                 await bus.disableTool(named: name)
             }
         }
-        await DesktopTools.enforceConfigGates(from: desktopConfig, on: bus)
         return bus
     }
 }

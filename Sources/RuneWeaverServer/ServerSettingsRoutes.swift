@@ -41,13 +41,21 @@ func registerSettingsRoutes(_ app: Application) {
             // Validate the merged config before persisting so a single bad
             // field cannot corrupt the stored file or live engine state.
             try config.validate()
-            try config.save(to: url)
             let liveContext = req.application.runeWeaver
+            // Fail-closed pre-save probe: a rejected `db_path` throws before
+            // the file is persisted and before any live tool state mutates,
+            // so the durable file and live desktop/index state never diverge.
+            // The probed components ride along into the reconcile below so an
+            // enable or `db_path` change builds and probes the new store once.
+            let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
+            try config.save(to: url)
             await applyLiveOrchestratorTuning(body: body, context: liveContext)
             await reloadLiveMediaTools(body: body, config: config, context: liveContext)
             await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
             await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
-            await reloadLiveIndexPolicy(body: body, config: config, context: liveContext)
+            try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
+        } catch let abort as Abort {
+            throw abort
         } catch let error as ConfigError {
             throw Abort(.badRequest, reason: String(describing: error))
         } catch {
@@ -161,11 +169,9 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
 /// Follows the media reload pattern: a nil desktop patch is a no-op, stored
 /// bridges ride along so hermetic doubles survive a settings PUT, and each
 /// re-registered tool keeps its live enabled state. Both tools stay
-/// registered (never absent from `GET /tools`); the fresh allow policy is
-/// pushed into the context and re-applied over restored rows, so a toggle
-/// turned off force-disables its tool while a toggle turned on still ships
-/// the tool disabled until the operator enables it through the tool-state
-/// route.
+/// registered (never absent from `GET /tools`); the fresh capture policy is
+/// pushed into the context, and the tool-state toggle remains the sole
+/// authority for enablement.
 private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
     guard body.desktop != nil else { return }
     context.desktopConfig = config.desktop
@@ -177,14 +183,175 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
         let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
         await context.toolBus.register(tool: tool, isEnabled: isEnabled)
     }
-    await context.restoreToolStates()
 }
 
-/// Applies the saved `[index]` policy to the live coordinator so the next run uses new values without a restart.
-/// Status already reads the file live; this keeps the run gate in lockstep for coordinators wired at boot.
-/// When no coordinator is wired (index disabled at boot), the next boot picks up the policy.
-private func reloadLiveIndexPolicy(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+/// Applies the saved `[index]` policy to the live engine so the next run uses new values without a restart.
+/// When no coordinator is wired and the saved policy enables the index, the
+/// store and coordinator are constructed live through the shared boot path and
+/// swapped into the context; a changed `db_path` rebuilds against the new path
+/// the same way. Disabling cancels any in-flight run and joins its
+/// termination first, then tears down.
+/// Construction is fail-closed: a bad `db_path` throws before the live context
+/// is touched so the previous index keeps serving.
+/// Status already reads the file live; run/cancel/prune/reset keep failing
+/// closed only when genuinely unwired.
+private func reloadLiveIndexPolicy(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents? = nil) async throws {
     guard body.index != nil else { return }
-    guard let coordinator = context.indexCoordinator else { return }
-    await coordinator.updateConfig(config.index)
+    try await reconcileLiveIndexPolicy(savedConfig: config, context: context, prebuilt: prebuilt)
+}
+
+/// Reconciles the live document index with the persisted config.
+///
+/// Shared by the settings route and tests so enable-from-disabled, `db_path`
+/// swaps, disable-teardown, and fail-closed construction follow one path.
+/// - Parameters:
+///   - savedConfig: Persisted config carrying the `[index]` policy plus the
+///     source policies the boot path binds into its stages.
+///   - context: Live server context receiving the swap.
+///   - prebuilt: Store plus coordinator probed by the pre-save preflight for
+///     this same `savedConfig`. Reused when its `db_path` still matches so one
+///     PUT probes a new path once instead of probing in preflight and again
+///     here. Direct callers pass nil and probe inline.
+/// - Throws: `Abort(.badRequest)` when a newly enabled `db_path` cannot back
+///   a store, before the live context is mutated.
+func reconcileLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents? = nil) async throws {
+    let saved = savedConfig.index
+    // Disabling tears down: cancel the in-flight run and join its termination
+    // first so its terminal summary is preserved and no old-generation run
+    // overlaps the teardown, then clear the pair so controls fail closed.
+    // The pair is read as one atomic snapshot so concurrent PUTs never mix
+    // generations.
+    guard saved.enabled else {
+        let live = context.liveIndexSnapshot()
+        if let coordinator = live.coordinator, await coordinator.isRunning {
+            try await cancelAndJoinIndexRun(coordinator)
+        }
+        context.setLiveIndex(store: nil, coordinator: nil)
+        return
+    }
+    // Enabled with a wired coordinator on the same path is a policy refresh:
+    // the next run gates on the new values without rebuilding stages.
+    // The pair is read as one atomic snapshot so concurrent PUTs never mix
+    // generations when classifying same-path vs `db_path`-change.
+    let live = context.liveIndexSnapshot()
+    if let coordinator = live.coordinator, let store = live.store {
+        let liveDBPath = await store.dbPath
+        if liveDBPath == saved.dbPath {
+            await coordinator.updateConfig(saved)
+            return
+        }
+        // A changed `db_path` rebuilds against the new path. Construct and
+        // probe before touching the live pair so a bad path leaves the old
+        // index serving; then cancel the old generation's run and join its
+        // termination before swapping so only one generation runs at a time.
+        // The pre-save preflight already probed this path for the same save,
+        // so reuse its components instead of building a second time.
+        let fresh = try await reusedOrProbedIndexComponents(savedConfig: savedConfig, context: context, prebuilt: prebuilt)
+        if await coordinator.isRunning {
+            try await cancelAndJoinIndexRun(coordinator)
+        }
+        context.setLiveIndex(store: fresh.store, coordinator: fresh.coordinator)
+        return
+    }
+    // Enabled while unwired constructs live so the next run needs no restart.
+    // The probe runs before the swap so a bad `db_path` keeps the routes
+    // failing closed instead of parking a broken store.
+    let fresh = try await reusedOrProbedIndexComponents(savedConfig: savedConfig, context: context, prebuilt: prebuilt)
+    context.setLiveIndex(store: fresh.store, coordinator: fresh.coordinator)
+}
+
+/// Pre-save fail-closed probe for a pending `[index]` patch.
+///
+/// Runs before the config file is persisted and before any live tool state
+/// mutates, so a rejected `db_path` never becomes durable and file/live
+/// never diverge. Mirrors `reconcileLiveIndexPolicy` without mutating: a
+/// disabled policy or a same-path policy refresh needs no probe (nil), while
+/// an enable-from-unwired or a changed `db_path` builds boot-parity
+/// components and probes the new store first. The returned components ride
+/// along into the reconcile so the PUT probes a new path once.
+/// - Parameters:
+///   - savedConfig: Merged config about to be persisted.
+///   - context: Live server context supplying the embedder and vision provider.
+///   - patchPresent: Whether the request carries an `index` patch.
+/// - Returns: Probed components for a new path, or nil when no probe ran.
+/// - Throws: `Abort(.badRequest)` when the new `db_path` cannot back a store.
+private func preflightLiveIndexPolicy(savedConfig: RuneWeaverConfig, context: ServerContext, patchPresent: Bool) async throws -> ServerIndexComponents? {
+    guard patchPresent, savedConfig.index.enabled else { return nil }
+    // Read the pair as one atomic snapshot so a concurrent PUT swapping
+    // generations cannot interleave between the two reads and mis-classify
+    // a same-path refresh as a `db_path`-change (or vice versa).
+    let live = context.liveIndexSnapshot()
+    if let store = live.store, live.coordinator != nil {
+        let liveDBPath = await store.dbPath
+        if liveDBPath == savedConfig.index.dbPath {
+            return nil
+        }
+    }
+    return try await probedIndexComponents(savedConfig: savedConfig, context: context)
+}
+
+/// Reuses preflight-probed components when they already cover this save.
+///
+/// The pre-save preflight probes the same `savedConfig` the reconcile then
+/// swaps in, so rebuilding here would construct the store and run the stats
+/// probe a second time per PUT. A stale or mismatched carryover (different
+/// `db_path`, e.g. a direct test call passing an unrelated value) falls back
+/// to a fresh inline probe.
+/// - Parameters:
+///   - savedConfig: Persisted config to build from.
+///   - context: Live context supplying the shared embedder and vision provider.
+///   - prebuilt: Components probed by the pre-save preflight, if any.
+/// - Returns: The prebuilt components when their path matches, else freshly probed ones.
+private func reusedOrProbedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext, prebuilt: ServerIndexComponents?) async throws -> ServerIndexComponents {
+    if let prebuilt, prebuilt.docIndexDBPath == savedConfig.index.dbPath {
+        return prebuilt
+    }
+    return try await probedIndexComponents(savedConfig: savedConfig, context: context)
+}
+
+/// Signals cancellation on an old-generation coordinator and joins its run
+/// task before the live pair is swapped or cleared, so the previous
+/// generation cannot overlap the fresh one. `IndexCoordinator.cancel()` only
+/// signals cooperative cancellation; without the join the old run would keep
+/// executing between batches after `setLiveIndex` moved on.
+/// The join is bounded: a stalled old generation stops blocking the PUT after
+/// the grace window and the swap proceeds, while caller cancellation aborts
+/// the wait instead of hanging the settings save.
+/// - Parameter coordinator: Old-generation coordinator to stop and join.
+/// - Throws: `CancellationError` when the awaiting PUT is cancelled.
+private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws {
+    await coordinator.cancel()
+    // Long enough for a cooperative stage to notice the flag between batches,
+    // short enough that a wedged generation cannot hang `PUT /settings`.
+    let graceNs: UInt64 = 5_000_000_000
+    let sliceNs: UInt64 = 10_000_000
+    let deadline = Date().addingTimeInterval(TimeInterval(graceNs) / 1_000_000_000)
+    while await coordinator.isRunning {
+        try Task.checkCancellation()
+        guard Date() < deadline else { break }
+        try await Task.sleep(nanoseconds: sliceNs)
+    }
+}
+
+/// Builds boot-parity index components for the saved config and probes the new
+/// store so an unwritable `db_path` fails before the live context is touched.
+/// - Parameters:
+///   - savedConfig: Persisted config to build from.
+///   - context: Live context supplying the shared embedder and vision provider.
+/// - Returns: Probed store plus coordinator.
+/// - Throws: `Abort(.badRequest)` when the new store cannot serve stats.
+private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext) async throws -> ServerIndexComponents {
+    guard let components = ServerIndexBoot.makeComponents(
+        config: savedConfig,
+        embedder: context.embedder,
+        visionLLM: context.servingLLM
+    ) else {
+        throw Abort(.badRequest, reason: "Indexing is disabled in [index].")
+    }
+    do {
+        _ = try await components.store.stats()
+    } catch {
+        throw Abort(.badRequest, reason: "Index database is not usable at '\(savedConfig.index.dbPath)': \(error.localizedDescription)")
+    }
+    return components
 }

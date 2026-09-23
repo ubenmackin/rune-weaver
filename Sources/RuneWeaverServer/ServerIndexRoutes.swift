@@ -40,8 +40,13 @@ private func registerIndexStatusRoute(_ app: Application) {
         // install still renders an honest empty state.
         let stats = try await context.indexStore?.stats()
         let running = await context.indexCoordinator?.isRunning ?? false
-        let lastErrors = await recentIndexErrors(context: context)
-        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors)
+        // One shared bounded fetch per poll: both derivations below read the
+        // same snapshot, so status performs a single store query with a fixed
+        // cap instead of two full-history scans that could race new rows.
+        let indexRuns = await recentIndexRuns(context: context)
+        let lastErrors = recentIndexErrors(from: indexRuns)
+        let lastRun = latestIndexRun(from: indexRuns)
+        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun)
     }
 }
 
@@ -147,22 +152,133 @@ private func loadedIndexConfiguration() throws -> IndexConfig {
     }
 }
 
-/// Collects the most recent index run failures from the shared audit trail.
+/// Fixed newest-row scan window for the status probe.
 ///
-/// Only the `index`-kind rows already written by `ServerIndexRunReporter` are
-/// consulted, so the status shape reuses the durable run log instead of adding
-/// a second failure channel; rendering is bounded and carries no content.
+/// Bounds per-poll work independent of retained history size: the probe reads
+/// at most this many newest run rows and filters to the `index` kind in
+/// memory, instead of sizing the fetch from the live `count`. A larger window
+/// finds sparse index rows more often but costs more per poll; 100 sits above
+/// the 50-row window known to drop index rows under chat traffic while staying
+/// well below the 500-row store capacity. A kind-filtered store query would
+/// remove the window tradeoff entirely, but that needs a `RunLogStore` API
+/// change outside this route file.
+/// - Note: Single-sourced here so the shared fetch and its derivations agree.
+private enum IndexStatusScan {
+    /// Maximum newest run rows examined per status poll.
+    static let cap = 100
+}
+
+/// Cached count patterns for the durable run summary line.
+///
+/// Compiled once instead of per request: the previous implementation built a
+/// fresh `NSRegularExpression` for each of the three counts on every status
+/// poll. Patterns stay case-insensitive and keyword-anchored so minor
+/// capitalization drift still matches; a line whose wording drifted past the
+/// patterns yields nil counts rather than a missing strip. Persisting
+/// structured counts on the run log would remove the wording dependency
+/// entirely, but that needs a `RunLogEntry` schema change outside this route
+/// file, so the bounded fix here is shared compilation plus a
+/// message-then-response fallback in `latestIndexRun(from:)`.
+private enum IndexRunCountPatterns {
+    /// Matches `<n> indexed` in the summary line, compiled once.
+    static let indexed: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+indexed", options: .caseInsensitive)
+    /// Matches `<n> scanned` in the summary line, compiled once.
+    static let scanned: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+scanned", options: .caseInsensitive)
+    /// Matches `<n> errors` in the summary line, compiled once.
+    static let errors: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+errors", options: .caseInsensitive)
+}
+
+/// Fetches the recent `index`-kind run rows for the status probe.
+///
+/// Single bounded query shared by `recentIndexErrors(from:)` and
+/// `latestIndexRun(from:)`: one `list(limit:)` with a fixed cap, filtered by
+/// kind, with no preceding count query so new rows cannot slip between a
+/// separate count and the list.
+/// - Parameter context: Server context owning the run log.
+/// - Returns: Newest `index`-kind rows within the scan window, newest first.
+private func recentIndexRuns(context: ServerContext) async -> [RunLogEntry] {
+    let recent = await context.runs.list(limit: IndexStatusScan.cap)
+    return recent.filter { $0.kind == ServerIndexRunReporter.kind }
+}
+
+/// Collects the most recent index run failures from a shared run snapshot.
+///
+/// Pure derivation over `recentIndexRuns(context:)` output: filters to error
+/// rows and renders detail strings, newest first. Only the `index`-kind rows
+/// already written by `ServerIndexRunReporter` are consulted, so the status
+/// shape reuses the durable run log instead of adding a second failure
+/// channel; rendering is bounded and carries no content.
 /// - Parameters:
-///   - context: Server context owning the run log.
+///   - runs: Newest `index`-kind rows from `recentIndexRuns(context:)`.
 ///   - limit: Maximum failures to return, newest first.
 /// - Returns: Failure detail strings, newest first.
-private func recentIndexErrors(context: ServerContext, limit: Int = 5) async -> [String] {
-    let recent = await context.runs.list(limit: 50)
-    return recent
-        .filter { $0.kind == ServerIndexRunReporter.kind && $0.status == IndexRunStatus.error.rawValue }
+private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [String] {
+    runs
+        .filter { $0.status == IndexRunStatus.error.rawValue }
         .prefix(limit)
         .map { entry in
             let detail = entry.response?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (detail?.isEmpty == false ? detail : nil) ?? entry.message
         }
+}
+
+/// Distills the newest `index`-kind run row into the last-run strip.
+///
+/// Pure derivation over `recentIndexRuns(context:)` output. The coordinator's
+/// summary line (`Index run <status>: <n> indexed, ... <n> scanned, <n>
+/// errors`) carries the outcome counts, so the strip parses them back out of
+/// the durable text; each count falls back from the message to the response
+/// detail line (both carry the same summary first line), and a row whose
+/// wording drifted past both still reports its status and finish time with
+/// nil counts instead of disappearing.
+/// - Parameter runs: Newest `index`-kind rows from `recentIndexRuns(context:)`.
+/// - Returns: The latest run outcome, or nil when no run has been recorded.
+private func latestIndexRun(from runs: [RunLogEntry]) -> IndexLastRunStatus? {
+    guard let entry = runs.first else {
+        return nil
+    }
+    let message = entry.message
+    let fallback = entry.response ?? ""
+    return IndexLastRunStatus(
+        status: entry.status,
+        indexed: firstRunCount(keyword: "indexed", in: message) ?? firstRunCount(keyword: "indexed", in: fallback),
+        scanned: firstRunCount(keyword: "scanned", in: message) ?? firstRunCount(keyword: "scanned", in: fallback),
+        errors: firstRunCount(keyword: "errors", in: message) ?? firstRunCount(keyword: "errors", in: fallback),
+        finishedAt: entry.timestamp
+    )
+}
+
+/// Extracts the first `<n> <keyword>` count from a run summary line.
+///
+/// Uses the shared compiled patterns, so the status probe performs no
+/// per-request regex compilation. Only the three status keywords are
+/// recognized; any other keyword yields nil without compiling.
+/// - Parameters:
+///   - keyword: Count label to find (`"indexed"`, `"scanned"`, `"errors"`).
+///   - message: Summary line carrying the counts.
+/// - Returns: The parsed count, or nil when the wording drifted.
+private func firstRunCount(keyword: String, in message: String) -> Int? {
+    guard !message.isEmpty else { return nil }
+    let cached: NSRegularExpression?
+    switch keyword.lowercased() {
+    case "indexed":
+        cached = IndexRunCountPatterns.indexed
+    case "scanned":
+        cached = IndexRunCountPatterns.scanned
+    case "errors":
+        cached = IndexRunCountPatterns.errors
+    default:
+        return nil
+    }
+    guard let expression = cached else {
+        return nil
+    }
+    let range = NSRange(message.startIndex ..< message.endIndex, in: message)
+    guard let match = expression.firstMatch(in: message, options: [], range: range),
+          match.numberOfRanges > 1,
+          let countRange = Range(match.range(at: 1), in: message)
+    else {
+        return nil
+    }
+    return Int(message[countRange])
 }

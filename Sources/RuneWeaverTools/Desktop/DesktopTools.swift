@@ -7,8 +7,8 @@
 // `desktop.action` is approval-gated and dangerous: it dispatches batched
 // mouse, keyboard, and app-switch actions through the permission gate.
 // Both tools always register so they stay visible in `GET /tools`, but
-// boot registration ships them disabled and the `[desktop]` toggles act as
-// a fail-closed allow boundary on top, so neither runs without an explicit
+// boot registration ships them disabled and the persisted tool-state toggle
+// is the sole authority for enablement, so neither runs without an explicit
 // operator action.
 
 import Foundation
@@ -374,7 +374,7 @@ public enum DesktopTools {
     public static let screenshotToolName = "desktop.screenshot"
     public static let actionToolName = "desktop.action"
 
-    /// Both tool names in registration order, regardless of toggles.
+    /// Both tool names in registration order, regardless of config.
     public static var allToolNames: [String] {
         [screenshotToolName, actionToolName]
     }
@@ -383,12 +383,13 @@ public enum DesktopTools {
     ///
     /// Both tools always register — visibility in `GET /tools` never
     /// depends on a toggle, so the surface stays inspectable instead of
-    /// shape-shifting. Enablement is gated separately: boot-path callers
-    /// register them disabled (`isEnabled: false`), persisted tool-state
-    /// rows restore operator intent, and `enforceConfigGates(from:on:)`
-    /// force-disables any tool whose `[desktop]` toggle is off.
+    /// shape-shifting. Enablement is governed solely by the persisted
+    /// tool-state toggle: boot-path callers register them disabled
+    /// (`isEnabled: false`), stored rows restore operator intent, and no
+    /// config gate overrides that state.
     /// - Parameters:
-    ///   - desktopConfig: The `[desktop]` configuration section.
+    ///   - desktopConfig: The `[desktop]` configuration section carrying
+    ///     capture knobs (dimensions, quality, blocklist).
     ///   - captureBridge: Optional capture bridge (for tests).
     ///   - controlBridge: Optional control bridge (for tests).
     /// - Returns: Both desktop tools, in registration order.
@@ -411,28 +412,8 @@ public enum DesktopTools {
     }
 
     /// Both tool names in registration order; registration itself never
-    /// depends on the `[desktop]` toggles.
+    /// depends on config — the tool-state toggle is the sole authority.
     public static func toolNames(for _: DesktopConfig) -> [String] {
         allToolNames
-    }
-
-    /// Enforces the `[desktop]` allow boundary on a live bus.
-    ///
-    /// Applied after persisted tool-state rows are restored: a toggle that
-    /// is off force-disables its tool regardless of any stored enable row,
-    /// so a hand-edited config, a legacy fail-closed install, or a settings
-    /// toggle turned off always wins over runtime state. A toggle that is
-    /// on leaves the tool's state untouched — it still ships disabled until
-    /// the operator enables it through the tool-state route.
-    /// - Parameters:
-    ///   - config: The live `[desktop]` policy supplying both toggles.
-    ///   - bus: Bus whose desktop tools receive the boundary.
-    public static func enforceConfigGates(from config: DesktopConfig, on bus: ToolBus) async {
-        if !config.screenCaptureEnabled {
-            await bus.disableTool(named: screenshotToolName)
-        }
-        if !config.controlEnabled {
-            await bus.disableTool(named: actionToolName)
-        }
     }
 }

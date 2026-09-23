@@ -133,6 +133,40 @@ public struct IndexedChunk: Sendable, Codable, Equatable, Identifiable {
     }
 }
 
+/// Per-source aggregate counts describing one origin corpus.
+public struct IndexSourceStats: Sendable, Codable, Equatable {
+    /// Origin corpus these counts belong to.
+    public let source: IndexSource
+    /// Number of indexed documents from this source.
+    public let documents: Int
+    /// Number of stored chunks belonging to this source.
+    public let chunks: Int
+    /// Total chunk text bytes belonging to this source.
+    public let bytes: Int64
+
+    /// Creates a per-source aggregate snapshot.
+    public init(source: IndexSource, documents: Int, chunks: Int, bytes: Int64) {
+        self.source = source
+        self.documents = documents
+        self.chunks = chunks
+        self.bytes = bytes
+    }
+}
+
+/// Extraction-outcome breakdown describing one status bucket.
+public struct IndexExtractStatusStats: Sendable, Codable, Equatable {
+    /// Extraction outcome these counts belong to.
+    public let status: ExtractStatus
+    /// Number of indexed documents with this outcome.
+    public let documents: Int
+
+    /// Creates an extraction-outcome aggregate snapshot.
+    public init(status: ExtractStatus, documents: Int) {
+        self.status = status
+        self.documents = documents
+    }
+}
+
 /// Aggregate counts describing the current index contents.
 public struct IndexStats: Sendable, Codable, Equatable {
     /// Number of indexed documents.
@@ -147,6 +181,22 @@ public struct IndexStats: Sendable, Codable, Equatable {
     public let bytes: Int64
     /// When this snapshot was taken.
     public let indexAsOf: Date
+    /// Per-source document/chunk/byte aggregates, one row per origin corpus.
+    public let bySource: [IndexSourceStats]
+    /// Document counts grouped by extraction outcome.
+    public let byExtractStatus: [IndexExtractStatusStats]
+
+    /// Coding keys for the statistics snapshot.
+    private enum CodingKeys: String, CodingKey {
+        case documents
+        case chunks
+        case vectorChunks
+        case keywordChunks
+        case bytes
+        case indexAsOf
+        case bySource
+        case byExtractStatus
+    }
 
     /// Creates an index statistics snapshot.
     public init(
@@ -155,7 +205,9 @@ public struct IndexStats: Sendable, Codable, Equatable {
         vectorChunks: Int,
         keywordChunks: Int,
         bytes: Int64,
-        indexAsOf: Date
+        indexAsOf: Date,
+        bySource: [IndexSourceStats] = [],
+        byExtractStatus: [IndexExtractStatusStats] = []
     ) {
         self.documents = documents
         self.chunks = chunks
@@ -163,6 +215,37 @@ public struct IndexStats: Sendable, Codable, Equatable {
         self.keywordChunks = keywordChunks
         self.bytes = bytes
         self.indexAsOf = indexAsOf
+        self.bySource = bySource
+        self.byExtractStatus = byExtractStatus
+    }
+
+    /// Decodes a snapshot, defaulting additive aggregates to empty so payloads
+    /// written before per-source and extract-status breakdowns still decode.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.documents = try container.decode(Int.self, forKey: .documents)
+        self.chunks = try container.decode(Int.self, forKey: .chunks)
+        self.vectorChunks = try container.decode(Int.self, forKey: .vectorChunks)
+        self.keywordChunks = try container.decode(Int.self, forKey: .keywordChunks)
+        self.bytes = try container.decode(Int64.self, forKey: .bytes)
+        self.indexAsOf = try container.decode(Date.self, forKey: .indexAsOf)
+        self.bySource = try container.decodeIfPresent([IndexSourceStats].self, forKey: .bySource) ?? []
+        self.byExtractStatus = try container.decodeIfPresent([IndexExtractStatusStats].self, forKey: .byExtractStatus) ?? []
+    }
+
+    /// Encodes a snapshot including the additive aggregates.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(documents, forKey: .documents)
+        try container.encode(chunks, forKey: .chunks)
+        try container.encode(vectorChunks, forKey: .vectorChunks)
+        try container.encode(keywordChunks, forKey: .keywordChunks)
+        try container.encode(bytes, forKey: .bytes)
+        try container.encode(indexAsOf, forKey: .indexAsOf)
+        try container.encode(bySource, forKey: .bySource)
+        try container.encode(byExtractStatus, forKey: .byExtractStatus)
     }
 }
 

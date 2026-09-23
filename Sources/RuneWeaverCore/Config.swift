@@ -980,31 +980,17 @@ public struct BrowserConfig: Sendable, Codable, Equatable {
 
 // MARK: - Desktop vision and control
 
-/// `[desktop]` — macOS desktop vision and gated control policy.
+/// `[desktop]` — macOS desktop vision and control capture policy.
 ///
 /// Both desktop tools always register so they stay visible in `GET /tools`,
-/// but they ship disabled and each toggle here is a fail-closed allow
-/// boundary: while `screenCaptureEnabled` is false `desktop.screenshot` is
-/// forced off, and while `controlEnabled` is false `desktop.action` is
-/// forced off — regardless of persisted tool-state rows. With the boundary
-/// open, each tool goes live only through its tool-state toggle, so the
-/// dangerous surface never runs without an explicit operator action. Screen
-/// capture defaults off so a stock install exposes no approval-free capture.
-/// A legacy `[desktop]` `enabled` master key is no longer written but still
-/// reads at the TOML layer, ANDed into both toggles for upgrade safety. The
-/// screenshot tool is read-only, while `desktop.action` requires approval
-/// per-invocation through the permission gate.
+/// but they ship disabled and go live only through the persisted tool-state
+/// toggle, which is the sole authority for enablement. The `[desktop]`
+/// section carries only capture knobs (dimensions, quality, blocklist), so
+/// a stock install exposes no approval-free capture until an operator
+/// enables `desktop.screenshot`. The screenshot tool is read-only, while
+/// `desktop.action` requires approval per-invocation through the permission
+/// gate.
 public struct DesktopConfig: Sendable, Equatable {
-    /// Allow boundary for `desktop.screenshot`: false forces the tool
-    /// disabled on the bus (it stays registered). Defaults off so a stock
-    /// install never captures the screen without an explicit opt-in.
-    public var screenCaptureEnabled: Bool
-    /// Allow boundary for `desktop.action` (mouse, keyboard, app switching):
-    /// false forces the tool disabled on the bus (it stays registered).
-    /// Independently gated; even with the boundary open the tool ships
-    /// disabled and a tool-state enable precedes any model call, which then
-    /// parks in the approvals inbox.
-    public var controlEnabled: Bool
     /// Longest edge of the downscaled screenshot in pixels. Bounds token cost.
     public var maxImageDimension: Int
     /// JPEG compression quality for downscaled screenshots (0.0–1.0).
@@ -1013,11 +999,6 @@ public struct DesktopConfig: Sendable, Equatable {
     /// Protects sensitive apps from automated clicks and keystrokes.
     public var blockedApps: [String]
 
-    /// Default screen capture allow boundary — off so approval-free capture
-    /// never ships live on a stock install.
-    public static let defaultScreenCaptureEnabled = false
-    /// Default control allow boundary.
-    public static let defaultControlEnabled = false
     /// Default longest edge for downscaled screenshots.
     public static let defaultMaxImageDimension = 1280
     /// Hard upper bound for `maxImageDimension`.
@@ -1037,22 +1018,16 @@ public struct DesktopConfig: Sendable, Equatable {
 
     /// Creates a desktop config.
     public init(
-        screenCaptureEnabled: Bool = defaultScreenCaptureEnabled,
-        controlEnabled: Bool = defaultControlEnabled,
         maxImageDimension: Int = defaultMaxImageDimension,
         jpegQuality: Double = defaultJpegQuality,
         blockedApps: [String] = defaultBlockedApps
     ) {
-        self.screenCaptureEnabled = screenCaptureEnabled
-        self.controlEnabled = controlEnabled
         self.maxImageDimension = maxImageDimension
         self.jpegQuality = jpegQuality
         self.blockedApps = blockedApps
     }
 
     private enum CodingKeys: String, CodingKey {
-        case screenCaptureEnabled = "screen_capture_enabled"
-        case controlEnabled = "control_enabled"
         case maxImageDimension = "max_image_dimension"
         case jpegQuality = "jpeg_quality"
         case blockedApps = "blocked_apps"
@@ -1061,11 +1036,11 @@ public struct DesktopConfig: Sendable, Equatable {
 
 extension DesktopConfig: Codable {
     /// Decodes a desktop config, defaulting omitted keys.
+    /// Unknown keys (including retired allow toggles) are ignored so old
+    /// files load without migration.
     /// - Parameter decoder: Decoder for the config document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        screenCaptureEnabled = try container.decodeIfPresent(Bool.self, forKey: .screenCaptureEnabled) ?? Self.defaultScreenCaptureEnabled
-        controlEnabled = try container.decodeIfPresent(Bool.self, forKey: .controlEnabled) ?? Self.defaultControlEnabled
         maxImageDimension = try container.decodeIfPresent(Int.self, forKey: .maxImageDimension) ?? Self.defaultMaxImageDimension
         jpegQuality = try container.decodeIfPresent(Double.self, forKey: .jpegQuality) ?? Self.defaultJpegQuality
         blockedApps = try container.decodeIfPresent([String].self, forKey: .blockedApps) ?? Self.defaultBlockedApps
@@ -1075,8 +1050,6 @@ extension DesktopConfig: Codable {
     /// - Parameter encoder: Encoder for the config document.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(screenCaptureEnabled, forKey: .screenCaptureEnabled)
-        try container.encode(controlEnabled, forKey: .controlEnabled)
         try container.encode(maxImageDimension, forKey: .maxImageDimension)
         try container.encode(jpegQuality, forKey: .jpegQuality)
         try container.encode(blockedApps, forKey: .blockedApps)

@@ -1549,6 +1549,187 @@ describe("SettingsManager", () => {
     expect(sentPayload).toBeDefined();
   });
 
+  it("renders a screenshot-only Configure modal that saves knobs without enable keys", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "desktop.screenshot",
+        description: "Capture a display or app window",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "desktop.action",
+        description: "Perform approved desktop actions",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", { name: /Configure/i });
+    expect(configureButtons.length).toBe(2);
+    await user.click(configureButtons[0]);
+
+    // The screenshot modal carries only its capture knobs.
+    expect(screen.getByRole("heading", { name: /Configure Desktop Screenshot/i })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: /Configure Desktop Control/i })).toBeNull();
+    expect(screen.getByLabelText(/Max Image Dimension/i)).toBeDefined();
+    expect(screen.getByLabelText(/JPEG Quality/i)).toBeDefined();
+    expect(screen.queryByLabelText(/Blocked Apps/i)).toBeNull();
+    expect(screen.queryByText(/Both tools always/i)).toBeNull();
+    // No in-modal Enabled toggle: the modal holds no checkboxes at all.
+    const modal = document.querySelector(".modal-container");
+    expect(modal).not.toBeNull();
+    expect(modal?.querySelectorAll('input[type="checkbox"]').length).toBe(0);
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const desktop = (sentPayload as unknown as Record<string, unknown>)["desktop"] as Record<
+      string,
+      unknown
+    >;
+    expect(desktop).toBeDefined();
+    expect(desktop).toHaveProperty("max_image_dimension");
+    expect(desktop).toHaveProperty("jpeg_quality");
+    expect(desktop).not.toHaveProperty("screen_capture_enabled");
+    expect(desktop).not.toHaveProperty("control_enabled");
+    expect(desktop).not.toHaveProperty("blocked_apps");
+  });
+
+  it("renders a control-only Configure modal that saves the blocklist without enable keys", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "desktop.screenshot",
+        description: "Capture a display or app window",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "desktop.action",
+        description: "Perform approved desktop actions",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...mockSettings,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(mockSettings);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", { name: /Configure/i });
+    expect(configureButtons.length).toBe(2);
+    await user.click(configureButtons[1]);
+
+    // The control modal carries only the blocked-apps editor with its count.
+    expect(screen.getByRole("heading", { name: /Configure Desktop Control/i })).toBeDefined();
+    expect(screen.queryByRole("heading", { name: /Configure Desktop Screenshot/i })).toBeNull();
+    const blockedTextarea = screen.getByLabelText(/Blocked Apps/i) as HTMLTextAreaElement;
+    expect(blockedTextarea.value).toContain("Terminal");
+    expect(screen.getByText(/7 apps/i)).toBeDefined();
+    expect(screen.queryByLabelText(/Max Image Dimension/i)).toBeNull();
+    expect(screen.queryByLabelText(/JPEG Quality/i)).toBeNull();
+    expect(screen.queryByText(/Both tools always/i)).toBeNull();
+    // No in-modal Enabled toggle: the modal holds no checkboxes at all.
+    const modal = document.querySelector(".modal-container");
+    expect(modal).not.toBeNull();
+    expect(modal?.querySelectorAll('input[type="checkbox"]').length).toBe(0);
+
+    await user.clear(blockedTextarea);
+    await user.type(blockedTextarea, "Terminal\n1Password");
+    expect(screen.getByText(/2 apps/i)).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const desktop = (sentPayload as unknown as Record<string, unknown>)["desktop"] as Record<
+      string,
+      unknown
+    >;
+    expect(desktop).toEqual({ blocked_apps: ["Terminal", "1Password"] });
+  });
+
   it("does not guard parked approvals awaiting human review", async () => {
     const user = userEvent.setup();
     let putCalled = false;
@@ -1599,6 +1780,62 @@ describe("SettingsManager", () => {
       )
     ).toBeNull();
     expect(putCalled).toBe(true);
+  });
+
+  it("styles every Tools Configure button with accent-ghost", async () => {
+    const user = userEvent.setup();
+    const configurableTools = [
+      "media.arr",
+      "media.arr.read",
+      "browser.navigate",
+      "browser.act",
+      "web.fetch",
+      "desktop.screenshot",
+      "desktop.action",
+    ].map((name) => ({
+      name,
+      description: `${name} tool`,
+      permissionLevel: "readOnly",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: true,
+      pluginID: null,
+      source: "builtin",
+      integrityStatus: "valid",
+      hasConfig: true,
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: configurableTools });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    const configureButtons = await screen.findAllByRole("button", {
+      name: /Configure/i,
+    });
+    expect(configureButtons.length).toBe(configurableTools.length);
+    for (const btn of configureButtons) {
+      expect(btn.classList.contains("accent-ghost")).toBe(true);
+      expect(btn.classList.contains("icon-text-btn")).toBe(true);
+      expect(btn.classList.contains("ghost")).toBe(false);
+    }
   });
 });
 
