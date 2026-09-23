@@ -1,8 +1,7 @@
 // Rune Weaver Server — Desktop settings DTOs for the settings API.
 //
 // Purpose: carries the partial desktop patch for `PUT /settings` so dashboard
-// edits preserve untouched fields while the screenshot and control toggles
-// plus capture knobs apply without a restart.
+// edits preserve untouched fields while capture knobs apply without a restart.
 // Scope: REST patch bodies only; the settings request type owns merge policy
 // while validation and persistence stay with the config layer.
 // Architectural role: keeps desktop Codable contracts version-tolerant and
@@ -15,19 +14,11 @@ import Vapor
 /// Partial desktop patch for `PUT /settings`.
 ///
 /// Every field stays optional so a request carrying only one key leaves the
-/// stored toggles, dimensions, quality, and blocklist untouched instead of
-/// resetting them. Covers the same field set as the full `DesktopConfig`
-/// snapshot, so a caller holding a complete policy can build the patch
-/// through `init(_:)` and reuse the merge path without hand-mapping fields.
+/// stored capture knobs and blocklist untouched instead of resetting them.
+/// Covers the same field set as the full `DesktopConfig` snapshot, so a
+/// caller holding a complete policy can build the patch through `init(_:)`
+/// and reuse the merge path without hand-mapping fields.
 public struct DesktopSettingsUpdate: Content, Equatable {
-    /// Allow boundary for `desktop.screenshot`: false force-disables the
-    /// tool on the bus while it stays registered; true lets the tool-state
-    /// toggle decide.
-    public var screenCaptureEnabled: Bool?
-    /// Allow boundary for `desktop.action`: false force-disables the tool
-    /// on the bus while it stays registered; true lets the tool-state
-    /// toggle decide.
-    public var controlEnabled: Bool?
     /// Longest edge of the downscaled screenshot in pixels.
     public var maxImageDimension: Int?
     /// JPEG compression quality for downscaled screenshots (0.0–1.0).
@@ -36,14 +27,10 @@ public struct DesktopSettingsUpdate: Content, Equatable {
     public var blockedApps: [String]?
 
     public init(
-        screenCaptureEnabled: Bool? = nil,
-        controlEnabled: Bool? = nil,
         maxImageDimension: Int? = nil,
         jpegQuality: Double? = nil,
         blockedApps: [String]? = nil
     ) {
-        self.screenCaptureEnabled = screenCaptureEnabled
-        self.controlEnabled = controlEnabled
         self.maxImageDimension = maxImageDimension
         self.jpegQuality = jpegQuality
         self.blockedApps = blockedApps
@@ -53,16 +40,12 @@ public struct DesktopSettingsUpdate: Content, Equatable {
     /// a complete `DesktopConfig` reuse the same merge path.
     /// - Parameter config: Complete desktop policy.
     public init(_ config: DesktopConfig) {
-        self.screenCaptureEnabled = config.screenCaptureEnabled
-        self.controlEnabled = config.controlEnabled
         self.maxImageDimension = config.maxImageDimension
         self.jpegQuality = config.jpegQuality
         self.blockedApps = config.blockedApps
     }
 
     private enum CodingKeys: String, CodingKey {
-        case screenCaptureEnabled = "screen_capture_enabled"
-        case controlEnabled = "control_enabled"
         case maxImageDimension = "max_image_dimension"
         case jpegQuality = "jpeg_quality"
         case blockedApps = "blocked_apps"
@@ -91,12 +74,6 @@ extension UpdateSettingsRequest {
     /// the desktop-specific logic lives beside its DTOs.
     func applyDesktop(to desktop: inout DesktopConfig) {
         guard let update = self.desktop else { return }
-        if let screenCaptureEnabled = update.screenCaptureEnabled {
-            desktop.screenCaptureEnabled = screenCaptureEnabled
-        }
-        if let controlEnabled = update.controlEnabled {
-            desktop.controlEnabled = controlEnabled
-        }
         if let maxImageDimension = update.maxImageDimension {
             desktop.maxImageDimension = maxImageDimension
         }

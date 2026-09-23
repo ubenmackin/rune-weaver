@@ -7,12 +7,15 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import IndexingPanel, {
   IndexPolicyPanel,
+  describeIndexLastRun,
   formatIndexAge,
   formatIndexAsOf,
   formatIndexBytes,
   indexDonutArcs,
+  indexSourceBarWidth,
   isIndexProgressFrame,
   resolveIndexPhase,
+  resolveIndexSourceContent,
 } from "./IndexingPanel";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { jsonResponse } from "../test-utils/http";
@@ -53,6 +56,21 @@ const statusPayload = {
     { kind: "messages", enabled: false },
   ],
   lastErrors: [],
+  bySource: [
+    { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+    { kind: "mail", documents: 12, chunks: 30, bytes: 548 },
+  ],
+  byExtractStatus: [
+    { status: "extracted", documents: 30 },
+    { status: "partial", documents: 12 },
+  ],
+  lastRun: {
+    status: "ok",
+    indexed: 3,
+    scanned: 5,
+    errors: 0,
+    finishedAt: 1,
+  },
 };
 
 // Structural order check: true when b renders after a in document order, so
@@ -165,6 +183,39 @@ describe("IndexingPanel helpers", () => {
     expect(isIndexProgressFrame({ toolName: "" }, true)).toBe(true);
     expect(isIndexProgressFrame({ toolName: "" }, false)).toBe(false);
   });
+
+  it("scales source bars by document share instead of binary on/off", () => {
+    expect(indexSourceBarWidth(30, 30)).toBe("100%");
+    expect(indexSourceBarWidth(15, 30)).toBe("50%");
+    expect(indexSourceBarWidth(0, 30)).toBe("0%");
+    expect(indexSourceBarWidth(5, 0)).toBe("0%");
+  });
+
+  it("resolves canonical source rows with real totals", () => {
+    const rows = resolveIndexSourceContent({
+      sources: [
+        { kind: "files", enabled: true },
+        { kind: "mail", enabled: false },
+        { kind: "messages", enabled: false },
+      ],
+      bySource: [{ kind: "files", documents: 30, chunks: 70, bytes: 1500 }],
+    });
+    expect(rows.map((row) => row.kind)).toEqual(["files", "mail", "messages"]);
+    expect(rows[0]).toMatchObject({ documents: 30, chunks: 70, bytes: 1500 });
+    // A source missing from the aggregates degrades to zero instead of
+    // disappearing, so older engines still render all three rows.
+    expect(rows[1]).toMatchObject({ documents: 0, chunks: 0, bytes: 0 });
+  });
+
+  it("summarizes the last run strip with counts and finish time", () => {
+    expect(describeIndexLastRun(null)).toBe("No runs yet");
+    expect(
+      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
+    ).toContain("Last run ok");
+    expect(
+      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
+    ).toContain("3 indexed");
+  });
 });
 
 describe("IndexingPanel", () => {
@@ -185,8 +236,12 @@ describe("IndexingPanel", () => {
     expect(screen.getByText("100")).toBeInTheDocument();
     expect(screen.getByText("2 KB")).toBeInTheDocument();
     expect(screen.getByText("80 vector · 20 keyword")).toBeInTheDocument();
-    expect(screen.getByText("Never indexed")).toBeInTheDocument();
+    // The watermark card carries the relative age prominently plus the
+    // absolute date below, so the honest never-indexed label appears twice.
+    expect(screen.getAllByText("Never indexed").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Disabled")).toBeInTheDocument();
+    // The last-run strip distills the newest run log row above the cards.
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
   });
 
   it("keeps run controls above the stat cards and the charts", async () => {
@@ -284,7 +339,7 @@ describe("IndexingPanel", () => {
     expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
   });
 
-  it("renders the donut and per-source bars from the stubbed status", async () => {
+  it("renders real-count source bars, the extract breakdown, and the last-run strip", async () => {
     const { fetchMock } = stubFetch({
       status: {
         ...statusPayload,
@@ -293,6 +348,15 @@ describe("IndexingPanel", () => {
           { kind: "mail", enabled: false },
           { kind: "messages", enabled: false },
         ],
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+        lastRun: { status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 },
       },
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -307,11 +371,29 @@ describe("IndexingPanel", () => {
       "aria-label",
       "80 vector chunks, 20 keyword chunks",
     );
-    // Bars reflect per-source enablement; pills mirror the same state.
+    // Bars scale by real document share: the largest source fills the track
+    // while the half-size source renders at half width — never binary on/off.
     expect(screen.getByTestId("index-bar-files")).toHaveStyle({ width: "100%" });
-    expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "0%" });
+    expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "50%" });
+    expect(screen.getByTestId("index-bar-mail")).not.toHaveStyle({ width: "0%" });
+    // Each row names its real totals instead of an On/Off token.
+    expect(screen.getByText("30 docs · 70 chunks · 1.5 KB")).toBeInTheDocument();
+    // Pills mirror the same enablement state the bars no longer encode.
     expect(screen.getByText("Files · On")).toBeInTheDocument();
     expect(screen.getByText("Mail · Off")).toBeInTheDocument();
+    // The extraction-outcome breakdown renders one scaled bar per status.
+    expect(screen.getByTestId("index-extract-bar-extracted")).toHaveStyle({
+      width: "100%",
+    });
+    expect(screen.getByTestId("index-extract-bar-partial")).toHaveStyle({
+      width: "50%",
+    });
+    // The last-run strip distills status, counts, and finish time.
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("3 indexed");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("5 scanned");
+    // The watermark card keeps the absolute date alongside the prominent age.
+    expect(screen.getByTestId("index-watermark-card")).toBeInTheDocument();
   });
 
   it("saves the index policy through a PUT /settings index patch", async () => {
@@ -369,6 +451,47 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByText(/Index run ok: 3 indexed/)).toBeInTheDocument();
     });
+  });
+
+  it("shows a muted hint under Run when indexing is disabled", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: false },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Disabled")).toBeInTheDocument();
+    });
+    // Run stays disabled while prune/reset stay independent of the flag.
+    expect(screen.getByRole("button", { name: "Rebuild / Run Now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Prune" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Reset Index" })).toBeEnabled();
+    expect(
+      screen.getByText(
+        "Indexing is off — turn it on in Settings → Indexing to run a pass.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("hides the disabled hint when indexing is enabled", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Enabled")).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Rebuild / Run Now" })).toBeEnabled();
+    expect(
+      screen.queryByText(
+        "Indexing is off — turn it on in Settings → Indexing to run a pass.",
+      ),
+    ).toBeNull();
   });
 
   it("requires an explicit cutoff date before calling the prune route", async () => {

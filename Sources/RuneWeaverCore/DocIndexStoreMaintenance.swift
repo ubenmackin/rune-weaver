@@ -55,7 +55,9 @@ import Foundation
                     vectorChunks: 0,
                     keywordChunks: 0,
                     bytes: 0,
-                    indexAsOf: Date(timeIntervalSince1970: 0)
+                    indexAsOf: Date(timeIntervalSince1970: 0),
+                    bySource: [],
+                    byExtractStatus: []
                 )
             }
             let handle = try open(dbPath: dbPath)
@@ -71,14 +73,106 @@ import Foundation
                 sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
             )
             let indexAsOf = try scalarMaxIndexedAt(handle: handle)
+            let bySource = try sourceAggregates(handle: handle)
+            let byExtractStatus = try extractStatusAggregates(handle: handle)
             return IndexStats(
                 documents: documents,
                 chunks: chunks,
                 vectorChunks: vectorChunks,
                 keywordChunks: max(chunks - vectorChunks, 0),
                 bytes: bytes,
-                indexAsOf: indexAsOf
+                indexAsOf: indexAsOf,
+                bySource: bySource,
+                byExtractStatus: byExtractStatus
             )
+        }
+
+        /// Aggregates per-source document, chunk, and byte counts.
+        ///
+        /// Document counts group the `indexed_documents` table directly while
+        /// chunk and byte counts join through `indexed_chunks`, so a document
+        /// without chunks still contributes its document row with zero chunks
+        /// and bytes. Only sources holding at least one document are returned,
+        /// in canonical `IndexSource` order.
+        private static func sourceAggregates(handle: OpaquePointer?) throws -> [IndexSourceStats] {
+            let documentCounts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT source, COUNT(*) FROM indexed_documents GROUP BY source;"
+            )
+            let chunkCounts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT d.source, COUNT(c.id) FROM indexed_chunks c "
+                    + "JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
+            )
+            let byteSums = try groupedSums(
+                handle: handle,
+                sql: "SELECT d.source, COALESCE(SUM(LENGTH(CAST(c.chunk_text AS BLOB))), 0) "
+                    + "FROM indexed_chunks c JOIN indexed_documents d ON d.id = c.document_id GROUP BY d.source;"
+            )
+            var aggregates: [IndexSourceStats] = []
+            for source in IndexSource.allCases {
+                guard let documents = documentCounts[source.rawValue] else { continue }
+                let chunks = chunkCounts[source.rawValue] ?? 0
+                let bytes = byteSums[source.rawValue] ?? 0
+                aggregates.append(IndexSourceStats(
+                    source: source,
+                    documents: documents,
+                    chunks: chunks,
+                    bytes: bytes
+                ))
+            }
+            return aggregates
+        }
+
+        /// Aggregates document counts grouped by extraction outcome.
+        ///
+        /// Only statuses holding at least one document are returned, in
+        /// canonical `ExtractStatus` order, so a fresh store reports an empty
+        /// breakdown instead of a row of zeros.
+        private static func extractStatusAggregates(handle: OpaquePointer?) throws -> [IndexExtractStatusStats] {
+            let counts = try groupedCounts(
+                handle: handle,
+                sql: "SELECT extract_status, COUNT(*) FROM indexed_documents GROUP BY extract_status;"
+            )
+            var aggregates: [IndexExtractStatusStats] = []
+            for status in ExtractStatus.allCases {
+                guard let documents = counts[status.rawValue] else { continue }
+                aggregates.append(IndexExtractStatusStats(status: status, documents: documents))
+            }
+            return aggregates
+        }
+
+        /// Reads a two-column `GROUP BY` mapping into text keys, sharing one
+        /// prepare/step/finalize loop across count and sum queries. The caller
+        /// supplies how the second column becomes a value, so the two
+        /// aggregates differ only in that accessor while rows without a text
+        /// key are skipped rather than recorded under an empty key.
+        private static func groupedValues<Value>(handle: OpaquePointer?, sql: String, prepareError: String, extract: (OpaquePointer?) -> Value) throws -> [String: Value] {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed(prepareError)
+            }
+            defer { sqlite3_finalize(statement) }
+            var values: [String: Value] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let key = SQLiteHelpers.columnText(statement, index: 0) else { continue }
+                values[key] = extract(statement)
+            }
+            return values
+        }
+
+        /// Reads a two-column `GROUP BY` count mapping into text keys.
+        private static func groupedCounts(handle: OpaquePointer?, sql: String) throws -> [String: Int] {
+            try groupedValues(handle: handle, sql: sql, prepareError: "Could not prepare grouped count") {
+                Int(sqlite3_column_int64($0, 1))
+            }
+        }
+
+        /// Reads a two-column `GROUP BY` byte-sum mapping into text keys.
+        private static func groupedSums(handle: OpaquePointer?, sql: String) throws -> [String: Int64] {
+            try groupedValues(handle: handle, sql: sql, prepareError: "Could not prepare grouped sum") {
+                sqlite3_column_int64($0, 1)
+            }
         }
 
         /// Deletes documents indexed before a cutoff, then reclaims file space.

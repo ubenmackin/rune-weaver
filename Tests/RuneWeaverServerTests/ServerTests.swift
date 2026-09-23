@@ -1118,7 +1118,7 @@ struct ToolStateStoreTests {
     }
 
     @Test
-    func `Tool-state enable is refused while the desktop settings toggle is off`() async throws {
+    func `Tool-state enable succeeds without a config gate for desktop tools`() async throws {
         let (engine, base) = try makeIsolatedEngine()
         defer { try? FileManager.default.removeItem(at: base) }
         let dbPath = base.appendingPathComponent("episodes.db").path
@@ -1126,8 +1126,8 @@ struct ToolStateStoreTests {
         let gate = PermissionGate()
         let approvals = ApprovalQueue(permissionGate: gate)
         let bus = ToolBus(permissionGate: gate)
-        // Boot ships both desktop tools registered but disabled under the
-        // default fail-closed [desktop] policy.
+        // Boot ships both desktop tools registered but disabled; the
+        // tool-state toggle is the sole authority for enablement.
         for tool in DesktopTools.makeTools() {
             await bus.register(tool: tool, isEnabled: false)
         }
@@ -1147,36 +1147,18 @@ struct ToolStateStoreTests {
             approvals: approvals,
             toolStates: toolStates
         )
-        #expect(context.desktopConfig.screenCaptureEnabled == false)
 
-        // Closed boundary: the enable is refused before anything persists, so
-        // no stale row exists for the restore-time gates to fight later.
-        do {
-            _ = try await updateToolState(toolName: "desktop.screenshot", enabled: true, context: context)
-            Issue.record("Expected badRequest while screen capture is gated off")
-        } catch let abort as Abort {
-            #expect(abort.status == .badRequest)
-            #expect(abort.reason.contains("screen capture"))
-        }
-        #expect(await toolStates.isEnabled(toolName: "desktop.screenshot") == nil)
-        #expect(await bus.isToolEnabled(named: "desktop.screenshot") == false)
-
-        // Opening the boundary in settings lets the same enable persist.
-        context.desktopConfig.screenCaptureEnabled = true
+        // Enabling persists and goes live with no config gate in the way.
         let enabled = try await updateToolState(toolName: "desktop.screenshot", enabled: true, context: context)
         #expect(enabled.isEnabled == true)
         #expect(await toolStates.isEnabled(toolName: "desktop.screenshot") == true)
         #expect(await bus.isToolEnabled(named: "desktop.screenshot") == true)
 
-        // The control boundary stays independently closed for desktop.action.
-        do {
-            _ = try await updateToolState(toolName: "desktop.action", enabled: true, context: context)
-            Issue.record("Expected badRequest while control is gated off")
-        } catch let abort as Abort {
-            #expect(abort.status == .badRequest)
-        }
-        #expect(await toolStates.isEnabled(toolName: "desktop.action") == nil)
-        #expect(await bus.isToolEnabled(named: "desktop.action") == false)
+        // The second desktop tool enables independently through the same path.
+        let actionEnabled = try await updateToolState(toolName: "desktop.action", enabled: true, context: context)
+        #expect(actionEnabled.isEnabled == true)
+        #expect(await toolStates.isEnabled(toolName: "desktop.action") == true)
+        #expect(await bus.isToolEnabled(named: "desktop.action") == true)
     }
 }
 

@@ -18,10 +18,8 @@ struct ConfigDesktopTests {
         """
         let root = try TOMLParser.parse(text)
         let config = try RuneWeaverConfig(decoding: root)
-        // Fail-closed stock install: both allow boundaries off, so a fresh
-        // config never exposes approval-free screen capture by omission.
-        #expect(config.desktop.screenCaptureEnabled == false)
-        #expect(config.desktop.controlEnabled == false)
+        // Stock install carries only capture knobs; enablement flows through
+        // the tool-state toggle so a fresh config never implies live capture.
         #expect(config.desktop.maxImageDimension == 1280)
         #expect(config.desktop.jpegQuality == 0.75)
         #expect(config.desktop.blockedApps.contains("Terminal"))
@@ -31,7 +29,7 @@ struct ConfigDesktopTests {
     }
 
     @Test
-    func `Explicit desktop section decodes per-tool toggles`() throws {
+    func `Explicit desktop section decodes capture knobs`() throws {
         let text = """
         [llm]
         default_provider = "mlx"
@@ -42,16 +40,12 @@ struct ConfigDesktopTests {
         server_url = "http://localhost:8080"
 
         [desktop]
-        screen_capture_enabled = true
-        control_enabled = true
         max_image_dimension = 1920
         jpeg_quality = 0.85
         blocked_apps = ["Terminal", "SecretApp"]
         """
         let root = try TOMLParser.parse(text)
         let config = try RuneWeaverConfig(decoding: root)
-        #expect(config.desktop.screenCaptureEnabled == true)
-        #expect(config.desktop.controlEnabled == true)
         #expect(config.desktop.maxImageDimension == 1920)
         #expect(config.desktop.jpegQuality == 0.85)
         #expect(config.desktop.blockedApps == ["Terminal", "SecretApp"])
@@ -59,13 +53,12 @@ struct ConfigDesktopTests {
     }
 
     @Test
-    func `Legacy enabled master key ANDs into both toggles`() throws {
-        // Older files carried a `[desktop]` `enabled` master switch; the
-        // schema no longer writes it but still honors it at the TOML layer
-        // so upgrades behave: `enabled = false` stays fail-closed even when
-        // per-tool toggles say true, while `enabled = true` leaves each
-        // decoded per-tool toggle as written.
-        let base = """
+    func `Retired allow toggles and legacy master key are silently ignored`() throws {
+        // Older files carried `screen_capture_enabled`, `control_enabled`,
+        // and a master `enabled` key. The single-gate contract ignores them
+        // so upgrades load without migration and enablement stays with the
+        // tool-state toggle.
+        let text = """
         [llm]
         default_provider = "mlx"
 
@@ -73,31 +66,36 @@ struct ConfigDesktopTests {
         enabled = true
         model = "gemma-4-9b"
         server_url = "http://localhost:8080"
-        """
-
-        let closed = base + """
 
         [desktop]
         enabled = false
         screen_capture_enabled = true
         control_enabled = true
+        max_image_dimension = 1600
         """
-        let closedConfig = try RuneWeaverConfig(decoding: TOMLParser.parse(closed))
-        #expect(closedConfig.desktop.screenCaptureEnabled == false)
-        #expect(closedConfig.desktop.controlEnabled == false)
-        try closedConfig.validate()
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.desktop.maxImageDimension == 1600)
+        #expect(config.desktop.jpegQuality == 0.75)
+        try config.validate()
 
-        let open = base + """
+        // Wrong-typed retired keys are ignored too, never a validation error.
+        let loose = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
 
         [desktop]
-        enabled = true
-        screen_capture_enabled = true
-        control_enabled = false
+        screen_capture_enabled = "yes"
+        control_enabled = "no"
         """
-        let openConfig = try RuneWeaverConfig(decoding: TOMLParser.parse(open))
-        #expect(openConfig.desktop.screenCaptureEnabled == true)
-        #expect(openConfig.desktop.controlEnabled == false)
-        try openConfig.validate()
+        let looseConfig = try RuneWeaverConfig(decoding: TOMLParser.parse(loose))
+        #expect(looseConfig.desktop.maxImageDimension == 1280)
+        try looseConfig.validate()
     }
 
     @Test
@@ -129,24 +127,38 @@ struct ConfigDesktopTests {
     }
 
     @Test
-    func `Desktop section round-trips through TOML serialization without a master key`() throws {
+    func `Desktop section round-trips through TOML serialization without retired keys`() throws {
         var config = RuneWeaverConfig.default
-        config.desktop.screenCaptureEnabled = true
-        config.desktop.controlEnabled = true
         config.desktop.maxImageDimension = 1600
         config.desktop.jpegQuality = 0.8
         config.desktop.blockedApps = ["Terminal", "Finder"]
 
         let toml = config.renderTOML()
         #expect(toml.contains("[desktop]"))
-        #expect(toml.contains("screen_capture_enabled = true"))
-        #expect(toml.contains("control_enabled = true"))
+        #expect(!toml.contains("screen_capture_enabled"))
+        #expect(!toml.contains("control_enabled"))
+        // Provider and integration sections legitimately persist their own
+        // `enabled` flags, so the retired desktop master key is checked
+        // inside the [desktop] section only.
+        let desktopSection: String
+        if let start = toml.range(of: "[desktop]") {
+            let tail = toml[start.lowerBound...]
+            let body = tail.dropFirst("[desktop]".count)
+            if let next = body.range(of: "\n[") {
+                desktopSection = String(tail[..<next.lowerBound])
+            } else {
+                desktopSection = String(tail)
+            }
+        } else {
+            desktopSection = ""
+        }
+        #expect(!desktopSection.contains("enabled = "))
+        #expect(!desktopSection.contains("screen_capture_enabled"))
+        #expect(!desktopSection.contains("control_enabled"))
         #expect(toml.contains("max_image_dimension = 1600"))
 
         let parsed = try TOMLParser.parse(toml)
         let decoded = try RuneWeaverConfig(decoding: parsed)
-        #expect(decoded.desktop.screenCaptureEnabled == true)
-        #expect(decoded.desktop.controlEnabled == true)
         #expect(decoded.desktop.maxImageDimension == 1600)
         #expect(decoded.desktop.jpegQuality == 0.8)
         #expect(decoded.desktop.blockedApps == ["Terminal", "Finder"])

@@ -35,6 +35,78 @@ public struct IndexSourceStatus: Content, Equatable {
     }
 }
 
+/// Per-source content counts on `GET /index/status`.
+public struct IndexSourceCounts: Content, Equatable {
+    /// Source kind (`"files"`, `"mail"`, or `"messages"`).
+    public let kind: String
+    /// Number of indexed documents from this source.
+    public let documents: Int
+    /// Number of stored chunks belonging to this source.
+    public let chunks: Int
+    /// Total chunk text bytes belonging to this source.
+    public let bytes: Int64
+
+    /// Creates a per-source content row.
+    /// - Parameters:
+    ///   - kind: Source kind token.
+    ///   - documents: Indexed document count.
+    ///   - chunks: Stored chunk count.
+    ///   - bytes: Total chunk text bytes.
+    public init(kind: String, documents: Int = 0, chunks: Int = 0, bytes: Int64 = 0) {
+        self.kind = kind
+        self.documents = documents
+        self.chunks = chunks
+        self.bytes = bytes
+    }
+}
+
+/// Extraction-outcome breakdown row on `GET /index/status`.
+public struct IndexExtractStatusCounts: Content, Equatable {
+    /// Extraction outcome token (`"extracted"`, `"partial"`, and so on).
+    public let status: String
+    /// Number of indexed documents with this outcome.
+    public let documents: Int
+
+    /// Creates an extraction-outcome row.
+    /// - Parameters:
+    ///   - status: Extraction outcome token.
+    ///   - documents: Indexed document count.
+    public init(status: String, documents: Int = 0) {
+        self.status = status
+        self.documents = documents
+    }
+}
+
+/// Latest index run outcome on `GET /index/status`, distilled from the newest
+/// `index`-kind `run_logs` row.
+public struct IndexLastRunStatus: Content, Equatable {
+    /// Terminal (or in-flight) state token.
+    public let status: String
+    /// Documents written by the run, when the summary line carried a count.
+    public let indexed: Int?
+    /// Items examined by the run, when the summary line carried a count.
+    public let scanned: Int?
+    /// Items that could not be processed, when the summary line carried a count.
+    public let errors: Int?
+    /// Instant the run finished (the run log timestamp).
+    public let finishedAt: Date?
+
+    /// Creates a last-run row.
+    /// - Parameters:
+    ///   - status: Run state token.
+    ///   - indexed: Documents written.
+    ///   - scanned: Items examined.
+    ///   - errors: Items that could not be processed.
+    ///   - finishedAt: Instant the run finished.
+    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil) {
+        self.status = status
+        self.indexed = indexed
+        self.scanned = scanned
+        self.errors = errors
+        self.finishedAt = finishedAt
+    }
+}
+
 /// Status snapshot for `GET /index/status`.
 public struct IndexStatusResponse: Content, Equatable {
     /// Whether the background indexer runs at all.
@@ -57,6 +129,12 @@ public struct IndexStatusResponse: Content, Equatable {
     public let sources: [IndexSourceStatus]
     /// Most recent index run failures, newest first, with no content or secrets.
     public let lastErrors: [String]
+    /// Per-source document/chunk/byte aggregates, one row per origin corpus.
+    public let bySource: [IndexSourceCounts]
+    /// Document counts grouped by extraction outcome.
+    public let byExtractStatus: [IndexExtractStatusCounts]
+    /// Latest index run outcome, or nil when no run has been recorded.
+    public let lastRun: IndexLastRunStatus?
 
     /// Creates an index status snapshot.
     /// - Parameters:
@@ -70,6 +148,9 @@ public struct IndexStatusResponse: Content, Equatable {
     ///   - indexAsOf: Last successful watermark, or nil.
     ///   - sources: Per-source enablement rows.
     ///   - lastErrors: Recent run failures, newest first.
+    ///   - bySource: Per-source content aggregates.
+    ///   - byExtractStatus: Extraction-outcome breakdown.
+    ///   - lastRun: Latest run outcome, or nil.
     public init(
         enabled: Bool = false,
         running: Bool = false,
@@ -80,7 +161,10 @@ public struct IndexStatusResponse: Content, Equatable {
         bytes: Int64 = 0,
         indexAsOf: Date? = nil,
         sources: [IndexSourceStatus] = [],
-        lastErrors: [String] = []
+        lastErrors: [String] = [],
+        bySource: [IndexSourceCounts] = [],
+        byExtractStatus: [IndexExtractStatusCounts] = [],
+        lastRun: IndexLastRunStatus? = nil
     ) {
         self.enabled = enabled
         self.running = running
@@ -92,6 +176,9 @@ public struct IndexStatusResponse: Content, Equatable {
         self.indexAsOf = indexAsOf
         self.sources = sources
         self.lastErrors = lastErrors
+        self.bySource = bySource
+        self.byExtractStatus = byExtractStatus
+        self.lastRun = lastRun
     }
 }
 
@@ -107,18 +194,26 @@ public struct IndexStatusResponse: Content, Equatable {
 ///   - stats: Aggregate store stats, or nil when no store is wired.
 ///   - running: Whether a run is in flight.
 ///   - lastErrors: Recent run failures, newest first.
+///   - lastRun: Latest run outcome, or nil when no run has been recorded.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
     stats: IndexStats?,
     running: Bool,
-    lastErrors: [String]
+    lastErrors: [String],
+    lastRun: IndexLastRunStatus? = nil
 ) -> IndexStatusResponse {
     let sources = [
         IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: config.enabled && config.files),
         IndexSourceStatus(kind: IndexSourceKind.mail.rawValue, enabled: config.enabled && config.mail),
         IndexSourceStatus(kind: IndexSourceKind.messages.rawValue, enabled: config.enabled && config.messages)
     ]
+    let bySource = (stats?.bySource ?? []).map { row in
+        IndexSourceCounts(kind: row.source.rawValue, documents: row.documents, chunks: row.chunks, bytes: row.bytes)
+    }
+    let byExtractStatus = (stats?.byExtractStatus ?? []).map { row in
+        IndexExtractStatusCounts(status: row.status.rawValue, documents: row.documents)
+    }
     return IndexStatusResponse(
         enabled: config.enabled,
         running: running,
@@ -129,7 +224,10 @@ func makeIndexStatusResponse(
         bytes: stats?.bytes ?? 0,
         indexAsOf: stats?.indexAsOf,
         sources: sources,
-        lastErrors: lastErrors
+        lastErrors: lastErrors,
+        bySource: bySource,
+        byExtractStatus: byExtractStatus,
+        lastRun: lastRun
     )
 }
 

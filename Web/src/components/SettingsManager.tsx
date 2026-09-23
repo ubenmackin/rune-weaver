@@ -41,13 +41,12 @@ import {
   getTools,
   updateToolState,
   DEFAULT_DESKTOP_BLOCKED_APPS_TEXT,
-  DEFAULT_DESKTOP_CONTROL_ENABLED,
   DEFAULT_DESKTOP_JPEG_QUALITY,
   DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
-  DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED,
   formatBlockedAppsText,
   parseBlockedAppsText,
   type DesktopConfigData,
+  type DesktopSettingsUpdate,
   type EmailAccountData,
   type MediaConfigData,
   type ProviderConfigData,
@@ -448,18 +447,12 @@ export default function SettingsManager() {
   const [browserSaveLoading, setBrowserSaveLoading] = useState(false);
   const [browserModalError, setBrowserModalError] = useState<string | null>(null);
   const browserSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Native desktop vision and gated control ([desktop]): per-tool allow
-  // boundaries plus capture knobs. Both tools always register (visible but
-  // disabled in the tool toggles) and each toggle force-disables its tool
-  // while off; both default off so a stock install stays fail-closed. The
-  // blocked-apps editor holds raw textarea text (one app per line) so blank
-  // lines survive editing and only collapse on save.
-  const [desktopScreenCaptureEnabled, setDesktopScreenCaptureEnabled] = useState(
-    DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED
-  );
-  const [desktopControlEnabled, setDesktopControlEnabled] = useState(
-    DEFAULT_DESKTOP_CONTROL_ENABLED
-  );
+  // Native desktop vision and gated control ([desktop]): capture knobs for
+  // desktop.screenshot plus the blocked-apps list for desktop.action. Each
+  // tool configures from its own modal, so this form holds only the knobs —
+  // tool enablement lives in the tool-state toggles above. The blocked-apps
+  // editor holds raw textarea text (one app per line) so blank lines survive
+  // editing and only collapse on save.
   const [desktopMaxImageDimension, setDesktopMaxImageDimension] = useState<
     number | string
   >(DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION);
@@ -1095,19 +1088,13 @@ export default function SettingsManager() {
     ]
   );
 
-  // Copies one settings fetch into the desktop fields, tolerating an absent
-  // [desktop] section from older engines by keeping the form defaults.
+  // Copies one settings fetch into the desktop knob fields, tolerating an
+  // absent [desktop] section from older engines by keeping the form defaults.
   // Only overwrites sections the engine returns so older engines without
   // desktop leave the form defaults untouched.
   const populateDesktopSettings = useCallback(
     (desktop: DesktopConfigData | undefined | null) => {
       if (!desktop) return;
-      if (typeof desktop.screen_capture_enabled === "boolean") {
-        setDesktopScreenCaptureEnabled(desktop.screen_capture_enabled);
-      }
-      if (typeof desktop.control_enabled === "boolean") {
-        setDesktopControlEnabled(desktop.control_enabled);
-      }
       if (typeof desktop.max_image_dimension === "number") {
         setDesktopMaxImageDimension(desktop.max_image_dimension);
       }
@@ -1121,21 +1108,34 @@ export default function SettingsManager() {
     []
   );
 
-  // Builds the [desktop] delta from the form fields so the full-settings save
-  // and the modal-only save share one shape. Numeric fields preserve the raw
-  // input (including empty/invalid) so the modal validation surfaces range
-  // errors instead of silently coercing back to defaults.
+  // Builds the [desktop] delta from the knob fields so the full-settings save
+  // and the modal-only save share one shape. A per-tool modal sends only its
+  // own knobs (capture bounds for desktop.screenshot, the blocklist for
+  // desktop.action); the full-settings save sends every knob. Enable keys
+  // never travel here — tool enablement lives in the tool-state toggles.
+  // Numeric fields preserve the raw input (including empty/invalid) so the
+  // modal validation surfaces range errors instead of silently coercing back
+  // to defaults.
   const buildDesktopPayload = useCallback(
-    (): DesktopConfigData => ({
-      screen_capture_enabled: desktopScreenCaptureEnabled,
-      control_enabled: desktopControlEnabled,
-      max_image_dimension: Number(desktopMaxImageDimension),
-      jpeg_quality: Number(desktopJpegQuality),
-      blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
-    }),
+    (toolName: string | null = null): DesktopSettingsUpdate => {
+      if (toolName === "desktop.screenshot") {
+        return {
+          max_image_dimension: Number(desktopMaxImageDimension),
+          jpeg_quality: Number(desktopJpegQuality),
+        };
+      }
+      if (toolName === "desktop.action") {
+        return {
+          blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
+        };
+      }
+      return {
+        max_image_dimension: Number(desktopMaxImageDimension),
+        jpeg_quality: Number(desktopJpegQuality),
+        blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
+      };
+    },
     [
-      desktopScreenCaptureEnabled,
-      desktopControlEnabled,
       desktopMaxImageDimension,
       desktopJpegQuality,
       desktopBlockedAppsText,
@@ -1770,25 +1770,29 @@ export default function SettingsManager() {
     }
   };
 
-  // Saves only the [desktop] delta through PUT /settings, mirroring the
-  // media-only save shape so unsaved edits in other tabs survive. Numeric
-  // fields fail closed here through the same shared bounds helper as the
-  // full save instead of coercing to defaults, and the engine live-reloads
-  // capture knobs without a restart.
+  // Saves only the [desktop] delta for the open per-tool modal through PUT
+  // /settings, mirroring the media-only save shape so unsaved edits in other
+  // tabs survive. The screenshot modal validates its capture bounds through
+  // the same shared bounds helper as the full save instead of coercing to
+  // defaults; the control modal carries only the blocklist, which needs no
+  // range check. Each modal sends only its own knobs and never enable keys,
+  // and the engine live-reloads capture knobs without a restart.
   const handleSaveDesktopConfig = async () => {
-    const desktopBoundsError = validateDesktopCaptureBounds(
-      desktopMaxImageDimension,
-      desktopJpegQuality
-    );
-    if (desktopBoundsError) {
-      setDesktopModalError(desktopBoundsError);
-      return;
+    if (configuringToolName !== "desktop.action") {
+      const desktopBoundsError = validateDesktopCaptureBounds(
+        desktopMaxImageDimension,
+        desktopJpegQuality
+      );
+      if (desktopBoundsError) {
+        setDesktopModalError(desktopBoundsError);
+        return;
+      }
     }
     setDesktopSaveLoading(true);
     setDesktopModalError(null);
     try {
       const updated = await updateSettings({
-        desktop: buildDesktopPayload(),
+        desktop: buildDesktopPayload(configuringToolName),
       });
       populateForm(updated);
       setDesktopSaveSuccess(true);
@@ -3019,7 +3023,7 @@ export default function SettingsManager() {
                         {tool.hasConfig && (
                           <button
                             type="button"
-                            className="ghost icon-text-btn"
+                            className="accent-ghost icon-text-btn"
                             onClick={() => {
                               setMediaModalError(null);
                               setMediaSaveSuccess(false);
@@ -4872,17 +4876,16 @@ export default function SettingsManager() {
             </button>
           </div>
         </Modal>
-      ) : configuringToolName === "desktop.screenshot" ||
-      configuringToolName === "desktop.action" ? (
+      ) : configuringToolName === "desktop.screenshot" ? (
         <Modal
-          label="Configure Desktop Vision & Control"
+          label="Configure Desktop Screenshot"
           onClose={() => {
             if (!desktopSaveLoading) setConfiguringToolName(null);
           }}
           containerClassName="modal-container"
         >
           <div className="modal-header">
-            <h3>Configure Desktop Vision & Control</h3>
+            <h3>Configure Desktop Screenshot</h3>
             <button
               type="button"
               className="icon-button"
@@ -4910,57 +4913,11 @@ export default function SettingsManager() {
             )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Both tools always appear in the tool toggles, but each runs only
-              when its gate here is on: <code>desktop.screenshot</code>{" "}
-              (read-only capture) stays force-disabled while screen capture is
-              off, and <code>desktop.action</code> (approval-gated control)
-              stays force-disabled while control is off. Both gates ship off by
-              default, an open gate still leaves the tool disabled until you
-              enable it in the tool toggles above, and captures stay in memory
+              Read-only display or app-window capture with downscaled JPEG plus
+              coordinate metadata for control actions. Captures stay in memory
               for the turn with only the content hash plus dimensions retained
               afterwards.
             </p>
-
-            {/* Allow-boundary toggles */}
-            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
-                  <span>Screenshot (desktop.screenshot)</span>
-                </h4>
-                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={desktopScreenCaptureEnabled}
-                    onChange={(e) => setDesktopScreenCaptureEnabled(e.target.checked)}
-                  />
-                  <span>Enabled</span>
-                </label>
-              </div>
-              <p className="muted text-sm" style={{ margin: 0 }}>
-                Read-only display or app-window capture with downscaled JPEG plus
-                coordinate metadata for control actions.
-              </p>
-            </div>
-
-            <div style={{ padding: "14px", borderRadius: "8px", border: "1px solid var(--border-color, #2d3748)", marginBottom: "16px", backgroundColor: "var(--bg-secondary, #141822)" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
-                <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
-                  <span>Control (desktop.action)</span>
-                </h4>
-                <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "0.85rem", cursor: "pointer" }}>
-                  <input
-                    type="checkbox"
-                    checked={desktopControlEnabled}
-                    onChange={(e) => setDesktopControlEnabled(e.target.checked)}
-                  />
-                  <span>Enabled</span>
-                </label>
-              </div>
-              <p className="muted text-sm" style={{ margin: 0 }}>
-                Approval-gated mouse, keyboard, and app-switch actions. Every batch
-                parks in the approvals inbox and never runs without approval.
-              </p>
-            </div>
 
             {/* Capture knobs */}
             <div className="form-row" style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
@@ -5007,6 +4964,66 @@ export default function SettingsManager() {
                 </span>
               </div>
             </div>
+          </div>
+          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setConfiguringToolName(null)}
+              disabled={desktopSaveLoading}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary"
+              onClick={() => void handleSaveDesktopConfig()}
+              disabled={desktopSaveLoading}
+            >
+              {desktopSaveLoading ? "Saving…" : "Save Configuration"}
+            </button>
+          </div>
+        </Modal>
+      ) : configuringToolName === "desktop.action" ? (
+        <Modal
+          label="Configure Desktop Control"
+          onClose={() => {
+            if (!desktopSaveLoading) setConfiguringToolName(null);
+          }}
+          containerClassName="modal-container"
+        >
+          <div className="modal-header">
+            <h3>Configure Desktop Control</h3>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => {
+                if (!desktopSaveLoading) setConfiguringToolName(null);
+              }}
+              disabled={desktopSaveLoading}
+              aria-label="Close"
+            >
+              <CloseIcon size={16} />
+            </button>
+          </div>
+          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
+            {desktopModalError && (
+              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <AlertTriangleIcon size={16} />
+                <span>{desktopModalError}</span>
+              </div>
+            )}
+            {desktopSaveSuccess && (
+              <div className="success-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                <CheckIcon size={16} />
+                <span>Desktop settings saved!</span>
+              </div>
+            )}
+
+            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
+              Approval-gated mouse, keyboard, and app-switch actions. Every batch
+              parks in the approvals inbox and never runs without approval.
+            </p>
 
             {/* Blocked apps */}
             <div className="form-group" style={{ marginBottom: "10px" }}>

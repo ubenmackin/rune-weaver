@@ -1,12 +1,12 @@
 // Rune Weaver Dashboard — Local index status dashboard and policy form.
 //
 // The status dashboard (Memory → Index Status) owns Run/Cancel/Prune/Reset,
-// the stat cards, and frontend-only SVG/CSS charts computed from the existing
-// GET /index/status fields; the policy form (Settings → Indexing) owns the
-// enable/sources/excludes/caps fields with its own Save, so neither surface
-// duplicates the other's control set. Status freshness comes from the shared
-// WebSocket run broadcasts — there is no manual Refresh button — and live
-// progress rides the `tool_progress` frames, so the panel never invents a
+// the stat cards, the last-run strip, and frontend-only SVG/CSS charts computed
+// from the GET /index/status fields; the policy form (Settings → Indexing)
+// owns the enable/sources/excludes/caps fields with its own Save, so neither
+// surface duplicates the other's control set. Status freshness comes from the
+// shared WebSocket run broadcasts — there is no manual Refresh button — and
+// live progress rides the `tool_progress` frames, so the panel never invents a
 // completion fraction the engine cannot supply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -25,7 +25,10 @@ import {
   runIndex,
   updateSettings,
   type IndexConfigData,
+  type IndexExtractStatusCounts,
+  type IndexLastRunStatus,
   type IndexRunResponse,
+  type IndexSourceCounts,
   type IndexStatusResponse,
 } from "../api";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
@@ -81,6 +84,9 @@ const INDEX_PHASE_COPY: Record<string, string> = {
 const CHART_VECTOR_COLOR = "var(--accent-purple)";
 const CHART_KEYWORD_COLOR = "var(--accent-blue)";
 const CHART_TRACK_COLOR = "var(--border-color)";
+// Extraction-outcome bars reuse the keyword blue so the breakdown reads as a
+// second member of the same chart family without inventing a new hue per status.
+const CHART_EXTRACT_COLOR = "var(--accent-blue)";
 
 // Donut ring geometry in SVG user units: radius 40 inside a 100×100 viewBox
 // with a 10-unit stroke leaves an inner hole wide enough for the ring to read
@@ -137,6 +143,92 @@ export function indexDonutArcs(
   const vectorDash = total > 0 ? (vectorCount / total) * circumference : 0;
   const keywordDash = total > 0 ? (keywordCount / total) * circumference : 0;
   return { circumference, vectorDash, keywordDash };
+}
+
+// Floors a positive finite count to an integer, degrading anything else to
+// zero so status totals never render NaN, Infinity, negatives, or fractions.
+export function floorPositive(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+// Per-source content row joining enablement with real totals: enablement comes
+// from the status sources list while documents/chunks/bytes come from the
+// additive bySource aggregates. A source missing from either side degrades to
+// disabled or zero rather than disappearing, so older engines without the
+// aggregates still render the canonical Files/Mail/Messages rows.
+export interface IndexSourceContentRow {
+  kind: string;
+  enabled: boolean;
+  documents: number;
+  chunks: number;
+  bytes: number;
+}
+
+// Resolves the canonical Files/Mail/Messages rows with real totals, so the
+// bars scale by content instead of rendering binary on/off widths.
+export function resolveIndexSourceContent(
+  status: Pick<IndexStatusResponse, "sources" | "bySource"> | null | undefined,
+): IndexSourceContentRow[] {
+  const sources = status?.sources ?? [];
+  const totals = status?.bySource ?? [];
+  const enabledByKind = new Map(sources.map((source) => [source.kind, source.enabled]));
+  const totalsByKind = new Map<string, IndexSourceCounts>(
+    totals.map((row) => [row.kind, row]),
+  );
+  return INDEX_SOURCES.map((source) => {
+    const totalsRow = totalsByKind.get(source.kind);
+    return {
+      kind: source.kind,
+      enabled: enabledByKind.get(source.kind) ?? false,
+      documents: floorPositive(totalsRow?.documents),
+      chunks: floorPositive(totalsRow?.chunks),
+      bytes: floorPositive(totalsRow?.bytes),
+    };
+  });
+}
+
+// Bar width for one chart row scaled by its document share of the largest
+// bucket, so the longest bar always fills the track and the rest read as real
+// proportions instead of binary on/off fills. Shared by the per-source and
+// extraction-outcome charts, whose scaling rule is identical, keeping
+// single-document buckets visible next to large ones.
+export function indexSourceBarWidth(documents: number, maxDocuments: number): string {
+  const docs = Number.isFinite(documents) && documents > 0 ? documents : 0;
+  const max = Number.isFinite(maxDocuments) && maxDocuments > 0 ? maxDocuments : 0;
+  if (max <= 0 || docs <= 0) return "0%";
+  return `${Math.min(100, Math.max(4, Math.round((docs / max) * 100)))}%`;
+}
+
+// Display label for an extraction-outcome token, falling back to the engine's
+// wire token so an unknown future status still renders honestly.
+export function extractStatusLabel(status: string): string {
+  return status && status.trim() ? status.trim() : "unknown";
+}
+
+// One-line human summary of the last index run for the strip: status plus the
+// outcome counts and the finish time, omitting any count the summary line did
+// not carry so a drifted payload still renders its status and time.
+export function describeIndexLastRun(lastRun: IndexLastRunStatus | null | undefined): string {
+  if (!lastRun) return "No runs yet";
+  const parts: string[] = [`Last run ${lastRun.status}`];
+  if (typeof lastRun.indexed === "number" && Number.isFinite(lastRun.indexed)) {
+    parts.push(`${lastRun.indexed} indexed`);
+  }
+  if (typeof lastRun.scanned === "number" && Number.isFinite(lastRun.scanned)) {
+    parts.push(`${lastRun.scanned} scanned`);
+  }
+  if (typeof lastRun.errors === "number" && Number.isFinite(lastRun.errors)) {
+    parts.push(`${lastRun.errors} errors`);
+  }
+  if (lastRun.finishedAt != null) {
+    const age = formatIndexAge(lastRun.finishedAt);
+    if (age !== "Never indexed") {
+      parts.push(`finished ${age}`);
+    }
+  }
+  return parts.join(" · ");
 }
 
 // Extracts the phase token from a live progress frame message
@@ -219,6 +311,19 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const vectorChunks = status?.vectorChunks ?? 0;
   const keywordChunks = status?.keywordChunks ?? 0;
   const donut = indexDonutArcs(vectorChunks, keywordChunks, DONUT_RADIUS);
+  // Real per-source totals for the bars, in canonical Files/Mail/Messages
+  // order; older engines without the aggregates degrade to zeroed rows.
+  const sourceContent = resolveIndexSourceContent(status);
+  const maxSourceDocuments = Math.max(0, ...sourceContent.map((row) => row.documents));
+  // Extraction-outcome breakdown for the second chart, largest bucket first so
+  // the dominant outcome anchors the track scaling. Document counts are
+  // sanitized through floorPositive before sort/max, matching
+  // resolveIndexSourceContent, so malformed/negative/NaN payloads degrade to
+  // zero instead of misordering the rows or yielding NaN.
+  const extractRows: IndexExtractStatusCounts[] = [...(status?.byExtractStatus ?? [])]
+    .map((row) => ({ ...row, documents: floorPositive(row.documents) }))
+    .sort((left, right) => right.documents - left.documents);
+  const maxExtractDocuments = Math.max(0, ...extractRows.map((row) => row.documents));
 
   const loadStatus = useCallback(async () => {
     setError(null);
@@ -447,6 +552,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             <span>{action === "reset" ? "Clearing…" : "Reset Index"}</span>
           </button>
         </div>
+        {/* Disabled-index hint under the Run row; prune/reset stay independent
+            of the enabled flag. */}
+        {status?.enabled === false ? (
+          <p className="muted text-sm">
+            Indexing is off — turn it on in Settings → Indexing to run a pass.
+          </p>
+        ) : null}
       </div>
 
       {/* Live phase steps + shimmer while a run is in flight: the engine
@@ -499,7 +611,8 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       )}
 
       {/* Stat cards middle: size, counts with the vector/keyword split,
-          watermark age, per-source pills, and recent failures. */}
+          prominent watermark age, per-source pills, last-run strip, and recent
+          failures. */}
       <div className="index-status-section">
         <h3>Status</h3>
         <div className="index-status-line">
@@ -514,6 +627,16 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
 
         {status ? (
           <>
+            {/* Last-run strip distilled from the newest index-kind run log row:
+                status plus indexed/scanned/errors and the finish time, so the
+                latest outcome reads without opening run history. */}
+            <div
+              className="index-last-run"
+              data-testid="index-last-run"
+              style={{ marginTop: 12 }}
+            >
+              <span className="muted text-sm">{describeIndexLastRun(status.lastRun ?? null)}</span>
+            </div>
             <div
               className="index-stat-cards"
               style={{
@@ -544,13 +667,22 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   {status.vectorChunks} vector · {status.keywordChunks} keyword
                 </div>
               </div>
-              <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
+              <div
+                className="card index-stat-card index-watermark-card"
+                data-testid="index-watermark-card"
+                style={{
+                  padding: 12,
+                  marginBottom: 0,
+                  borderWidth: 2,
+                  borderStyle: "solid",
+                }}
+              >
                 <div className="muted text-xs">Last indexed</div>
-                <div
-                  style={{ fontSize: 16, fontWeight: 700, marginTop: 2 }}
-                  title={formatIndexAsOf(status.indexAsOf)}
-                >
+                <div style={{ fontSize: 22, fontWeight: 800, marginTop: 2 }}>
                   {formatIndexAge(status.indexAsOf)}
+                </div>
+                <div className="muted text-xs" style={{ marginTop: 2 }}>
+                  {formatIndexAsOf(status.indexAsOf)}
                 </div>
               </div>
             </div>
@@ -587,9 +719,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         )}
       </div>
 
-      {/* Charts bottom: frontend-only SVG donut (vector vs keyword) plus CSS
-          bars for per-source enablement — plain markup computed from the
-          status payload, no chart dependency and no extra route. */}
+      {/* Charts bottom: frontend-only SVG donut (vector vs keyword), CSS bars
+          for real per-source content (documents/chunks/bytes by source), and
+          bars for the extraction-outcome breakdown — plain markup computed
+          from the status payload, no chart dependency and no extra route. */}
       {status ? (
         <div className="index-charts-section">
           <h3>Charts</h3>
@@ -681,7 +814,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 gap: 8,
               }}
             >
-              {status.sources.map((source) => (
+              {sourceContent.map((source) => (
                 <div
                   key={source.kind}
                   style={{ display: "flex", alignItems: "center", gap: 8 }}
@@ -700,19 +833,69 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   >
                     <div
                       data-testid={`index-bar-${source.kind}`}
+                      aria-label={`${sourceLabel(source.kind)} ${source.documents} documents`}
                       style={{
-                        width: source.enabled ? "100%" : "0%",
+                        width: indexSourceBarWidth(source.documents, maxSourceDocuments),
                         height: "100%",
                         borderRadius: 5,
                         background: CHART_VECTOR_COLOR,
                       }}
                     />
                   </div>
-                  <span className="text-xs muted" style={{ width: 24, textAlign: "right" }}>
-                    {source.enabled ? "On" : "Off"}
+                  <span className="text-xs muted" style={{ minWidth: 120, textAlign: "right" }}>
+                    {source.documents} docs · {source.chunks} chunks · {formatIndexBytes(source.bytes)}
                   </span>
                 </div>
               ))}
+            </div>
+
+            <div
+              data-testid="index-extract-bars"
+              style={{
+                flex: "1 1 240px",
+                minWidth: 200,
+                display: "flex",
+                flexDirection: "column",
+                gap: 8,
+              }}
+            >
+              {extractRows.length > 0 ? (
+                extractRows.map((row) => (
+                  <div
+                    key={row.status}
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                  >
+                    <span className="text-xs muted" style={{ width: 96 }}>
+                      {extractStatusLabel(row.status)}
+                    </span>
+                    <div
+                      style={{
+                        flex: 1,
+                        height: 10,
+                        borderRadius: 5,
+                        background: CHART_TRACK_COLOR,
+                        overflow: "hidden",
+                      }}
+                    >
+                      <div
+                        data-testid={`index-extract-bar-${row.status}`}
+                        aria-label={`${extractStatusLabel(row.status)} ${row.documents} documents`}
+                        style={{
+                          width: indexSourceBarWidth(row.documents, maxExtractDocuments),
+                          height: "100%",
+                          borderRadius: 5,
+                          background: CHART_EXTRACT_COLOR,
+                        }}
+                      />
+                    </div>
+                    <span className="text-xs muted" style={{ minWidth: 64, textAlign: "right" }}>
+                      {row.documents} docs
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <span className="text-xs muted">No extraction breakdown yet</span>
+              )}
             </div>
           </div>
         </div>

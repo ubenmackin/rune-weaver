@@ -447,3 +447,160 @@ struct IndexSettingsDTOTests {
         #expect(object["describe_images_with_llm"] as? Bool == true)
     }
 }
+
+// MARK: - Live construction on settings save
+
+/// Covers the settings-save reconciliation that swaps the live store and
+/// coordinator without a restart: enable-from-disabled, `db_path` moves,
+/// disable-while-running teardown, and fail-closed construction.
+@Suite("Index Live Construction")
+struct IndexLiveConstructionTests {
+    /// Makes an isolated directory for one test's index databases.
+    private func makeScratchDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    /// Builds a persisted config with the index policy applied.
+    private func makeSavedConfig(enabled: Bool, dbPath: String) -> RuneWeaverConfig {
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(enabled: enabled, files: true, mail: false, messages: false, roots: [], dbPath: dbPath)
+        return config
+    }
+
+    /// Waits until the coordinator reports a run in flight.
+    private func waitForRunning(_ coordinator: IndexCoordinator) async {
+        for _ in 0 ..< 100 {
+            if await coordinator.isRunning {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    @Test
+    func `Enable from disabled constructs live so run succeeds without restart`() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("index.db").path
+
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext()
+            registerRuneWeaverRoutes(app)
+
+            // No coordinator wired yet, so the control surface fails closed.
+            let before = try await indexRequest(app: app, method: .POST, path: "/index/run")
+            #expect(before.status == .serviceUnavailable)
+
+            try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: dbPath), context: app.runeWeaver)
+
+            // The swap landed live: the same app now runs without a restart.
+            let run = try await indexRequest(app: app, method: .POST, path: "/index/run")
+            #expect(run.status == .ok)
+            let summary = try run.content.decode(IndexRunResponse.self)
+            #expect(summary.status == IndexRunStatus.ok.rawValue)
+            let livePath = await app.runeWeaver.indexStore?.dbPath
+            #expect(livePath == dbPath)
+        }
+    }
+
+    @Test
+    func `Db path change constructs against the new path and swaps`() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let firstPath = directory.appendingPathComponent("first.db").path
+        let secondPath = directory.appendingPathComponent("second.db").path
+
+        let context = makeIndexTestContext()
+        try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: firstPath), context: context)
+        let firstCoordinator = context.indexCoordinator
+        #expect(firstCoordinator != nil)
+        #expect(await context.indexStore?.dbPath == firstPath)
+
+        try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: secondPath), context: context)
+        #expect(await context.indexStore?.dbPath == secondPath)
+        // A new generation serves the new path rather than reusing the old one.
+        #expect(context.indexCoordinator !== firstCoordinator)
+
+        let summary = await context.indexCoordinator?.run(trigger: .onDemand)
+        #expect(summary?.status == .ok)
+    }
+
+    @Test
+    func `Same db path refreshes policy without rebuilding`() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("index.db").path
+
+        let context = makeIndexTestContext()
+        try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: dbPath), context: context)
+        let coordinator = context.indexCoordinator
+        #expect(coordinator != nil)
+
+        var refreshed = makeSavedConfig(enabled: true, dbPath: dbPath)
+        refreshed.index.mail = true
+        try await reconcileLiveIndexPolicy(savedConfig: refreshed, context: context)
+        #expect(context.indexCoordinator === coordinator)
+        #expect(await context.indexStore?.dbPath == dbPath)
+    }
+
+    @Test
+    func `Disable cancels the in-flight run then tears down`() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("index.db").path
+        let store = DocIndexStore(dbPath: dbPath)
+        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+            for _ in 0 ..< 200 {
+                if isCancelled() {
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 0)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [slowStage],
+            store: store
+        )
+        let context = makeIndexTestContext(coordinator: coordinator, store: store)
+
+        let runTask = Task { await coordinator.run(trigger: .onDemand) }
+        await waitForRunning(coordinator)
+        #expect(await coordinator.isRunning)
+
+        try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: false, dbPath: dbPath), context: context)
+
+        let summary = await runTask.value
+        #expect(summary.status == .cancelled)
+        #expect(context.indexCoordinator == nil)
+        #expect(context.indexStore == nil)
+    }
+
+    @Test
+    func `Bad db path fails closed with the old index intact`() async throws {
+        let directory = try makeScratchDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let goodPath = directory.appendingPathComponent("good.db").path
+        // A directory is not a usable SQLite file, so probing it must fail.
+        let badPath = directory.path
+
+        let context = makeIndexTestContext()
+        try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: goodPath), context: context)
+        #expect(await context.indexStore?.dbPath == goodPath)
+
+        do {
+            try await reconcileLiveIndexPolicy(savedConfig: makeSavedConfig(enabled: true, dbPath: badPath), context: context)
+            #expect(Bool(false), "a bad db_path must throw before mutating the live context")
+        } catch let abort as Abort {
+            #expect(abort.status == .badRequest)
+        }
+        // The previous generation keeps serving after the rejected swap.
+        #expect(await context.indexStore?.dbPath == goodPath)
+        #expect(context.indexCoordinator != nil)
+        let summary = await context.indexCoordinator?.run(trigger: .onDemand)
+        #expect(summary?.status == .ok)
+    }
+}

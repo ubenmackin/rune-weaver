@@ -1548,15 +1548,10 @@ export interface IndexSettingsUpdate {
 // Native desktop vision and gated control policy mirroring the engine
 // `DesktopConfig` (Sources/RuneWeaverCore/Config.swift). Both desktop tools
 // always register so they stay visible in `GET /tools`, but they ship
-// disabled and each toggle here is a fail-closed allow boundary: while off,
-// the server force-disables that tool regardless of tool-state toggles; while
-// on, the tool still ships disabled until enabled in the tool-state toggles.
-// Capture and control both default off so a stock install never exposes
-// approval-free screen capture. Only capture knobs and the blocklist live
-// here; no secret ever appears.
+// disabled until enabled in the tool-state toggles. Only capture knobs and
+// the blocklist live here; enablement lives in the tool-state toggles and no
+// secret ever appears.
 export interface DesktopConfigData {
-  screen_capture_enabled: boolean;
-  control_enabled: boolean;
   max_image_dimension: number;
   jpeg_quality: number;
   blocked_apps: string[];
@@ -1567,16 +1562,12 @@ export interface DesktopConfigData {
 // key leaves the rest of the stored `[desktop]` section untouched; the JSON
 // keys are the snake_case names the engine persists.
 export interface DesktopSettingsUpdate {
-  screen_capture_enabled?: boolean;
-  control_enabled?: boolean;
   max_image_dimension?: number;
   jpeg_quality?: number;
   blocked_apps?: string[];
 }
 
 // Manual mirrors of DesktopConfig defaults in Sources/RuneWeaverCore/Config.swift.
-export const DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED = false;
-export const DEFAULT_DESKTOP_CONTROL_ENABLED = false;
 export const DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION = 1280;
 export const DEFAULT_DESKTOP_JPEG_QUALITY = 0.75;
 
@@ -1621,8 +1612,6 @@ export function formatBlockedAppsText(apps: string[] | undefined | null): string
 // Default desktop policy mirroring DesktopConfig so a fresh form matches the
 // boundary the engine enforces before the first settings fetch.
 export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
-  screen_capture_enabled: DEFAULT_DESKTOP_SCREEN_CAPTURE_ENABLED,
-  control_enabled: DEFAULT_DESKTOP_CONTROL_ENABLED,
   max_image_dimension: DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
   jpeg_quality: DEFAULT_DESKTOP_JPEG_QUALITY,
   blocked_apps: [...DEFAULT_DESKTOP_BLOCKED_APPS],
@@ -1634,6 +1623,35 @@ export const DEFAULT_DESKTOP_CONFIG: DesktopConfigData = {
 export interface IndexSourceStatus {
   kind: string;
   enabled: boolean;
+}
+
+// Per-source content counts on `GET /index/status`: real document, chunk, and
+// byte totals grouped by origin corpus. Optional because older engines predate
+// the aggregates; absent degrades to an empty breakdown instead of failing.
+export interface IndexSourceCounts {
+  kind: string;
+  documents: number;
+  chunks: number;
+  bytes: number;
+}
+
+// Extraction-outcome breakdown row on `GET /index/status`: document counts
+// grouped by extraction outcome. Optional for back-compat with older engines.
+export interface IndexExtractStatusCounts {
+  status: string;
+  documents: number;
+}
+
+// Latest index run outcome on `GET /index/status`, distilled server-side from
+// the newest `index`-kind run log row. Counts are nullable because a drifted
+// summary line still reports status and finish time; finishedAt keeps the dual
+// wire shape (ISO-8601 string or Unix seconds) normalized via parseRunTimestamp.
+export interface IndexLastRunStatus {
+  status: string;
+  indexed?: number | null;
+  scanned?: number | null;
+  errors?: number | null;
+  finishedAt?: string | number | null;
 }
 
 // Status snapshot for `GET /index/status`.
@@ -1651,6 +1669,14 @@ export interface IndexStatusResponse {
   indexAsOf?: string | number | null;
   sources: IndexSourceStatus[];
   lastErrors: string[];
+  // Per-source content aggregates and extraction-outcome breakdown. Optional
+  // because older engines predate the breakdowns; absent means unknown and the
+  // charts degrade to an empty state instead of failing.
+  bySource?: IndexSourceCounts[];
+  byExtractStatus?: IndexExtractStatusCounts[];
+  // Latest run outcome, or null when no run has been recorded. Optional for
+  // back-compat with older engines that predate the strip.
+  lastRun?: IndexLastRunStatus | null;
 }
 
 // Outcome of `POST /index/run`.

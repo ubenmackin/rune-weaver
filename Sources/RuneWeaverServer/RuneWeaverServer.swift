@@ -220,6 +220,14 @@ final class TurnTaskBox: Sendable {
     }
 }
 
+/// Live document index pair swapped by settings saves without a restart.
+private struct LiveIndexPair: Sendable {
+    /// Document store backing status, prune, and reset, or nil when unwired.
+    var store: DocIndexStore?
+    /// Coordinator sequencing the enabled source stages, or nil when unwired.
+    var coordinator: IndexCoordinator?
+}
+
 /// Shared engine collaborators held in Vapor application storage.
 public final class ServerContext: Sendable {
     /// Loopback binding plus port.
@@ -264,12 +272,32 @@ public final class ServerContext: Sendable {
     public let sandboxCleanup: SandboxCleanupScheduler
     /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
     public let browserConfig: BrowserConfig
+    /// Active chat provider backing vision description for live index rebuilds.
+    /// Stored at boot so a settings save can resolve the vision stage the same
+    /// way boot does without reaching back into the orchestrator.
+    public let servingLLM: (any LLMProvider)?
+    /// Live document index pair. Held behind a lock because settings PUTs swap
+    /// the store and coordinator in place while this class stays Sendable,
+    /// mirroring `desktopConfigBox`.
+    private let liveIndexBox: OSAllocatedUnfairLock<LiveIndexPair>
     /// Local document index coordinator backing the `/index` routes, or nil when
-    /// indexing is not wired.
-    public let indexCoordinator: IndexCoordinator?
+    /// indexing is not wired. Swapped live by settings saves without a restart.
+    /// Read-only by design: the store and coordinator always move as one
+    /// generation through `setLiveIndex`, and readers needing both together
+    /// use `liveIndexSnapshot`, so no caller can land a half-swapped pair.
+    public var indexCoordinator: IndexCoordinator? {
+        liveIndexBox.withLock { $0.coordinator }
+    }
+
     /// Local document index store backing status, prune, and reset, or nil when
-    /// indexing is not wired.
-    public let indexStore: DocIndexStore?
+    /// indexing is not wired. Swapped live by settings saves without a restart.
+    /// Read-only by design: the store and coordinator always move as one
+    /// generation through `setLiveIndex`, and readers needing both together
+    /// use `liveIndexSnapshot`, so no caller can land a half-swapped pair.
+    public var indexStore: DocIndexStore? {
+        liveIndexBox.withLock { $0.store }
+    }
+
     /// Owner bearer verifier, or nil for the no-auth loopback posture.
     public let auth: ServerAuth?
     /// Shared Playwright gateway reused across browser live-reloads so a settings PUT
@@ -293,12 +321,11 @@ public final class ServerContext: Sendable {
     /// Hermetic desktop control bridge preserved across live-reloads so a
     /// settings PUT refreshes control knobs without dropping test doubles.
     public let desktopControlBridge: (any DesktopControlling)?
-    /// Live `[desktop]` allow-boundary policy. Held behind a lock because
-    /// settings PUTs refresh it in place while this class stays Sendable;
-    /// `restoreToolStates` reads it on every reconcile so a toggle turned
-    /// off always wins over persisted tool-state rows.
+    /// Live `[desktop]` capture policy. Held behind a lock because
+    /// settings PUTs refresh it in place while this class stays Sendable.
     private let desktopConfigBox: OSAllocatedUnfairLock<DesktopConfig>
-    /// Live `[desktop]` policy supplying the desktop allow gates.
+    /// Live `[desktop]` policy carrying capture knobs (dimensions, quality,
+    /// blocklist). Enablement flows solely through the tool-state toggle.
     public var desktopConfig: DesktopConfig {
         get { desktopConfigBox.withLock { $0 } }
         set { desktopConfigBox.withLock { $0 = newValue } }
@@ -338,6 +365,7 @@ public final class ServerContext: Sendable {
         browserConfig: BrowserConfig = BrowserConfig(),
         indexCoordinator: IndexCoordinator? = nil,
         indexStore: DocIndexStore? = nil,
+        servingLLM: (any LLMProvider)? = nil,
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -382,8 +410,8 @@ public final class ServerContext: Sendable {
         self.sandboxConfig = sandboxConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
-        self.indexCoordinator = indexCoordinator
-        self.indexStore = indexStore
+        self.servingLLM = servingLLM
+        self.liveIndexBox = OSAllocatedUnfairLock(initialState: LiveIndexPair(store: indexStore, coordinator: indexCoordinator))
         self.auth = auth
         self.browserGateway = browserGateway
         self.searchTransport = searchTransport
@@ -404,11 +432,9 @@ public final class ServerContext: Sendable {
         )
     }
 
-    /// Reapplies every persisted tool toggle onto the live bus, then enforces
-    /// the `[desktop]` allow boundary: stored intent wins over fresh
-    /// registration defaults, and a `[desktop]` toggle that is off always
-    /// wins over a stored enable row, so hand-edited configs, legacy
-    /// fail-closed installs, and settings toggles turned off stay closed.
+    /// Reapplies every persisted tool toggle onto the live bus.
+    /// Stored intent wins over fresh registration defaults, and the
+    /// tool-state toggle is the sole authority for desktop tools.
     public func restoreToolStates(forceReload: Bool = false) async {
         let stored = await toolStates.loadAll(forceReload: forceReload)
         for (name, enabled) in stored {
@@ -418,7 +444,23 @@ public final class ServerContext: Sendable {
                 await toolBus.disableTool(named: name)
             }
         }
-        await DesktopTools.enforceConfigGates(from: desktopConfig, on: toolBus)
+    }
+
+    /// Swaps the live document index pair atomically so status, run, cancel,
+    /// prune, and reset observe one consistent generation without a restart.
+    /// - Parameters:
+    ///   - store: Document store to serve, or nil to unwire.
+    ///   - coordinator: Coordinator to serve, or nil to unwire.
+    public func setLiveIndex(store: DocIndexStore?, coordinator: IndexCoordinator?) {
+        liveIndexBox.withLock { $0 = LiveIndexPair(store: store, coordinator: coordinator) }
+    }
+
+    /// Atomically snapshots the live document index pair so concurrent PUTs
+    /// observe one consistent generation: the coordinator and store always
+    /// belong together, never coordinator from gen A with store from gen B.
+    /// - Returns: The live store and coordinator as one generation.
+    public func liveIndexSnapshot() -> (store: DocIndexStore?, coordinator: IndexCoordinator?) {
+        liveIndexBox.withLock { ($0.store, $0.coordinator) }
     }
 
     /// Builds a context wired for live approval prompts over WebSocket.
@@ -544,6 +586,7 @@ public final class ServerContext: Sendable {
             browserConfig: browserConfig,
             indexCoordinator: indexCoordinator,
             indexStore: indexStore,
+            servingLLM: llm,
             auth: auth,
             browserGateway: browserGateway,
             searchTransport: searchTransport,
@@ -556,17 +599,7 @@ public final class ServerContext: Sendable {
             desktopControlBridge: desktopControlBridge,
             desktopConfig: desktopConfig
         )
-        reclaimSandboxDetonationMachines(config: sandboxConfig)
-        await installLiveApprovalHandler(
-            bus: bus,
-            approvals: context.approvals,
-            hub: context.hub,
-            onApprovalRequested: onApprovalRequested
-        )
-        // Stored toggles win over fresh registration defaults so restarts
-        // restore operator intent; tools registered after `make` (builtin
-        // plugins in the serve path) re-apply via `restoreToolStates`.
-        await context.restoreToolStates()
+        await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context
     }
 
@@ -686,6 +719,28 @@ private func resolvePluginStack(
         _ = await pDiscovery.discoverAndSync(toolBus: bus)
     }
     return ResolvedPluginStack(store: pStore, states: tStates, discovery: pDiscovery)
+}
+
+/// Wires live approval prompts and restores persisted tool toggles on a built context.
+/// Keeps `make` within the body-length gate by owning the boot tail that must run
+/// after construction: orphaned detonation reclamation, bus approval handler
+/// install, then stored-toggle restore so restarts honor operator intent.
+private func finalizeServerContext(
+    _ context: ServerContext,
+    sandboxConfig: SandboxConfig,
+    onApprovalRequested: (@Sendable (PermissionRequest) async -> Void)?
+) async {
+    reclaimSandboxDetonationMachines(config: sandboxConfig)
+    await installLiveApprovalHandler(
+        bus: context.toolBus,
+        approvals: context.approvals,
+        hub: context.hub,
+        onApprovalRequested: onApprovalRequested
+    )
+    // Stored toggles win over fresh registration defaults so restarts
+    // restore operator intent; tools registered after `make` (builtin
+    // plugins in the serve path) re-apply via `restoreToolStates`.
+    await context.restoreToolStates()
 }
 
 /// Storage key for the shared ``ServerContext``.

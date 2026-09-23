@@ -291,8 +291,8 @@ struct ServeCommand: AsyncParsableCommand {
             await context.toolBus.register(tool: tool, isEnabled: isEnabled)
         }
         // Registration preserves live state now, but re-apply persisted
-        // toggles plus the desktop allow gates anyway; the cached load makes
-        // this a memory-only pass after the boot hydration in `make`.
+        // toggles anyway; the cached load makes this a memory-only pass after
+        // the boot hydration in `make`.
         await context.restoreToolStates(forceReload: false)
         // Re-snapshot the live service registry so drift between the startup
         // preview and the serving bus surfaces instead of silently omitting

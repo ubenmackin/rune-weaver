@@ -439,6 +439,85 @@ struct DocIndexStoreTests {
     }
 
     @Test
+    func `Per-source and extract-status aggregates group real counts`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let firstFiles = try await store.upsertDocument(makeDocument(
+            externalID: "files-a",
+            contentHash: "hash-files-a",
+            extractStatus: .extracted
+        ))
+        _ = try await store.upsertChunks(
+            documentID: firstFiles.id,
+            chunks: [
+                IndexedChunk(documentID: firstFiles.id, ordinal: 0, text: "first files chunk one"),
+                IndexedChunk(documentID: firstFiles.id, ordinal: 1, text: "first files chunk two")
+            ]
+        )
+        let secondFiles = try await store.upsertDocument(makeDocument(
+            externalID: "files-b",
+            contentHash: "hash-files-b",
+            extractStatus: .partial
+        ))
+        _ = try await store.upsertChunks(
+            documentID: secondFiles.id,
+            chunks: [IndexedChunk(documentID: secondFiles.id, ordinal: 0, text: "second files chunk")]
+        )
+        let mail = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "mail-a",
+            contentHash: "hash-mail-a",
+            extractStatus: .failed
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mail.id,
+            chunks: [
+                IndexedChunk(documentID: mail.id, ordinal: 0, text: "mail chunk one"),
+                IndexedChunk(documentID: mail.id, ordinal: 1, text: "mail chunk two"),
+                IndexedChunk(documentID: mail.id, ordinal: 2, text: "mail chunk three")
+            ]
+        )
+        _ = try await store.upsertDocument(makeDocument(
+            source: .messages,
+            externalID: "messages-a",
+            contentHash: "hash-messages-a",
+            extractStatus: .metadataOnly
+        ))
+
+        let stats = try await store.stats()
+        #expect(stats.documents == 4)
+        #expect(stats.chunks == 6)
+
+        // Per-source aggregates group documents, chunks, and bytes by origin.
+        let bySource = Dictionary(uniqueKeysWithValues: stats.bySource.map { ($0.source, $0) })
+        #expect(stats.bySource.map(\.source) == [.files, .mail, .messages])
+        #expect(bySource[.files]?.documents == 2)
+        #expect(bySource[.files]?.chunks == 3)
+        #expect((bySource[.files]?.bytes ?? 0) > 0)
+        #expect(bySource[.mail]?.documents == 1)
+        #expect(bySource[.mail]?.chunks == 3)
+        #expect((bySource[.mail]?.bytes ?? 0) > 0)
+        // A document without chunks still contributes its document row with
+        // zero chunks and bytes.
+        #expect(bySource[.messages]?.documents == 1)
+        #expect(bySource[.messages]?.chunks == 0)
+        #expect(bySource[.messages]?.bytes == 0)
+        #expect(stats.bySource.reduce(0) { $0 + $1.documents } == stats.documents)
+        #expect(stats.bySource.reduce(0) { $0 + $1.chunks } == stats.chunks)
+        #expect(stats.bySource.reduce(0) { $0 + $1.bytes } == stats.bytes)
+
+        // Extraction outcomes group document counts by status.
+        let byStatus = Dictionary(uniqueKeysWithValues: stats.byExtractStatus.map { ($0.status, $0) })
+        #expect(stats.byExtractStatus.map(\.status) == [.extracted, .partial, .metadataOnly, .failed])
+        #expect(byStatus[.extracted]?.documents == 1)
+        #expect(byStatus[.partial]?.documents == 1)
+        #expect(byStatus[.metadataOnly]?.documents == 1)
+        #expect(byStatus[.failed]?.documents == 1)
+        #expect(stats.byExtractStatus.reduce(0) { $0 + $1.documents } == stats.documents)
+    }
+
+    @Test
     func `Mail documents round-trip source-specific fields`() async throws {
         let (path, base) = makeIndexPath()
         defer { try? FileManager.default.removeItem(at: base) }

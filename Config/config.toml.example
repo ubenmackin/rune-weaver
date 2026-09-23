@@ -168,20 +168,15 @@ search_timeout_seconds = 10
 max_results = 10
 
 [desktop]
-# Native macOS desktop vision and gated control. Both tools always register
-# (visible in the tool list) but ship disabled, and each toggle below is a
-# fail-closed allow boundary: while false, the engine force-disables that
-# tool regardless of the dashboard's tool-state toggles. Both default off,
-# so a fresh install never captures the screen without an explicit opt-in.
-# Enabling a tool-state toggle while its boundary here is off is refused.
-# Captures stay in memory (hash plus dimensions only); every desktop.action
-# batch parks in the approvals inbox. A legacy `enabled` master key is no
-# longer written but still reads (ANDed into both toggles) so old configs
-# stay fail-closed across an upgrade.
-# Allow boundary for desktop.screenshot (readOnly capture).
-screen_capture_enabled = false
-# Allow boundary for desktop.action (approval-gated control).
-control_enabled = false
+# Native macOS perception and gated automation. Both tools always register
+# (visible but disabled) and enablement flows solely through the persisted
+# tool-state toggle, which is the sole authority: a tool stays disabled
+# until an operator enables it (dashboard Tools tab / tool-state API).
+# This section carries only capture knobs and never gates enablement.
+# Retired `screen_capture_enabled`, `control_enabled`, and legacy `enabled`
+# keys are silently ignored when present so old files load without migration.
+# Captures are in-memory downscaled JPEGs; control batches park in the
+# approvals inbox.
 # Longest edge of the downscaled screenshot in pixels (256-3840). Bounds
 # vision-model token cost.
 max_image_dimension = 1280

@@ -157,9 +157,9 @@ public enum BuiltinToolPlugins {
     /// custom subset build from `makeTools`/`makeAllTools` and register directly.
     ///
     /// Desktop tools always register but arrive disabled: persisted
-    /// tool-state rows re-apply via `restoreToolStates` and the `[desktop]`
-    /// allow gates run there too, so a stock install never puts
-    /// approval-free screen capture in front of the model at boot.
+    /// tool-state rows re-apply via `restoreToolStates`, so a stock install
+    /// never puts approval-free screen capture in front of the model at boot
+    /// until the operator enables the tool-state toggle.
     public static func registerAll(
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,

@@ -1,15 +1,15 @@
-// Rune Weaver App Tests — Menu bar desktop gate refresh regression tests.
+// Rune Weaver App Tests — Menu bar desktop tool-state refresh regression tests.
 //
-// Pins the emergency-stop invariant: the Desktop Control menu section is
-// driven by the live `[desktop]` allow gates, not the boot snapshot, so a
-// gate opened at runtime must surface within one refresh tick. Otherwise the
-// active indicator and Emergency Stop stay hidden while a `desktop.action`
-// batch dispatches.
+// Pins the single-gate invariant: the Desktop Control menu section is
+// driven by the live tool-state toggles, so enabling a desktop tool must
+// surface within one refresh tick. Otherwise the active indicator and
+// Emergency Stop stay hidden while a `desktop.action` batch dispatches.
 
 import Foundation
 @testable import RuneWeaverApp
 import RuneWeaverCore
 import RuneWeaverServer
+import RuneWeaverTools
 import Testing
 
 /// Stub LLM finishing every turn with no content so the fixture context
@@ -74,31 +74,32 @@ private func makeFixtureContext() throws -> (ServerContext, URL) {
 @MainActor
 struct AppModelDesktopGateRefreshTests {
     @Test
-    func `runtime desktop gate flip surfaces within one refresh tick`() async throws {
+    func `runtime desktop tool-state flip surfaces within one refresh tick`() async throws {
         let (context, base) = try makeFixtureContext()
         defer { try? FileManager.default.removeItem(at: base) }
 
         let model = AppModel()
         model.serverContext = context
-        // A stock install boots with both allow boundaries closed, so the
+        // A stock install boots with both desktop tools disabled, so the
         // Desktop Control section starts hidden.
         #expect(model.isDesktopEnabled == false)
 
-        // One poll tick (the refresh loop's body) against closed gates keeps
+        // One poll tick (the refresh loop's body) against disabled tools keeps
         // the section hidden.
         await model.refreshState()
         #expect(model.isDesktopEnabled == false)
 
-        // The settings live-reload pushes the fresh policy onto the live
-        // context; opening a boundary must surface the menu section so the
-        // active indicator and Emergency Stop are reachable mid-dispatch.
-        context.desktopConfig.controlEnabled = true
+        // Enabling a desktop tool through the tool-state toggle must surface
+        // the menu section so the active indicator and Emergency Stop are
+        // reachable mid-dispatch.
+        await context.toolBus.register(tool: DesktopTools.makeTools()[0], isEnabled: true)
         await model.refreshState()
         #expect(model.isDesktopEnabled == true)
 
-        // Closing the boundary again hides the section on the next tick, so
-        // the menu never advertises Desktop Control against a closed gate.
-        context.desktopConfig.controlEnabled = false
+        // Disabling both tools again hides the section on the next tick, so
+        // the menu never advertises Desktop Control while nothing can run.
+        await context.toolBus.disableTool(named: DesktopTools.screenshotToolName)
+        await context.toolBus.disableTool(named: DesktopTools.actionToolName)
         await model.refreshState()
         #expect(model.isDesktopEnabled == false)
     }
