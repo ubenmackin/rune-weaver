@@ -12,9 +12,28 @@ public protocol Tool: Sendable {
     var inputSchema: JSONSchema { get }
     /// Trust level enforced by the permission gate.
     var permissionLevel: PermissionLevel { get }
+    /// Provenance of this tool's output for model-context labeling.
+    ///
+    /// Declaration-driven: each tool states its own provenance so the loop never
+    /// sniffs names. The extension default keeps every existing local tool on the
+    /// trusted path without touching its declaration; only network-derived tools
+    /// override to untrusted.
+    var contentTrustLevel: ContentTrustLevel { get }
 
     /// Runs the tool.
     func execute(input: ToolInput, context: ToolContext) async throws -> ToolOutput
+}
+
+/// Default provenance keeps local tools byte-identical without redeclaration.
+///
+/// Every pre-existing tool compiles unchanged because this default covers the
+/// requirement; network-derived tools opt into labeling by declaring
+/// `.untrustedExternal` on their own type.
+public extension Tool {
+    /// Trusted by default; network tools override to untrusted.
+    var contentTrustLevel: ContentTrustLevel {
+        .trusted
+    }
 }
 
 /// A sink a tool calls to surface indeterminate progress while it executes.

@@ -244,6 +244,9 @@ struct ChatCommand: AsyncParsableCommand {
         // Prune expired trust grants during the session so expired rows do
         // not linger for the life of the REPL; stopped explicitly on exit.
         await permissionGate.startPeriodicCleanup()
+        // One shared secrets instance per chat invocation so every tool on the
+        // bus observes one fallback store instead of per-tool state.
+        let sharedSecrets = SecretsManager()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
@@ -255,7 +258,9 @@ struct ChatCommand: AsyncParsableCommand {
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            desktopConfig: loaded.config.desktop
+            desktopConfig: loaded.config.desktop,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets
         )
         await configureApprovalHandler(on: toolBus, permissionGate: permissionGate)
         await printStartupBanners(toolBus: toolBus, emailConfig: loaded.config.email)
@@ -280,7 +285,8 @@ struct ChatCommand: AsyncParsableCommand {
             maxToolIterations: max(1, maxToolIterations),
             memoryEngine: memoryEngine,
             embedder: embedder,
-            sessionTokens: CLILockedValue(0)
+            sessionTokens: CLILockedValue(0),
+            securityConfig: loaded.config.security
         )
         await runChatREPL(
             provider: active,
@@ -396,6 +402,8 @@ private struct ChatTurnContext: Sendable {
     let embedder: (any EmbeddingsBackend)?
     /// Session-cumulative billed tokens rendered via `SessionTokenDisplay`.
     let sessionTokens: CLILockedValue<Int>
+    /// Defense policy carrying the `[security] untrusted_labeling` off-switch.
+    let securityConfig: SecurityConfig
 }
 
 /// Builds the session trailer line for one assistant turn.
@@ -841,7 +849,12 @@ private func runChunkedTurn(
     }
     let validTools = filteredTools.valid
     let definitions = validTools.map { ToolDefinition($0) }
-    let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
+    let recall = try await context.memoryEngine.recallMessage(
+        for: query,
+        sessionID: context.sessionID,
+        embedder: context.embedder,
+        labelingEnabled: context.securityConfig.untrustedLabeling
+    )
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var progress = ChunkedTurnProgress(snapshot: historySnapshot, rounds: 0)
     while true {
@@ -939,8 +952,23 @@ private func executeChunkedInputs(
         }
         let marker = result.isError ? "✕" : "→"
         print(TerminalStyle.dim("  \(marker) \(ToolInput.inline(result.content, limit: 300))"))
-        await context.conversations.append(result.asMessage(), to: context.sessionID)
-        if let record = OrchestratorToolLoop.episodicToolRecord(toolName: input.toolName, result: result) {
+        // Declaration-driven labeling: untrusted web/browser/mail/api bytes
+        // enter model context delimited as data while trusted bytes pass
+        // through byte-identical, honoring `[security] untrusted_labeling`.
+        let tool = await OrchestratorToolLoop.appendLabeledResult(
+            on: context.toolBus,
+            to: context.conversations,
+            toolName: input.toolName,
+            result: result,
+            sessionID: context.sessionID,
+            labelingEnabled: context.securityConfig.untrustedLabeling
+        )
+        if let record = OrchestratorToolLoop.episodicToolRecord(
+            toolName: input.toolName,
+            result: result,
+            for: tool,
+            labelingEnabled: context.securityConfig.untrustedLabeling
+        ) {
             await context.memoryEngine.mirrorTurn(
                 content: record,
                 sessionID: context.sessionID,
@@ -1019,7 +1047,12 @@ private func runTextTurn(
         cliPrintError(OrchestratorToolLoop.degradedToolWarning(for: skipped))
     }
     let validTextTools = filteredTextTools.valid
-    let recall = try await context.memoryEngine.recallMessage(for: query, sessionID: context.sessionID, embedder: context.embedder)
+    let recall = try await context.memoryEngine.recallMessage(
+        for: query,
+        sessionID: context.sessionID,
+        embedder: context.embedder,
+        labelingEnabled: context.securityConfig.untrustedLabeling
+    )
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var toolRounds = 0
     while true {

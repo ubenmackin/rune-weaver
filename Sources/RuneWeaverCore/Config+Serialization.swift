@@ -51,6 +51,7 @@ extension RuneWeaverConfig {
         lines += renderPluginsTOML()
         lines += renderMediaTOML()
         lines += renderDesktopTOML()
+        lines += renderSecurityTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -354,6 +355,20 @@ extension RuneWeaverConfig {
         lines.append("blocked_apps = [\(desktop.blockedApps.map { Self.tomlQuoted($0) }.joined(separator: ", "))]")
         lines.append("")
         return lines
+    }
+
+    /// Renders the additive `[security]` section.
+    ///
+    /// Every key renders, including the default-ON values, so a saved file
+    /// documents the defense policy and a round-trip never depends on an
+    /// implicit default silently diverging from what was written.
+    private func renderSecurityTOML() -> [String] {
+        [
+            "[security]",
+            "untrusted_labeling = \(security.untrustedLabeling ? "true" : "false")",
+            "email_credential_filter = \(security.emailCredentialFilter ? "true" : "false")",
+            ""
+        ]
     }
 }
 

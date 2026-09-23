@@ -27,6 +27,7 @@ extension RuneWeaverConfig {
         try validatePluginsSection()
         try validateMediaSection()
         try validateDesktopSection()
+        try validateSecuritySection()
     }
 
     private func validateEngineSection() throws {
@@ -564,6 +565,13 @@ extension RuneWeaverConfig {
             )
         }
     }
+
+    /// Validates the `[security]` section.
+    ///
+    /// Both flags are plain booleans with no range to bound, so there is
+    /// nothing to reject: the method exists so the section joins the same
+    /// validate-every-section contract as all prior sections.
+    private func validateSecuritySection() throws {}
 }
 
 // swiftformat:enable extensionAccessControl

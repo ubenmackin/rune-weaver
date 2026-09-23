@@ -291,6 +291,10 @@ public struct WebFetchTool: Tool, Sendable {
         )
     /// Always allowed at the gate level; unsafe URLs fail with guidance instead.
     public let permissionLevel = PermissionLevel.readOnly
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Maximum redirects followed before failing closed (shared with `api.request`).
     public static let maxRedirects = HTTPRedirectFollower.maxRedirects

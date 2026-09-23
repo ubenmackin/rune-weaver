@@ -3,7 +3,12 @@
 // Carries the isolated browser program backing `browser.navigate` and
 // `browser.act`: fail-closed SSRF gating, ref collection, text distillation,
 // login-wall detection, redirect-chain surfacing, opt-in bounded screenshots,
-// and the JSON envelope. The program is split into two ordered segments that
+// and the JSON envelope. The Swift side vets every entry URL through the
+// canonical guard with the configured search, media, and model exemptions
+// before this program spawns and re-vets every reported redirect and landing
+// URL afterwards, so this embedded gate stays a second layer for callers that
+// reach the bridge directly: it fails closed on loopback, link-local,
+// metadata, and private ranges without its own exemption plumbing. The program is split into two ordered segments that
 // concatenate atomically (`head` then `tail`); keep them adjacent and edit
 // them together so the deny set, capture budget, and envelope shape update as
 // one. The capture budget and viewport interpolate `BrowserScreenshotPolicy`
@@ -398,6 +403,15 @@ enum BrowserPlaywrightScriptTail: Sendable {
                         page.wait_for_load_state("domcontentloaded", timeout=5000)
                     except Exception:
                         pass
+                    # Click-throughs and meta-refreshes can land elsewhere, so the
+                    # post-action URL re-enters the same fail-closed gate as the
+                    # entry and navigate-landed checks before any result leaves
+                    # the helper; Swift re-vets the reported URL again afterwards.
+                    landed_after = page.url or url
+                    landed_after_reason = _ssrf_deny_reason(landed_after)
+                    if landed_after_reason:
+                        fail(landed_after_reason)
+                        return
                     sys.stdout.write(json.dumps({
                         "ok": True,
                         "url": page.url or url,

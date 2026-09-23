@@ -418,6 +418,7 @@ extension RuneWeaverConfig {
         try Self.decodeBrowser(root, into: &config)
         try Self.decodeMedia(root, into: &config)
         try Self.decodeDesktop(root, into: &config)
+        try Self.decodeSecurity(root, into: &config)
         self = config
     }
 
@@ -835,6 +836,21 @@ extension RuneWeaverConfig {
         }
         if let blocked = try desktop.strictStringArray("blocked_apps", field: "desktop.blocked_apps") {
             config.desktop.blockedApps = blocked
+        }
+    }
+
+    /// Decodes the additive `[security]` section, defaulting omitted keys.
+    ///
+    /// Absent sections keep the default-ON policies so existing files load
+    /// untouched; present-but-wrong-typed values throw instead of silently
+    /// defaulting, matching every prior section's strict accessors.
+    static func decodeSecurity(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let security = root.tables["security"] else { return }
+        if let labeling = try security.strictBool("untrusted_labeling", field: "security.untrusted_labeling") {
+            config.security.untrustedLabeling = labeling
+        }
+        if let credentialFilter = try security.strictBool("email_credential_filter", field: "security.email_credential_filter") {
+            config.security.emailCredentialFilter = credentialFilter
         }
     }
 }

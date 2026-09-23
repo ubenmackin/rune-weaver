@@ -216,7 +216,9 @@ enum CLIShared {
         llmConfig: LLMConfig? = nil,
         llmServerURLs: [String] = [],
         mediaConfig: MediaConfig? = nil,
-        desktopConfig: DesktopConfig = DesktopConfig()
+        desktopConfig: DesktopConfig = DesktopConfig(),
+        securityConfig: SecurityConfig = SecurityConfig(),
+        secrets: SecretsManager? = nil
     ) -> [any Tool] {
         let browser = browserConfig ?? BrowserConfig()
         let baseOrigins = llmServerURLs
@@ -229,8 +231,11 @@ enum CLIShared {
             mediaConfig: mediaConfig,
             desktopConfig: desktopConfig,
             llmServerURLs: combinedOrigins,
+            securityConfig: securityConfig,
             memoryEngine: memoryEngine,
-            embedder: embedder
+            embedder: embedder,
+            mediaSecrets: secrets,
+            secrets: secrets
         )
     }
 
@@ -254,9 +259,14 @@ enum CLIShared {
         llmConfig: LLMConfig? = nil,
         llmServerURLs: [String] = [],
         mediaConfig: MediaConfig? = nil,
-        desktopConfig: DesktopConfig = DesktopConfig()
+        desktopConfig: DesktopConfig = DesktopConfig(),
+        securityConfig: SecurityConfig = SecurityConfig(),
+        secrets: SecretsManager? = nil
     ) async -> ToolBus {
-        let bus = ToolBus(approvalHandler: approvalHandler, permissionGate: permissionGate)
+        let bus = ToolBus(
+            approvalHandler: approvalHandler,
+            permissionGate: permissionGate
+        )
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in pluginTools(
             emailConfig: emailConfig,
@@ -268,7 +278,9 @@ enum CLIShared {
             llmConfig: llmConfig,
             llmServerURLs: llmServerURLs,
             mediaConfig: mediaConfig,
-            desktopConfig: desktopConfig
+            desktopConfig: desktopConfig,
+            securityConfig: securityConfig,
+            secrets: secrets
         ) {
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }

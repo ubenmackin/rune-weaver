@@ -194,6 +194,9 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
             router: LLMRouter(providers: providers)
         )
+        // One shared secrets instance per scheduler invocation so the headless
+        // bus observes one fallback store instead of per-tool state.
+        let sharedSecrets = SecretsManager()
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
@@ -206,7 +209,9 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             episodesDBPath: loaded.config.memory.episodesDBPath,
             browserConfig: loaded.config.browser,
             llmConfig: loaded.config.llm,
-            desktopConfig: loaded.config.desktop
+            desktopConfig: loaded.config.desktop,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets
         )
         let orchestrator = Orchestrator(
             conversations: conversations,
@@ -214,7 +219,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             llm: selected,
             memoryEngine: memoryEngine,
             embedder: embedder,
-            compactionThresholdPercent: loaded.config.engine.compactionThresholdPercent
+            compactionThresholdPercent: loaded.config.engine.compactionThresholdPercent,
+            securityConfig: loaded.config.security
         )
         let capturedBus = toolBus
         let pollChecker: SchedulerPollChecker = { rule in

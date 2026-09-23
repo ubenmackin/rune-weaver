@@ -7,7 +7,12 @@
 // no stored credentials, and no cross-task storage, then closes it before
 // returning. The unified act surface validates one verb (click, fill, select,
 // press, scroll) plus integer-or-string ref aliases against the snapshot URL,
-// parking every call with target plus URL. Screenshots are an opt-in
+// parking every call with target plus URL. Every URL-bearing verb vets
+// through the canonical SSRF guard with the configured search, media, and
+// model exemptions before reaching the bridge, and every bridge-reported
+// redirect and landing URL re-vets the same way so a public start cannot
+// bounce into loopback, link-local, metadata, or private ranges.
+// Screenshots are an opt-in
 // `includeScreenshot` flag (default false) advertised only to vision-capable
 // models and stripped from text-only history, with captures held in memory
 // for the turn and only a content hash persisted.
@@ -441,10 +446,11 @@ public struct BrowserNavigateTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "browser.navigate"
     /// When the LLM should use this tool.
-    /// Kept to one line so the composed prompt stays within budget across the full registry.
+    /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
         "Opens a URL in a fresh isolated context; returns text plus refs (e.g. e12) for browser.act. "
-            + "Auth walls escalate to human login; downloads are manifest-only."
+            + "Auth walls escalate to human login; downloads are manifest-only. "
+            + "Navigation is SSRF-guarded: approval-free browsing must not dial loopback, link-local, metadata, or private ranges."
     /// Function-calling contract for `url` (plus accepted aliases) and the screenshot opt-in.
     /// Every decoder alias is advertised so a compliant validator accepts
     /// exactly what the decoder handles.
@@ -466,11 +472,21 @@ public struct BrowserNavigateTool: Tool, Sendable {
         )
     /// Always allowed: navigation distills without changing web state.
     public let permissionLevel = PermissionLevel.readOnly
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Playwright gateway (subprocess bridge by default, stub in tests).
     private let gateway: any BrowserPlaywrightGateway
     /// Allowlisted origin and host patterns exempted from SSRF refusals.
     private let allowlistedOrigins: Set<String>
+    /// Browser policy supplying the search origin exemption.
+    private let browserConfig: BrowserConfig
+    /// Media policy supplying Sonarr/Radarr auto-allowed origins.
+    private let mediaConfig: MediaConfig?
+    /// Configured model endpoints exempted from the loopback deny.
+    private let llmServerURLs: [String]
 
     /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
     /// without dropping an injected test double.
@@ -479,6 +495,9 @@ public struct BrowserNavigateTool: Tool, Sendable {
     }
 
     /// Creates a navigate tool.
+    /// Delegates to the designated config-bound init with a neutral policy so
+    /// the precomputed explicit set stays the sole exemption source instead of
+    /// gaining a default search origin the caller never configured.
     /// - Parameters:
     ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
     ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
@@ -486,8 +505,43 @@ public struct BrowserNavigateTool: Tool, Sendable {
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = []
     ) {
-        self.gateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
+        self.init(
+            gateway: gateway,
+            browserConfig: BrowserConfig(searxngURL: ""),
+            mediaConfig: nil,
+            llmServerURLs: [],
+            allowlistedOrigins: allowlistedOrigins
+        )
+    }
+
+    /// Creates a navigate tool bound to the configured exemption set.
+    /// Entry URLs vet through the canonical guard with search, media, and
+    /// model origins exempted before reaching the bridge, and every
+    /// bridge-reported hop re-vets the same way so a public start cannot
+    /// bounce into sensitive ranges.
+    /// - Parameters:
+    ///   - gateway: Playwright gateway. Defaults to a config-bound subprocess bridge.
+    ///   - browserConfig: `[browser]` policy feeding the SSRF exemption set.
+    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
+    ///   - llmServerURLs: Configured model endpoints exempted from the loopback deny.
+    ///   - allowlistedOrigins: Additional origin and host patterns exempted alongside the configured set.
+    public init(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        allowlistedOrigins: Set<String> = []
+    ) {
+        self.browserConfig = browserConfig
+        self.mediaConfig = mediaConfig
+        self.llmServerURLs = llmServerURLs
         self.allowlistedOrigins = allowlistedOrigins
+        self.gateway = gateway ?? SubprocessPlaywrightGateway(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        )
     }
 
     /// Opens the page and returns its distilled snapshot.
@@ -505,7 +559,16 @@ public struct BrowserNavigateTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try await BrowserValidation.validateURLAsync(args.trimmedURL, allowlistedOrigins: allowlistedOrigins)
+            // Prompt-injected URLs vet through the canonical guard with the
+            // configured search, media, and model exemptions before the bridge
+            // spawns; any refusal or unverified host fails closed here.
+            url = try await BrowserValidation.validateURLAsync(
+                args.trimmedURL,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins
+            )
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -516,6 +579,17 @@ public struct BrowserNavigateTool: Tool, Sendable {
             || BrowserScreenshotPolicy.includeScreenshotRequested(argumentsJSON: input.argumentsJSON)
         do {
             let snapshot = try await gateway.navigate(url: url, includeScreenshot: includeScreenshot, dryRun: context.dryRun)
+            // Stub gateways bypass the subprocess gateway's own hop checks, so
+            // the tool re-vets every reported hop before encoding: a public
+            // start cannot launder a sensitive redirect through a canned chain.
+            try await BrowserValidation.validateRedirectChainAsync(
+                snapshot.redirectChain,
+                finalURL: snapshot.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins
+            )
             let content = try navigateContent(for: snapshot, includeScreenshotRequested: includeScreenshot)
             return .success(content, callID: input.callID)
         } catch let browserError as BrowserError {
@@ -592,10 +666,11 @@ public struct BrowserActTool: Tool, Sendable {
     /// Stable tool name referenced by the LLM and memory.
     public let name = "browser.act"
     /// When the LLM should use this tool.
-    /// Kept to one line so the composed prompt stays within budget across the full registry.
+    /// Kept to two lines so the composed prompt stays within budget across the full registry.
     public let description =
         "Runs one validated action (click/fill/select/press/scroll) on a browser.navigate ref plus URL; "
-            + "fill/select need text, approval-gated, manifest-only downloads."
+            + "fill/select need text, approval-gated, manifest-only downloads. "
+            + "Act URLs are SSRF-guarded like navigation: loopback, link-local, metadata, and private ranges stay denied."
     /// Function-calling contract for `action`, `ref`, optional `text`, and `url`.
     /// Every decoder alias is advertised so a compliant validator accepts
     /// exactly what the decoder handles.
@@ -632,11 +707,21 @@ public struct BrowserActTool: Tool, Sendable {
         )
     /// Gated: acting changes web state and always prompts without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Playwright gateway (subprocess bridge by default, stub in tests).
     private let gateway: any BrowserPlaywrightGateway
     /// Allowlisted origin and host patterns exempted from SSRF refusals.
     private let allowlistedOrigins: Set<String>
+    /// Browser policy supplying the search origin exemption.
+    private let browserConfig: BrowserConfig
+    /// Media policy supplying Sonarr/Radarr auto-allowed origins.
+    private let mediaConfig: MediaConfig?
+    /// Configured model endpoints exempted from the loopback deny.
+    private let llmServerURLs: [String]
 
     /// Shared gateway for live-reload reuse so a settings PUT refreshes origins
     /// without dropping an injected test double.
@@ -645,6 +730,9 @@ public struct BrowserActTool: Tool, Sendable {
     }
 
     /// Creates an act tool.
+    /// Delegates to the designated config-bound init with a neutral policy,
+    /// matching the navigate tool: the explicit set stays the only exemption
+    /// source here.
     /// - Parameters:
     ///   - gateway: Playwright gateway. Defaults to the `python3` subprocess bridge.
     ///   - allowlistedOrigins: Allowlisted origin and host patterns exempted from SSRF refusals.
@@ -652,8 +740,42 @@ public struct BrowserActTool: Tool, Sendable {
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = []
     ) {
-        self.gateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
+        self.init(
+            gateway: gateway,
+            browserConfig: BrowserConfig(searxngURL: ""),
+            mediaConfig: nil,
+            llmServerURLs: [],
+            allowlistedOrigins: allowlistedOrigins
+        )
+    }
+
+    /// Creates an act tool bound to the configured exemption set.
+    /// The snapshot URL vets through the canonical guard with search, media,
+    /// and model origins exempted before the bridge re-navigates, and the
+    /// reported post-action URL re-vets the same way before it enters output.
+    /// - Parameters:
+    ///   - gateway: Playwright gateway. Defaults to a config-bound subprocess bridge.
+    ///   - browserConfig: `[browser]` policy feeding the SSRF exemption set.
+    ///   - mediaConfig: Optional media policy for auto-allowing media server origins.
+    ///   - llmServerURLs: Configured model endpoints exempted from the loopback deny.
+    ///   - allowlistedOrigins: Additional origin and host patterns exempted alongside the configured set.
+    public init(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        allowlistedOrigins: Set<String> = []
+    ) {
+        self.browserConfig = browserConfig
+        self.mediaConfig = mediaConfig
+        self.llmServerURLs = llmServerURLs
         self.allowlistedOrigins = allowlistedOrigins
+        self.gateway = gateway ?? SubprocessPlaywrightGateway(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        )
     }
 
     /// Validates and performs (or previews under dry-run) one action.
@@ -684,7 +806,16 @@ public struct BrowserActTool: Tool, Sendable {
         }
         let url: String
         do {
-            url = try await BrowserValidation.validateURLAsync(args.trimmedURL, allowlistedOrigins: allowlistedOrigins)
+            // The snapshot URL re-navigates inside the bridge, so it vets
+            // through the canonical guard with the configured exemptions
+            // before any grant or subprocess use; refusals fail closed here.
+            url = try await BrowserValidation.validateURLAsync(
+                args.trimmedURL,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins
+            )
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
@@ -706,6 +837,16 @@ public struct BrowserActTool: Tool, Sendable {
         }
         do {
             let result = try await gateway.act(action: action, ref: ref, text: text, url: url)
+            // Stub gateways bypass the subprocess gateway's own landing check,
+            // so the tool re-vets the reported URL: a click-through or
+            // meta-refresh must not land the turn in sensitive ranges.
+            _ = try await BrowserValidation.validateEgressURLAsync(
+                result.url,
+                browserConfig: browserConfig,
+                mediaConfig: mediaConfig,
+                llmServerURLs: llmServerURLs,
+                extraAllowlistedOrigins: allowlistedOrigins
+            )
             let content = try actContent(for: result)
             return .success(content, callID: input.callID)
         } catch let browserError as BrowserError {
@@ -760,23 +901,89 @@ public enum BrowserTools {
     public static let toolNames = ["browser.navigate", "browser.act"]
 
     /// Builds the browser tools sharing one gateway.
+    /// Delegates to the config-bound builder with a neutral policy so one
+    /// construction site owns the shared gateway plus navigate/act assembly.
     public static func makeTools(
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = []
     ) -> [any Tool] {
-        let shared: any BrowserPlaywrightGateway = gateway ?? SubprocessPlaywrightGateway(allowlistedOrigins: allowlistedOrigins)
-        let navigate: any Tool = BrowserNavigateTool(gateway: shared, allowlistedOrigins: allowlistedOrigins)
-        let act: any Tool = BrowserActTool(gateway: shared, allowlistedOrigins: allowlistedOrigins)
+        makeTools(
+            gateway: gateway,
+            browserConfig: BrowserConfig(searxngURL: ""),
+            mediaConfig: nil,
+            llmServerURLs: [],
+            allowlistedOrigins: allowlistedOrigins
+        )
+    }
+
+    /// Builds the browser tools sharing one gateway bound to the configured exemption set.
+    /// Entry URLs vet through the canonical guard with search, media, and
+    /// model origins exempted, and every bridge-reported hop re-vets the same
+    /// way; the explicit set rides along for callers that precompute origins.
+    public static func makeTools(
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        allowlistedOrigins: Set<String> = []
+    ) -> [any Tool] {
+        let shared: any BrowserPlaywrightGateway = gateway ?? SubprocessPlaywrightGateway(
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        )
+        let navigate: any Tool = BrowserNavigateTool(
+            gateway: shared,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        )
+        let act: any Tool = BrowserActTool(
+            gateway: shared,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        )
         return [navigate, act]
     }
 
     /// Registers the browser tools, replacing same-named entries.
+    /// Delegates to the config-bound register with a neutral policy so one
+    /// site owns registration.
     public static func register(
         on bus: ToolBus,
         gateway: (any BrowserPlaywrightGateway)? = nil,
         allowlistedOrigins: Set<String> = []
     ) async {
-        for tool in makeTools(gateway: gateway, allowlistedOrigins: allowlistedOrigins) {
+        await register(
+            on: bus,
+            gateway: gateway,
+            browserConfig: BrowserConfig(searxngURL: ""),
+            mediaConfig: nil,
+            llmServerURLs: [],
+            allowlistedOrigins: allowlistedOrigins
+        )
+    }
+
+    /// Registers the config-bound browser tools, replacing same-named entries.
+    public static func register(
+        on bus: ToolBus,
+        gateway: (any BrowserPlaywrightGateway)? = nil,
+        browserConfig: BrowserConfig,
+        mediaConfig: MediaConfig? = nil,
+        llmServerURLs: [String] = [],
+        allowlistedOrigins: Set<String> = []
+    ) async {
+        for tool in makeTools(
+            gateway: gateway,
+            browserConfig: browserConfig,
+            mediaConfig: mediaConfig,
+            llmServerURLs: llmServerURLs,
+            allowlistedOrigins: allowlistedOrigins
+        ) {
             await bus.register(tool: tool)
         }
     }

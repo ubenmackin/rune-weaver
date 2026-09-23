@@ -96,7 +96,7 @@ let package = Package(
         ),
         .testTarget(
             name: "RuneWeaverCoreTests",
-            dependencies: ["RuneWeaverCore"]
+            dependencies: ["RuneWeaverCore", "RuneWeaverTools"]
         ),
         .testTarget(
             name: "RuneWeaverLLMTests",

@@ -33,16 +33,28 @@ public struct EmailSearchTool: Tool, Sendable {
         )
     /// Always allowed: search never changes mailbox state.
     public let permissionLevel = PermissionLevel.readOnly
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Configured mail accounts.
     private let emailConfig: EmailConfig
     /// IMAP gateway (subprocess bridge by default, stub in tests).
     private let gateway: any EmailIMAPGateway
+    /// Defense policy gating agent-visible credential redaction. Defaults on
+    /// so stock installs never expose one-time codes or magic links.
+    private let securityConfig: SecurityConfig
 
     /// Creates a search tool.
-    public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
+    public init(
+        emailConfig: EmailConfig,
+        gateway: (any EmailIMAPGateway)? = nil,
+        securityConfig: SecurityConfig = SecurityConfig()
+    ) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
+        self.securityConfig = securityConfig
     }
 
     /// Runs the search, resolving credentials at execution time.
@@ -176,7 +188,13 @@ extension EmailSearchTool {
                 attachmentCount: $0.attachmentCount
             )
         }
-        let capped = Array(labeled.prefix(limit))
+        // Credential filter runs at the envelope boundary where agent-visible
+        // content is built: headers stay visible while snippets redact. The
+        // human inbox is untouched; only this tool output carries the filter.
+        let visible = labeled.map {
+            $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter)
+        }
+        let capped = Array(visible.prefix(limit))
         let content = try EmailBridgeParsing.encodeSearchEnvelope(
             account: account.name,
             query: effectiveQuery,
@@ -225,7 +243,13 @@ extension EmailSearchTool {
                         attachmentCount: $0.attachmentCount
                     )
                 }
-                groups.append(labeled)
+                // Same envelope-boundary redaction as the single-mailbox path
+                // so fan-out hits cannot bypass the filter.
+                groups.append(
+                    labeled.map {
+                        $0.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter)
+                    }
+                )
                 succeeded.append(box)
             } catch {
                 if error is CancellationError {
@@ -274,16 +298,28 @@ public struct EmailReadTool: Tool, Sendable {
         )
     /// Always allowed: reading never changes mailbox state.
     public let permissionLevel = PermissionLevel.readOnly
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Configured mail accounts.
     private let emailConfig: EmailConfig
     /// IMAP gateway (subprocess bridge by default, stub in tests).
     private let gateway: any EmailIMAPGateway
+    /// Defense policy gating agent-visible credential redaction. Defaults on
+    /// so stock installs never expose one-time codes or magic links.
+    private let securityConfig: SecurityConfig
 
     /// Creates a read tool.
-    public init(emailConfig: EmailConfig, gateway: (any EmailIMAPGateway)? = nil) {
+    public init(
+        emailConfig: EmailConfig,
+        gateway: (any EmailIMAPGateway)? = nil,
+        securityConfig: SecurityConfig = SecurityConfig()
+    ) {
         self.emailConfig = emailConfig
         self.gateway = gateway ?? SubprocessIMAPGateway()
+        self.securityConfig = securityConfig
     }
 
     /// Reads one message, resolving credentials at execution time.
@@ -347,7 +383,11 @@ public struct EmailReadTool: Tool, Sendable {
                 return .failure(error.localizedDescription, callID: input.callID)
             }
             let message = try await gateway.fetch(credentials: credentials, mailbox: effectiveMailbox, messageID: messageID)
-            let content = try EmailBridgeParsing.encodeReadEnvelope(account: account.name, message: message, mailbox: effectiveMailbox)
+            // Credential filter runs at the envelope boundary where
+            // agent-visible content is built: headers stay visible while the
+            // body redacts. The human inbox is untouched.
+            let visible = message.agentVisible(credentialFilterEnabled: securityConfig.emailCredentialFilter)
+            let content = try EmailBridgeParsing.encodeReadEnvelope(account: account.name, message: visible, mailbox: effectiveMailbox)
             return .success(content, callID: input.callID)
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
@@ -391,6 +431,10 @@ public struct EmailAttachmentTool: Tool, Sendable {
         )
     /// Gated: downloads stage files and always prompt without a trust grant.
     public let permissionLevel = PermissionLevel.requiresApproval
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Maximum decoded bytes staged per attachment (10 MB).
     public static let maxAttachmentBytes = 10 * 1024 * 1024
@@ -1024,12 +1068,13 @@ public enum EmailTools {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil
+        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        securityConfig: SecurityConfig = SecurityConfig()
     ) -> [any Tool] {
         let shared: any EmailIMAPGateway = gateway ?? SubprocessIMAPGateway()
         let sharedSMTP: any EmailSMTPGateway = smtpGateway ?? SubprocessSMTPGateway()
-        let search: any Tool = EmailSearchTool(emailConfig: emailConfig, gateway: shared)
-        let read: any Tool = EmailReadTool(emailConfig: emailConfig, gateway: shared)
+        let search: any Tool = EmailSearchTool(emailConfig: emailConfig, gateway: shared, securityConfig: securityConfig)
+        let read: any Tool = EmailReadTool(emailConfig: emailConfig, gateway: shared, securityConfig: securityConfig)
         let attachment: any Tool = EmailAttachmentTool(
             emailConfig: emailConfig,
             gateway: shared,
@@ -1058,7 +1103,8 @@ public enum EmailTools {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         filesConfig: FilesConfig = FilesConfig(),
         homeDirectoryURL: URL? = nil,
-        archiveDetonator: (any EmailArchiveDetonator)? = nil
+        archiveDetonator: (any EmailArchiveDetonator)? = nil,
+        securityConfig: SecurityConfig = SecurityConfig()
     ) async {
         for tool in makeTools(
             emailConfig: emailConfig,
@@ -1067,7 +1113,8 @@ public enum EmailTools {
             sandboxConfig: sandboxConfig,
             filesConfig: filesConfig,
             homeDirectoryURL: homeDirectoryURL,
-            archiveDetonator: archiveDetonator
+            archiveDetonator: archiveDetonator,
+            securityConfig: securityConfig
         ) {
             await bus.register(tool: tool)
         }

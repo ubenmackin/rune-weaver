@@ -243,7 +243,10 @@ public struct ApiRequestTool: Tool, Sendable {
             + "SSRF targets (private RFC 1918, 169.254.0.0/16, loopback except searxng_url and LLM endpoints, "
             + "unique-local IPv6, metadata hosts, file:) are refused. "
             + "Headers are limited to Accept, Content-Type, and Authorization; "
-            + "body is capped at 64KB and responses at 256KB truncated. "
+            + "header values may reference stored secrets as rwsecret:<KEY> (for example \"Bearer rwsecret:MY_API_KEY\"), "
+            + "resolved just-in-time at the network boundary so previews, logs, and persistence never carry real values; "
+            + "never paste real secret values into arguments. "
+            + "Body is capped at 64KB and responses at 256KB truncated. "
             + "File pulls return a manifest only and never write to the host."
     /// Function-calling contract for method, URL, headers, and body.
     /// Every decoder alias (`verb`, `uri`/`link`, `header`, `payload`/`data`)
@@ -254,7 +257,8 @@ public struct ApiRequestTool: Tool, Sendable {
                 + #""description":"HTTP method"},"verb":{"type":"string","description":"Alias for method"},"#
                 + #""url":{"type":"string","description":"Absolute http(s) URL to request"},"uri":{"type":"string","#
                 + #""description":"Alias for url"},"link":{"type":"string","description":"Alias for url"},"#
-                + #""headers":{"type":"object","description":"Optional headers (Accept, Content-Type, Authorization only)","#
+                + #""headers":{"type":"object","description":"Optional headers (Accept, Content-Type, "#
+                + #"Authorization only; values may use rwsecret:<KEY> references)","#
                 + #""additionalProperties":{"type":"string"}},"header":{"type":"object","description":"Alias for headers","#
                 + #""additionalProperties":{"type":"string"}},"body":{"type":"string","description":"Optional request body (64KB cap)"},"#
                 + #""payload":{"type":"string","description":"Alias for body"},"data":{"type":"string","description":"Alias for body"}},"#
@@ -264,6 +268,10 @@ public struct ApiRequestTool: Tool, Sendable {
         )
     /// Always gated: even GET parks so the SSRF guard and caps stay human-visible.
     public let permissionLevel = PermissionLevel.requiresApproval
+    /// Network-derived bytes may carry injected directives, so results enter as labeled data.
+    public var contentTrustLevel: ContentTrustLevel {
+        .untrustedExternal
+    }
 
     /// Maximum redirects followed before failing closed (shared with `web.fetch`).
     public static let maxRedirects = HTTPRedirectFollower.maxRedirects
@@ -288,13 +296,16 @@ public struct ApiRequestTool: Tool, Sendable {
     private let llmServerURLs: [String]
     /// HTTP transport (live session by default, stub in tests).
     private let transport: any ApiRequestTransport
+    /// Secrets backing surrogate resolution at the transport boundary.
+    private let secrets: SecretsManager
 
     /// Creates an API request tool.
     public init(
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        transport: (any ApiRequestTransport)? = nil
+        transport: (any ApiRequestTransport)? = nil,
+        secrets: SecretsManager? = nil
     ) {
         self.browserConfig = browserConfig
         self.mediaConfig = mediaConfig
@@ -304,6 +315,7 @@ public struct ApiRequestTool: Tool, Sendable {
         } else {
             self.transport = URLSessionApiRequestTransport(timeoutSeconds: Self.timeoutSeconds)
         }
+        self.secrets = secrets ?? SecretsManager()
     }
 
     /// Validates and performs (or previews under dry-run) one API request.
@@ -356,11 +368,44 @@ public struct ApiRequestTool: Tool, Sendable {
         }
         let bodyString = (args.body?.isEmpty == true) ? nil : args.body
         if context.dryRun {
+            // Previews keep the surrogate reference and never touch the live
+            // secret, so an approval screen cannot leak the real value.
             return dryRunOutput(method: method, url: rawURL, headers: headers, body: bodyString, callID: input.callID)
+        }
+        // Surrogates resolve just-in-time at this boundary: agent-authored
+        // arguments carry only `rwsecret:<key>`, while the wire request below
+        // carries the live value. Unknown references fail closed as a typed
+        // error without echoing any secret bytes.
+        let resolvedHeaders: [String: String]
+        let resolvedSecrets: [String]
+        do {
+            let resolved = try await resolveSurrogateHeaders(headers)
+            resolvedHeaders = resolved.headers
+            resolvedSecrets = resolved.secrets
+        } catch let error as ApiRequestError {
+            return .failure(error.message, callID: input.callID)
+        } catch let error as SecretsError {
+            switch error {
+            case let .unknownSurrogate(key):
+                return .failure(
+                    ApiRequestError.unknownSurrogate(
+                        "Unknown secret surrogate 'rwsecret:\(key)': no stored secret for key '\(key)'."
+                    ).message,
+                    callID: input.callID
+                )
+            case let .invalidInput(reason):
+                return .failure(reason, callID: input.callID)
+            case let .keychainError(status):
+                return .failure("api.request secret lookup failed (keychain status \(status)).", callID: input.callID)
+            case .encodingError:
+                return .failure("api.request secret lookup failed (encoding error).", callID: input.callID)
+            }
+        } catch {
+            return .failure(error.localizedDescription, callID: input.callID)
         }
         // Log the outbound shape with the secret already redacted so the
         // audit trail never carries the raw `Authorization` value.
-        let headerSummary = ApiHeaderPolicy.logSummary(headers)
+        let headerSummary = ApiHeaderPolicy.logSummary(resolvedHeaders, resolvedSecrets: resolvedSecrets)
         let bodyByteCount = bodyString?.utf8.count ?? 0
         RuneWeaverLog.tools.info(
             "api.request \(method.rawValue) \(rawURL) headers=\(headerSummary) bodyBytes=\(bodyByteCount)"
@@ -368,12 +413,16 @@ public struct ApiRequestTool: Tool, Sendable {
         do {
             let envelope = try await requestChain(
                 method: method,
-                headers: headers,
+                headers: resolvedHeaders,
                 bodyString: bodyString,
                 initialURL: requestURL,
                 originalURL: rawURL
             )
-            let content = try ToolEnvelopeEncoding.encode(envelope)
+            let encoded = try ToolEnvelopeEncoding.encode(envelope)
+            // Sweep any resolved value the server echoed back (a reflected
+            // credential in a body, for example) before the output reaches the
+            // model, mirroring the header redaction above.
+            let content = secrets.redactResolved(encoded, secrets: resolvedSecrets)
             RuneWeaverLog.tools.info(
                 "api.request done \(method.rawValue) \(envelope.finalUrl) status=\(envelope.statusCode.map(String.init) ?? "-") truncated=\(envelope.truncated)"
             )
@@ -383,6 +432,36 @@ public struct ApiRequestTool: Tool, Sendable {
         } catch {
             return .failure("api.request failed for \(rawURL): \(error.localizedDescription)", callID: input.callID)
         }
+    }
+
+    // MARK: - Surrogates
+
+    /// Resolves surrogate references in validated header values.
+    ///
+    /// Each value may hold a bare reference or an embedded one; resolution
+    /// happens here at the transport boundary so earlier stages (validation,
+    /// dry-run previews, approval targets) only ever see the reference. A bare
+    /// prefix with no well-formed key fails closed instead of forwarding the
+    /// literal to the wire.
+    /// - Parameter headers: Validated headers possibly holding surrogates.
+    /// - Returns: Wire-ready headers plus inserted live values for sweeping.
+    private func resolveSurrogateHeaders(_ headers: [String: String]) async throws -> (headers: [String: String], secrets: [String]) {
+        var resolved: [String: String] = [:]
+        resolved.reserveCapacity(headers.count)
+        var collectedSecrets: [String] = []
+        for (name, value) in headers {
+            guard SecretsManager.containsSurrogate(value) else {
+                if SecretsManager.containsSurrogatePrefix(value) {
+                    throw SecretsError.invalidInput(reason: "header '\(name)' contains a malformed secret surrogate (expected rwsecret:<key>)")
+                }
+                resolved[name] = value
+                continue
+            }
+            let outcome = try await self.secrets.resolveValueContainingSurrogates(value)
+            resolved[name] = outcome.resolved
+            collectedSecrets.append(contentsOf: outcome.secrets)
+        }
+        return (resolved, collectedSecrets)
     }
 
     // MARK: - Preview
@@ -689,9 +768,10 @@ public enum ApiRequestTools {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        transport: (any ApiRequestTransport)? = nil
+        transport: (any ApiRequestTransport)? = nil,
+        secrets: SecretsManager? = nil
     ) -> [any Tool] {
-        [ApiRequestTool(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport)]
+        [ApiRequestTool(browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport, secrets: secrets)]
     }
 
     /// Registers the API request tool, replacing same-named entries.
@@ -700,10 +780,11 @@ public enum ApiRequestTools {
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
         llmServerURLs: [String] = [],
-        transport: (any ApiRequestTransport)? = nil
+        transport: (any ApiRequestTransport)? = nil,
+        secrets: SecretsManager? = nil
     ) async {
         for tool in makeTools(
-            browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport
+            browserConfig: browserConfig, mediaConfig: mediaConfig, llmServerURLs: llmServerURLs, transport: transport, secrets: secrets
         ) {
             await bus.register(tool: tool)
         }

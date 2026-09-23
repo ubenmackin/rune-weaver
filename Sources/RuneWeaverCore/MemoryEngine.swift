@@ -739,7 +739,22 @@ public extension MemoryEngine {
     static let episodicToolOutcomeLimit = 2000
 
     /// Builds compact episodic content for one tool execution.
-    static func episodicToolRecord(toolName: String, content: String, isError: Bool) -> String? {
+    ///
+    /// Untrusted external bytes stay delimited as data so a later recall cannot
+    /// re-enter as trusted instructions: the `Used <tool>:` prefix is
+    /// engine-authored and stays outside the label while the compact outcome
+    /// carries the single-sourced data-only block. Trusted tools pass through
+    /// with the exact historical shape, and a disabled labeler passes through
+    /// byte-identically for debugging. Unknown provenance fails closed to
+    /// untrusted so a caller that forgets to declare trust cannot silently
+    /// persist attacker bytes as trusted history.
+    static func episodicToolRecord(
+        toolName: String,
+        content: String,
+        isError: Bool,
+        trustLevel: ContentTrustLevel = .untrustedExternal,
+        labelingEnabled: Bool = true
+    ) -> String? {
         let trimmedName = toolName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty else { return nil }
         let trimmedOutcome = content.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -753,15 +768,46 @@ public extension MemoryEngine {
         let compact = cleaned.count > episodicToolOutcomeLimit
             ? String(cleaned.prefix(episodicToolOutcomeLimit)) + "…"
             : cleaned
+        let visibleOutcome = OrchestratorToolLoop.labeledResultContent(
+            compact,
+            trustLevel: trustLevel,
+            toolName: trimmedName,
+            labelingEnabled: labelingEnabled
+        )
         if isError {
-            return "Used \(trimmedName) (failed): \(compact)"
+            return "Used \(trimmedName) (failed): \(visibleOutcome)"
         }
-        return "Used \(trimmedName): \(compact)"
+        return "Used \(trimmedName): \(visibleOutcome)"
     }
 
     /// Builds compact episodic content from a bus result.
+    ///
+    /// Fail-closed legacy path: provenance is unknown here, so the record
+    /// labels as untrusted rather than trusting by default. Callers with a
+    /// declared `contentTrustLevel` use the overload below.
     static func episodicToolRecord(toolName: String, result: ToolResult) -> String? {
-        episodicToolRecord(toolName: toolName, content: result.content, isError: result.isError)
+        episodicToolRecord(
+            toolName: toolName,
+            content: result.content,
+            isError: result.isError,
+            trustLevel: .untrustedExternal
+        )
+    }
+
+    /// Builds compact episodic content from a bus result with declared provenance.
+    static func episodicToolRecord(
+        toolName: String,
+        result: ToolResult,
+        trustLevel: ContentTrustLevel,
+        labelingEnabled: Bool = true
+    ) -> String? {
+        episodicToolRecord(
+            toolName: toolName,
+            content: result.content,
+            isError: result.isError,
+            trustLevel: trustLevel,
+            labelingEnabled: labelingEnabled
+        )
     }
 
     /// Removes tool-call plumbing lines from text.
@@ -834,11 +880,74 @@ public extension MemoryEngine {
     static let automaticRecallHeader =
         "Relevant memories (use for context; do not mention unless relevant):"
 
+    /// Whether a recall tier may carry attacker-controlled bytes.
+    ///
+    /// Indexed chunks hold file, mail, and message text, so they always
+    /// re-enter as labeled data. Episodic tool mirrors (`Used <tool>: ...`)
+    /// may carry web, browser, mail, and API bytes; plain user and assistant
+    /// turns stay trusted verbatim so everyday recall pays no label tax.
+    /// Semantic facts and profile preferences are owner-stored and stay
+    /// trusted verbatim.
+    static func isUntrustedRecallSource(_ source: MemorySource) -> Bool {
+        source == .docIndex
+    }
+
+    /// Whether one recall hit must re-enter as labeled data.
+    ///
+    /// Structural, not advisory: tool mirrors are identified by the
+    /// engine-authored `Used ` prefix the mirror writer owns, never by tool
+    /// names, so a renamed tool keeps its provenance and user turns that
+    /// happen to mention a tool stay trusted unless they carry the prefix.
+    /// Index chunks always qualify through the single-sourced tier policy
+    /// above; all other tiers qualify only when they carry the tool-mirror
+    /// prefix.
+    static func shouldLabelRecallResult(_ result: MemoryResult) -> Bool {
+        if isUntrustedRecallSource(result.source) {
+            return true
+        }
+        if result.source == .episodic {
+            let trimmed = result.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.hasPrefix("Used ") || trimmed.hasPrefix("Used\n")
+        }
+        return false
+    }
+
+    /// Whether a recall payload already carries the data-only block.
+    ///
+    /// Fresh tool mirrors wrap at storage, so recall must not wrap them again:
+    /// re-labeling would sanitize the inner delimiters into placeholder text
+    /// and double the token tax. The check requires the full block structure
+    /// in order (banner, then opening stem, then closing delimiter) so prose
+    /// merely quoting one marker never reads as already-labeled. Index chunks
+    /// always take the outer label regardless — sanitization neutralizes any
+    /// forged delimiters inside — so a chunk quoting the banner cannot dodge
+    /// labeling.
+    static func isAlreadyLabeledRecallPayload(_ compact: String) -> Bool {
+        guard let bannerRange = compact.range(of: ContentTrustLabeler.banner),
+              let beginRange = compact.range(of: ContentTrustLabeler.beginPrefix),
+              let endRange = compact.range(of: ContentTrustLabeler.endDelimiter)
+        else {
+            return false
+        }
+        return bannerRange.lowerBound < beginRange.lowerBound && beginRange.lowerBound < endRange.lowerBound
+    }
+
     /// Builds source-labeled recall context, token-bounded with truncation.
+    ///
+    /// Tool-mirror and index lines wrap their compact payload in the
+    /// single-sourced data-only block so mirrored attacker bytes cannot
+    /// re-enter as trusted system instructions; the `[source]` prefix stays
+    /// outside the label as engine-authored routing. Indexed chunks always
+    /// label so quoted delimiters cannot dodge the boundary (sanitization
+    /// neutralizes inner copies); tool mirrors skip only when the full block
+    /// structure is already present. Trusted tiers pass through with the
+    /// historical shape, and a disabled labeler passes through
+    /// byte-identically for debugging.
     static func automaticRecallContext(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
-        maxChars: Int = automaticRecallMaxChars
+        maxChars: Int = automaticRecallMaxChars,
+        labelingEnabled: Bool = true
     ) -> String? {
         guard maxChars > 0 else { return nil }
         let relevant = results.filter { $0.score >= threshold }
@@ -849,6 +958,16 @@ public extension MemoryEngine {
                 .replacingOccurrences(of: "\t", with: " ")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let compact = singleLine.count > 500 ? String(singleLine.prefix(500)) + "…" : singleLine
+            if labelingEnabled, shouldLabelRecallResult(result) {
+                if isUntrustedRecallSource(result.source) {
+                    let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
+                    return "[\(result.source.rawValue)] \(labeled)"
+                }
+                if !isAlreadyLabeledRecallPayload(compact) {
+                    let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
+                    return "[\(result.source.rawValue)] \(labeled)"
+                }
+            }
             return "[\(result.source.rawValue)] \(compact)"
         }
         let block = ([automaticRecallHeader] + lines).joined(separator: "\n")
@@ -863,9 +982,10 @@ public extension MemoryEngine {
     static func automaticRecallMessage(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
-        maxChars: Int = automaticRecallMaxChars
+        maxChars: Int = automaticRecallMaxChars,
+        labelingEnabled: Bool = true
     ) -> Message? {
-        guard let text = automaticRecallContext(for: results, threshold: threshold, maxChars: maxChars) else {
+        guard let text = automaticRecallContext(for: results, threshold: threshold, maxChars: maxChars, labelingEnabled: labelingEnabled) else {
             return nil
         }
         return Message(role: .system, content: text)
@@ -911,7 +1031,12 @@ public extension MemoryEngine {
     }
 
     /// Resolves automatic recall for one user turn, failure-isolated except cancellation.
-    func recallMessage(for query: String, sessionID: UUID, embedder: (any EmbeddingsBackend)? = nil) async throws -> Message? {
+    func recallMessage(
+        for query: String,
+        sessionID: UUID,
+        embedder: (any EmbeddingsBackend)? = nil,
+        labelingEnabled: Bool = true
+    ) async throws -> Message? {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         // `embedQuery` isolates embedding failures internally (falling back
         // to nil) and only rethrows cancellation, so a bare await suffices.
@@ -927,7 +1052,7 @@ public extension MemoryEngine {
                 limit: Self.automaticRecallLimit
             )
             let filtered = Self.filteredRecallResults(results, query: query, sessionID: sessionID)
-            return Self.automaticRecallMessage(for: filtered)
+            return Self.automaticRecallMessage(for: filtered, labelingEnabled: labelingEnabled)
         } catch let error as CancellationError {
             throw error
         } catch {
