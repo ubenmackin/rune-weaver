@@ -13,7 +13,7 @@ import Vapor
 /// Registers settings routes for reading and persisting configuration.
 func registerSettingsRoutes(_ app: Application) {
     let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
-    settings.get { _ async throws -> SettingsResponse in
+    settings.get { req async throws -> Response in
         let url = RuneWeaverConfig.defaultConfigFileURL()
         let config: RuneWeaverConfig
         do {
@@ -23,9 +23,11 @@ func registerSettingsRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
-        return SettingsResponse(config: config, configPath: url.path)
+        let response = try await SettingsResponse(config: config, configPath: url.path).encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
     }
-    settings.put { req async throws -> SettingsResponse in
+    settings.put { req async throws -> Response in
         let body = try req.content.decode(UpdateSettingsRequest.self)
         let url = RuneWeaverConfig.defaultConfigFileURL()
         var config: RuneWeaverConfig
@@ -61,7 +63,9 @@ func registerSettingsRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
-        return SettingsResponse(config: config, configPath: url.path)
+        let response = try await SettingsResponse(config: config, configPath: url.path).encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
     }
 }
 

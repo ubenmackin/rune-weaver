@@ -871,6 +871,7 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
         )
     }
     try context.config.requireBindable(authConfigured: resolvedAuth != nil)
+    app.routes.defaultMaxBodySize = "2mb"
     app.http.server.configuration.hostname = context.config.hostname
     app.http.server.configuration.port = context.config.port
     app.http.server.configuration.shutdownTimeout = .seconds(2)
@@ -890,12 +891,16 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
 /// verifier the surface stays the v1 loopback-no-auth shape exactly, including
 /// the absence of the rotation route.
 public func registerRuneWeaverRoutes(_ app: Application) {
+    app.routes.defaultMaxBodySize = "2mb"
+    app.middleware.use(HostValidationMiddleware(hostname: app.http.server.configuration.hostname))
+    app.middleware.use(GlobalSecurityHeadersMiddleware())
     // Resolve the bundle once so the public-path gate and the delivery handler
     // agree on exactly which bytes are real static artifacts.
     let dashboardBundle = DashboardBundle.resolve()
     if let auth = app.runeWeaverAuth {
         app.middleware.use(ServerAuthMiddleware(auth: auth, dashboardBundle: dashboardBundle))
         registerAuthRotateRoute(app, auth: auth)
+        registerAuthSessionRoutes(app, auth: auth)
     }
     registerHealthRoute(app)
     registerChatRoute(app)
@@ -941,6 +946,75 @@ private func registerAuthRotateRoute(_ app: Application, auth: ServerAuth) {
         // then marked no-store so a one-time credential is never cached.
         let response = try await ServerAuthRotateResponse(token: token).encodeResponse(for: req)
         response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store")
+        let sessionID = try await auth.createSession()
+        response.cookies[ServerAuthRequest.sessionCookieName] = ServerAuthRequest.makeSessionCookie(
+            token: sessionID,
+            isSecure: ServerAuthRequest.isRequestSecure(req)
+        )
+        return response
+    }
+}
+
+/// Request body for `POST /auth/session`.
+private struct AuthSessionRequestBody: Content {
+    let token: String?
+}
+
+/// Registers the owner browser session routes (`POST /auth/session` and `DELETE /auth/session`).
+private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
+    let authGroup = app.grouped(PathComponent.constant(ServerPaths.auth))
+
+    // POST /auth/session (login)
+    authGroup.post(PathComponent.constant(ServerPaths.session)) { req async throws -> Response in
+        let identity = ServerAuthRequest.clientIdentity(for: req)
+        let isLoopback = ServerAuthRequest.isLoopback(identity)
+
+        // Read token from JSON body or Authorization header
+        let bodyToken = (try? req.content.decode(AuthSessionRequestBody.self))?.token?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let headerToken = req.headers.bearerAuthorization?.token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = (bodyToken?.isEmpty == false ? bodyToken : nil) ?? (headerToken?.isEmpty == false ? headerToken : nil) ?? ""
+
+        guard !candidate.isEmpty, await (auth.verifyAndCaptureGeneration(candidate)) != nil else {
+            RuneWeaverLog.server.warning("Owner auth session login rejected from \(identity).")
+            if let retryAfter = await auth.recordFailure(for: identity, isLoopback: isLoopback) {
+                return ServerAuthMiddleware.throttledResponse(retryAfter: retryAfter)
+            }
+            return ServerAuthMiddleware.unauthorizedResponse()
+        }
+
+        await auth.clearFailures(for: identity)
+        let sessionID = try await auth.createSession()
+        let response = Response(
+            status: .ok,
+            headers: HTTPHeaders([
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Cache-Control", "no-store")
+            ]),
+            body: .init(string: #"{"status":"ok"}"#)
+        )
+        response.cookies[ServerAuthRequest.sessionCookieName] = ServerAuthRequest.makeSessionCookie(
+            token: sessionID,
+            isSecure: ServerAuthRequest.isRequestSecure(req)
+        )
+        return response
+    }
+
+    // DELETE /auth/session (logout)
+    authGroup.delete(PathComponent.constant(ServerPaths.session)) { req async throws -> Response in
+        if let cookieToken = req.cookies[ServerAuthRequest.sessionCookieName]?.string {
+            await auth.revokeSession(cookieToken)
+        }
+        let response = Response(
+            status: .ok,
+            headers: HTTPHeaders([
+                ("Content-Type", "application/json; charset=utf-8"),
+                ("Cache-Control", "no-store")
+            ]),
+            body: .init(string: #"{"status":"ok"}"#)
+        )
+        response.cookies[ServerAuthRequest.sessionCookieName] = ServerAuthRequest.makeExpiredSessionCookie(
+            isSecure: ServerAuthRequest.isRequestSecure(req)
+        )
         return response
     }
 }

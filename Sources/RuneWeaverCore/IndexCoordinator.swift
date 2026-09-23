@@ -51,8 +51,10 @@ public enum IndexSourceKind: String, Sendable, Equatable, CaseIterable {
 
 /// What caused an index run.
 public enum IndexRunTrigger: String, Sendable, Equatable {
-    /// The nightly scheduler trigger.
+    /// The nightly scheduler trigger, fired at the configured nightly hour.
     case nightly
+    /// A late launch after the nightly hour catching up a missed nightly window.
+    case catchUp
     /// A caller-requested run.
     case onDemand
 }
@@ -516,6 +518,13 @@ public actor IndexCoordinator {
     private let cancelFlag = IndexCancellationFlag()
     /// Stage currently running, for cancellation propagation.
     private var activeStage: (any IndexSourceStage)?
+    /// Handle for the run task in flight, so cancellation aborts in-flight awaits.
+    ///
+    /// Stored at run start and cleared alongside `running` so `cancel()` can
+    /// abort awaits (IMAP, embedding batch, vision turn) via `Task` cancellation
+    /// in addition to the cooperative flag; the awaits then throw at their next
+    /// checkpoint instead of running to stage end.
+    private var activeRunTask: Task<IndexRunSummary, Never>?
     /// Whether a run is in flight.
     private var running = false
     /// Instant of the last emitted liveness frame.
@@ -567,28 +576,39 @@ public actor IndexCoordinator {
     /// Runs the nightly trigger when it is due.
     ///
     /// A disabled coordinator is a no-op, as is a trigger already run on the
-    /// current calendar day or one that arrives before ``nightlyHour``.
+    /// current calendar day or one that arrives before ``nightlyHour``. The
+    /// trigger is `.nightly` when the calendar hour equals ``nightlyHour`` and
+    /// `.catchUp` for a later same-day launch that missed the nightly window;
+    /// the same-day guard applies to both so at most one automatic run fires
+    /// per calendar day. The nightly start is recorded only when the run
+    /// proceeds past the single-flight check, so a tick racing a manual run
+    /// returns skipped without suppressing the nightly retry for that day.
     /// - Parameter date: Evaluation instant.
     /// - Returns: The run summary when a run fired, or nil when nothing happened.
     @discardableResult
     public func fireNightly(now date: Date = Date()) async -> IndexRunSummary? {
         guard config.enabled else { return nil }
         let calendar = Calendar.current
-        guard calendar.component(.hour, from: date) >= nightlyHour else { return nil }
+        let hour = calendar.component(.hour, from: date)
+        guard hour >= nightlyHour else { return nil }
         let snapshot = await stateStore.snapshot()
         if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
             return nil
         }
-        try? await stateStore.recordNightlyStart(at: date)
-        return await run(trigger: .nightly)
+        let trigger: IndexRunTrigger = (hour == nightlyHour) ? .nightly : .catchUp
+        let summary = await run(trigger: trigger)
+        if summary.status != .skipped {
+            try? await stateStore.recordNightlyStart(at: date)
+        }
+        return summary
     }
 
     /// Runs one index pass over every enabled source.
     ///
     /// The run never throws: a failing stage is counted and the pass continues,
     /// because a background index should make progress on the remaining sources
-    /// rather than abort on one bad gateway. Cancellation stops the pass between
-    /// stages, leaving committed work for the next run.
+    /// rather than abort on one bad gateway. Cancellation stops the pass within
+    /// one batch, leaving committed work for the next run.
     /// - Parameter trigger: What caused the run.
     /// - Returns: A summary describing the pass.
     @discardableResult
@@ -600,7 +620,10 @@ public actor IndexCoordinator {
             return skippedSummary(trigger: trigger, reason: "An index run is already in progress.")
         }
         running = true
-        defer { running = false }
+        defer {
+            running = false
+            activeRunTask = nil
+        }
 
         cancelFlag.reset()
         activeStage = nil
@@ -608,6 +631,50 @@ public actor IndexCoordinator {
         let startedAt = now()
         let sessionID = UUID()
         let eventID = UUID()
+        let flag = cancelFlag
+        // Own the stage loop in a child task so cancel() can abort in-flight
+        // awaits via Task cancellation in addition to the cooperative flag.
+        // The child runs its actor work in the child's task context, so every
+        // per-batch Task probe inside the stages observes the cancel within one
+        // batch instead of running to stage end.
+        let child = Task<IndexRunSummary, Never> {
+            await self.performRun(
+                trigger: trigger,
+                sessionID: sessionID,
+                eventID: eventID,
+                startedAt: startedAt
+            )
+        }
+        activeRunTask = child
+        // Forward outer cancellation (for example a dropped request task) to
+        // the run task; cancel() itself never awaits the run, so the cancel
+        // route keeps returning immediately while the run settles via broadcast.
+        return await withTaskCancellationHandler {
+            await child.value
+        } onCancel: {
+            flag.set()
+            child.cancel()
+        }
+    }
+
+    /// Executes the stage loop for one run.
+    ///
+    /// Runs in the run task's context so Task cancellation from `cancel()` is
+    /// observed at the next per-batch checkpoint. A failing stage is counted
+    /// and the pass continues; cancellation stops between batches, leaving
+    /// committed work for the next run.
+    /// - Parameters:
+    ///   - trigger: What caused the run.
+    ///   - sessionID: Per-run session identifier for the log row.
+    ///   - eventID: Stable event identifier for start and completion events.
+    ///   - startedAt: Instant the run began.
+    /// - Returns: A summary describing the pass.
+    private func performRun(
+        trigger: IndexRunTrigger,
+        sessionID: UUID,
+        eventID: UUID,
+        startedAt: Date
+    ) async -> IndexRunSummary {
         var totals = Totals()
 
         await reporter.runStarted(IndexRunEvent(
@@ -627,14 +694,14 @@ public actor IndexCoordinator {
             }
             activeStage = stage
             let phase: IndexPhase = stage.kind == .vision ? .embedding : .extracting
-            await emit(phase: phase, totals: totals, startedAt: startedAt, force: true)
+            await emit(phase: phase, stage: stage.kind, totals: totals, startedAt: startedAt, force: true)
             let flag = cancelFlag
             let cancellationProbe: @Sendable () -> Bool = { flag.isSet || Task.isCancelled }
             do {
                 let report = try await stage.run(reporter: progress, isCancelled: cancellationProbe)
                 ranAny = true
                 totals.add(report)
-                if cancelFlag.isSet {
+                if cancelFlag.isSet || Task.isCancelled {
                     break
                 }
             } catch is CancellationError {
@@ -659,7 +726,9 @@ public actor IndexCoordinator {
             .ok
         }
 
-        await emit(phase: .committing, totals: totals, startedAt: startedAt, force: true)
+        if !cancelled {
+            await emit(phase: .committing, totals: totals, startedAt: startedAt, force: true)
+        }
         let stats = try? await store?.stats()
         let recordedAsOf = stats?.indexAsOf ?? finishedAt
         if status == .ok {
@@ -699,13 +768,18 @@ public actor IndexCoordinator {
 
     /// Requests cancellation of the run in flight.
     ///
-    /// The flag is set immediately and the active stage is asked to stop at its
-    /// next safe point; work already committed by prior batches stays in place.
+    /// The flag is set immediately, the active stage is asked to stop at its
+    /// next safe point, and the stored run task is cancelled so in-flight
+    /// awaits throw at their next checkpoint instead of running to stage end.
+    /// Work already committed by prior batches stays in place. Returns
+    /// immediately without awaiting the run; completion is observed via the
+    /// `run_completed` broadcast or the status probe.
     public func cancel() async {
         cancelFlag.set()
         if let activeStage {
             await activeStage.cancel()
         }
+        activeRunTask?.cancel()
     }
 }
 
@@ -791,10 +865,11 @@ private extension IndexCoordinator {
     /// Emits a phase frame, honoring the shared 2 Hz cadence unless forced.
     /// - Parameters:
     ///   - phase: Phase being reported.
+    ///   - stage: Active source stage, or nil for discovering and committing frames.
     ///   - totals: Running totals so far.
     ///   - startedAt: Instant the run began.
     ///   - force: Whether to bypass the cadence floor.
-    func emit(phase: IndexPhase, totals: Totals, startedAt: Date, force: Bool) async {
+    func emit(phase: IndexPhase, stage: IndexSourceKind? = nil, totals: Totals, startedAt: Date, force: Bool) async {
         let timestamp = now()
         if !force, let lastFrameAt, timestamp.timeIntervalSince(lastFrameAt) < Self.minimumFrameInterval {
             return
@@ -803,7 +878,12 @@ private extension IndexCoordinator {
         let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
         let seconds = max(timestamp.timeIntervalSince(startedAt), 0)
         let rate = seconds > 0 ? Double(totals.indexed) / seconds : 0
-        let message = "Indexing \(phase.rawValue): \(totals.indexed) indexed "
+        let prefix = if let stage {
+            "Indexing \(phase.rawValue) \(stage.rawValue):"
+        } else {
+            "Indexing \(phase.rawValue):"
+        }
+        let message = "\(prefix) \(totals.indexed) indexed "
             + "(\(totals.vectorChunks) vectors, \(totals.keywordChunks) keyword-only), "
             + "\(totals.scanned) scanned, \(totals.skipped) skipped, \(totals.errors) errors, "
             + String(format: "%.1f docs/s", rate)

@@ -7,6 +7,7 @@ import { resetSharedSocket as resetProdSharedSocket } from "../hooks/useSharedWe
 // stub records its message handler and outbound frames here for assertions
 // and frame injection.
 export interface MockWebSocketCapture {
+  url?: string;
   onMessage: ((e: MessageEvent) => void) | null;
   sentFrames: string[];
 }
@@ -20,7 +21,7 @@ export function createMockWebSocketCapture(): MockWebSocketCapture {
 // Builds the stub WebSocket class bound to one capture. The constructor attaches asynchronously to
 // mirror real connection timing, and send/close mirror the minimal surface the shared client probes
 // (readyState, onopen, onclose, onmessage).
-export function createMockWebSocket(capture: MockWebSocketCapture): new () => unknown {
+export function createMockWebSocket(capture: MockWebSocketCapture): new (url?: string) => unknown {
   return class MockWebSocket {
     static CONNECTING = 0;
     static OPEN = 1;
@@ -32,7 +33,8 @@ export function createMockWebSocket(capture: MockWebSocketCapture): new () => un
     onerror: (() => void) | null = null;
     onmessage: ((e: MessageEvent) => void) | null = null;
 
-    constructor() {
+    constructor(url?: string) {
+      capture.url = url;
       setTimeout(() => {
         capture.onMessage = this.onmessage;
         this.onopen?.();

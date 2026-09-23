@@ -469,6 +469,9 @@ public actor MessagesIndexer {
             var indexed = 0
             var lastRowID = watermark
             for row in rows {
+                // Honor cancellation per message so a large batch stops within
+                // one item instead of draining the whole batch bound.
+                try Task.checkCancellation()
                 let attachments = try MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)
                 let payload = makePayload(from: row, attachments: attachments, names: names)
                 if !payload.combinedText.isEmpty {

@@ -113,9 +113,10 @@ extension MediaArrClient {
                 throw ToolExecutionError.unconfigured("Sonarr URL is not configured. Set [media.sonarr] url in ~/.runeweaver/config.toml or Settings.")
             }
             let keyEnv = cfg.apiKeyEnv?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let apiKeyEnv = (keyEnv?.isEmpty == false ? keyEnv : nil) ?? "SONARR_API_KEY"
             return ArrServiceConfig(
                 url: url,
-                apiKeyEnv: (keyEnv?.isEmpty == false) ? keyEnv! : "SONARR_API_KEY",
+                apiKeyEnv: apiKeyEnv,
                 defaultQuality: cfg.defaultQualityProfile,
                 defaultRoot: cfg.defaultRootFolder
             )
@@ -129,9 +130,10 @@ extension MediaArrClient {
                 throw ToolExecutionError.unconfigured("Radarr URL is not configured. Set [media.radarr] url in ~/.runeweaver/config.toml or Settings.")
             }
             let keyEnv = cfg.apiKeyEnv?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let apiKeyEnv = (keyEnv?.isEmpty == false ? keyEnv : nil) ?? "RADARR_API_KEY"
             return ArrServiceConfig(
                 url: url,
-                apiKeyEnv: (keyEnv?.isEmpty == false) ? keyEnv! : "RADARR_API_KEY",
+                apiKeyEnv: apiKeyEnv,
                 defaultQuality: cfg.defaultQualityProfile,
                 defaultRoot: cfg.defaultRootFolder
             )
@@ -521,7 +523,7 @@ extension MediaArrClient {
     ) async throws -> String {
         // 1. Lookup title
         let lookupEndpoint = service == .sonarr ? "api/v3/series/lookup" : "api/v3/movie/lookup"
-        let queryTerm = args.query ?? (args.id != nil ? "\(service == .sonarr ? "tvdb:" : "tmdb:")\(args.id!)" : "")
+        let queryTerm = args.query ?? (args.id.map { "\(service == .sonarr ? "tvdb:" : "tmdb:")\($0)" } ?? "")
         guard !queryTerm.isEmpty else {
             throw ToolExecutionError.badArgument("Adding a title requires a 'query' or 'id'.")
         }

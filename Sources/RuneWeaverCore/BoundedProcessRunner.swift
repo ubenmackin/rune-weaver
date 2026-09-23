@@ -119,6 +119,13 @@ public enum BoundedProcessRunner: Sendable {
         private static func signalTermination(pid: Int32) {
             guard pid > 0 else { return }
             _ = kill(pid, SIGTERM)
+            _ = kill(-pid, SIGTERM)
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+                if kill(pid, 0) == 0 {
+                    _ = kill(pid, SIGKILL)
+                    _ = kill(-pid, SIGKILL)
+                }
+            }
         }
     }
 
@@ -162,14 +169,67 @@ public enum BoundedProcessRunner: Sendable {
         } catch {
             throw BoundedProcessError.launchFailed("Could not launch \(executableURL.path): \(error.localizedDescription)")
         }
-        if let inputData, !inputData.isEmpty {
-            do {
-                try stdinPipe.fileHandleForWriting.write(contentsOf: inputData)
-            } catch {
-                RuneWeaverLog.tools.debug("BoundedProcessRunner: Child closed stdin before write completed: \(error.localizedDescription)")
+        writeStandardInput(pipe: stdinPipe, data: inputData)
+        return try drainAndCollect(
+            process: process,
+            stdoutPipe: stdoutPipe,
+            stderrPipe: stderrPipe,
+            timeoutSeconds: timeoutSeconds,
+            maxOutputBytes: maxOutputBytes,
+            maxErrorBytes: maxErrorBytes
+        )
+    }
+
+    /// Writes standard input to the child process asynchronously and closes the pipe.
+    private static func writeStandardInput(pipe: Pipe, data: Data?) {
+        if let data, !data.isEmpty {
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer {
+                    try? pipe.fileHandleForWriting.close()
+                }
+                do {
+                    try pipe.fileHandleForWriting.write(contentsOf: data)
+                } catch {
+                    RuneWeaverLog.tools.debug("BoundedProcessRunner: Child closed stdin before write completed: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            try? pipe.fileHandleForWriting.close()
+        }
+    }
+
+    /// Terminates a running process with SIGTERM and schedules SIGKILL escalation after 500ms.
+    private static func terminateWithEscalation(_ process: Process) {
+        process.terminate()
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        _ = kill(-pid, SIGTERM)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+            if kill(pid, 0) == 0 {
+                _ = kill(pid, SIGKILL)
+                _ = kill(-pid, SIGKILL)
             }
         }
-        try? stdinPipe.fileHandleForWriting.close()
+    }
+
+    /// Forcibly kills a running process with SIGKILL immediately.
+    private static func forceKillProcess(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        guard pid > 0 else { return }
+        _ = kill(pid, SIGKILL)
+        _ = kill(-pid, SIGKILL)
+    }
+
+    /// Drains stdout and stderr pipes in a single-threaded poll loop with timeout and limits.
+    private static func drainAndCollect(
+        process: Process,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe,
+        timeoutSeconds: TimeInterval,
+        maxOutputBytes: Int,
+        maxErrorBytes: Int
+    ) throws -> BoundedProcessResult {
         // Single-threaded readiness loop replaces the prior concurrent drains
         // plus dispatch timeout: one thread polls both pipes, enforces caps,
         // and watches the deadline so no non-Sendable child state crosses
@@ -199,7 +259,7 @@ public enum BoundedProcessRunner: Sendable {
             if !timedOut, Date() >= deadline {
                 if process.isRunning {
                     timedOut = true
-                    process.terminate()
+                    terminateWithEscalation(process)
                 }
             }
             var fds = [
@@ -213,12 +273,8 @@ public enum BoundedProcessRunner: Sendable {
                 guard let base = buffer.baseAddress else { return 0 }
                 return poll(base, nfds_t(buffer.count), pollTimeout)
             }
-            if ready < 0 {
-                // EINTR merely retries; any other poll error drains once more
-                // non-blocking before treating the pipes as finished.
-                if errno == EINTR {
-                    continue
-                }
+            if ready < 0, errno == EINTR {
+                continue
             }
             let outReady = !outFinished && (isPollReadable(fds[0].revents) || !process.isRunning)
             let errReady = !errFinished && (isPollReadable(fds[1].revents) || !process.isRunning)
@@ -237,6 +293,7 @@ public enum BoundedProcessRunner: Sendable {
                 break
             }
         }
+        forceKillProcess(process)
         process.waitUntilExit()
         // Timeout wins over caps, matching the prior dispatch ordering where
         // the timeout flag was checked before the output-cap flag.
@@ -256,7 +313,11 @@ public enum BoundedProcessRunner: Sendable {
             stderr: errData
         )
     }
+}
 
+// MARK: - Async Runner
+
+extension BoundedProcessRunner {
     /// Runs one child without blocking the cooperative pool.
     public static func runAsync(
         executableURL: URL,
@@ -338,7 +399,6 @@ public enum BoundedProcessRunner: Sendable {
                         return
                     }
                     writeBoundedInput(stdinPipe: stdinPipe, inputData: inputData)
-                    try? stdinPipe.fileHandleForWriting.close()
                     let timeoutTask = startBoundedTimeout(
                         clampedTimeout: clampedTimeout,
                         timedOut: timedOut,
@@ -426,6 +486,16 @@ public enum BoundedProcessRunner: Sendable {
                 if data.count > limit {
                     if process.isRunning {
                         process.terminate()
+                        let pid = process.processIdentifier
+                        if pid > 0 {
+                            _ = kill(-pid, SIGTERM)
+                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.5) {
+                                if kill(pid, 0) == 0 {
+                                    _ = kill(pid, SIGKILL)
+                                    _ = kill(-pid, SIGKILL)
+                                }
+                            }
+                        }
                     }
                     exceeded = true
                     return

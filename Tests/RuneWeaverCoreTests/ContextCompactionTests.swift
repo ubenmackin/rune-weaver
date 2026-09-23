@@ -142,4 +142,31 @@ struct ContextCompactionTests {
         // Recent turns should still be in history
         #expect(history.contains { $0.role == .user && $0.content.contains("Turn 10") })
     }
+
+    @Test
+    func `ConversationManager truncation never leaves orphan tool message at head of kept history`() async {
+        let manager = ConversationManager(maxMessages: 3)
+        let sessionID = UUID()
+
+        // Turn 1:
+        await manager.append(Message(role: .user, content: "Initial turn"), to: sessionID)
+        await manager.append(Message(role: .assistant, content: "Call tool"), to: sessionID)
+        await manager.append(Message(role: .tool, content: "Result 1", toolCallID: "call-1"), to: sessionID)
+        await manager.append(Message(role: .tool, content: "Result 2", toolCallID: "call-1"), to: sessionID)
+
+        // Turn 2:
+        await manager.append(Message(role: .user, content: "Turn 2 user prompt"), to: sessionID)
+        await manager.append(Message(role: .assistant, content: "Turn 2 response"), to: sessionID)
+
+        let session = await manager.session(id: sessionID)
+        let messages = session?.messages ?? []
+
+        // Messages must be bounded by maxMessages
+        #expect(messages.count <= 3)
+        // First message of kept messages must not be a .tool message
+        if let first = messages.first {
+            #expect(first.role != .tool)
+            #expect(first.role == .user)
+        }
+    }
 }

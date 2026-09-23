@@ -206,6 +206,8 @@ public extension IndexClosureStage {
             let documents = await pendingDocuments()
             report.scanned = documents.count
             for document in documents {
+                // Honor cancellation per document so the vision pass stops
+                // within one LLM turn instead of draining the pending list.
                 if isCancelled() {
                     break
                 }
@@ -221,6 +223,8 @@ public extension IndexClosureStage {
                     case .skipped:
                         report.skipped += 1
                     }
+                } catch is CancellationError {
+                    break
                 } catch {
                     report.errors += 1
                     report.warnings.append("vision: \(error.localizedDescription)")

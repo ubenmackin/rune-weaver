@@ -115,4 +115,16 @@ struct AttachmentSecurityTests {
             #expect(xattrVal.contains("RuneWeaver"))
         }
     #endif
+
+    @Test
+    func `Handles sliced Data with non-zero startIndex without crashing`() {
+        let fullData = Data([0xAA, 0xBB, 0xCC, 0x50, 0x4B, 0x03, 0x04, 0x14, 0x00])
+        let slice = fullData[3...]
+        #expect(slice.startIndex == 3)
+        #expect(AttachmentSecurity.requiresMicroVMDetonation(data: slice, contentType: "", filename: "test.zip"))
+        let imageHeader = Data([0x00, 0x00, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])
+        let imageSlice = imageHeader[2...]
+        #expect(imageSlice.startIndex == 2)
+        #expect(AttachmentSecurity.isValidImage(data: imageSlice))
+    }
 }

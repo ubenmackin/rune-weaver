@@ -132,7 +132,7 @@ const MAX_TOOL_PROGRESS_CURRENT_LENGTH = 240;
 // this instead of trusting the wire as defense-in-depth, so a handcrafted frame
 // ("/etc/passwd", "~/.ssh", "../../secret") can never render a filesystem path
 // the engine deliberately keeps private.
-function relativeProgressCurrent(value: unknown): string | null {
+export function relativeProgressCurrent(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (trimmed.length === 0) return null;
@@ -145,6 +145,20 @@ function relativeProgressCurrent(value: unknown): string | null {
   return trimmed.slice(0, MAX_TOOL_PROGRESS_CURRENT_LENGTH);
 }
 
+// Shared trimmed-identity guard for tool frames: a tool identity without
+// non-whitespace characters cannot correlate with its end frame or approval,
+// so it must never enter turn state. Single source for progress parsing, live
+// start/end validation, and chat turn state so future grammar changes land in
+// one place.
+export function isValidToolIDs(toolName: unknown, callID: unknown): boolean {
+  return (
+    typeof toolName === "string" &&
+    typeof callID === "string" &&
+    toolName.trim().length > 0 &&
+    callID.trim().length > 0
+  );
+}
+
 // Validates one live progress frame before it enters the keyed map. Required
 // numeric fields (scanned, matched, elapsedMs) share the engine's non-negative
 // integer contract so a drifted or partial payload drops instead of rendering a
@@ -152,10 +166,7 @@ function relativeProgressCurrent(value: unknown): string | null {
 // null rather than aborting the update.
 export function parseToolProgress(value: unknown): ToolProgress | null {
   if (!isRecord(value)) return null;
-  if (typeof value.callID !== "string" || value.callID.trim().length === 0)
-    return null;
-  if (typeof value.toolName !== "string" || value.toolName.trim().length === 0)
-    return null;
+  if (!isValidToolIDs(value.toolName, value.callID)) return null;
   if (typeof value.message !== "string") return null;
   const scanned = toNonNegativeInt(value.scanned);
   const matched = toNonNegativeInt(value.matched);
@@ -163,9 +174,14 @@ export function parseToolProgress(value: unknown): ToolProgress | null {
   if (scanned === undefined || matched === undefined || elapsedMs === undefined)
     return null;
   const rawWarning = typeof value.warning === "string" ? value.warning.trim() : "";
+  // Store trimmed identities so the keyed progress map and the end-frame
+  // lookup agree: a padded identity must not key as " foo " while the forget
+  // path looks up "foo".
+  const callID = (value.callID as string).trim();
+  const toolName = (value.toolName as string).trim();
   return {
-    callID: value.callID,
-    toolName: value.toolName,
+    callID,
+    toolName,
     message: value.message,
     warning: rawWarning.length > 0 ? rawWarning : null,
     scanned,
@@ -179,6 +195,7 @@ export function parseToolProgress(value: unknown): ToolProgress | null {
 // one decimal so fast scans still look alive, while ten seconds and beyond rounds
 // to whole seconds to avoid a jittering tenth that implies false precision.
 export function formatToolProgressElapsedMs(elapsedMs: number): string {
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return "0s";
   const seconds = Math.max(0, elapsedMs) / 1000;
   const rounded = seconds >= 10 ? Math.round(seconds) : Math.round(seconds * 10) / 10;
   return `${rounded}s`;
@@ -887,21 +904,28 @@ function validateTurnResponse(
 // Single-owner bearer authentication
 // ---------------------------------------------------------------------------
 
-// sessionStorage key naming the single owner-token slot. The engine serves the
-// dashboard bundle publicly, so the in-bundle login gate and the running
-// authenticated session share this one slot instead of competing stores; the key
-// is never written to persistent storage.
+// ---------------------------------------------------------------------------
+// Single-owner authentication (HttpOnly session cookie + optional bearer)
+// ---------------------------------------------------------------------------
+
+// Legacy sessionStorage key naming the single owner-token slot in older versions.
+// Retained only to purge any stale tokens previously written to storage.
 export const AUTH_TOKEN_STORAGE_KEY = "runeWeaverToken";
 
-// The live token lives in memory; sessionStorage is a same-tab mirror only.
-// Memory is authoritative because every request and socket dial must read the
-// credential synchronously, and a storage-only read would leave a window where a
-// cleared slot still authenticates. The mirror survives a reload without ever
-// writing the credential to persistent storage.
-let authToken: string | null = null;
+// Immediately purge any legacy token left in sessionStorage to prevent XSS exfiltration
+if (typeof window !== "undefined") {
+  try {
+    window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  } catch {
+    // Ignore storage unavailability in sandbox / private browsing mode
+  }
+}
 
-// Whether the in-memory value has been hydrated from the session mirror yet.
-let authTokenHydrated = false;
+// In-memory bearer token for headless / script callers that explicitly supply one.
+// Normal browser UI authentication uses HttpOnly cookies (`rw_session`) so credentials
+// cannot be exfiltrated via XSS.
+let authToken: string | null = null;
+let sessionAuthenticated = false;
 
 // Listeners awaiting authentication transitions. The boot gate and the shared
 // WebSocket subscribe here so a login, logout, rotation, or uniform 401 reaches
@@ -909,39 +933,15 @@ let authTokenHydrated = false;
 type AuthStateListener = (authenticated: boolean) => void;
 const authStateListeners = new Set<AuthStateListener>();
 
-// Reads the session mirror, treating an unreadable or blank slot as absent so a
-// privacy-mode storage failure degrades to "no token" instead of throwing on
-// every request.
-function readStoredAuthToken(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
-    return raw && raw.trim() ? raw.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-// Mirrors the in-memory token to sessionStorage. A storage failure keeps the
-// in-memory credential (the safe direction is to stay authenticated for this
-// page) and only forfeits reload recovery.
-function writeStoredAuthToken(token: string | null): void {
-  if (typeof window === "undefined") return;
-  try {
-    if (token) {
-      window.sessionStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
-    } else {
-      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
-    }
-  } catch {
-    // Ignore: the in-memory value remains authoritative for this page.
-  }
+// Whether the current session is authenticated via HttpOnly cookie or bearer token.
+export function isSessionAuthenticated(): boolean {
+  return sessionAuthenticated || authToken !== null;
 }
 
 // Notifies auth-state listeners without letting one throwing listener starve the
 // others.
 function notifyAuthState(): void {
-  const authenticated = authToken !== null;
+  const authenticated = isSessionAuthenticated();
   for (const listener of authStateListeners) {
     try {
       listener(authenticated);
@@ -951,19 +951,16 @@ function notifyAuthState(): void {
   }
 }
 
-// Returns the live token, hydrating from the session mirror on first read so a
-// reload re-adopts the tab session without a network round trip.
+// Returns the live bearer token if explicitly configured (e.g. headless/test usage).
+// In normal browser operations with HttpOnly cookies, credentials cannot be read
+// by JavaScript to prevent exfiltration, so this returns null.
 export function getAuthToken(): string | null {
-  if (!authTokenHydrated) {
-    authToken = readStoredAuthToken();
-    authTokenHydrated = true;
-  }
   return authToken;
 }
 
 // Builds request headers for a direct same-origin fetch made outside the shared
 // JSON helper (for example a non-JSON lifecycle probe), so those calls carry the
-// owner credential too instead of bypassing the gate. Extra headers are merged
+// owner credential too if one is configured. Extra headers are merged
 // last so a caller can still set Content-Type.
 export function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const token = getAuthToken();
@@ -973,38 +970,47 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
   };
 }
 
-// Adopts a token as the live credential and mirrors it to the tab session.
-// Called on login and after rotation; blank input is ignored so an empty form can
-// never clear a working session.
+// Adopts an explicit bearer token as the live credential (primarily for tests/CLI).
+// The token is never stored in persistent or sessionStorage.
 export function setAuthToken(token: string): void {
   const trimmed = token.trim();
   if (!trimmed) return;
   authToken = trimmed;
-  authTokenHydrated = true;
-  writeStoredAuthToken(trimmed);
+  sessionAuthenticated = true;
   notifyAuthState();
 }
 
-// Clears the live token from memory and the session mirror together so a logout
-// cannot leave a reload-recoverable credential behind. A transition is reported
-// only when a credential was actually present: the loopback no-auth posture has
-// no token to clear, so a stray logout there must not flip the gate to a login
-// form the engine would accept any value for. When it fires, the transition
-// drives the login gate and closes the shared socket.
+// Clears authentication state from memory, purges any legacy session storage,
+// and instructs the engine to expire the HttpOnly session cookie via DELETE /auth/session.
 export function clearAuthToken(): void {
-  // Hydrate first so a stored token is seen even if this is the first auth call.
-  const hadToken = getAuthToken() !== null;
+  const hadAuth = isSessionAuthenticated();
   authToken = null;
-  authTokenHydrated = true;
-  writeStoredAuthToken(null);
-  if (hadToken) {
+  sessionAuthenticated = false;
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+    if (hadAuth) {
+      try {
+        fetch("/auth/session", {
+          method: "DELETE",
+          credentials: "same-origin",
+        }).catch(() => {});
+      } catch {
+        // Ignore
+      }
+    }
+  }
+  if (hadAuth) {
     notifyAuthState();
   }
 }
 
 // Subscribes to authentication transitions. The current state is intentionally
 // not emitted synchronously so a caller mounting before the boot probe does not
-// briefly believe the session is unauthenticated; callers read getAuthToken()
+// briefly believe the session is unauthenticated; callers read isSessionAuthenticated()
 // for the present value and this only reports changes.
 export function subscribeAuthState(listener: AuthStateListener): () => void {
   authStateListeners.add(listener);
@@ -1017,10 +1023,16 @@ export function subscribeAuthState(listener: AuthStateListener): () => void {
 // told to fall back to login; the value is never logged, echoed in an error, or
 // included in the notification, so a rejected credential stays unobserved.
 function handleUnauthorized(): void {
-  if (authToken === null) return;
+  if (!isSessionAuthenticated()) return;
   authToken = null;
-  authTokenHydrated = true;
-  writeStoredAuthToken(null);
+  sessionAuthenticated = false;
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+    } catch {
+      // Ignore
+    }
+  }
   notifyAuthState();
 }
 
@@ -1029,25 +1041,35 @@ function handleUnauthorized(): void {
 // missing credential from a wrong one beyond throttle and transport.
 export type AuthenticationResult = "ok" | "invalid" | "throttled" | "unreachable";
 
-// Validates a candidate token against a protected route and adopts it only on
-// success. The probe deliberately reads no body: the engine's uniform 401 is the
-// proof, and parsing the response would tempt logging payload detail that must
-// never carry the credential. `/settings` is the same protected probe the engine
-// uses for its own token check, so the gate accepts exactly the tokens the
-// engine accepts.
+// Validates a candidate token against POST /auth/session. On success, the engine sets
+// a secure, HttpOnly, SameSite=Strict cookie ('rw_session') on the response. The raw token
+// is never saved into sessionStorage, localStorage, or client memory, preventing XSS exfiltration.
 export async function authenticateWithToken(token: string): Promise<AuthenticationResult> {
   const candidate = token.trim();
   if (!candidate) return "invalid";
   let response: Response;
   try {
-    response = await fetch("/settings", {
-      headers: { Authorization: `Bearer ${candidate}` },
+    response = await fetch("/auth/session", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ token: candidate }),
+      credentials: "same-origin",
     });
   } catch {
     return "unreachable";
   }
   if (response.ok) {
-    setAuthToken(candidate);
+    sessionAuthenticated = true;
+    if (typeof window !== "undefined") {
+      try {
+        window.sessionStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+      } catch {
+        // Ignore
+      }
+    }
+    notifyAuthState();
     return "ok";
   }
   if (response.status === 429) return "throttled";
@@ -1062,13 +1084,9 @@ export interface RotateTokenResponse {
   token: string;
 }
 
-// Rotates the owner bearer through the authenticated route and adopts the
-// returned token before handing it back for the one-time reveal. The old token is
-// invalid the instant rotation returns, so the swap happens here rather than
-// after the owner acknowledges saving: delaying it would strand every background
-// poll on a dead credential. A refused rotation leaves the current token
-// untouched so the session never lands on a value that was not persisted. The
-// token is never logged.
+// Rotates the owner bearer through the authenticated route and returns the new token
+// for one-time copying by the user. If authenticated via HttpOnly cookie, the engine
+// automatically updates the rw_session cookie in the response.
 export async function rotateToken(): Promise<string> {
   const response = await fetchJson<RotateTokenResponse>("/auth/rotate", {
     method: "POST",
@@ -1077,7 +1095,8 @@ export async function rotateToken(): Promise<string> {
   if (!token) {
     throw new ApiError("Rotation response did not include a token", 0);
   }
-  setAuthToken(token);
+  sessionAuthenticated = true;
+  notifyAuthState();
   return token;
 }
 
@@ -1104,6 +1123,7 @@ async function fetchJsonWithHeaders<T>(
   try {
     response = await fetch(path, {
       ...init,
+      credentials: "same-origin",
       headers: {
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -1201,6 +1221,9 @@ export async function getHealth(): Promise<HealthResponse> {
   // field wins when valid for future body-carried caps, otherwise the probe header fills it in,
   // and older engines with neither degrade to the fallback constant via the resolver.
   const { data, headers } = await fetchJsonWithHeaders<HealthResponse>("/health");
+  if (isAuthenticatedHealth(data)) {
+    sessionAuthenticated = true;
+  }
   const fromBody = parseMaxConcurrentChatTurns(data.maxConcurrentChatTurns as unknown);
   if (fromBody != null) {
     data.maxConcurrentChatTurns = fromBody;
@@ -1588,25 +1611,43 @@ export const DEFAULT_DESKTOP_BLOCKED_APPS: string[] = [
 export const DEFAULT_DESKTOP_BLOCKED_APPS_TEXT: string =
   DEFAULT_DESKTOP_BLOCKED_APPS.join("\n");
 
-// Parses the blocked-apps textarea into the wire shape: one app name per line,
-// trimmed, with blank lines dropped. Blank filtering keeps an emptied editor
-// as an explicit allow-all instead of persisting whitespace-only rows, and the
-// server-side control bridge remains the authoritative enforcer.
-export function parseBlockedAppsText(text: string | undefined | null): string[] {
-  if (text == null) return [...DEFAULT_DESKTOP_BLOCKED_APPS];
+// Shared line-list codec for multiline editors: one entry per line, trimmed,
+// with blank lines dropped so an emptied editor reads as an explicit empty
+// list instead of persisting whitespace-only rows. Null input degrades to a
+// copy of the caller-supplied fallback so default boundaries stay with the
+// wrappers and the server remains the authoritative enforcer.
+export function parseLinesToList(
+  text: string | undefined | null,
+  fallback: string[],
+): string[] {
+  if (text == null) return [...fallback];
   return text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
 }
 
+// Shared formatter for multiline editors: joins a list for display, falling
+// back to the caller-supplied text when an older engine omits the section so
+// textarea and array states never diverge on the default boundary.
+export function formatListToText(
+  list: string[] | undefined | null,
+  fallback: string,
+): string {
+  if (!Array.isArray(list)) return fallback;
+  return list.join("\n");
+}
+
+// Parses the blocked-apps textarea into the wire shape, defaulting to the
+// desktop guard boundary when no text is present.
+export function parseBlockedAppsText(text: string | undefined | null): string[] {
+  return parseLinesToList(text, DEFAULT_DESKTOP_BLOCKED_APPS);
+}
+
 // Formats a blocked-apps array for the multiline editor, falling back to the
 // guard defaults when an older engine omits the [desktop] section entirely.
-// Callers use this for initial display and reset so textarea and array states
-// never diverge on the default boundary.
 export function formatBlockedAppsText(apps: string[] | undefined | null): string {
-  if (!Array.isArray(apps)) return DEFAULT_DESKTOP_BLOCKED_APPS_TEXT;
-  return apps.join("\n");
+  return formatListToText(apps, DEFAULT_DESKTOP_BLOCKED_APPS_TEXT);
 }
 
 // Default desktop policy mirroring DesktopConfig so a fresh form matches the
@@ -1642,16 +1683,88 @@ export interface IndexExtractStatusCounts {
   documents: number;
 }
 
+// Display labels for index run triggers. The engine persists the
+// machine-readable wire token (`nightly`, `onDemand`, `catchUp`) in run
+// messages and the `Trigger:` detail line; the dashboard maps each token to
+// plain language here so run notices, the last-run strip, and run-history
+// rows agree on one copy without branching per call site.
+export const INDEX_RUN_TRIGGER_LABELS: Record<string, string> = {
+  nightly: "Nightly Run",
+  onDemand: "Manual Run",
+  catchUp: "Catch-Up Run",
+};
+
+// Maps an index run trigger token to its display label, falling back to the
+// trimmed wire token so an unknown future trigger still renders honestly, and
+// to a bare index label when no token is present.
+export function indexRunTriggerLabel(trigger: string | null | undefined): string {
+  if (typeof trigger !== "string") return "Index Run";
+  const token = trigger.trim();
+  if (!token) return "Index Run";
+  return INDEX_RUN_TRIGGER_LABELS[token] ?? token;
+}
+
+// Extracts the machine-readable trigger token from an index run log row. The
+// start message carries `Index run started (<trigger>)` while the completion
+// response carries a `Trigger: <trigger>` detail line; either shape yields the
+// token only when anchored to its prefix and matching a known trigger
+// (`nightly`, `catchUp`, `onDemand`), and a row carrying neither degrades to
+// null instead of guessing.
+export function parseIndexRunTrigger(
+  run: Pick<RunLogEntry, "message" | "response"> | null | undefined,
+): string | null {
+  if (!run) return null;
+  const message = typeof run.message === "string" ? run.message : "";
+  const prefix = "Index run started (";
+  const prefixAt = message.indexOf(prefix);
+  if (prefixAt !== -1) {
+    const rest = message.slice(prefixAt + prefix.length);
+    const close = rest.indexOf(")");
+    if (close !== -1) {
+      const token = rest.slice(0, close).trim();
+      if (token === "nightly" || token === "catchUp" || token === "onDemand") {
+        return token;
+      }
+    }
+  }
+  const response = typeof run.response === "string" ? run.response : "";
+  if (response) {
+    for (const line of response.split("\n")) {
+      const trimmed = line.trim();
+      if (/^trigger:/i.test(trimmed)) {
+        const token = trimmed.slice(trimmed.indexOf(":") + 1).trim().split(/\s+/, 1)[0];
+        if (token === "nightly" || token === "catchUp" || token === "onDemand") {
+          return token;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// Maps an index run log row to its display label, parsing the trigger token
+// from the durable message/response first so run-history rows agree with run
+// notices even when the status probe predates trigger tracking.
+export function indexRunLabelForRun(
+  run: Pick<RunLogEntry, "message" | "response"> | null | undefined,
+): string {
+  return indexRunTriggerLabel(parseIndexRunTrigger(run));
+}
+
 // Latest index run outcome on `GET /index/status`, distilled server-side from
 // the newest `index`-kind run log row. Counts are nullable because a drifted
 // summary line still reports status and finish time; finishedAt keeps the dual
 // wire shape (ISO-8601 string or Unix seconds) normalized via parseRunTimestamp.
+// The trigger token (`nightly`, `catchUp`, `onDemand`) is optional for
+// back-compat with older engines that predate trigger tracking; absent
+// degrades to an unlabeled strip instead of failing.
 export interface IndexLastRunStatus {
   status: string;
   indexed?: number | null;
   scanned?: number | null;
   errors?: number | null;
   finishedAt?: string | number | null;
+  trigger?: string | null;
 }
 
 // Status snapshot for `GET /index/status`.
@@ -1842,23 +1955,17 @@ export interface UpdateSettingsInput {
 // Textarea mirror of the empty allowed origins defaults.
 export const DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT = "";
 
-// Parses the allowed-origins textarea into the wire shape: one pattern per line, trimmed, with blank
-// lines dropped. Blank filtering avoids persisting whitespace-only rows.
+// Parses the allowed-origins textarea into the wire shape, defaulting to an
+// empty allowlist when no text is present.
 export function parseAllowedOriginsText(text: string | undefined | null): string[] {
-  if (text == null) return [];
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return parseLinesToList(text, []);
 }
 
-// Formats an allowed-origins array for the multiline editor. Callers use this for display and reset
-// so textarea and array states never diverge.
+// Formats an allowed-origins array for the multiline editor.
 export function formatAllowedOriginsText(
   origins: string[] | undefined | null
 ): string {
-  if (!Array.isArray(origins)) return "";
-  return origins.join("\n");
+  return formatListToText(origins, DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT);
 }
 
 // Manual mirror of FilesConfig.defaultDenyPatterns in Sources/RuneWeaverCore/Config.swift.
@@ -1884,25 +1991,18 @@ export const DEFAULT_FILES_ALLOW_ROOTS: string[] = ["~"];
 export const DEFAULT_FILES_DENY_PATTERNS_TEXT: string =
   DEFAULT_FILES_DENY_PATTERNS.join("\n");
 
-// Parses the blocked-paths textarea into the wire shape: one glob per line, trimmed, with blank
-// lines dropped. Blank filtering keeps an emptied editor as an explicit allow-all instead of
-// persisting whitespace-only rows, and the server-side guard remains the authoritative enforcer.
+// Parses the blocked-paths textarea into the wire shape, defaulting to the
+// files guard boundary when no text is present.
 export function parseDenyPatternsText(text: string | undefined | null): string[] {
-  if (text == null) return [...DEFAULT_FILES_DENY_PATTERNS];
-  return text
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return parseLinesToList(text, DEFAULT_FILES_DENY_PATTERNS);
 }
 
-// Formats a deny array for the multiline editor, falling back to the guard defaults when an older
-// engine omits the [files] section entirely. Callers use this for initial display and reset so
-// textarea and array states never diverge on the default boundary.
+// Formats a deny array for the multiline editor, falling back to the guard
+// defaults when an older engine omits the [files] section entirely.
 export function formatDenyPatternsText(
   patterns: string[] | undefined | null
 ): string {
-  if (!Array.isArray(patterns)) return DEFAULT_FILES_DENY_PATTERNS_TEXT;
-  return patterns.join("\n");
+  return formatListToText(patterns, DEFAULT_FILES_DENY_PATTERNS_TEXT);
 }
 
 // Manual mirrors of SandboxConfig Tier-3 defaults in Sources/RuneWeaverCore/Config.swift.
@@ -2138,11 +2238,13 @@ export function startElapsedSeconds(
   clientStartMs: number,
   nowMs: number = Date.now(),
 ): number {
+  const safeClientStartMs = Number.isFinite(clientStartMs) ? clientStartMs : 0;
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : 0;
   const baseMs =
     startedAtSeconds != null && Number.isFinite(startedAtSeconds) && startedAtSeconds > 0
       ? startedAtSeconds * 1000
-      : clientStartMs;
-  return Math.max(0, Math.floor((nowMs - baseMs) / 1000));
+      : safeClientStartMs;
+  return Math.max(0, Math.floor((safeNowMs - baseMs) / 1000));
 }
 
 // Reads live SearXNG reachability without touching settings: the profile

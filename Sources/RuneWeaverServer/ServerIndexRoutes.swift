@@ -230,7 +230,10 @@ private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [Str
 /// the durable text; each count falls back from the message to the response
 /// detail line (both carry the same summary first line), and a row whose
 /// wording drifted past both still reports its status and finish time with
-/// nil counts instead of disappearing.
+/// nil counts instead of disappearing. The trigger token is parsed the same
+/// way: the start message carries `Index run started (<trigger>)` while the
+/// completion response carries a `Trigger: <trigger>` detail line, so either
+/// shape yields the machine-readable token the dashboard maps to display copy.
 /// - Parameter runs: Newest `index`-kind rows from `recentIndexRuns(context:)`.
 /// - Returns: The latest run outcome, or nil when no run has been recorded.
 private func latestIndexRun(from runs: [RunLogEntry]) -> IndexLastRunStatus? {
@@ -244,8 +247,70 @@ private func latestIndexRun(from runs: [RunLogEntry]) -> IndexLastRunStatus? {
         indexed: firstRunCount(keyword: "indexed", in: message) ?? firstRunCount(keyword: "indexed", in: fallback),
         scanned: firstRunCount(keyword: "scanned", in: message) ?? firstRunCount(keyword: "scanned", in: fallback),
         errors: firstRunCount(keyword: "errors", in: message) ?? firstRunCount(keyword: "errors", in: fallback),
-        finishedAt: entry.timestamp
+        finishedAt: entry.timestamp,
+        trigger: indexRunTriggerToken(from: entry)
     )
+}
+
+/// Extracts the machine-readable trigger token from an index run row.
+///
+/// Prefers the start-message shape `Index run started (<trigger>)`, then the
+/// completion-response shape `Trigger: <trigger>` on its own detail line. A
+/// row carrying neither shape yields nil so older payloads degrade to an
+/// unlabeled strip instead of disappearing.
+/// - Parameter entry: Newest `index`-kind row from `recentIndexRuns(context:)`.
+/// - Returns: The trigger token (`"nightly"`, `"catchUp"`, `"onDemand"`), or nil.
+private func indexRunTriggerToken(from entry: RunLogEntry) -> String? {
+    if let started = firstParenthesizedToken(in: entry.message) {
+        return started
+    }
+    if let response = entry.response, let detail = firstTriggerDetailToken(in: response) {
+        return detail
+    }
+    return nil
+}
+
+/// Extracts the parenthesized token from a start message.
+///
+/// Matches `Index run started (<trigger>)` anchored to that case-sensitive
+/// prefix and validates the token against the known triggers; any other
+/// parenthesized suffix yields nil instead of mislabeling the run.
+/// - Parameter message: Run message carrying the start shape.
+/// - Returns: The validated trigger token, or nil.
+private func firstParenthesizedToken(in message: String) -> String? {
+    guard let prefixRange = message.range(of: "Index run started (") else {
+        return nil
+    }
+    let rest = message[prefixRange.upperBound...]
+    guard let close = rest.firstIndex(of: ")") else {
+        return nil
+    }
+    let token = rest[..<close].trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !token.isEmpty, IndexRunTrigger(rawValue: String(token)) != nil else {
+        return nil
+    }
+    return String(token)
+}
+
+/// Extracts the trigger token from a completion detail line.
+///
+/// Scans lines for a `Trigger:` prefix (case-insensitive) and returns the
+/// first whitespace-delimited token after it only when it matches a known
+/// trigger; a response without such a line yields nil.
+/// - Parameter response: Completion detail text.
+/// - Returns: The validated trigger token, or nil.
+private func firstTriggerDetailToken(in response: String) -> String? {
+    for line in response.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard lower.hasPrefix("trigger:") else { continue }
+        let after = trimmed.dropFirst("Trigger:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = after.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init)
+        if let token, IndexRunTrigger(rawValue: token) != nil {
+            return token
+        }
+    }
+    return nil
 }
 
 /// Extracts the first `<n> <keyword>` count from a run summary line.

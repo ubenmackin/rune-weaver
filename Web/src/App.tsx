@@ -79,9 +79,12 @@ export default function App() {
         }
       })
       .catch(() => {
-        // An unreachable engine cannot validate a login either; render the
-        // dashboard so its own error surfaces appear instead of a dead form.
-        if (!cancelled) setAuthGate("authenticated");
+        // Fail closed on unreachable or errored engine: require login rather than
+        // rendering an unauthenticated dashboard.
+        if (!cancelled) {
+          clearAuthToken();
+          setAuthGate("required");
+        }
       });
     return () => {
       cancelled = true;

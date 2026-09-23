@@ -263,14 +263,11 @@ public struct URLSessionWebFetchTransport: WebFetchTransport, Sendable {
     /// - Parameter request: Request to send.
     /// - Returns: Body plus response.
     public func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        var mutable = request
-        if mutable.timeoutInterval < 1 {
-            mutable.timeoutInterval = timeoutSeconds
-        }
-        let delegate = NoRedirectDelegate()
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        defer { session.invalidateAndCancel() }
-        return try await session.data(for: mutable)
+        try await CappedNoRedirectDelegate.downloadCapped(
+            request: request,
+            maxBytes: WebFetchTool.maxFetchBytes,
+            timeoutSeconds: timeoutSeconds
+        )
     }
 }
 

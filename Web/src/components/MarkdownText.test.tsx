@@ -68,6 +68,14 @@ describe("MarkdownText", () => {
     expect(container.textContent).not.toContain("javascript:");
   });
 
+  it("normalizes safe URLs when rendering anchor hrefs", () => {
+    const linkSample = "Visit [Link](https://example.com/test?a=1&amp;b=2).";
+    const { container } = render(<MarkdownText text={linkSample} />);
+    const link = container.querySelector("a");
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute("href")).toBe("https://example.com/test?a=1&b=2");
+  });
+
   it("renders headings", () => {
     const { container } = render(
       <MarkdownText text={"# Title\n## Subtitle\n### Section"} />

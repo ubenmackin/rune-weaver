@@ -360,13 +360,23 @@ public struct WSToolStartFrame: Codable, Sendable, Equatable {
         case roundIndex
     }
 
-    /// Decodes a tool start frame, defaulting a missing round for back-compat.
+    /// Decodes a tool start frame, defaulting a missing round for back-compat
+    /// while rejecting blank identity so a drifted payload fails here exactly
+    /// where the live progress frame drops it.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_start"
-        self.toolName = try container.decode(String.self, forKey: .toolName)
-        self.callID = try container.decode(String.self, forKey: .callID)
+        let toolName = try container.decode(String.self, forKey: .toolName)
+        guard !toolName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .toolName, in: container, debugDescription: "toolName must be non-blank")
+        }
+        self.toolName = toolName
+        let callID = try container.decode(String.self, forKey: .callID)
+        guard !callID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .callID, in: container, debugDescription: "callID must be non-blank")
+        }
+        self.callID = callID
         self.argumentsJSON = try container.decode(String.self, forKey: .argumentsJSON)
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
         self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex)
@@ -427,13 +437,23 @@ public struct WSToolEndFrame: Codable, Sendable, Equatable {
         case roundIndex
     }
 
-    /// Decodes a tool end frame, defaulting a missing round for back-compat.
+    /// Decodes a tool end frame, defaulting a missing round for back-compat
+    /// while rejecting blank identity so a drifted payload fails here exactly
+    /// where the live progress frame drops it.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "tool_end"
-        self.toolName = try container.decode(String.self, forKey: .toolName)
-        self.callID = try container.decode(String.self, forKey: .callID)
+        let toolName = try container.decode(String.self, forKey: .toolName)
+        guard !toolName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .toolName, in: container, debugDescription: "toolName must be non-blank")
+        }
+        self.toolName = toolName
+        let callID = try container.decode(String.self, forKey: .callID)
+        guard !callID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .callID, in: container, debugDescription: "callID must be non-blank")
+        }
+        self.callID = callID
         self.result = try container.decode(ToolResult.self, forKey: .result)
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
         self.roundIndex = try container.decodeIfPresent(Int.self, forKey: .roundIndex)
@@ -547,7 +567,10 @@ public struct WSToolCancelMissFrame: Codable, Sendable, Equatable {
 
     /// Decodes a miss frame, defaulting a missing discriminator for back-compat.
     /// The call identity stays required so a partial payload throws here instead
-    /// of clearing an unrelated row in the dashboard.
+    /// of clearing an unrelated row in the dashboard. A blank identifier is
+    /// preserved verbatim so the blank-rejection miss the shared cancel path
+    /// emits still decodes; the dashboard and client guards drop blank identity
+    /// before clearing any row, so preserving it here never clears unrelated state.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)

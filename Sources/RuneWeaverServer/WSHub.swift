@@ -49,8 +49,9 @@ public actor WSSocketBox: WSConnectionSocket {
 /// Serializes outbound frames for one WebSocket connection.
 private actor WSSendQueue {
     /// Sends one frame through the queue, best-effort with timeout.
-    func send(_ text: String, to box: any WSConnectionSocket) async {
-        await wsSendWithTimeout(text, to: box)
+    @discardableResult
+    func send(_ text: String, to box: any WSConnectionSocket, timeoutNanoseconds: UInt64 = 1_000_000_000) async -> Bool {
+        await wsSendWithTimeout(text, to: box, timeoutNanoseconds: timeoutNanoseconds)
     }
 }
 
@@ -217,28 +218,46 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Target for fan-out broadcast avoiding large tuples.
+    private struct FanOutTarget: Sendable {
+        let id: UUID
+        let queue: WSSendQueue
+        let box: any WSConnectionSocket
+    }
+
     /// Concurrent best-effort fan-out shared by every broadcast path.
     private func fanOut(_ text: String) async {
         // A socket the hub already knows holds a retired generation is skipped
         // here, so revocation does not depend on the socket sending a frame to
         // discover it was dropped.
-        let targets: [(WSSendQueue, any WSConnectionSocket)] = sockets.compactMap { id, connection in
+        let targets = sockets.compactMap { id, connection -> FanOutTarget? in
             guard !isRetired(connection.generation) else { return nil }
-            return (queue(for: id), connection.box)
+            return FanOutTarget(id: id, queue: queue(for: id), box: connection.box)
         }
-        await withTaskGroup(of: Void.self) { group in
-            for (queue, box) in targets {
+        var failedIDs: [UUID] = []
+        await withTaskGroup(of: (UUID, Bool).self) { group in
+            for target in targets {
                 group.addTask {
-                    await queue.send(text, to: box)
+                    let ok = await target.queue.send(text, to: target.box)
+                    return (target.id, ok)
                 }
             }
+            for await (id, ok) in group where !ok {
+                failedIDs.append(id)
+            }
+        }
+        for id in failedIDs {
+            remove(id: id)
         }
     }
 
     /// Sends one text frame to the connection with the given identifier.
     public func send(id: UUID, text: String) async {
         guard let connection = sockets[id], !isRetired(connection.generation) else { return }
-        await queue(for: id).send(text, to: connection.box)
+        let ok = await queue(for: id).send(text, to: connection.box)
+        if !ok {
+            remove(id: id)
+        }
     }
 }
 
@@ -248,12 +267,12 @@ public actor WSHub {
 /// Invariant: only the first racer resumes; late arrivals are ignored, and a
 /// resume racing registration still settles instead of hanging.
 private final class WSSendGate: Sendable {
-    /// Locked verdict carrying the waiter plus the settled flag.
+    /// Locked verdict carrying the waiter plus the settled outcome.
     private struct State: Sendable {
         /// Waiter to resume once, cleared on settle.
-        var continuation: CheckedContinuation<Void, Never>?
-        /// Whether a racer already settled the verdict.
-        var didResume = false
+        var continuation: CheckedContinuation<Bool, Never>?
+        /// Whether a racer already settled the verdict, and if so, the boolean result.
+        var result: Bool?
     }
 
     private let state = OSAllocatedUnfairLock(initialState: State())
@@ -262,24 +281,24 @@ private final class WSSendGate: Sendable {
     init() {}
 
     /// Publishes the waiter, settling immediately when a racer already won.
-    func set(_ continuation: CheckedContinuation<Void, Never>) {
-        let alreadySettled = state.withLock { lockState -> Bool in
-            if lockState.didResume {
-                return true
+    func set(_ continuation: CheckedContinuation<Bool, Never>) {
+        let earlyResult = state.withLock { lockState -> Bool? in
+            if let result = lockState.result {
+                return result
             }
             lockState.continuation = continuation
-            return false
+            return nil
         }
-        if alreadySettled {
-            continuation.resume(returning: ())
+        if let earlyResult {
+            continuation.resume(returning: earlyResult)
         }
     }
 
     /// Resumes the waiter unless already resumed.
-    func resume(returning value: Void = ()) {
-        let pending = state.withLock { lockState -> CheckedContinuation<Void, Never>? in
-            guard !lockState.didResume else { return nil }
-            lockState.didResume = true
+    func resume(returning value: Bool) {
+        let pending = state.withLock { lockState -> CheckedContinuation<Bool, Never>? in
+            guard lockState.result == nil else { return nil }
+            lockState.result = value
             let held = lockState.continuation
             lockState.continuation = nil
             return held
@@ -292,39 +311,50 @@ private final class WSSendGate: Sendable {
 /// The send, the timeout, and cancellation race on one shared verdict so a slow
 /// socket arriving after a timeout cannot resume twice; the winner drops its loser
 /// so burst sends never stack lingering sleeps. Late arrivals observe the stored
-/// outcome instead of racing.
-private func wsSendWithTimeout(_ text: String, to box: any WSConnectionSocket, timeoutNanoseconds: UInt64 = 5_000_000_000) async {
+/// outcome instead of racing. Returns true if sent successfully, false if timed out or failed.
+private func wsSendWithTimeout(
+    _ text: String,
+    to box: any WSConnectionSocket,
+    timeoutNanoseconds: UInt64 = 1_000_000_000
+) async -> Bool {
     let gate = WSSendGate()
     let sendTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
     let timeoutTasks = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
-    await withTaskCancellationHandler {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    return await withTaskCancellationHandler {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             gate.set(continuation)
-            let timeoutTask = Task { [gate, sendTasks] in
+            let timeoutTask = Task { [gate, sendTasks, box] in
                 do {
                     try await Task.sleep(nanoseconds: timeoutNanoseconds)
                 } catch {
                     return
                 }
                 sendTasks.withLock { $0 }?.cancel()
-                gate.resume(returning: ())
+                _ = try? await box.close(code: .policyViolation)
+                gate.resume(returning: false)
             }
             timeoutTasks.withLock { $0 = timeoutTask }
             let sendTask = Task { [gate, box, text, timeoutTasks] in
-                try? await box.send(text)
-                timeoutTasks.withLock { $0 }?.cancel()
-                gate.resume(returning: ())
+                do {
+                    try await box.send(text)
+                    timeoutTasks.withLock { $0 }?.cancel()
+                    gate.resume(returning: true)
+                } catch {
+                    timeoutTasks.withLock { $0 }?.cancel()
+                    _ = try? await box.close(code: .policyViolation)
+                    gate.resume(returning: false)
+                }
             }
             sendTasks.withLock { $0 = sendTask }
             if Task.isCancelled {
                 timeoutTasks.withLock { $0 }?.cancel()
                 sendTasks.withLock { $0 }?.cancel()
-                gate.resume(returning: ())
+                gate.resume(returning: false)
             }
         }
     } onCancel: {
         timeoutTasks.withLock { $0 }?.cancel()
         sendTasks.withLock { $0 }?.cancel()
-        gate.resume(returning: ())
+        gate.resume(returning: false)
     }
 }

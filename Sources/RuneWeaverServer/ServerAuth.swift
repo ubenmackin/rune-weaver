@@ -383,6 +383,22 @@ public actor ServerAuth {
     private let store: ServerAuthTokenStore
     /// Per-identity failure state.
     private var failures: [String: FailureBucket] = [:]
+    /// Ephemeral browser sessions, mapping session token -> session entry.
+    private var sessions: [String: SessionEntry] = [:]
+    /// Upper bound on active browser sessions to prevent unbounded memory growth.
+    private static let maxActiveSessions = 100
+
+    /// One active browser session: the token generation it was minted under plus
+    /// when it was created.
+    ///
+    /// The generation binds the session to the live owner token so a rotation
+    /// revokes sessions minted under the retired credential instead of letting
+    /// them survive past it; `createdAt` orders entries oldest-first so the
+    /// 100-session cap evicts the stalest sessions first.
+    private struct SessionEntry: Sendable {
+        let generation: Int
+        let createdAt: Date
+    }
 
     /// Accumulated failures for one identity.
     private struct FailureBucket: Sendable {
@@ -426,6 +442,43 @@ public actor ServerAuth {
         return ServerAuth(initialToken: trimmed, store: store)
     }
 
+    /// Mints a fresh ephemeral session token for browser dashboard access.
+    ///
+    /// The token is bound to the current generation so a later ``rotate()``
+    /// revokes it with every other live session, and entries carry their
+    /// creation time so the 100-session cap evicts oldest-first instead of
+    /// growing without bound. Called from the login (`POST /auth/session`) and
+    /// rotation (`POST /auth/rotate`) routes after the owner credential verifies.
+    /// - Returns: The newly minted 256-bit session token.
+    /// - Throws: ``ServerAuthError/tokenGenerationFailed`` when the system
+    ///   CSPRNG cannot produce random bytes; no weaker fallback is minted.
+    public func createSession() throws -> String {
+        if sessions.count >= Self.maxActiveSessions {
+            let sorted = sessions.sorted { $0.value.createdAt < $1.value.createdAt }
+            for (key, _) in sorted.prefix(sessions.count - Self.maxActiveSessions + 1) {
+                sessions.removeValue(forKey: key)
+            }
+        }
+        let sessionToken = try Self.generateToken()
+        sessions[sessionToken] = SessionEntry(generation: generation, createdAt: Date())
+        return sessionToken
+    }
+
+    /// Revokes an ephemeral browser session on logout.
+    public func revokeSession(_ sessionID: String) {
+        sessions.removeValue(forKey: sessionID)
+    }
+
+    /// Flushes all active browser sessions (e.g. during token rotation).
+    public func revokeAllSessions() {
+        sessions.removeAll(keepingCapacity: false)
+    }
+
+    /// Whether an ephemeral session identifier is currently active.
+    public func hasActiveSession(_ sessionID: String) -> Bool {
+        sessions[sessionID] != nil
+    }
+
     /// Verifies a presented token and captures the generation it verified under,
     /// atomically.
     ///
@@ -443,6 +496,14 @@ public actor ServerAuth {
     ///   the presented value is empty or does not match.
     public func verifyAndCaptureGeneration(_ presented: String) -> Int? {
         guard !presented.isEmpty else { return nil }
+        if let session = sessions[presented] {
+            if session.generation == self.generation {
+                return session.generation
+            } else {
+                sessions.removeValue(forKey: presented)
+                return nil
+            }
+        }
         guard Self.constantTimeEquals(presented, token) else { return nil }
         return generation
     }
@@ -498,6 +559,7 @@ public actor ServerAuth {
         token = newToken
         generation += 1
         failures.removeAll()
+        revokeAllSessions()
         // Fingerprints only: the audit trail must never carry a credential.
         RuneWeaverLog.server.notice(
             "Owner bearer token rotated (old \(oldFingerprint), new \(newFingerprint))."
@@ -635,27 +697,85 @@ public enum ServerAuthRequest {
         return connection.contains("upgrade") && upgrade == "websocket"
     }
 
+    /// Cookie name holding the owner session token for browser dashboard access.
+    public static let sessionCookieName = "rw_session"
+
     /// Extracts the presented bearer credential.
     ///
     /// The `token` query parameter is accepted only when `allowQueryToken` is
     /// set, because browsers cannot attach an `Authorization` header to a
     /// WebSocket handshake; REST requests must use the header so a credential
-    /// never rides along in a logged URL.
+    /// never rides along in a logged URL. Browser sessions present an `HttpOnly`
+    /// cookie so the credential is never accessible to client scripts.
     /// - Parameters:
     ///   - request: Inbound request.
     ///   - allowQueryToken: Whether the upgrade query fallback is permitted.
     /// - Returns: The presented token, or nil when none is present.
     public static func presentedBearer(for request: Request, allowQueryToken: Bool) -> String? {
-        if let header = request.headers.bearerAuthorization?.token, !header.isEmpty {
-            return header
+        if let header = request.headers.bearerAuthorization?.token {
+            let trimmed = header.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        if let cookie = request.cookies[sessionCookieName]?.string {
+            let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
         }
         guard allowQueryToken,
-              let query = request.query[String.self, at: "token"],
-              !query.isEmpty
+              let query = request.query[String.self, at: "token"]
         else {
             return nil
         }
-        return query
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    /// Generates an HttpOnly session cookie value for the owner token.
+    public static func makeSessionCookie(token: String, isSecure: Bool = false) -> HTTPCookies.Value {
+        HTTPCookies.Value(
+            string: token,
+            expires: nil,
+            maxAge: nil,
+            domain: nil,
+            path: "/",
+            isSecure: isSecure,
+            isHTTPOnly: true,
+            sameSite: .strict
+        )
+    }
+
+    /// Generates an expired session cookie to clear the session on logout.
+    public static func makeExpiredSessionCookie(isSecure: Bool = false) -> HTTPCookies.Value {
+        HTTPCookies.Value(
+            string: "",
+            expires: Date(timeIntervalSince1970: 0),
+            maxAge: 0,
+            domain: nil,
+            path: "/",
+            isSecure: isSecure,
+            isHTTPOnly: true,
+            sameSite: .strict
+        )
+    }
+
+    /// Determines whether the inbound request was made over HTTPS directly or through a TLS-terminating reverse proxy.
+    public static func isRequestSecure(_ request: Request) -> Bool {
+        if request.url.scheme?.lowercased() == "https" {
+            return true
+        }
+        if let forwardedProto = request.headers.first(name: "X-Forwarded-Proto") {
+            let primary = forwardedProto.split(separator: ",").first?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if primary == "https" {
+                return true
+            }
+        }
+        return false
     }
 
     /// Stable client identity for failure buckets.
@@ -774,6 +894,11 @@ public enum ServerAuthRequest {
     /// - Returns: True for the liveness probe.
     public static func isLivenessPath(_ path: String) -> Bool {
         path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == "health"
+    }
+
+    /// Whether a path is the browser session management endpoint (`POST /auth/session`, `DELETE /auth/session`).
+    public static func isAuthSessionPath(_ path: String) -> Bool {
+        path.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased() == "\(ServerPaths.auth)/\(ServerPaths.session)"
     }
 
     /// Removes the `token` query parameter from a request.
@@ -915,6 +1040,13 @@ public struct ServerAuthMiddleware: AsyncMiddleware {
             }
         }
 
+        // Browser session login (`POST /auth/session`) and logout (`DELETE /auth/session`)
+        // handle candidate credentials directly and fail closed with their own failure-bucket
+        // throttling, so they must be reachable without an existing session.
+        if ServerAuthRequest.isAuthSessionPath(path) {
+            return try await next.respond(to: request)
+        }
+
         // Audit one line per rejected request with no credential echo; the path
         // excludes the query string, so a dropped token can never appear here.
         RuneWeaverLog.server.warning(
@@ -975,5 +1107,114 @@ private extension Data {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
+    }
+}
+
+/// Vapor middleware validating inbound HTTP Host headers to protect against DNS rebinding.
+public struct HostValidationMiddleware: AsyncMiddleware {
+    /// Permitted hosts (lowercased, without port).
+    public let allowedHosts: Set<String>
+    /// Whether missing Host headers should be permitted in testing environments.
+    public let allowMissingHostInTesting: Bool
+
+    /// Creates host validation middleware with an explicit allowed set.
+    /// - Parameters:
+    ///   - allowedHosts: Set of allowed host names/IPs without port numbers.
+    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
+    public init(
+        allowedHosts: Set<String> = ["127.0.0.1", "localhost", "::1", "[::1]"],
+        allowMissingHostInTesting: Bool = true
+    ) {
+        self.allowedHosts = allowedHosts
+        self.allowMissingHostInTesting = allowMissingHostInTesting
+    }
+
+    /// Creates host validation middleware allowing standard loopback hosts plus the server's configured hostname.
+    /// - Parameters:
+    ///   - hostname: Configured bind hostname.
+    ///   - allowMissingHostInTesting: When true, requests in `.testing` without a Host header are allowed.
+    public init(hostname: String, allowMissingHostInTesting: Bool = true) {
+        var hosts: Set = ["127.0.0.1", "localhost", "::1", "[::1]"]
+        let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !trimmed.isEmpty {
+            hosts.insert(trimmed)
+            if trimmed.contains(":"), !trimmed.hasPrefix("[") {
+                hosts.insert("[\(trimmed)]")
+            }
+        }
+        self.allowedHosts = hosts
+        self.allowMissingHostInTesting = allowMissingHostInTesting
+    }
+
+    /// Normalizes and extracts the host component from a raw Host header value.
+    public static func extractHost(from hostHeader: String) -> String {
+        let trimmed = hostHeader.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmed.hasPrefix("[") {
+            if let closingBracketIndex = trimmed.firstIndex(of: "]") {
+                return String(trimmed[...closingBracketIndex])
+            }
+            return trimmed
+        }
+        // If there are multiple colons and no brackets, treat as an unbracketed IPv6 literal.
+        if trimmed.filter({ $0 == ":" }).count > 1 {
+            return trimmed
+        }
+        if let colonIndex = trimmed.firstIndex(of: ":") {
+            return String(trimmed[..<colonIndex])
+        }
+        return trimmed
+    }
+
+    public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        guard let hostHeader = request.headers.first(name: .host) else {
+            if allowMissingHostInTesting, request.application.environment == .testing {
+                return try await next.respond(to: request)
+            }
+            return Response(
+                status: .badRequest,
+                headers: HTTPHeaders([
+                    ("Content-Type", "application/json; charset=utf-8"),
+                    ("Cache-Control", "no-store"),
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("X-Frame-Options", "DENY"),
+                    ("Referrer-Policy", "strict-origin-when-cross-origin")
+                ]),
+                body: .init(string: #"{"error":"missing host header"}"#)
+            )
+        }
+
+        let host = Self.extractHost(from: hostHeader)
+        guard allowedHosts.contains(host) else {
+            RuneWeaverLog.server.warning("HostValidationMiddleware rejected invalid Host header: \(hostHeader)")
+            return Response(
+                status: .forbidden,
+                headers: HTTPHeaders([
+                    ("Content-Type", "application/json; charset=utf-8"),
+                    ("Cache-Control", "no-store"),
+                    ("X-Content-Type-Options", "nosniff"),
+                    ("X-Frame-Options", "DENY"),
+                    ("Referrer-Policy", "strict-origin-when-cross-origin")
+                ]),
+                body: .init(string: #"{"error":"invalid host header"}"#)
+            )
+        }
+
+        return try await next.respond(to: request)
+    }
+}
+
+/// Middleware injecting defense-in-depth HTTP security headers into all responses.
+public struct GlobalSecurityHeadersMiddleware: AsyncMiddleware {
+    public init() {}
+
+    public func respond(to request: Request, chainingTo next: any AsyncResponder) async throws -> Response {
+        let response = try await next.respond(to: request)
+        response.headers.replaceOrAdd(name: "X-Content-Type-Options", value: "nosniff")
+        response.headers.replaceOrAdd(name: "X-Frame-Options", value: "DENY")
+        response.headers.replaceOrAdd(name: "Referrer-Policy", value: "strict-origin-when-cross-origin")
+        if ServerAuthRequest.isRequestSecure(request) {
+            response.headers.replaceOrAdd(name: "Strict-Transport-Security", value: "max-age=31536000; includeSubDomains")
+        }
+        return response
     }
 }

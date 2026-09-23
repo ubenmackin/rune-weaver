@@ -250,6 +250,101 @@ struct IndexCoordinatorTests {
     }
 
     @Test
+    func `Cancel interrupts a slow batch within one batch`() async {
+        // Staged double with a slow cancellable batch per item, standing in for
+        // an IMAP fetch, an embedding batch, or a vision turn: each batch awaits
+        // a cancellable sleep so task cancellation throws at the next checkpoint
+        // instead of running to stage end.
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+            var report = IndexSourceRunReport(kind: .files)
+            for _ in 0 ..< 5 {
+                if isCancelled() {
+                    break
+                }
+                // Cancellable work: the run task cancel aborts this sleep
+                // immediately, bounding overrun to the batch in flight.
+                try await Task.sleep(nanoseconds: 500_000_000)
+                report.scanned += 1
+                report.indexed += 1
+            }
+            return report
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage]
+        )
+        let runTask = Task { await coordinator.run() }
+        // Let the first batch start, then cancel mid-run.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        await coordinator.cancel()
+        let summary = await runTask.value
+
+        #expect(summary.status == .cancelled)
+        #expect(summary.documentsIndexed < 5)
+        #expect(summary.indexAsOf == nil)
+        // No wall-clock bound: task cancellation already bounds the overrun to
+        // the batch in flight, and elapsed assertions false-fail on slow CI.
+        // Partial progress plus the cancelled status is the deterministic proof
+        // the run stopped early instead of draining every batch.
+    }
+
+    @Test
+    func `Nightly trigger selects nightly at the hour and catch-up later the same day`() async {
+        let calendar = Calendar.current
+        let nightlyHour = 3
+        let startOfDay = calendar.startOfDay(for: Date())
+        let nightlyDate = startOfDay.addingTimeInterval(TimeInterval(nightlyHour * 3600 + 5 * 60))
+        let catchUpDate = startOfDay.addingTimeInterval(TimeInterval((nightlyHour + 2) * 3600 + 7 * 60))
+        // A fire before the nightly hour never runs, independent of the same-day guard.
+        let beforeDate = startOfDay.addingTimeInterval(TimeInterval(max(0, nightlyHour - 1) * 3600))
+
+        func makeCoordinator(statePath: String, events: IndexRunEventRecorder) -> IndexCoordinator {
+            let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+                IndexSourceRunReport(kind: .files)
+            }
+            return IndexCoordinator(
+                config: IndexConfig(enabled: true, files: true, roots: []),
+                stages: [stage],
+                stateStore: IndexRunStateStore(path: statePath),
+                reporter: events,
+                nightlyHour: nightlyHour
+            )
+        }
+
+        // Firing at the nightly hour selects the nightly trigger.
+        let nightlyDirectory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: nightlyDirectory) }
+        let nightlyEvents = IndexRunEventRecorder()
+        let nightlyCoordinator = makeCoordinator(
+            statePath: nightlyDirectory.appendingPathComponent("state.json").path,
+            events: nightlyEvents
+        )
+        #expect(await nightlyCoordinator.fireNightly(now: beforeDate) == nil)
+        let nightlySummary = await nightlyCoordinator.fireNightly(now: nightlyDate)
+        #expect(nightlySummary?.trigger == .nightly)
+        #expect(IndexRunTrigger.catchUp.rawValue == "catchUp")
+        let nightlyStarted = await nightlyEvents.startedEvents()
+        #expect(nightlyStarted.first?.trigger == .nightly)
+
+        // A later same-day launch with fresh state selects the catch-up trigger,
+        // and a second same-day fire is a no-op under the same-day guard.
+        let catchUpDirectory = makeIndexTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: catchUpDirectory) }
+        let catchUpEvents = IndexRunEventRecorder()
+        let catchUpCoordinator = makeCoordinator(
+            statePath: catchUpDirectory.appendingPathComponent("state.json").path,
+            events: catchUpEvents
+        )
+        let catchUpSummary = await catchUpCoordinator.fireNightly(now: catchUpDate)
+        #expect(catchUpSummary?.trigger == .catchUp)
+        let catchUpStarted = await catchUpEvents.startedEvents()
+        #expect(catchUpStarted.first?.trigger == .catchUp)
+        #expect(catchUpStarted.first?.message.contains(IndexRunTrigger.catchUp.rawValue) == true)
+        let second = await catchUpCoordinator.fireNightly(now: catchUpDate.addingTimeInterval(60))
+        #expect(second == nil)
+    }
+
+    @Test
     func `Successful run records stats, events, and the index watermark`() async throws {
         let directory = makeIndexTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

@@ -11,7 +11,7 @@ export function sanitizeWarnings(value: unknown): string[] {
   for (const entry of value) {
     if (typeof entry !== "string") continue;
     if (entry.trim().length === 0) continue;
-    cleaned.push(entry);
+    cleaned.push(entry.trim());
   }
   return cleaned;
 }

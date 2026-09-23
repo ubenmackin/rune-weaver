@@ -89,55 +89,61 @@ public enum AttachmentSecurity: Sendable {
             return "File extension '\(ext)' is a restricted executable type"
         }
 
-        guard data.count >= 2 else { return nil }
+        let bytes = prefixBytes(data, limit: 300)
+        guard bytes.count >= 2 else { return nil }
 
         // Shebang script: `#!`
-        if data[0] == 0x23 && data[1] == 0x21 {
+        if bytes[0] == 0x23 && bytes[1] == 0x21 {
             return "Shell or script interpreter shebang ('#!') detected"
         }
 
         // Windows PE executable: `MZ`
-        if data[0] == 0x4D && data[1] == 0x5A {
+        if bytes[0] == 0x4D && bytes[1] == 0x5A {
             return "Windows PE executable ('MZ') signature detected"
         }
 
-        guard data.count >= 4 else { return nil }
+        guard bytes.count >= 4 else { return nil }
 
         // Mach-O 32-bit: 0xFEEDFACE (big/little endian)
-        if (data[0] == 0xFE && data[1] == 0xED && data[2] == 0xFA && data[3] == 0xCE) ||
-            (data[0] == 0xCE && data[1] == 0xFA && data[2] == 0xED && data[3] == 0xFE)
+        if (bytes[0] == 0xFE && bytes[1] == 0xED && bytes[2] == 0xFA && bytes[3] == 0xCE) ||
+            (bytes[0] == 0xCE && bytes[1] == 0xFA && bytes[2] == 0xED && bytes[3] == 0xFE)
         {
             return "macOS Mach-O 32-bit executable signature detected"
         }
 
         // Mach-O 64-bit: 0xFEEDFACF (big/little endian)
-        if (data[0] == 0xFE && data[1] == 0xED && data[2] == 0xFA && data[3] == 0xCF) ||
-            (data[0] == 0xCF && data[1] == 0xFA && data[2] == 0xED && data[3] == 0xFE)
+        if (bytes[0] == 0xFE && bytes[1] == 0xED && bytes[2] == 0xFA && bytes[3] == 0xCF) ||
+            (bytes[0] == 0xCF && bytes[1] == 0xFA && bytes[2] == 0xED && bytes[3] == 0xFE)
         {
             return "macOS Mach-O 64-bit executable signature detected"
         }
 
         // Mach-O Universal / Fat Binary: 0xCAFEBABE or 0xBEBAFECA
-        if (data[0] == 0xCA && data[1] == 0xFE && data[2] == 0xBA && data[3] == 0xBE) ||
-            (data[0] == 0xBE && data[1] == 0xBA && data[2] == 0xFE && data[3] == 0xCA)
+        if (bytes[0] == 0xCA && bytes[1] == 0xFE && bytes[2] == 0xBA && bytes[3] == 0xBE) ||
+            (bytes[0] == 0xBE && bytes[1] == 0xBA && bytes[2] == 0xFE && bytes[3] == 0xCA)
         {
             // Note: Java class files also start with 0xCAFEBABE, which are also compiled bytecode
             return "macOS Mach-O Universal Binary / Java bytecode signature detected"
         }
 
         // Linux ELF: 0x7F 'E' 'L' 'F'
-        if data[0] == 0x7F, data[1] == 0x45, data[2] == 0x4C, data[3] == 0x46 {
+        if bytes[0] == 0x7F, bytes[1] == 0x45, bytes[2] == 0x4C, bytes[3] == 0x46 {
             return "Linux ELF executable signature detected"
         }
 
         // Compiled AppleScript: `FasdUAS `
-        if data.count >= 8 {
-            if data[0] == 0x46, data[1] == 0x61, data[2] == 0x73, data[3] == 0x64 {
+        if bytes.count >= 8 {
+            if bytes[0] == 0x46, bytes[1] == 0x61, bytes[2] == 0x73, bytes[3] == 0x64 {
                 return "Compiled AppleScript signature detected"
             }
         }
 
         return nil
+    }
+
+    /// Extract a contiguous prefix buffer up to `limit` bytes with 0-based indexing.
+    private static func prefixBytes(_ data: Data, limit: Int = 300) -> [UInt8] {
+        Array(data.prefix(limit))
     }
 
     /// Whether filename or MIME type alone marks the payload as an archive.
@@ -185,47 +191,48 @@ public enum AttachmentSecurity: Sendable {
         }
 
         // Magic bytes inspection
-        guard data.count >= 2 else { return nil }
+        let bytes = prefixBytes(data, limit: 300)
+        guard bytes.count >= 2 else { return nil }
 
         // GZIP: 0x1F 0x8B
-        if data[0] == 0x1F, data[1] == 0x8B {
+        if bytes[0] == 0x1F, bytes[1] == 0x8B {
             return "gzip"
         }
 
         // BZIP2: 'B' 'Z' 'h'
-        if data.count >= 3, data[0] == 0x42, data[1] == 0x5A, data[2] == 0x68 {
+        if bytes.count >= 3, bytes[0] == 0x42, bytes[1] == 0x5A, bytes[2] == 0x68 {
             return "bzip2"
         }
 
-        guard data.count >= 4 else { return nil }
+        guard bytes.count >= 4 else { return nil }
 
         // ZIP (including docx, xlsx, pptx, jar, apk): 'P' 'K' 0x03 0x04 or 'P' 'K' 0x05 0x06 (empty)
-        if data[0] == 0x50, data[1] == 0x4B,
-           (data[2] == 0x03 && data[3] == 0x04) || (data[2] == 0x05 && data[3] == 0x06)
+        if bytes[0] == 0x50, bytes[1] == 0x4B,
+           (bytes[2] == 0x03 && bytes[3] == 0x04) || (bytes[2] == 0x05 && bytes[3] == 0x06)
         {
             return "zip"
         }
 
         // 7-Zip: '7' 'z' 0xBC 0xAF 0x27 0x1C
-        if data.count >= 6,
-           data[0] == 0x37, data[1] == 0x7A, data[2] == 0xBC,
-           data[3] == 0xAF, data[4] == 0x27, data[5] == 0x1C
+        if bytes.count >= 6,
+           bytes[0] == 0x37, bytes[1] == 0x7A, bytes[2] == 0xBC,
+           bytes[3] == 0xAF, bytes[4] == 0x27, bytes[5] == 0x1C
         {
             return "7z"
         }
 
         // RAR: 'R' 'a' 'r' '!' 0x1A 0x07
-        if data.count >= 6,
-           data[0] == 0x52, data[1] == 0x61, data[2] == 0x72,
-           data[3] == 0x21, data[4] == 0x1A, data[5] == 0x07
+        if bytes.count >= 6,
+           bytes[0] == 0x52, bytes[1] == 0x61, bytes[2] == 0x72,
+           bytes[3] == 0x21, bytes[4] == 0x1A, bytes[5] == 0x07
         {
             return "rar"
         }
 
         // TAR: 'ustar' at offset 257
-        if data.count >= 262 {
-            if data[257] == 0x75, data[258] == 0x73, data[259] == 0x74,
-               data[260] == 0x61, data[261] == 0x72
+        if bytes.count >= 262 {
+            if bytes[257] == 0x75, bytes[258] == 0x73, bytes[259] == 0x74,
+               bytes[260] == 0x61, bytes[261] == 0x72
             {
                 return "tar"
             }
@@ -235,56 +242,57 @@ public enum AttachmentSecurity: Sendable {
     }
 
     private static func detectedImage(data: Data) -> String? {
-        guard data.count >= 3 else { return nil }
+        let bytes = prefixBytes(data, limit: 300)
+        guard bytes.count >= 3 else { return nil }
 
         // JPEG: 0xFF 0xD8 0xFF
-        if data[0] == 0xFF, data[1] == 0xD8, data[2] == 0xFF {
+        if bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF {
             return "jpeg"
         }
 
         // PNG: 0x89 'P' 'N' 'G' 0x0D 0x0A 0x1A 0x0A
-        if data.count >= 8,
-           data[0] == 0x89, data[1] == 0x50, data[2] == 0x4E, data[3] == 0x47,
-           data[4] == 0x0D, data[5] == 0x0A, data[6] == 0x1A, data[7] == 0x0A
+        if bytes.count >= 8,
+           bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47,
+           bytes[4] == 0x0D, bytes[5] == 0x0A, bytes[6] == 0x1A, bytes[7] == 0x0A
         {
             return "png"
         }
 
         // GIF: 'G' 'I' 'F' '8' ('7' or '9') 'a'
-        if data.count >= 6,
-           data[0] == 0x47, data[1] == 0x49, data[2] == 0x46, data[3] == 0x38,
-           data[4] == 0x37 || data[4] == 0x39, data[5] == 0x61
+        if bytes.count >= 6,
+           bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x38,
+           bytes[4] == 0x37 || bytes[4] == 0x39, bytes[5] == 0x61
         {
             return "gif"
         }
 
         // WebP: 'R' 'I' 'F' 'F' ... 'W' 'E' 'B' 'P'
-        if data.count >= 12,
-           data[0] == 0x52, data[1] == 0x49, data[2] == 0x46, data[3] == 0x46,
-           data[8] == 0x57, data[9] == 0x45, data[10] == 0x42, data[11] == 0x50
+        if bytes.count >= 12,
+           bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50
         {
             return "webp"
         }
 
         // TIFF: 'I' 'I' 0x2A 0x00 (little-endian) or 'M' 'M' 0x00 0x2A (big-endian)
-        if data.count >= 4 {
-            if (data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A && data[3] == 0x00) ||
-                (data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 && data[3] == 0x2A)
+        if bytes.count >= 4 {
+            if (bytes[0] == 0x49 && bytes[1] == 0x49 && bytes[2] == 0x2A && bytes[3] == 0x00) ||
+                (bytes[0] == 0x4D && bytes[1] == 0x4D && bytes[2] == 0x00 && bytes[3] == 0x2A)
             {
                 return "tiff"
             }
         }
 
         // BMP: 'B' 'M'
-        if data[0] == 0x42, data[1] == 0x4D {
+        if bytes[0] == 0x42, bytes[1] == 0x4D {
             return "bmp"
         }
 
         // ISO Base Media File Format (HEIC, HEIF, AVIF): 'f' 't' 'y' 'p' at byte 4
-        if data.count >= 12,
-           data[4] == 0x66, data[5] == 0x74, data[6] == 0x79, data[7] == 0x70
+        if bytes.count >= 12,
+           bytes[4] == 0x66, bytes[5] == 0x74, bytes[6] == 0x79, bytes[7] == 0x70
         {
-            let brand = String(bytes: data[8 ..< 12], encoding: .ascii)?.lowercased() ?? ""
+            let brand = String(bytes: bytes[8 ..< 12], encoding: .ascii)?.lowercased() ?? ""
             if brand.contains("heic") || brand.contains("heix") || brand.contains("mif1") ||
                 brand.contains("avif") || brand.contains("msf1")
             {
@@ -297,8 +305,9 @@ public enum AttachmentSecurity: Sendable {
 
     private static func isPDF(data: Data) -> Bool {
         // PDF: `%PDF-`
-        guard data.count >= 5 else { return false }
-        return data[0] == 0x25 && data[1] == 0x50 && data[2] == 0x44 && data[3] == 0x46 && data[4] == 0x2D
+        let bytes = prefixBytes(data, limit: 16)
+        guard bytes.count >= 5 else { return false }
+        return bytes[0] == 0x25 && bytes[1] == 0x50 && bytes[2] == 0x44 && bytes[3] == 0x46 && bytes[4] == 0x2D
     }
 
     private static func isText(data: Data, contentType: String, filename: String) -> Bool {

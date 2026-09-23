@@ -221,14 +221,15 @@ export default function MarkdownText({
           pre: MarkdownPre,
           code: MarkdownCode,
           a({ href, children, ...props }) {
-            if (!isSafeUrl(href)) {
+            if (!href || !isSafeUrl(href)) {
               // Blocked links render as inert text without the raw URI so an
               // attacker URI never reaches the DOM or the readable text.
               return <span>[{children}]</span>;
             }
+            const safeHref = normalizeUrlForCheck(href);
             return (
               <a
-                href={href}
+                href={safeHref}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="chat-markdown-link"
@@ -239,12 +240,13 @@ export default function MarkdownText({
             );
           },
           img({ src, alt, ...props }) {
-            if (!isSafeUrl(src)) {
+            if (!src || !isSafeUrl(src)) {
               // Blocked images render alt text only so an unsafe source URI
               // never reaches the DOM or the readable text.
               return <span>[Image: {alt || "Blocked image"}]</span>;
             }
-            return <img src={src} alt={alt} className="chat-markdown-img" {...props} />;
+            const safeSrc = normalizeUrlForCheck(src);
+            return <img src={safeSrc} alt={alt} className="chat-markdown-img" {...props} />;
           },
           h1({ children, ...props }) {
             return <h3 className="chat-h3" {...props}>{children}</h3>;
