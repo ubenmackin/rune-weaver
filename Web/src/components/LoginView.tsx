@@ -3,10 +3,14 @@
 //
 // The engine serves the dashboard bundle publicly because a browser cannot
 // attach a bearer header to navigation or asset fetches, so this view is the
-// real owner-auth gate: it renders before any authenticated request, captures
-// the owner token into memory plus the tab session, and surfaces one generic
-// rejection line per failure class so the form never becomes an oracle for a
-// near-miss token. It carries no engine shapes beyond the credential field.
+// real owner-auth gate: it renders before any authenticated request, adopts
+// the owner token via the engine-set HttpOnly rw_session cookie only, and
+// surfaces one generic rejection line per failure class so the form never
+// becomes an oracle for a near-miss token. The app itself never writes
+// credentials to cookies, localStorage, or sessionStorage; the fixed owner
+// username plus current-password fields exist only so the user's own browser
+// vault can offer a saveable sign-in. It carries no engine shapes beyond the
+// credential field.
 
 import { useState, type FormEvent } from "react";
 import { authenticateWithToken } from "../api";
@@ -22,6 +26,13 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Fixed identity paired with the owner token so password managers recognize
+  // this as a saveable sign-in. Managers key entries by a username plus a
+  // password and stay silent for a lone secret field, which is why every
+  // session previously required manual entry even though the token itself
+  // lives in the Keychain on the engine host.
+  const username = "owner";
+
   const trimmed = token.trim();
   const canSubmit = trimmed.length > 0 && !checking;
 
@@ -30,9 +41,11 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
     if (!canSubmit) return;
     setChecking(true);
     setError(null);
-    // authenticateWithToken adopts the credential on success and mirrors it to
-    // sessionStorage, so the parent gate and the shared socket observe it
-    // through the same auth transition.
+    // authenticateWithToken adopts the credential on success via the
+    // engine-set HttpOnly session cookie, so the parent gate and the shared
+    // socket observe it through the same auth transition. The app itself
+    // never writes credentials to cookies, localStorage, or sessionStorage;
+    // any vault persistence is the user's own browser password-manager save.
     const result = await authenticateWithToken(trimmed);
     setChecking(false);
     if (result === "ok") {
@@ -83,9 +96,34 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
         >
           Enter your owner access token to continue.
         </p>
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} method="post">
           <label
-            htmlFor="owner-access-token"
+            htmlFor="owner-username"
+            style={{
+              display: "block",
+              marginBottom: "6px",
+              fontSize: "13px",
+              color: "var(--text-secondary, #b7bdcb)",
+            }}
+          >
+            Username
+          </label>
+          <input
+            id="owner-username"
+            name="username"
+            type="text"
+            autoComplete="username"
+            className="input-field"
+            value={username}
+            readOnly
+            style={{
+              width: "100%",
+              boxSizing: "border-box",
+              marginBottom: "12px",
+            }}
+          />
+          <label
+            htmlFor="owner-password"
             style={{
               display: "block",
               marginBottom: "6px",
@@ -96,8 +134,8 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
             Access token
           </label>
           <input
-            id="owner-access-token"
-            name="token"
+            id="owner-password"
+            name="password"
             type="password"
             autoComplete="current-password"
             className="input-field"
@@ -116,6 +154,16 @@ export default function LoginView({ onAuthenticated }: LoginViewProps) {
             {checking ? "Signing in…" : "Sign in"}
           </button>
         </form>
+        <p
+          style={{
+            margin: "12px 0 0",
+            fontSize: "12px",
+            color: "var(--text-secondary, #98a0b3)",
+          }}
+        >
+          Your browser will offer to remember this sign-in so you don&apos;t
+          have to re-enter the token each time.
+        </p>
         <p
           role="status"
           aria-live="polite"

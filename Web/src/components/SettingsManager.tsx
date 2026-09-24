@@ -18,6 +18,17 @@ import {
   DEFAULT_SEARCH_MAX_RESULTS,
   DEFAULT_SEARCH_SEARXNG_URL,
   DEFAULT_SEARCH_TIMEOUT_SECONDS,
+  DEFAULT_SERVER_HOSTNAME,
+  DEFAULT_SERVER_PORT,
+  MAX_SERVER_ALLOWED_HOSTS,
+  MAX_SERVER_ALLOWED_HOST_LENGTH,
+  formatServerAllowedHostsText,
+  isLoopbackHostname,
+  canonicalRestartHost,
+  normalizeServerAllowedHost,
+  parseServerAllowedHostsText,
+  validateServerAllowedHosts,
+  validateServerHostname,
   ensureSearch,
   getSearchHealth,
   hasActiveRuns,
@@ -81,10 +92,11 @@ import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 
-// Eight-item vertical navigation keeps every category visible without horizontal scrolling; sandbox
+// Vertical navigation keeps every category visible without horizontal scrolling; sandbox
 // and file policy share one Security pane so the sidebar stays within the width budget as settings
 // grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
-// the /search/* health routes are keyed to that id, so only the label moves.
+// the /search/* health routes are keyed to that id, so only the label moves. The `network` pane
+// owns the [server] bind (hostname, port, allowed_hosts) plus the restart banner.
 type SettingsTab =
   | "providers"
   | "engine"
@@ -94,6 +106,7 @@ type SettingsTab =
   | "voice"
   | "search"
   | "email"
+  | "network"
   | "indexing";
 
 interface ProviderEntry {
@@ -157,6 +170,46 @@ export const BROWSER_PYTHON_STAGE_COPY: Record<string, string> = {
   installing: "Installing Playwright package",
   browsers: "Installing Chromium browser",
 };
+
+// Preset bind targets for the single Network bind control: loopback-only
+// serves without a token, while the all-interfaces value needs a resolvable
+// owner token and fails closed otherwise. Any other value (localhost, ::1, a
+// literal LAN IP) stays on the custom option with its address held directly in
+// serverHostname. An explicit custom pick preserves the preset value in the
+// revealed input instead of clearing to empty, tracked by the custom flag so
+// the selector can stay on custom while holding a preset spelling.
+export const SERVER_BIND_PRESETS = ["127.0.0.1", "0.0.0.0"];
+
+// Compares a bind hostname against the preset list case-insensitively via the
+// shared restart canonicalization (trim plus lowercase plus IPv6-bracket
+// handling) so casing or bracket-only spellings the gate treats identically
+// never force a spurious custom pick.
+function isServerBindPreset(hostname: string): boolean {
+  const candidate = canonicalRestartHost(hostname);
+  return SERVER_BIND_PRESETS.some(
+    (preset) => canonicalRestartHost(preset) === candidate,
+  );
+}
+
+// Re-anchor cadence for the live bind while the Network pane is open: polls
+// /health so an external restart moves live to the new boot and the banner
+// clears without a manual Refresh. Five seconds keeps the banner honest
+// without adding steady-state QPS once file converges with boot.
+export const SERVER_BOOT_POLL_INTERVAL_MS = 5000;
+
+// Compares allowed_hosts as an order-insensitive IPv6-bracket-canonicalized
+// set so a reorder-only, case-only, or IPv6 bracket-only edit never trips a
+// spurious restart; each entry runs through the stored Host normalization
+// plus the restart bracket canonicalization, matching the server compare of
+// normalizedAllowedHost wrapped in canonicalRestartHost. Only bracketed
+// spellings whose inner text holds a colon (IPv6) canonicalize, so bracketed
+// non-IPv6 spellings stay distinct.
+function areServerAllowedHostsEqual(a: string[], b: string[]): boolean {
+  const sortedA = [...new Set(a.map((h) => canonicalRestartHost(normalizeServerAllowedHost(h))))].sort();
+  const sortedB = [...new Set(b.map((h) => canonicalRestartHost(normalizeServerAllowedHost(h))))].sort();
+  if (sortedA.length !== sortedB.length) return false;
+  return sortedA.every((h, i) => h === sortedB[i]);
+}
 
 interface BrowserPythonHealthPayload {
   ready?: boolean | null;
@@ -454,6 +507,34 @@ export default function SettingsManager() {
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const desktopSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Network bind ([server] hostname, port, allowed_hosts): the socket and the
+  // Host gate are fixed at boot, so saves persist to the file and return
+  // requiresRestart instead of live-reloading. The allowed-hosts editor holds
+  // raw textarea text (one exact host per line) so blank lines survive editing
+  // and only collapse on save; the restart flag from the last PUT plus the
+  // file-vs-boot comparison below drives the pending-vs-live banner.
+  const [serverHostname, setServerHostname] = useState<string>(DEFAULT_SERVER_HOSTNAME);
+  // Tracks an explicit Custom pick so entering custom mode preserves the
+  // preset value in the revealed input instead of clearing to empty; the
+  // selector stays on custom while the input holds the preset until edited,
+  // and picking a preset clears the flag.
+  const [serverHostnameCustom, setServerHostnameCustom] = useState(false);
+  const [serverPort, setServerPort] = useState<number | string>(DEFAULT_SERVER_PORT);
+  const [serverAllowedHostsText, setServerAllowedHostsText] = useState<string>("");
+  const [serverRestartRequired, setServerRestartRequired] = useState(false);
+  // Live boot bind snapshot: the socket and Host gate values fixed at process
+  // start. File values from GET/PUT drift ahead after a network save, so the
+  // restart banner compares the pending file against this boot snapshot
+  // instead of file against file (which would render identical after
+  // populateForm syncs the form to the PUT response). Seeded from the first
+  // settings fetch and corrected from /health when the engine advertises its
+  // boot bind; preserved across PUTs so a second save without a restart keeps
+  // the original boot instead of sliding to an intermediate file.
+  const [liveServerBind, setLiveServerBind] = useState<{
+    hostname: string;
+    port: number;
+    allowedHosts: string[];
+  } | null>(null);
   // Access-management flow: rotating the single owner token signs out every
   // other device the moment the engine swaps it, so the dashboard asks twice
   // before calling the route, then reveals the new token once. The API client
@@ -1218,7 +1299,93 @@ export default function SettingsManager() {
     // Desktop fields share one helper so load and save stay symmetric; an
     // absent [desktop] keeps the form defaults instead of blanking the modal.
     populateDesktopSettings(data.desktop);
+    // Network bind tolerates older engines without [server]: absent keys keep
+    // the loopback defaults so the pane never renders blank, and the textarea
+    // formats the stored list so blank lines only exist while editing.
+    setServerHostname(
+      typeof data.serverHostname === "string" && data.serverHostname.trim()
+        ? data.serverHostname
+        : DEFAULT_SERVER_HOSTNAME
+    );
+    // A freshly loaded preset never starts in explicit custom mode, while a
+    // stored custom address does, so the selector reflects the file instead
+    // of lingering on a prior custom pick. Compared case-insensitively via
+    // the restart canonicalization so casing the gate ignores never forces
+    // custom.
+    setServerHostnameCustom(
+      typeof data.serverHostname === "string" && data.serverHostname.trim()
+        ? !isServerBindPreset(data.serverHostname)
+        : false
+    );
+    setServerPort(
+      typeof data.serverPort === "number" && Number.isInteger(data.serverPort)
+        ? data.serverPort
+        : DEFAULT_SERVER_PORT
+    );
+    setServerAllowedHostsText(formatServerAllowedHostsText(data.serverAllowedHosts));
+    // Seed the boot snapshot once from the first fetch; later PUTs preserve
+    // the original boot via the pre-save snapshot in executeSave, so the
+    // banner keeps comparing pending file versus boot instead of file versus
+    // file. The flag itself mirrors the server: true only when the last PUT
+    // really moved the bind (the route diffs old versus new), while the
+    // render-time file-vs-boot check preserves the banner across non-server
+    // saves that return false.
+    const fileBindHostname =
+      typeof data.serverHostname === "string" && data.serverHostname.trim()
+        ? data.serverHostname
+        : DEFAULT_SERVER_HOSTNAME;
+    const fileBindPort =
+      typeof data.serverPort === "number" && Number.isInteger(data.serverPort)
+        ? data.serverPort
+        : DEFAULT_SERVER_PORT;
+    const fileBindHosts = Array.isArray(data.serverAllowedHosts)
+      ? [...data.serverAllowedHosts]
+      : [];
+    setLiveServerBind((prev) =>
+      prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
+    );
+    setServerRestartRequired(Boolean(data.requiresRestart));
   }, [populateMediaSettings, populateDesktopSettings]);
+
+  // Reconciles the boot snapshot from /health when the engine advertises its
+  // live bind. Older engines omit the keys, in which case the pre-save file
+  // snapshot above stays as the live source of truth. Newer engines correct an
+  // initial seed that assumed file equals boot (for example a file edited
+  // without a restart before the first fetch) and re-anchor live after a
+  // restart so the banner clears once file converges with boot.
+  const refreshBootBind = useCallback(async () => {
+    try {
+      const res = await fetch("/health", {
+        headers: authHeaders(),
+        credentials: "same-origin",
+      });
+      if (!res.ok) return;
+      const payload = (await res.json()) as {
+        serverHostname?: unknown;
+        serverPort?: unknown;
+        serverAllowedHosts?: unknown;
+      };
+      const bootHostname =
+        typeof payload.serverHostname === "string" && payload.serverHostname.trim()
+          ? payload.serverHostname
+          : null;
+      const bootPort =
+        typeof payload.serverPort === "number" && Number.isInteger(payload.serverPort)
+          ? (payload.serverPort as number)
+          : null;
+      const bootHosts = Array.isArray(payload.serverAllowedHosts)
+        ? (payload.serverAllowedHosts as unknown[]).filter(
+            (h): h is string => typeof h === "string"
+          )
+        : null;
+      if (bootHostname !== null && bootPort !== null && bootHosts !== null) {
+        setLiveServerBind({ hostname: bootHostname, port: bootPort, allowedHosts: [...bootHosts] });
+      }
+    } catch {
+      // Health without boot keys (older engines) or an unreachable probe keeps
+      // the file snapshot; the banner degrades to same-session truth.
+    }
+  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -1226,13 +1393,14 @@ export default function SettingsManager() {
     try {
       const data = await getSettings();
       populateForm(data);
+      void refreshBootBind();
       void loadPluginsData();
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to load settings");
     } finally {
       setLoading(false);
     }
-  }, [populateForm, loadPluginsData]);
+  }, [populateForm, refreshBootBind, loadPluginsData]);
 
   useEffect(() => {
     void refresh();
@@ -1248,6 +1416,74 @@ export default function SettingsManager() {
       void refreshBrowserHealth();
     }
   }, [activeTab, refreshSearchHealth, refreshBrowserHealth]);
+
+  // Re-anchors the boot snapshot when the Network pane opens so a restart
+  // performed outside the dashboard (file now converges with the new boot)
+  // clears the banner without a manual Refresh. Runs on tab entry only; the
+  // pending-restart poll below covers a restart while the pane stays open.
+  useEffect(() => {
+    if (activeTab === "network") {
+      void refreshBootBind();
+    }
+  }, [activeTab, refreshBootBind]);
+
+  // Clears the sticky restart flag once the saved file converges with the
+  // re-anchored boot: the health poll moves live to the new boot after an
+  // external restart, so equality proves the pending bind is live and the
+  // banner must clear instead of staying stuck on the pre-restart PUT flag.
+  useEffect(() => {
+    if (!serverRestartRequired || !settings || !liveServerBind) return;
+    const fileHostname =
+      typeof settings.serverHostname === "string" && settings.serverHostname.trim()
+        ? settings.serverHostname
+        : DEFAULT_SERVER_HOSTNAME;
+    const filePort =
+      typeof settings.serverPort === "number" && Number.isInteger(settings.serverPort)
+        ? settings.serverPort
+        : DEFAULT_SERVER_PORT;
+    const fileHosts = Array.isArray(settings.serverAllowedHosts)
+      ? (settings.serverAllowedHosts as string[])
+      : [];
+    const converged =
+      canonicalRestartHost(fileHostname) ===
+        canonicalRestartHost(liveServerBind.hostname) &&
+      filePort === liveServerBind.port &&
+      areServerAllowedHostsEqual(fileHosts, liveServerBind.allowedHosts);
+    if (converged) {
+      setServerRestartRequired(false);
+    }
+  }, [serverRestartRequired, settings, liveServerBind]);
+
+  // Polls the live bind while the Network pane shows a pending restart so an
+  // external restart re-anchors live when file converges with boot and the
+  // banner clears. Idle while converged so steady state adds no QPS; cleared
+  // on tab change or unmount.
+  useEffect(() => {
+    if (activeTab !== "network") return;
+    const fileHostname =
+      typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
+        ? settings.serverHostname
+        : DEFAULT_SERVER_HOSTNAME;
+    const filePort =
+      typeof settings?.serverPort === "number" && Number.isInteger(settings.serverPort)
+        ? settings.serverPort
+        : DEFAULT_SERVER_PORT;
+    const fileHosts = Array.isArray(settings?.serverAllowedHosts)
+      ? (settings.serverAllowedHosts as string[])
+      : [];
+    const bootHostname = liveServerBind?.hostname ?? fileHostname;
+    const bootPort = liveServerBind?.port ?? filePort;
+    const bootHosts = liveServerBind?.allowedHosts ?? fileHosts;
+    const fileDiffersFromBoot =
+      canonicalRestartHost(fileHostname) !== canonicalRestartHost(bootHostname) ||
+      filePort !== bootPort ||
+      !areServerAllowedHostsEqual(fileHosts, bootHosts);
+    if (!serverRestartRequired && !fileDiffersFromBoot) return;
+    const timer = setInterval(() => {
+      void refreshBootBind();
+    }, SERVER_BOOT_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [activeTab, settings, liveServerBind, serverRestartRequired, refreshBootBind]);
 
   // Unmount must never leave the browser provision poll or media/desktop tick
   // running behind a closed pane.
@@ -1549,6 +1785,41 @@ export default function SettingsManager() {
       setSaving(false);
       return;
     }
+    // [server] bind fails closed before any network write so a bad hostname,
+    // port, or allowed_hosts entry never persists to config.toml. Mirrors
+    // ServerEndpointConfig plus RuneWeaverConfig.validateServerHostname and
+    // validateAllowedHosts: port 1-65535, exact-only hostname and hosts
+    // (lowercase, port-stripped, no scheme/wildcard/CIDR/bare *,
+    // unbalanced brackets, or trailing dot, max 20 hosts, max 253 chars).
+    // A non-loopback hostname without a resolvable owner token is refused
+    // server-side (400, never a silent downgrade); the form lets the attempt
+    // through so that authoritative message surfaces instead of a stale
+    // client-side block.
+    const trimmedServerHostname = serverHostname.trim();
+    if (!trimmedServerHostname) {
+      setError("Server hostname cannot be empty.");
+      setSaving(false);
+      return;
+    }
+    const serverHostnameError = validateServerHostname(trimmedServerHostname);
+    if (serverHostnameError) {
+      setError(`Invalid server hostname: ${serverHostnameError}`);
+      setSaving(false);
+      return;
+    }
+    const serverPortNum = Number(serverPort);
+    if (!Number.isInteger(serverPortNum) || serverPortNum < 1 || serverPortNum > 65535) {
+      setError("Invalid server port: port must be between 1 and 65535.");
+      setSaving(false);
+      return;
+    }
+    const trimmedServerHosts = parseServerAllowedHostsText(serverAllowedHostsText);
+    const serverHostsError = validateServerAllowedHosts(trimmedServerHosts);
+    if (serverHostsError) {
+      setError(`Invalid allowed hosts: ${serverHostsError}`);
+      setSaving(false);
+      return;
+    }
     const emailAccounts: EmailAccountData[] = emailAccountsList.map((entry) => {
       const rawHost = entry.account.smtp_host ?? entry.account.smtpHost ?? "";
       const trimmedSmtpHost = String(rawHost).trim();
@@ -1596,6 +1867,34 @@ export default function SettingsManager() {
       const clampedMaxToolIterations = Number.isFinite(maxToolIterationsValue)
         ? Math.max(1, Math.min(100, Math.floor(maxToolIterationsValue)))
         : 10;
+      // Only send [server] keys when the form differs from the loaded file.
+      // Resending unchanged bind keys would trip carriesServerPatch on every
+      // save and return requiresRestart true for non-network edits; the route
+      // also diffs old versus new server-side as defense in depth.
+      const loadedServerHostname =
+        typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
+          ? settings.serverHostname
+          : DEFAULT_SERVER_HOSTNAME;
+      const loadedServerPort =
+        typeof settings?.serverPort === "number" && Number.isInteger(settings.serverPort)
+          ? settings.serverPort
+          : DEFAULT_SERVER_PORT;
+      const loadedServerHosts = Array.isArray(settings?.serverAllowedHosts)
+        ? (settings.serverAllowedHosts as string[])
+        : [];
+      const serverDirty =
+        canonicalRestartHost(trimmedServerHostname) !==
+          canonicalRestartHost(loadedServerHostname) ||
+        serverPortNum !== loadedServerPort ||
+        !areServerAllowedHostsEqual(trimmedServerHosts, loadedServerHosts);
+      // Snapshot the pre-save file as the boot source of truth before the PUT
+      // overwrites settings: after populateForm the file holds the new values
+      // while this snapshot keeps the still-live boot for the banner.
+      const preSaveFileBind = {
+        hostname: loadedServerHostname,
+        port: loadedServerPort,
+        allowedHosts: [...loadedServerHosts],
+      };
       const updated = await updateSettings({
         engineName,
         logLevel,
@@ -1634,12 +1933,34 @@ export default function SettingsManager() {
         pluginsAutoRescan,
         media: buildMediaPayload(),
         desktop: buildDesktopPayload(),
+        ...(serverDirty
+          ? {
+              serverHostname: trimmedServerHostname,
+              serverPort: serverPortNum,
+              serverAllowedHosts: trimmedServerHosts.map((h) => normalizeServerAllowedHost(h)),
+            }
+          : {}),
       });
+      // Preserve the original boot across saves: the first network save seeds
+      // live from the pre-save file, and later saves keep it so the banner
+      // compares the latest file against the still-live boot. populateForm
+      // below seeds live only when null, so this pre-save value wins.
+      if (updated.requiresRestart) {
+        setLiveServerBind((prev) => prev ?? preSaveFileBind);
+      }
       populateForm(updated);
-      // Saved confirmation stays exact so operators recognize it; safe
-      // sections hot-reload live while providers, engine identity, and DB
-      // paths take effect on restart without blanket restart claims here.
-      pushSuccessToast("Settings saved.");
+      // The bind never live-reloads: when the save really moved [server] keys
+      // the route returns requiresRestart and the Network pane keeps its banner
+      // until a restart, while safe sections hot-reload live underneath.
+      if (updated.requiresRestart) {
+        setServerRestartRequired(true);
+        pushSuccessToast("Settings saved. Restart required for network changes.");
+      } else {
+        // Saved confirmation stays exact so operators recognize it; safe
+        // sections hot-reload live while providers, engine identity, and DB
+        // paths take effect on restart without blanket restart claims here.
+        pushSuccessToast("Settings saved.");
+      }
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to save settings");
     } finally {
@@ -2044,6 +2365,36 @@ export default function SettingsManager() {
   // Live parsed count keeps the badge and the textarea hint in sync without
   // storing a second source of truth beside the raw editor text.
   const denyPatternCount = parseDenyPatternsText(filesDenyText).length;
+  // Live parsed allowed-hosts entries share the same single-source pattern:
+  // the badge and the save path read from the raw textarea text.
+  const serverAllowedHostsCount = parseServerAllowedHostsText(serverAllowedHostsText).length;
+  const serverAllowedHostsError = validateServerAllowedHosts(
+    parseServerAllowedHostsText(serverAllowedHostsText),
+  );
+  // File-vs-boot truth for the Network badge: the saved file from settings
+  // against the boot snapshot (or the file itself before the first snapshot).
+  // ORed with the server flag so a pending restart survives non-server saves
+  // that return false, while an unchanged bind never lights the badge.
+  const serverFileHostnameForBadge =
+    typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
+      ? settings.serverHostname
+      : DEFAULT_SERVER_HOSTNAME;
+  const serverFilePortForBadge =
+    typeof settings?.serverPort === "number" && Number.isInteger(settings.serverPort)
+      ? settings.serverPort
+      : DEFAULT_SERVER_PORT;
+  const serverFileHostsForBadge = Array.isArray(settings?.serverAllowedHosts)
+    ? (settings.serverAllowedHosts as string[])
+    : [];
+  const serverBootHostnameForBadge = liveServerBind?.hostname ?? serverFileHostnameForBadge;
+  const serverBootPortForBadge = liveServerBind?.port ?? serverFilePortForBadge;
+  const serverBootHostsForBadge = liveServerBind?.allowedHosts ?? serverFileHostsForBadge;
+  const serverFileDiffersFromBootForBadge =
+    canonicalRestartHost(serverFileHostnameForBadge) !==
+      canonicalRestartHost(serverBootHostnameForBadge) ||
+    serverFilePortForBadge !== serverBootPortForBadge ||
+    !areServerAllowedHostsEqual(serverFileHostsForBadge, serverBootHostsForBadge);
+  const serverRestartVisible = serverRestartRequired || serverFileDiffersFromBootForBadge;
 
   if (loading && !settings) {
     return (
@@ -2203,6 +2554,26 @@ export default function SettingsManager() {
           >
             <MailIcon size={16} />
             <span>Email Accounts</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "network"}
+            className={`settings-tab-btn ${activeTab === "network" ? "active" : ""}`}
+            onClick={() => selectSettingsTab("network")}
+          >
+            <SettingsIcon size={16} />
+            <span>Network</span>
+            {serverRestartVisible ? (
+              <span
+                className="settings-tab-badge"
+                style={{ backgroundColor: "#ed8936", color: "#ffffff" }}
+                title="Network changes need a restart"
+              >
+                !
+              </span>
+            ) : null}
           </button>
 
           <button
@@ -4205,6 +4576,242 @@ export default function SettingsManager() {
                 })}
               </div>
             )}
+          </div>
+        )}
+
+        {/* TAB: Network bind ([server] hostname, port, allowed_hosts). The socket
+            and the Host gate are fixed at boot, so saves persist to the file and
+            return requiresRestart without live-reloading; the banner below tracks
+            pending-vs-live until a restart. */}
+        {activeTab === "network" && (
+          <div className="settings-section card">
+            <div className="settings-section-title-group">
+              <h3>Network</h3>
+              <p className="settings-section-hint">
+                HTTP bind interface, port, and exact-only allowed hosts from [server].
+                Changes persist to config.toml and need a restart to take effect.
+              </p>
+            </div>
+            {(() => {
+              // File holds the last saved values from GET/PUT; boot holds the
+              // still-live socket from the pre-save snapshot (or /health when
+              // advertised); pending holds the unsaved form. Comparing file
+              // against boot keeps the restart banner truthful after
+              // populateForm syncs the form to the file, instead of rendering
+              // identical file-versus-file values.
+              const fileHostname =
+                typeof settings?.serverHostname === "string" && settings.serverHostname.trim()
+                  ? settings.serverHostname
+                  : DEFAULT_SERVER_HOSTNAME;
+              const filePort =
+                typeof settings?.serverPort === "number" ? settings.serverPort : DEFAULT_SERVER_PORT;
+              const fileHosts = Array.isArray(settings?.serverAllowedHosts)
+                ? (settings?.serverAllowedHosts as string[])
+                : [];
+              const bootHostname = liveServerBind?.hostname ?? fileHostname;
+              const bootPort = liveServerBind?.port ?? filePort;
+              const bootHosts = liveServerBind?.allowedHosts ?? fileHosts;
+              const pendingHostname = serverHostname.trim();
+              const pendingPort = Number(serverPort);
+              const pendingHosts = parseServerAllowedHostsText(serverAllowedHostsText);
+              const pendingHostsEqualFile = areServerAllowedHostsEqual(pendingHosts, fileHosts);
+              const isDirty =
+                canonicalRestartHost(pendingHostname) !==
+                  canonicalRestartHost(fileHostname) ||
+                (Number.isInteger(pendingPort) ? pendingPort !== filePort : true) ||
+                !pendingHostsEqualFile;
+              const fileDiffersFromBoot =
+                canonicalRestartHost(fileHostname) !==
+                  canonicalRestartHost(bootHostname) ||
+                filePort !== bootPort ||
+                !areServerAllowedHostsEqual(fileHosts, bootHosts);
+              const restartVisible = serverRestartRequired || fileDiffersFromBoot;
+              return (
+                <>
+                  {restartVisible ? (
+                    <div
+                      className="error-banner"
+                      data-testid="server-restart-banner"
+                      style={{
+                        backgroundColor: "rgba(237, 137, 54, 0.15)",
+                        border: "1px solid rgba(237, 137, 54, 0.4)",
+                        color: "#ed8936",
+                      }}
+                    >
+                      Restart required: network changes are saved but the live bind is still{" "}
+                      <code>
+                        {bootHostname}:{bootPort}
+                      </code>
+                      . Restart the engine to serve{" "}
+                      <code>
+                        {fileHostname}:{filePort}
+                      </code>
+                      .
+                    </div>
+                  ) : null}
+                  {isDirty && !restartVisible ? (
+                    <div
+                      className="muted text-sm"
+                      data-testid="server-pending-banner"
+                      style={{
+                        padding: "10px 14px",
+                        borderRadius: "8px",
+                        border: "1px solid var(--border-color, #2d3748)",
+                        marginBottom: "12px",
+                      }}
+                    >
+                      Unsaved network changes: pending{" "}
+                      <code>
+                        {pendingHostname || "(empty)"}:{String(serverPort) || "(empty)"}
+                      </code>{" "}
+                      vs saved{" "}
+                      <code>
+                        {fileHostname}:{filePort}
+                      </code>
+                      . Save, then restart to apply.
+                    </div>
+                  ) : null}
+                </>
+              );
+            })()}
+            <div className="form-row">
+              <div className="form-group flex-1">
+                <label htmlFor="server-hostname-select">Bind interface</label>
+                <select
+                  id="server-hostname-select"
+                  className="input-field"
+                  data-testid="server-hostname-select"
+                  value={serverHostnameCustom || !isServerBindPreset(serverHostname) ? "custom" : (SERVER_BIND_PRESETS.find((preset) => canonicalRestartHost(preset) === canonicalRestartHost(serverHostname)) ?? serverHostname.trim())}
+                  onChange={(e) => {
+                    const next = e.target.value;
+                    if (next === "custom") {
+                      // Entering custom mode preserves the preset value in the
+                      // revealed input instead of clearing to empty, so the
+                      // pending bind never forces a required-field error nor
+                      // loses the preset until the operator edits it.
+                      setServerHostnameCustom(true);
+                    } else {
+                      setServerHostnameCustom(false);
+                      setServerHostname(next);
+                    }
+                  }}
+                >
+                  <option value="127.0.0.1">127.0.0.1 (Loopback only, no token needed)</option>
+                  <option value="0.0.0.0">0.0.0.0 (All interfaces, LAN needs owner token)</option>
+                  <option value="custom">Custom</option>
+                </select>
+                <span className="form-group-hint">
+                  Which interface the engine listens on. This is separate from Allowed
+                  hosts below, which controls which Host headers the gate accepts.
+                </span>
+              </div>
+              {serverHostnameCustom || !isServerBindPreset(serverHostname) ? (
+                <div className="form-group flex-1">
+                  <label htmlFor="server-hostname">Bind address</label>
+                  <input
+                    id="server-hostname"
+                    type="text"
+                    className="input-field"
+                    data-testid="server-hostname"
+                    value={serverHostname}
+                    onChange={(e) => setServerHostname(e.target.value)}
+                    placeholder="127.0.0.1"
+                    required
+                  />
+                </div>
+              ) : null}
+              <div className="form-group flex-1">
+                <label htmlFor="server-port">Port</label>
+                <input
+                  id="server-port"
+                  type="number"
+                  min={1}
+                  max={65535}
+                  step={1}
+                  className="input-field"
+                  data-testid="server-port"
+                  value={serverPort}
+                  onChange={(e) => setServerPort(e.target.value === "" ? "" : Number(e.target.value))}
+                  placeholder={String(DEFAULT_SERVER_PORT)}
+                  required
+                />
+                <span className="form-group-hint">
+                  TCP port 1-65535. Saved to port under [server].
+                </span>
+              </div>
+            </div>
+            {!isLoopbackHostname(serverHostname) ? (
+              <div
+                className="muted text-sm"
+                data-testid="server-lan-hint"
+                style={{
+                  padding: "10px 14px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-color, #2d3748)",
+                  margin: "12px 0",
+                }}
+              >
+                A non-loopback bind serves on your local network and requires a resolvable owner
+                token. Without one the save is refused (400) instead of silently downgrading.
+                {hasOwnerSession ? (
+                  <span> An owner session is active in this tab.</span>
+                ) : (
+                  <span>
+                    {" "}
+                    Generate one on the Mac Studio with <code>rune-weaver auth token generate</code>,
+                    then sign in before saving a LAN bind.
+                  </span>
+                )}
+              </div>
+            ) : null}
+            <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+              <div className="settings-section-title-group">
+                <h4 style={{ margin: "0 0 4px 0" }}>Allowed hosts</h4>
+                <p className="settings-section-hint">
+                  Exact-only extra Host entries (max {MAX_SERVER_ALLOWED_HOSTS}, max{" "}
+                  {MAX_SERVER_ALLOWED_HOST_LENGTH} chars each). Lowercased and port-stripped on
+                  save; schemes, wildcards, CIDR, bare *, unbalanced brackets, and trailing
+                  dots are rejected.
+                </p>
+              </div>
+              <div className="row">
+                <span className="muted text-sm" data-testid="server-allowed-count">
+                  {serverAllowedHostsCount} {serverAllowedHostsCount === 1 ? "host" : "hosts"}
+                </span>
+              </div>
+            </div>
+            <div className="form-group" style={{ marginTop: "8px" }}>
+              <label htmlFor="server-allowed-hosts-textarea">
+                Allowed hosts, one per line{" "}
+                <span className="muted text-sm">
+                  ({serverAllowedHostsCount} {serverAllowedHostsCount === 1 ? "host" : "hosts"})
+                </span>
+              </label>
+              <textarea
+                id="server-allowed-hosts-textarea"
+                className="input-field server-allowed-hosts-textarea"
+                data-testid="server-allowed-hosts"
+                aria-label="Allowed hosts, one per line"
+                value={serverAllowedHostsText}
+                onChange={(e) => setServerAllowedHostsText(e.target.value)}
+                placeholder="e.g. mac-studio.local"
+                rows={6}
+              />
+              <span className="form-group-hint">
+                One exact host per line. Blank lines are ignored. Entries are lowercased and
+                port-stripped on save; schemes, wildcards, CIDR, bare *, unbalanced brackets,
+                and trailing dots are rejected with line numbers.
+              </span>
+              {serverAllowedHostsError ? (
+                <span
+                  className="form-group-hint"
+                  data-testid="server-allowed-error"
+                  style={{ color: "#f56565" }}
+                >
+                  {serverAllowedHostsError}
+                </span>
+              ) : null}
+            </div>
           </div>
         )}
 

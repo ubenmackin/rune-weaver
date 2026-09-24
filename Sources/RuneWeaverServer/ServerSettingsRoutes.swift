@@ -3,7 +3,10 @@
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
 // budgets, media/browser/web/API tools, desktop policy, and index policy take
-// effect without a restart.
+// effect without a restart. `[server]` bind keys persist to the file but never
+// live-reload the socket or the middleware set: they return `requiresRestart`
+// so the dashboard shows a pending-vs-live restart banner instead of
+// pretending the new bind is live.
 
 import Foundation
 import RuneWeaverCore
@@ -38,12 +41,59 @@ func registerSettingsRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
+        // Snapshot the stored bind before the merge so the response advertises
+        // a restart only when the file values actually move. A save that
+        // resends unchanged bind keys (for example a full-form PUT) leaves the
+        // flag false instead of crying restart on every edit.
+        let oldServerHostname = config.server.hostname
+        let oldServerPort = config.server.port
+        let oldServerAllowedHosts = config.server.allowedHosts
         do {
             try body.apply(to: &config)
             // Validate the merged config before persisting so a single bad
             // field cannot corrupt the stored file or live engine state.
             try config.validate()
+            // The bind and the Host gate stay on the boot values, so only a
+            // real hostname/port/allowed_hosts change needs a restart. The
+            // `carriesServerPatch` gate short-circuits saves without bind keys
+            // so unrelated edits skip the compare entirely. Hostname
+            // compares trimmed plus lowercased plus bracket-canonicalized and
+            // allowed hosts compare as sets of their bracket-canonicalized
+            // normalized Host forms so casing, `:port` spellings, bracketed
+            // versus bare IPv6 spellings, or reorderings that the gate treats
+            // identically do not trip a spurious restart, matching the
+            // dashboard normalized dirty-check.
+            let normalizedHostname = canonicalRestartHost(config.server.hostname)
+            let normalizedOldHostname = canonicalRestartHost(oldServerHostname)
+            let normalizedAllowedHosts = config.server.allowedHosts.map {
+                canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
+            }
+            let normalizedOldAllowedHosts = oldServerAllowedHosts.map {
+                canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
+            }
+            let serverChanged = body.carriesServerPatch
+                && (normalizedHostname != normalizedOldHostname
+                    || config.server.port != oldServerPort
+                    || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
+            let needsRestart = serverChanged
             let liveContext = req.application.runeWeaver
+            // Fail-closed bind guard: a changed non-loopback hostname persists
+            // only when an owner token resolves. Without one the save is
+            // refused with a Generate CTA instead of silently downgrading to an
+            // unauthenticated LAN bind or pretending loopback still applies.
+            // Unchanged binds (including an already-stored LAN value resent by
+            // a full-form save) skip the gate so unrelated edits stay saveable.
+            if serverChanged, !UpdateSettingsRequest.isLoopbackHostname(config.server.hostname) {
+                let hasToken = await serverBindHasOwnerToken(config: config)
+                guard hasToken else {
+                    throw Abort(
+                        .badRequest,
+                        reason: "Refusing to save non-loopback hostname '\(config.server.hostname)' without a configured owner token. "
+                            + "Set [server] hostname to a loopback address (127.0.0.1, localhost, ::1, or [::1]), "
+                            + "or run 'rune-weaver auth token generate' to enable LAN binds."
+                    )
+                }
+            }
             // Fail-closed pre-save probe: a rejected `db_path` throws before
             // the file is persisted and before any live tool state mutates,
             // so the durable file and live desktop/index state never diverge.
@@ -56,6 +106,12 @@ func registerSettingsRoutes(_ app: Application) {
             await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
             await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
             try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
+            // The bind and the Host middleware stay on the boot values: a
+            // `[server]` save persists to the file and returns `requiresRestart`
+            // without touching the live socket or middleware set.
+            let response = try await SettingsResponse(config: config, configPath: url.path, requiresRestart: needsRestart).encodeResponse(for: req)
+            response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+            return response
         } catch let abort as Abort {
             throw abort
         } catch let error as ConfigError {
@@ -63,9 +119,49 @@ func registerSettingsRoutes(_ app: Application) {
         } catch {
             throw Abort(.internalServerError, reason: error.localizedDescription)
         }
-        let response = try await SettingsResponse(config: config, configPath: url.path).encodeResponse(for: req)
-        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
-        return response
+    }
+}
+
+/// Canonicalizes one hostname for the restart compare.
+///
+/// Trims plus lowercases, then strips a single outer bracket pair only when the
+/// inner text carries a colon so `::1` and `[::1]` (or `::` and `[::]`) compare
+/// equal. A non-colon bracketed value (for example `[example.com]`) keeps its
+/// brackets so it never collides with the bare form. The Host gate stores both
+/// spellings for IPv6 literals, so without this the compare would report a
+/// spurious restart when only the bracket spelling moves.
+///
+/// Exposed internally so the host-parity contract can pin it against the
+/// dashboard mirror instead of drifting on bracket or case spellings.
+/// - Parameter value: Raw or normalized hostname.
+/// - Returns: Bracket-canonicalized hostname.
+func canonicalRestartHost(_ value: String) -> String {
+    var candidate = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if candidate.hasPrefix("["), candidate.hasSuffix("]"), candidate.count >= 2 {
+        let inner = String(candidate.dropFirst().dropLast())
+        // Only IPv6 literals use brackets; stripping unconditionally would map
+        // `[example.com]` onto `example.com` and hide a spurious restart.
+        if inner.contains(":") {
+            candidate = inner
+        }
+    }
+    return candidate
+}
+
+/// Whether an owner token guards the pending `[server]` bind.
+///
+/// Always resolves the merged `[auth]` section fresh so a token removed after
+/// boot cannot strand the file behind a stale live verifier, while a token
+/// provisioned after boot still authorizes the save. Any resolution failure
+/// reads as no token so the caller fails closed with the Generate CTA instead
+/// of persisting an unauthenticated LAN bind.
+/// - Parameter config: Merged config about to be persisted.
+/// - Returns: True when a token resolves from any configured source.
+private func serverBindHasOwnerToken(config: RuneWeaverConfig) async -> Bool {
+    do {
+        return try await ServerAuth.resolve(authConfig: config.auth) != nil
+    } catch {
+        return false
     }
 }
 

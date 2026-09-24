@@ -32,6 +32,15 @@ describe("LoginView owner-token gate", () => {
     const onAuthenticated = vi.fn();
     render(<LoginView onAuthenticated={onAuthenticated} />);
 
+    // The fixed username must be present before typing so managers recognize
+    // the pair on first render, and the hint tells the owner a save offer
+    // is expected instead of another manual entry next session.
+    const username = screen.getByLabelText("Username") as HTMLInputElement;
+    expect(username.value).toBe("owner");
+    expect(
+      screen.getByText(/browser will offer to remember/i),
+    ).toBeInTheDocument();
+
     const input = screen.getByLabelText("Access token") as HTMLInputElement;
     await user.type(input, "owner-token");
     await user.click(screen.getByRole("button", { name: "Sign in" }));
@@ -42,13 +51,40 @@ describe("LoginView owner-token gate", () => {
     expect(getAuthToken()).toBeNull();
     expect(window.sessionStorage.getItem(AUTH_TOKEN_STORAGE_KEY)).toBeNull();
     // The typed credential is dropped as soon as it is adopted so it does not
-    // linger in the replaced form.
+    // linger in the replaced form, while the fixed username stays put for the
+    // next save offer.
     expect(input.value).toBe("");
+    expect(username.value).toBe("owner");
     const [path, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(path).toBe("/auth/session");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body as string)).toEqual({ token: "owner-token" });
     expect(init.credentials).toBe("same-origin");
+  });
+
+  it("exposes password-manager-friendly fields so the sign-in is saveable", () => {
+    render(<LoginView />);
+
+    // Managers key entries by a username plus a password pair, so the fixed
+    // identity must carry the username token and the secret the
+    // current-password token with matching form names.
+    const username = screen.getByLabelText("Username") as HTMLInputElement;
+    expect(username.value).toBe("owner");
+    expect(username.getAttribute("autocomplete")).toBe("username");
+    expect(username.getAttribute("name")).toBe("username");
+    expect(username.readOnly).toBe(true);
+
+    const password = screen.getByLabelText("Access token") as HTMLInputElement;
+    expect(password.getAttribute("type")).toBe("password");
+    expect(password.getAttribute("autocomplete")).toBe("current-password");
+    expect(password.getAttribute("name")).toBe("password");
+
+    // Without a username the browser stays silent and every session needs
+    // manual entry, so the hint sets the expectation that a save offer
+    // appears after signing in.
+    expect(
+      screen.getByText(/browser will offer to remember/i),
+    ).toBeInTheDocument();
   });
 
   it("shows one generic rejection without echoing the typed token", async () => {

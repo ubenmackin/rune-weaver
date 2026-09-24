@@ -443,12 +443,28 @@ extension RuneWeaverConfig {
         guard let server = root.tables["server"] else { return }
         // Absent keys keep the loopback default; the strict accessors reject
         // present-but-wrong-typed values instead of silently defaulting, and
-        // range checks land in validation so decode stays type-only.
+        // range checks land in validation so decode stays type-only. Hostname
+        // stays trimmed-only so a `:port` suffix still fails in validation
+        // instead of being stripped away here.
         if let hostname = try server.strictString("hostname", field: "server.hostname") {
-            config.server.hostname = hostname
+            config.server.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let port = try server.strictInt("port", field: "server.port") {
             config.server.port = port
+        }
+        if let allowedHosts = try server.strictStringArray("allowed_hosts", field: "server.allowed_hosts") {
+            let trimmed = allowedHosts.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            // Validate the raw entries before port stripping hides a widening
+            // shape: stripping first would carve `http` from `http://evil.com`
+            // and let a scheme slip through as an exact host.
+            try Self.validateAllowedHosts(trimmed)
+            // Single-sourced through `dedupeNormalizedHosts` so file-load, the
+            // settings PUT, the health snapshot, and the Host gate store
+            // identically (lowercased, port-stripped, deduped first-seen order
+            // plus IPv6 counterparts) instead of diverging on casing or `:port`.
+            config.server.allowedHosts = ServerEndpointConfig.dedupeNormalizedHosts(trimmed)
         }
     }
 

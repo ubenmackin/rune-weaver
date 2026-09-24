@@ -18,7 +18,10 @@ struct RuneWeaverApp: App {
 }
 
 struct AppMenuLabel: View {
-    var model: AppModel
+    @Bindable var model: AppModel
+    /// Separate presentation state so Esc or swipe dismissal only hides the
+    /// sheet while the posture flag keeps the Server-section guidance.
+    @State private var showOnboarding = false
 
     var body: some View {
         HStack(spacing: 4) {
@@ -33,21 +36,92 @@ struct AppMenuLabel: View {
         }
         .onAppear {
             model.start()
+            if model.needsOwnerToken {
+                showOnboarding = true
+            }
         }
+        .onChange(of: model.needsOwnerToken) { _, newValue in
+            if newValue {
+                showOnboarding = true
+            }
+        }
+        // First-run onboarding sheet driven by separate presentation state
+        // seeded from the boot-time posture flag, so the show-once copy plus
+        // adopting restart never require Terminal. Dismissing without minting
+        // defers to Settings, which stays one click away in the menu.
+        .sheet(isPresented: $showOnboarding, onDismiss: {
+            // Dismissal only hides presentation; reassert the posture flag
+            // while the service still has no token so the Server section
+            // keeps offering generation.
+            if model.serverContext?.auth == nil {
+                model.needsOwnerToken = true
+            }
+        }, content: {
+            OwnerOnboardingView(model: model)
+        })
     }
 }
 
 struct AppMenuView: View {
-    var model: AppModel
+    @Bindable var model: AppModel
 
     var body: some View {
-        // Standard platform shortcuts keep menu actions discoverable by
-        // keyboard: dashboard, settings, and quit follow the same bindings
-        // users expect across macOS apps.
+        // The embedded service can refuse a bind (for example an all-interfaces
+        // address without an owner token), and that refusal is otherwise only
+        // visible in the log. Surfacing the live status line plus the failure
+        // reason keeps token recovery inside the menu: Owner Access, then retry.
+        Section("Server") {
+            Text(model.serverStatus)
+            if model.isRestarting {
+                // A restart holds the boot flag across the hop, so the menu
+                // names the in-flight state instead of offering a second
+                // concurrent Retry that would race the bind.
+                ProgressView("Restarting…")
+            }
+            if model.serverStatus.hasPrefix("Failed") {
+                // Token recovery stays Terminal-free through Owner Access plus
+                // Retry; a bad hostname has no native editor and Web Settings
+                // needs a live loopback server, so it requires a config.toml
+                // file edit before Retry.
+                Text(
+                    "Missing owner token? Add one in Owner Access below, then Retry — no Terminal needed. "
+                        + "To fix the hostname, edit ~/.runeweaver/config.toml ([server] hostname), then Retry. "
+                        + "Web Settings is unavailable while the server is down."
+                )
+                .foregroundStyle(.secondary)
+                Button("Open Settings") {
+                    model.openSettings()
+                }
+                .disabled(!model.isDashboardAvailable)
+                Button("Owner Access...") {
+                    model.openOwnerAccess()
+                }
+                Button(model.isRestarting ? "Restarting…" : "Retry Server") {
+                    model.restartServerToAdoptToken()
+                }
+                .disabled(model.isRestarting)
+            } else if model.needsOwnerToken {
+                // Loopback stays usable before a token exists, but any LAN bind
+                // stays refused; pointing at Settings here keeps first-run
+                // onboarding one click away instead of a silent local-only boot.
+                Text("Local use only — generate an owner token in Settings to enable LAN binds.")
+                    .foregroundStyle(.secondary)
+                Button("Open Settings") {
+                    model.openSettings()
+                }
+                .disabled(!model.isDashboardAvailable)
+                Button("Set Up Owner Access...") {
+                    model.openOwnerAccess()
+                }
+            }
+        }
+
+        Divider()
+
         Button("Open Web Dashboard") {
             model.openDashboard()
         }
-        .keyboardShortcut("o", modifiers: .command)
+        .disabled(!model.isDashboardAvailable)
 
         if !model.activeChats.isEmpty || !model.pendingApprovals.isEmpty {
             Divider()
@@ -58,6 +132,7 @@ struct AppMenuView: View {
                         Button(chat.title) {
                             model.openChat(id: chat.id)
                         }
+                        .disabled(!model.isDashboardAvailable)
                     }
                 }
             }
@@ -114,7 +189,6 @@ struct AppMenuView: View {
                     Button("⛔ Emergency Stop") {
                         model.emergencyStopDesktop()
                     }
-                    .keyboardShortcut(".", modifiers: [.command, .option, .shift])
                 }
             }
         }
@@ -124,13 +198,19 @@ struct AppMenuView: View {
         Button("Settings...") {
             model.openSettings()
         }
-        .keyboardShortcut(",", modifiers: .command)
+        .disabled(!model.isDashboardAvailable)
+
+        // Native token authority stays reachable while the service is healthy,
+        // when the Server section shows no onboarding affordance: status plus
+        // Rotate without Terminal live in the Settings scene.
+        Button("Owner Access...") {
+            model.openOwnerAccess()
+        }
 
         Divider()
 
         Button("Quit Rune Weaver") {
             model.quit()
         }
-        .keyboardShortcut("q")
     }
 }

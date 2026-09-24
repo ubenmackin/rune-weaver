@@ -57,9 +57,11 @@ extension RuneWeaverConfig {
     }
 
     private func validateServerSection() throws {
-        if server.hostname.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            throw ConfigError.validationError(field: "server.hostname", message: "must not be empty")
-        }
+        // Decode and the settings PUT trim before storing, so the stored form
+        // never carries padding; the hostname check validates the trimmed
+        // form under the same exact-host rules as `allowed_hosts` and the
+        // Host gate so file-load and PUT agree before persisting.
+        try Self.validateServerHostname(server.hostname)
         // Mirrors `ServerConfig.validPortRange` without linking the server
         // transport into the config layer, so a bad port fails at load.
         if server.port < 1 || server.port > 65535 {
@@ -67,6 +69,283 @@ extension RuneWeaverConfig {
                 field: "server.port", message: "must be between 1 and 65535"
             )
         }
+        try Self.validateAllowedHosts(server.allowedHosts)
+    }
+
+    /// Validates `server.hostname` as an exact host matching `allowed_hosts`
+    /// and Host-gate semantics.
+    ///
+    /// The Host gate matches the bind hostname after lowercasing (plus
+    /// bracket-canonicalized IPv6), so validation rejects shapes that could
+    /// never match exactly or would widen the gate: schemes, wildcards, CIDR
+    /// ranges or paths, userinfo, query or fragment, interior whitespace,
+    /// and control characters. A `:port` suffix on a non-IPv6 literal is
+    /// rejected because the port lives in `server.port`: persisting
+    /// `example.com:8082` as the hostname would never match the normalized
+    /// Host yet read as configured (spurious 403) or fail at bind time.
+    /// - Parameter hostname: Raw configured hostname.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
+    public static func validateServerHostname(_ hostname: String) throws {
+        let field = "server.hostname"
+        let trimmed = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ConfigError.validationError(field: field, message: "must not be empty")
+        }
+        if trimmed.count > ServerEndpointConfig.maxAllowedHostLength {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must not exceed \(ServerEndpointConfig.maxAllowedHostLength) characters (got \(trimmed.count))"
+            )
+        }
+        // Single-sourced through `validateExactHost` so hostname and allowlist
+        // agree on every widening shape; length and port checks stay local.
+        try Self.validateExactHost(trimmed: trimmed, original: hostname, field: field)
+        // Fail closed on `host:port` spellings for non-IPv6 literals: the
+        // port belongs in `server.port`, and the Host gate compares the
+        // port-stripped form, so persisting the suffix would never match yet
+        // read as configured. Unbracketed IPv6 literals carry multiple
+        // colons and keep them; a single colon (or a bracketed `:port`
+        // after `]`) is a port suffix, not an address.
+        if Self.isHostWithPortSuffix(trimmed) {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must be a host without a port (got '\(hostname)'); configure the port via server.port instead"
+            )
+        }
+        // Fail closed on values that normalize to empty (e.g. `:8082`): the
+        // Host gate compares the lowercased, port-stripped form, so a
+        // port-only hostname would never match yet read as configured.
+        if Self.normalizedAllowedHostForValidation(trimmed).isEmpty {
+            throw ConfigError.validationError(field: field, message: "must not be empty")
+        }
+    }
+
+    /// Whether a trimmed hostname carries a `:port` suffix.
+    ///
+    /// Bracketed literals (`[::1]`) keep their brackets; a colon after the
+    /// closing `]` counts as a port only for a numeric port, mirroring the
+    /// normalization strip rule. Unbracketed values with more than one colon
+    /// are IPv6 literals and keep their colons, while a single colon marks
+    /// `host:port` only for an empty or numeric suffix.
+    /// - Parameter trimmed: Whitespace-trimmed hostname.
+    /// - Returns: True when the value carries a port suffix.
+    private static func isHostWithPortSuffix(_ trimmed: String) -> Bool {
+        if trimmed.hasPrefix("[") {
+            guard let closingBracketIndex = trimmed.firstIndex(of: "]") else {
+                return false
+            }
+            let after = trimmed[trimmed.index(after: closingBracketIndex)...]
+            guard after.hasPrefix(":") else {
+                return false
+            }
+            let portPart = after.dropFirst()
+            return !portPart.isEmpty && portPart.allSatisfy { $0 >= "0" && $0 <= "9" }
+        }
+        if trimmed.filter({ $0 == ":" }).count != 1 {
+            return false
+        }
+        guard let colonIndex = trimmed.firstIndex(of: ":") else {
+            return false
+        }
+        let suffix = trimmed[trimmed.index(after: colonIndex)...]
+        if suffix.isEmpty {
+            return true
+        }
+        return suffix.allSatisfy { $0 >= "0" && $0 <= "9" }
+    }
+
+    /// Validates one exact host against the shared Host-gate semantics.
+    ///
+    /// Single-sources the widening-shape guards shared by
+    /// `validateServerHostname` and `validateAllowedHosts` (scheme, bare `*`,
+    /// wildcards, CIDR/paths, userinfo, query/fragment, whitespace, controls)
+    /// plus the unbalanced-bracket, bracketed non-IPv6, empty-bracket, and
+    /// trailing-dot fail-closed checks so file-load, the settings PUT, and
+    /// the Host gate agree. Length, empty, port-suffix, and normalized-empty
+    /// checks stay with the callers because the hostname rejects `:port`
+    /// while the allowlist strips it.
+    /// - Parameters:
+    ///   - trimmed: Whitespace-trimmed host value.
+    ///   - original: Raw value echoed in diagnostics.
+    ///   - field: Dotted field name for diagnostics.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
+    private static func validateExactHost(trimmed: String, original: String, field: String) throws {
+        let lowered = trimmed.lowercased()
+        if lowered.contains("://") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain a scheme (got '\(original)'); list the host instead"
+            )
+        }
+        if lowered == "*" {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain bare \"*\" (would allow every host)"
+            )
+        }
+        // Wildcard and CIDR hints keep their per-field wording so existing
+        // diagnostics do not drift: the hostname suggests the singular host
+        // while the allowlist suggests exact hosts.
+        let listHint = (field == "server.allowed_hosts") ? "list exact hosts instead" : "list the host instead"
+        if lowered.contains("*") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain wildcards (got '\(original)'); \(listHint)"
+            )
+        }
+        if lowered.contains("/") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain CIDR or paths (got '\(original)'); \(listHint)"
+            )
+        }
+        if trimmed.contains("@") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain userinfo (got '\(original)')"
+            )
+        }
+        if trimmed.contains("?") || trimmed.contains("#") {
+            throw ConfigError.validationError(
+                field: field, message: "must be a host without query or fragment (got '\(original)')"
+            )
+        }
+        if trimmed.contains(" ") || trimmed.contains("\t") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain whitespace (got '\(original)')"
+            )
+        }
+        if trimmed.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain control characters (got '\(original)')"
+            )
+        }
+        try validateBracketedHost(trimmed: trimmed, original: original, field: field)
+
+        // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
+        // normalization strips only an empty or numeric port, so
+        // `evil.com:evil` would otherwise persist verbatim garbage that never
+        // matches yet reads as configured. Empty or numeric suffixes pass
+        // through for the hostname port-suffix rejection and the allowlist
+        // strip respectively; IPv6 literals keep their colons above.
+        if !trimmed.hasPrefix("[") {
+            if trimmed.filter({ $0 == ":" }).count == 1,
+               let colonIndex = trimmed.firstIndex(of: ":")
+            {
+                let suffix = trimmed[trimmed.index(after: colonIndex)...]
+                if !suffix.allSatisfy({ $0 >= "0" && $0 <= "9" }) {
+                    if field == "server.hostname" {
+                        throw ConfigError.validationError(
+                            field: field,
+                            message: "must be a host without a port (got '\(original)'); configure the port via server.port instead"
+                        )
+                    }
+                    throw ConfigError.validationError(
+                        field: field,
+                        message: "must be a host with an optional numeric port (got '\(original)'); list exact hosts instead"
+                    )
+                }
+            }
+        }
+        // Fail closed on a trailing FQDN dot: the gate compares exact
+        // normalized hosts, so `example.com.` would never match `example.com`
+        // yet read as allowed. Loopback classification strips the dot first,
+        // while every other host must drop it before configuring.
+        if trimmed.hasSuffix(".") {
+            throw ConfigError.validationError(
+                field: field, message: "must not end with '.' (got '\(original)'); list the host without the trailing dot instead"
+            )
+        }
+    }
+
+    private static func validateBracketedHost(trimmed: String, original: String, field: String) throws {
+        if trimmed.contains("[") != trimmed.contains("]") {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain unbalanced brackets (got '\(original)')"
+            )
+        }
+        guard trimmed.contains("[") || trimmed.contains("]") else { return }
+        guard trimmed.hasPrefix("["),
+              trimmed.filter({ $0 == "[" }).count == 1,
+              trimmed.filter({ $0 == "]" }).count == 1,
+              let closingBracketIndex = trimmed.firstIndex(of: "]")
+        else {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain bracketed non-IPv6 (got '\(original)'); brackets are only for IPv6 literals"
+            )
+        }
+        let inner = String(trimmed[trimmed.index(after: trimmed.startIndex) ..< closingBracketIndex])
+        guard !inner.isEmpty else {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain empty brackets (got '\(original)')"
+            )
+        }
+        guard inner.contains(":") else {
+            throw ConfigError.validationError(
+                field: field, message: "must not contain bracketed non-IPv6 (got '\(original)'); list the host without brackets instead"
+            )
+        }
+        let afterBracket = String(trimmed[trimmed.index(after: closingBracketIndex)...])
+        if !afterBracket.isEmpty {
+            guard afterBracket.hasPrefix(":") else {
+                throw ConfigError.validationError(
+                    field: field, message: "must not contain bracketed non-IPv6 (got '\(original)'); brackets are only for IPv6 literals"
+                )
+            }
+            let portPart = afterBracket.dropFirst()
+            guard !portPart.isEmpty, portPart.allSatisfy({ $0 >= "0" && $0 <= "9" }) else {
+                throw ConfigError.validationError(
+                    field: field, message: "must not contain bracketed non-IPv6 (got '\(original)'); brackets are only for IPv6 literals"
+                )
+            }
+        }
+    }
+
+    /// Validates explicit `server.allowed_hosts` entries as exact hostnames only.
+    ///
+    /// The Host gate matches entries after lowercasing plus port stripping, so
+    /// validation rejects shapes that could never match exactly or would widen
+    /// the gate: schemes, wildcards, CIDR ranges, and a bare `*`. Bounds keep
+    /// the allowlist auditable and within the DNS name limit.
+    /// - Parameter hosts: Raw configured entries.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any widening shape.
+    public static func validateAllowedHosts(_ hosts: [String]) throws {
+        let field = "server.allowed_hosts"
+        if hosts.count > ServerEndpointConfig.maxAllowedHosts {
+            throw ConfigError.validationError(
+                field: field,
+                message: "must contain at most \(ServerEndpointConfig.maxAllowedHosts) entries (got \(hosts.count))"
+            )
+        }
+        for entry in hosts {
+            let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw ConfigError.validationError(field: field, message: "must not contain empty strings")
+            }
+            if trimmed.count > ServerEndpointConfig.maxAllowedHostLength {
+                throw ConfigError.validationError(
+                    field: field,
+                    message: "must not exceed \(ServerEndpointConfig.maxAllowedHostLength) characters (got \(trimmed.count))"
+                )
+            }
+            // Single-sourced through `validateExactHost` so allowlist and hostname
+            // agree on every widening shape; bounds stay local.
+            try Self.validateExactHost(trimmed: trimmed, original: entry, field: field)
+            // Fail closed on entries that normalize to empty (e.g. `:8082`):
+            // the Host gate compares the lowercased, port-stripped form, so a
+            // port-only entry would never match yet read as configured. The
+            // settings PUT already rejects this shape after normalization, so
+            // rejecting here keeps file-load and PUT in agreement.
+            if Self.normalizedAllowedHostForValidation(trimmed).isEmpty {
+                throw ConfigError.validationError(field: field, message: "must not contain empty strings")
+            }
+        }
+    }
+
+    /// Normalizes one `allowed_hosts` entry to the compared Host form for validation.
+    ///
+    /// Single-sourced through `ServerEndpointConfig.normalizeHost` so file-load
+    /// validation and the settings PUT reject the same normalized-empty shapes
+    /// fail-closed without linking the server transport into the config layer.
+    /// - Parameter entry: Raw configured entry.
+    /// - Returns: Lowercased, port-stripped host.
+    private static func normalizedAllowedHostForValidation(_ entry: String) -> String {
+        ServerEndpointConfig.normalizeHost(entry)
     }
 
     private func validateAuthSection() throws {

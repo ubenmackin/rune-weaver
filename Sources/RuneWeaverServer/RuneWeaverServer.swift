@@ -130,10 +130,23 @@ public func configureRuneWeaver(_ app: Application, context: ServerContext, auth
 /// every non-public path is gated before it can 404 or leak existence. With no
 /// verifier the surface stays the v1 loopback-no-auth shape exactly, including
 /// the absence of the rotation route.
+///
+/// The Host gate reads the runtime bind policy (`hostname`, `allowedHosts`,
+/// `authConfigured`) from the stored context so the policy that refused or
+/// permitted the bind is the same one gating Host headers; the HTTP server
+/// hostname was already set from that config in `configureRuneWeaver`.
 public func registerRuneWeaverRoutes(_ app: Application) {
     app.routes.defaultMaxBodySize = "2mb"
-    app.middleware.use(HostValidationMiddleware(hostname: app.http.server.configuration.hostname))
+    let serverConfig = app.runeWeaver.config
+    // Global headers run outermost so Host gate rejections flow through the
+    // same nosniff/DENY/referrer plus proxy-aware HSTS path instead of
+    // bypassing it; the Host gate also applies them directly for defense in depth.
     app.middleware.use(GlobalSecurityHeadersMiddleware())
+    app.middleware.use(HostValidationMiddleware(
+        hostname: serverConfig.hostname,
+        allowedHosts: serverConfig.allowedHosts,
+        authConfigured: serverConfig.authConfigured
+    ))
     // Resolve the bundle once so the public-path gate and the delivery handler
     // agree on exactly which bytes are real static artifacts.
     let dashboardBundle = DashboardBundle.resolve()
@@ -201,6 +214,11 @@ private struct AuthSessionRequestBody: Content {
 }
 
 /// Registers the owner browser session routes (`POST /auth/session` and `DELETE /auth/session`).
+///
+/// Login exchanges the owner bearer token — read from the JSON body or the
+/// `Authorization` header — for one fresh ephemeral session. A resent session
+/// value is not an owner credential and fails closed here like any wrong
+/// token, so sessions cannot mint their own replacements.
 private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
     let authGroup = app.grouped(PathComponent.constant(ServerPaths.auth))
 
@@ -214,7 +232,11 @@ private func registerAuthSessionRoutes(_ app: Application, auth: ServerAuth) {
         let headerToken = req.headers.bearerAuthorization?.token.trimmingCharacters(in: .whitespacesAndNewlines)
         let candidate = (bodyToken?.isEmpty == false ? bodyToken : nil) ?? (headerToken?.isEmpty == false ? headerToken : nil) ?? ""
 
-        guard !candidate.isEmpty, await (auth.verifyAndCaptureGeneration(candidate)) != nil else {
+        // Owner-only verification: the request gate accepts sessions by design,
+        // but minting a session requires the owner credential itself, matching
+        // the documented exchange. Every attempt — including a resent or
+        // retried login — re-presents and re-verifies it.
+        guard await auth.verifyOwnerToken(candidate) else {
             RuneWeaverLog.server.warning("Owner auth session login rejected from \(identity).")
             if let retryAfter = await auth.recordFailure(for: identity, isLoopback: isLoopback) {
                 return ServerAuthMiddleware.throttledResponse(retryAfter: retryAfter)
@@ -269,6 +291,17 @@ private func registerHealthRoute(_ app: Application) {
         // Live Start stage rides along so the profile menu polls one endpoint
         // for both the dot and the Starting line; nil when idle.
         let searchProgress = await SearXNGEnsurer.shared.currentStartProgress(for: searchURL)
+        let liveConfig = req.application.runeWeaver.config
+        // The boot bind is owner-private: only callers that cleared the owner
+        // gate learn it for the restart banner, while any other caller reaching
+        // this handler (the middleware answers unauthenticated probes with the
+        // minimal liveness shape, but the route must not rely on that alone)
+        // sees no hostname, port, or allowlist. The loopback-no-auth posture
+        // installs no verifier, so no request carries the authenticated marker
+        // and the keys stay omitted there as well; the dashboard tolerates
+        // absent keys by keeping its file snapshot, so omission degrades the
+        // banner instead of breaking the probe.
+        let disclosesBind = req.runeWeaverAuthenticated
         let health = HealthResponse(
             engine: req.application.runeWeaver.memoryEngineDescription,
             model: modelInfo.name,
@@ -278,7 +311,10 @@ private func registerHealthRoute(_ app: Application) {
             searchURL: searchURL,
             searchStatus: searchReachable ? "running" : "stopped",
             searchStage: searchProgress?.stage.rawValue,
-            searchStartedAt: searchProgress.map(\.startedAt.timeIntervalSince1970)
+            searchStartedAt: searchProgress.map(\.startedAt.timeIntervalSince1970),
+            serverHostname: disclosesBind ? liveConfig.hostname : nil,
+            serverPort: disclosesBind ? liveConfig.port : nil,
+            serverAllowedHosts: disclosesBind ? liveConfig.allowedHosts : nil
         )
         // Advertise the authoritative turn cap alongside the JSON body so the
         // dashboard prefers the server value over its fallback constant; a

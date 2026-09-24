@@ -1197,6 +1197,37 @@ struct ServerAuthSessionAndSecurityHeadersTests {
     }
 
     @Test
+    func `Session values cannot mint replacements through the login route`() async throws {
+        // Minting requires the owner credential itself: a resent session
+        // verifies at the request gate by design but must fail closed at
+        // login like any wrong token, so sessions cannot mint their own
+        // replacements. The owner-only verifier mirrors that boundary
+        // directly: sessions fail, the live owner passes, and empty fails.
+        let (auth, directory, _) = try makeAuth(token: "owner-token")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sessionID = try await auth.createSession()
+        #expect(await auth.verifyOwnerToken(sessionID) == false)
+        #expect(await auth.verifyOwnerToken("owner-token") == true)
+        #expect(await auth.verifyOwnerToken("") == false)
+
+        try await withTestApp { app in
+            app.runeWeaver = makeConfigurationContext(config: .default)
+            app.runeWeaverAuth = auth
+            registerRuneWeaverRoutes(app)
+
+            let retryReq = Request(
+                application: app,
+                method: .POST,
+                url: URI(string: "/auth/session"),
+                on: app.eventLoopGroup.next()
+            )
+            try retryReq.content.encode(["token": sessionID])
+            let retryRes = try await app.responder.respond(to: retryReq).get()
+            #expect(retryRes.status == .unauthorized)
+        }
+    }
+
+    @Test
     func `isRequestSecure detects HTTPS direct and X-Forwarded-Proto`() async throws {
         try await withTestApp { app in
             let req1 = Request(application: app, method: .GET, url: URI(string: "https://localhost/auth/session"), on: app.eventLoopGroup.next())
@@ -1286,6 +1317,302 @@ struct ServerAuthSessionAndSecurityHeadersTests {
             #expect(res.headers.first(name: "X-Frame-Options") == "DENY")
             #expect(res.headers.first(name: "X-Content-Type-Options") == "nosniff")
             #expect(res.headers.first(name: "Referrer-Policy") == "strict-origin-when-cross-origin")
+        }
+    }
+}
+
+@Suite("Host Validation Matrix")
+struct HostValidationMatrixTests {
+    /// Drives one Host header through the gate without binding a socket.
+    private func statusForHost(
+        app: Application,
+        middleware: HostValidationMiddleware,
+        host: String,
+        bearerToken: String? = nil
+    ) async throws -> Response {
+        var headers = HTTPHeaders()
+        headers.replaceOrAdd(name: .host, value: host)
+        if let bearerToken {
+            headers.replaceOrAdd(name: .authorization, value: "Bearer \(bearerToken)")
+        }
+        let request = Request(
+            application: app,
+            method: .GET,
+            url: URI(string: "/health"),
+            headers: headers,
+            on: app.eventLoopGroup.next()
+        )
+        return try await middleware.respond(to: request, chainingTo: AuthProbeResponder())
+    }
+
+    /// The rejection body must stay fixed so callers cannot probe the allowlist,
+    /// and a presented credential must never be reflected back.
+    private func expectForbiddenWithoutEcho(_ response: Response, presentedToken: String) {
+        #expect(response.status == .forbidden)
+        let body = response.body.string ?? ""
+        #expect(body == #"{"error":"invalid host header"}"#)
+        #expect(body.contains(presentedToken) == false)
+        #expect(response.headers.contains { $0.value.contains(presentedToken) } == false)
+    }
+
+    @Test
+    func `All-interfaces bind refuses without auth and binds with auth`() throws {
+        // An all-interfaces bind listens everywhere, so without a token it is
+        // the same unauthenticated LAN exposure the bind policy refuses.
+        for unspecified in ["0.0.0.0", "::", "[::]"] {
+            do {
+                try ServerConfig(hostname: unspecified, port: 8082, authConfigured: false)
+                    .requireBindable(authConfigured: false)
+                Issue.record("Expected nonLoopbackRefused for \(unspecified) without auth")
+            } catch let error as ServerConfigError {
+                guard case let .nonLoopbackRefused(host) = error else {
+                    Issue.record("Expected nonLoopbackRefused, got \(error)")
+                    return
+                }
+                #expect(host == unspecified)
+            }
+            try ServerConfig(hostname: unspecified, port: 8082, authConfigured: true)
+                .requireBindable(authConfigured: true)
+        }
+    }
+
+    @Test
+    func `Loopback Host headers pass on an all-interfaces bind`() async throws {
+        try await withTestApp { app in
+            // Loopback is the owner's own machine, so it stays reachable even
+            // when the bind widens to the LAN family under owner auth.
+            let middleware = HostValidationMiddleware(
+                hostname: "0.0.0.0",
+                allowedHosts: [],
+                authConfigured: true,
+                allowMissingHostInTesting: false
+            )
+            for host in ["127.0.0.1:8082", "localhost:8082", "127.0.0.1", "localhost", "[::1]:8082", "::1"] {
+                let response = try await statusForHost(app: app, middleware: middleware, host: host)
+                #expect(response.status == .ok, "\(host) should pass")
+            }
+        }
+    }
+
+    @Test
+    func `All-interfaces with auth allows the LAN family and explicit entries`() async throws {
+        try await withTestApp { app in
+            // A 0.0.0.0 bind with a resolved token intentionally serves the LAN
+            // the owner trusted by binding everywhere: private IPv4 ranges,
+            // link-adjacent .local names, and the exact explicit entries.
+            let middleware = HostValidationMiddleware(
+                hostname: "0.0.0.0",
+                allowedHosts: ["my-mac.tail123.ts.net"],
+                authConfigured: true,
+                allowMissingHostInTesting: false
+            )
+            let allowed = [
+                "10.0.0.5",
+                "10.0.0.5:8082",
+                "192.168.1.20:8082",
+                "172.16.5.4",
+                "172.31.255.1:8082",
+                "studio.local",
+                "studio.local:8082",
+                "STUDIO.LOCAL:8082",
+                "my-mac.tail123.ts.net",
+                "my-mac.tail123.ts.net:8082"
+            ]
+            for host in allowed {
+                let response = try await statusForHost(app: app, middleware: middleware, host: host)
+                #expect(response.status == .ok, "\(host) should pass on an authenticated all-interfaces bind")
+            }
+        }
+    }
+
+    @Test
+    func `All-interfaces with auth rejects rebinding shapes without echoing the token`() async throws {
+        try await withTestApp { app in
+            // Public names, public IPs, and widening shapes must stay outside
+            // the LAN opening: only the private family plus the explicit list
+            // rides the all-interfaces bind, so a rebinding host cannot use it.
+            // Hand-built widening entries are dropped by the gate itself, so a
+            // context assembled past config validation still fails closed.
+            let middleware = HostValidationMiddleware(
+                hostname: "0.0.0.0",
+                allowedHosts: ["my-mac.tail123.ts.net", "*.example.com", "192.168.1.0/24", "*", "http://evil.com"],
+                authConfigured: true,
+                allowMissingHostInTesting: false
+            )
+            let presented = "owner-secret-probe-token"
+            let rejected = [
+                "evil.com",
+                "evil.com:8082",
+                "attacker.com:8082",
+                "8.8.8.8",
+                "8.8.8.8:8082",
+                "93.184.216.34",
+                "203.0.113.9:8082",
+                "*.example.com",
+                "192.168.1.0/24",
+                "*",
+                "http://evil.com"
+            ]
+            for host in rejected {
+                let response = try await statusForHost(
+                    app: app,
+                    middleware: middleware,
+                    host: host,
+                    bearerToken: presented
+                )
+                expectForbiddenWithoutEcho(response, presentedToken: presented)
+            }
+            // A neighbor outside the private ranges is not smuggled in by the
+            // LAN opening even though it looks nearby.
+            for host in ["172.32.0.1", "172.15.0.1", "11.0.0.1"] {
+                let response = try await statusForHost(
+                    app: app,
+                    middleware: middleware,
+                    host: host,
+                    bearerToken: presented
+                )
+                expectForbiddenWithoutEcho(response, presentedToken: presented)
+            }
+        }
+    }
+
+    @Test
+    func `All-interfaces without auth stays strict on the explicit set`() async throws {
+        try await withTestApp { app in
+            // Without a resolved token the all-interfaces bind never boots, and
+            // the gate mirrors that posture: the LAN family stays closed and
+            // only loopback plus the literal plus explicit entries pass.
+            let middleware = HostValidationMiddleware(
+                hostname: "0.0.0.0",
+                allowedHosts: ["my-mac.tail123.ts.net"],
+                authConfigured: false,
+                allowMissingHostInTesting: false
+            )
+            let presented = "owner-secret-probe-token"
+            for host in ["10.0.0.5", "192.168.1.20:8082", "172.16.5.4", "studio.local"] {
+                let response = try await statusForHost(
+                    app: app,
+                    middleware: middleware,
+                    host: host,
+                    bearerToken: presented
+                )
+                expectForbiddenWithoutEcho(response, presentedToken: presented)
+            }
+            // The explicit entry and loopback still pass: strict means narrow,
+            // not empty.
+            for host in ["127.0.0.1:8082", "localhost:8082", "my-mac.tail123.ts.net:8082"] {
+                let response = try await statusForHost(app: app, middleware: middleware, host: host)
+                #expect(response.status == .ok, "\(host) should still pass without auth")
+            }
+        }
+    }
+
+    @Test
+    func `Literal LAN IP bind joins the allowed set without opening the subnet`() async throws {
+        try await withTestApp { app in
+            // Binding the literal LAN address is the narrow workaround: the
+            // address itself joins the allowlist, but no sibling on the subnet
+            // is implied the way the authenticated all-interfaces bind implies
+            // the whole private family.
+            let middleware = HostValidationMiddleware(
+                hostname: "192.168.1.20",
+                allowedHosts: [],
+                authConfigured: true,
+                allowMissingHostInTesting: false
+            )
+            let literal = try await statusForHost(app: app, middleware: middleware, host: "192.168.1.20:8082")
+            #expect(literal.status == .ok)
+            let loopback = try await statusForHost(app: app, middleware: middleware, host: "127.0.0.1:8082")
+            #expect(loopback.status == .ok)
+            let presented = "owner-secret-probe-token"
+            let neighbor = try await statusForHost(
+                app: app,
+                middleware: middleware,
+                host: "192.168.1.21:8082",
+                bearerToken: presented
+            )
+            expectForbiddenWithoutEcho(neighbor, presentedToken: presented)
+        }
+    }
+}
+
+@Suite("Host Parity Contract")
+struct HostParityContractTests {
+    /// One pinned vector shared with the dashboard mirror. The same JSON
+    /// literal lives in the web suite so a bracket, case, port, or
+    /// trailing-dot drift on either side fails its own suite instead of
+    /// silently forking the restart compare, the Host gate, or validation.
+    private struct HostParityVector: Decodable {
+        let input: String
+        let canonical: String
+        let normalized: String
+        let hostnameValid: Bool
+        let allowedHostValid: Bool
+    }
+
+    /// Pinned outputs for the restart canonicalizer, the Host normalizer,
+    /// and the exact-host validator. Bracketed IPv6 strips only in the
+    /// canonical form, casing folds in both string forms, `:port` survives
+    /// the canonical form but strips in the normalized form only for an
+    /// empty or colon-plus-numeric-port suffix after `]` (trailing junk like
+    /// `[::1]evil` survives verbatim and fails validation), unbracketed
+    /// `host:port` strips only for an empty or numeric port (`evil.com:evil`
+    /// and `[::1]:evil` survive verbatim and fail validation), and a trailing
+    /// dot survives both string forms while failing validation.
+    private static let fixtureJSON = """
+    [
+      {"input":"example.com","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
+      {"input":"  Example.COM  ","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
+      {"input":"[::1]","canonical":"::1","normalized":"[::1]","hostnameValid":true,"allowedHostValid":true},
+      {"input":"::1","canonical":"::1","normalized":"::1","hostnameValid":true,"allowedHostValid":true},
+      {"input":"[FE80::1]","canonical":"fe80::1","normalized":"[fe80::1]","hostnameValid":true,"allowedHostValid":true},
+      {"input":"[Example.COM]","canonical":"[example.com]","normalized":"[example.com]","hostnameValid":false,"allowedHostValid":false},
+      {"input":"Example.COM:8082","canonical":"example.com:8082","normalized":"example.com","hostnameValid":false,"allowedHostValid":true},
+      {"input":"[::1]:8082","canonical":"[::1]:8082","normalized":"[::1]","hostnameValid":false,"allowedHostValid":true},
+      {"input":"[::1]evil","canonical":"[::1]evil","normalized":"[::1]evil","hostnameValid":false,"allowedHostValid":false},
+      {"input":"evil.com:evil","canonical":"evil.com:evil","normalized":"evil.com:evil","hostnameValid":false,"allowedHostValid":false},
+      {"input":"[::1]:evil","canonical":"[::1]:evil","normalized":"[::1]:evil","hostnameValid":false,"allowedHostValid":false},
+      {"input":"localhost.","canonical":"localhost.","normalized":"localhost.","hostnameValid":false,"allowedHostValid":false},
+      {"input":"example.com.","canonical":"example.com.","normalized":"example.com.","hostnameValid":false,"allowedHostValid":false},
+      {"input":"LOCALHOST","canonical":"localhost","normalized":"localhost","hostnameValid":true,"allowedHostValid":true},
+      {"input":"  [::1]  ","canonical":"::1","normalized":"[::1]","hostnameValid":true,"allowedHostValid":true},
+      {"input":"http://evil.com","canonical":"http://evil.com","normalized":"http","hostnameValid":false,"allowedHostValid":false},
+      {"input":"*.example.com","canonical":"*.example.com","normalized":"*.example.com","hostnameValid":false,"allowedHostValid":false},
+      {"input":"[::1","canonical":"[::1","normalized":"[::1","hostnameValid":false,"allowedHostValid":false},
+      {"input":":8082","canonical":":8082","normalized":"","hostnameValid":false,"allowedHostValid":false}
+    ]
+    """
+
+    /// Decodes the pinned vectors so a malformed fixture fails loudly
+    /// instead of passing vacuously on an empty matrix.
+    /// - Returns: Pinned vectors in fixture order.
+    /// - Throws: Decoding error when the fixture drifts from the contract shape.
+    private static func fixture() throws -> [HostParityVector] {
+        try JSONDecoder().decode([HostParityVector].self, from: Data(fixtureJSON.utf8))
+    }
+
+    @Test
+    func `Restart canonicalizer normalizer and exact-host validator match the pinned matrix`() throws {
+        let vectors = try Self.fixture()
+        #expect(vectors.isEmpty == false)
+        for vector in vectors {
+            // The restart compare strips brackets only around a colon-bearing
+            // literal so `[::1]` and `::1` agree while `[example.com]` stays distinct.
+            #expect(canonicalRestartHost(vector.input) == vector.canonical, "canonicalRestartHost('\(vector.input)')")
+            // The Host gate strips a `:port` only for an empty or numeric
+            // suffix in both bracketed and unbracketed forms, so the saved
+            // allowlist and the request header compare alike without
+            // truncating trailing junk like `evil.com:evil` or `[::1]:evil`
+            // to an allowlisted literal.
+            #expect(ServerEndpointConfig.normalizeHost(vector.input) == vector.normalized, "normalizeHost('\(vector.input)')")
+            // Hostname validation rejects a `:port` suffix the allowlist
+            // strips, while both reject schemes, wildcards, unbalanced or
+            // non-IPv6 brackets, non-numeric port tails, and a trailing dot
+            // fail-closed.
+            let hostnameOK = (try? RuneWeaverConfig.validateServerHostname(vector.input)) != nil
+            #expect(hostnameOK == vector.hostnameValid, "validateServerHostname('\(vector.input)')")
+            let allowedOK = (try? RuneWeaverConfig.validateAllowedHosts([vector.input])) != nil
+            #expect(allowedOK == vector.allowedHostValid, "validateAllowedHosts('\(vector.input)')")
         }
     }
 }
