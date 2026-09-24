@@ -362,7 +362,15 @@ public actor RunLogStore {
     }
 
     /// Lists entries, newest first.
-    public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil, goalID: UUID? = nil) async -> [RunLogEntry] {
+    ///
+    /// The `kind` filter applies before the limit so sparse kinds (for example
+    /// `index` rows under chat traffic) are not dropped by a newest-N overall
+    /// window: callers asking for the newest `index` rows receive them within
+    /// the 500-row retention (newest-50 index-row window), regardless of how
+    /// many other-kind rows interleave within that window. Rows pruned past
+    /// the 500-row capacity (oldest first, regardless of kind) are no longer
+    /// visible to any lookup.
+    public func list(limit: Int = 50, jobID: UUID? = nil, sessionID: UUID? = nil, goalID: UUID? = nil, kind: String? = nil) async -> [RunLogEntry] {
         guard limit > 0 else { return [] }
         let matching = entries.filter { entry in
             if let jobID, entry.jobID != jobID {
@@ -372,6 +380,9 @@ public actor RunLogStore {
                 return false
             }
             if let goalID, entry.goalID != goalID {
+                return false
+            }
+            if let kind, entry.kind != kind {
                 return false
             }
             return true

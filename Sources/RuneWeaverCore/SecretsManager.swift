@@ -56,7 +56,11 @@ public actor SecretsManager {
                 kSecAttrService as String: namespace,
                 kSecAttrAccount as String: key
             ]
-            let attributes: [String: Any] = [kSecValueData as String: data]
+            let attributes: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrLabel as String: "Rune Weaver: \(key)",
+                kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+            ]
             var status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
             if status == errSecDuplicateItem {
                 status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
@@ -87,6 +91,7 @@ public actor SecretsManager {
                 kSecAttrService as String: namespace,
                 kSecAttrAccount as String: key,
                 kSecReturnData as String: true,
+                kSecReturnAttributes as String: true,
                 kSecMatchLimit as String: kSecMatchLimitOne
             ]
             var item: CFTypeRef?
@@ -97,8 +102,24 @@ public actor SecretsManager {
             guard status == errSecSuccess else {
                 throw SecretsError.keychainError(status: status)
             }
-            guard let data = item as? Data, let secret = String(data: data, encoding: .utf8) else {
+            guard let dict = item as? [String: Any],
+                  let data = dict[kSecValueData as String] as? Data,
+                  let secret = String(data: data, encoding: .utf8)
+            else {
                 throw SecretsError.encodingError
+            }
+            let currentLabel = dict[kSecAttrLabel as String] as? String
+            if currentLabel == nil || currentLabel == namespace {
+                let updateQuery: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: namespace,
+                    kSecAttrAccount as String: key
+                ]
+                let updateAttrs: [String: Any] = [
+                    kSecAttrLabel as String: "Rune Weaver: \(key)",
+                    kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+                ]
+                _ = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
             }
             return secret
         #else

@@ -604,3 +604,222 @@ struct IndexLiveConstructionTests {
         #expect(summary?.status == .ok)
     }
 }
+
+// MARK: - Live snapshot and kind-filtered latest run
+
+/// Covers the additive live strip plus the durable latest-run lookup: live is
+/// present while a run is in flight and null when idle, the newest index row
+/// survives heavy chat interleaving, and a cancelled pass still leaves a strip
+/// entry carrying its partial counts.
+@Suite("Index Status Live and Latest Run")
+struct IndexStatusLiveLatestTests {
+    /// Waits until the coordinator reports a run in flight.
+    private func waitForRunning(_ coordinator: IndexCoordinator) async {
+        for _ in 0 ..< 100 {
+            if await coordinator.isRunning {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    /// Builds an isolated store plus a coordinator around the given stages.
+    private func makeLiveComponents(stages: [IndexClosureStage]) throws -> (coordinator: IndexCoordinator, store: DocIndexStore, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = DocIndexStore(dbPath: directory.appendingPathComponent("index.db").path)
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: stages,
+            store: store,
+            stateStore: IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
+        )
+        return (coordinator, store, directory)
+    }
+
+    @Test
+    func `Live present during run and null when idle`() async throws {
+        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { reporter, _ in
+            await reporter(ToolProgress(
+                message: "Indexing files",
+                scanned: 3,
+                matched: 1,
+                current: "notes/report.md"
+            ))
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            return IndexSourceRunReport(kind: .files, scanned: 3, indexed: 1, lastItem: "notes/report.md")
+        }
+        let (coordinator, store, directory) = try makeLiveComponents(stages: [slowStage])
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext(coordinator: coordinator, store: store)
+            registerRuneWeaverRoutes(app)
+
+            // Idle before the run reports no live strip.
+            let idle = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(idle.status == .ok)
+            #expect(try idle.content.decode(IndexStatusResponse.self).live == nil)
+
+            let runTask = Task { await coordinator.run(trigger: .onDemand) }
+            await waitForRunning(coordinator)
+            #expect(await coordinator.isRunning)
+
+            // In flight the probe carries the live counters plus phase, stage,
+            // trigger, rate, elapsed, and the relative current file.
+            let during = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(during.status == .ok)
+            let live = try during.content.decode(IndexStatusResponse.self).live
+            #expect(live != nil)
+            #expect(live?.trigger == IndexRunTrigger.onDemand.rawValue)
+            #expect(live?.phase == IndexPhase.extracting.rawValue)
+            #expect(live?.stage == IndexSourceKind.files.rawValue)
+            #expect((live?.scanned ?? 0) >= 1)
+            #expect((live?.indexed ?? 0) >= 0)
+            #expect((live?.elapsedMs ?? 0) >= 0)
+            #expect((live?.rate ?? -1) >= 0)
+            #expect(live?.current == "notes/report.md")
+
+            let summary = await runTask.value
+            #expect(summary.status == .ok)
+
+            // Settled runs clear the snapshot so polling unmounts the strip.
+            let after = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(after.status == .ok)
+            let settled = try after.content.decode(IndexStatusResponse.self)
+            #expect(settled.running == false)
+            #expect(settled.live == nil)
+        }
+    }
+
+    @Test
+    func `Latest run survives heavy chat interleaving`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // One durable index row carrying counts plus its trigger line.
+            let message = "Index run ok: 7 indexed, 1 vectors, 6 keyword-only, 10 scanned, 0 errors"
+            let response = message + "\nTrigger: onDemand"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: message,
+                response: response
+            )
+
+            // Enough chat traffic to push the index row far past the old
+            // newest-N window: a kind-filtered lookup must still find it.
+            for index in 0 ..< 150 {
+                _ = await context.runs.append(
+                    kind: "chat",
+                    status: "ok",
+                    message: "chat turn \(index)"
+                )
+            }
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastRun = try status.content.decode(IndexStatusResponse.self).lastRun
+            #expect(lastRun != nil)
+            #expect(lastRun?.status == IndexRunStatus.ok.rawValue)
+            #expect(lastRun?.indexed == 7)
+            #expect(lastRun?.scanned == 10)
+            #expect(lastRun?.errors == 0)
+            #expect(lastRun?.trigger == IndexRunTrigger.onDemand.rawValue)
+        }
+    }
+
+    @Test
+    func `Cancelled run persists a strip entry with partial counts`() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            let store = DocIndexStore(dbPath: directory.appendingPathComponent("index.db").path)
+            let reporter = ServerIndexRunReporter(runs: context.runs, hub: context.hub)
+            let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+                for _ in 0 ..< 200 {
+                    if isCancelled() {
+                        break
+                    }
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                return IndexSourceRunReport(kind: .files, scanned: 4, indexed: 2, skipped: 1)
+            }
+            let coordinator = IndexCoordinator(
+                config: IndexConfig(enabled: true, files: true, roots: []),
+                stages: [slowStage],
+                store: store,
+                reporter: reporter
+            )
+            context.setLiveIndex(store: store, coordinator: coordinator)
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            let runTask = Task { await coordinator.run(trigger: .onDemand) }
+            await waitForRunning(coordinator)
+            #expect(await coordinator.isRunning)
+            await coordinator.cancel()
+            let summary = await runTask.value
+            #expect(summary.status == .cancelled)
+
+            // The terminal cancelled row keeps the partial counts so the strip
+            // renders the work done so far instead of disappearing.
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastRun = try status.content.decode(IndexStatusResponse.self).lastRun
+            #expect(lastRun != nil)
+            #expect(lastRun?.status == IndexRunStatus.cancelled.rawValue)
+            #expect(lastRun?.indexed == summary.documentsIndexed)
+            #expect(lastRun?.scanned == summary.scanned)
+            #expect(lastRun?.trigger == IndexRunTrigger.onDemand.rawValue)
+        }
+    }
+
+    @Test
+    func `Skipped run surfaces its reason on the strip`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // A durable skipped row carries the `Skipped:` detail line the
+            // coordinator writes, so the strip renders the same reason the
+            // run notice shows.
+            let message = "Index run skipped: 0 indexed, 0 vectors, 0 keyword-only, 0 scanned, 0 errors"
+            let response = message + "\nTrigger: onDemand\nSkipped: Indexing is disabled in [index]."
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.skipped.rawValue,
+                message: message,
+                response: response
+            )
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastRun = try status.content.decode(IndexStatusResponse.self).lastRun
+            #expect(lastRun != nil)
+            #expect(lastRun?.status == IndexRunStatus.skipped.rawValue)
+            #expect(lastRun?.trigger == IndexRunTrigger.onDemand.rawValue)
+            #expect(lastRun?.skippedReason == "Indexing is disabled in [index].")
+        }
+    }
+
+    @Test
+    func `Last-run strip decodes payloads predating the skip reason`() throws {
+        // Older engines never wrote `skippedReason`, so the strip contract
+        // stays version-tolerant and decodes to a nil reason instead of failing.
+        let payload = """
+        {"status":"ok","indexed":7,"scanned":10,"errors":0,"trigger":"onDemand"}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(IndexLastRunStatus.self, from: payload)
+        #expect(decoded.status == IndexRunStatus.ok.rawValue)
+        #expect(decoded.indexed == 7)
+        #expect(decoded.trigger == IndexRunTrigger.onDemand.rawValue)
+        #expect(decoded.skippedReason == nil)
+    }
+}

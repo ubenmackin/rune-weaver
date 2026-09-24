@@ -2,39 +2,34 @@
 // dashboard (layout, charts, no-refresh updates, destructive modals) and the
 // IndexPolicyPanel form.
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import IndexingPanel, {
   INDEX_LAST_ERRORS_COLLAPSED_COUNT,
   INDEX_LAST_ERROR_PREVIEW_CHARS,
-  INDEX_STEPS,
-  INDEX_STEP_ICONS,
   IndexPolicyPanel,
   dedupeIndexErrors,
   describeAutoStartNotice,
-  describeIndexLastRun,
-  describeRunSummary,
   formatIndexAge,
   formatIndexAsOf,
   formatIndexBytes,
+  formatIndexLiveHeader,
   formatIndexRate,
   indexDonutArcs,
   indexSourceBarPercent,
   indexSourceBarWidth,
-  indexStepsForFrame,
   isIndexProgressFrame,
   isLongIndexError,
   resolveDisplayIndexErrors,
+  resolveIndexLastRunText,
+  resolveIndexLiveStageTitle,
   resolveIndexLiveTitle,
-  resolveIndexPhase,
   resolveIndexSourceContent,
-  resolveIndexStage,
-  resolveIndexStep,
-  resolveIndexStepStatus,
   truncateIndexError,
 } from "./IndexingPanel";
 import {
+  describeIndexRun,
   indexRunLabelForRun,
   indexRunTriggerLabel,
   parseIndexRunTrigger,
@@ -193,26 +188,6 @@ describe("IndexingPanel helpers", () => {
     expect(empty.keywordDash).toBe(0);
   });
 
-  it("extracts a known phase from the frame message", () => {
-    expect(resolveIndexPhase("Indexing extracting: 3 indexed")).toBe("extracting");
-    expect(resolveIndexPhase("Indexing extracting files: 3 indexed")).toBe("extracting");
-    expect(resolveIndexPhase("Indexing unknownphase: 0")).toBeNull();
-    expect(resolveIndexPhase(null)).toBeNull();
-  });
-
-  it("extracts the active stage from the frame message", () => {
-    expect(resolveIndexStage("Indexing extracting files: 3 indexed")).toBe("files");
-    expect(resolveIndexStage("Indexing extracting mail: 1 indexed")).toBe("mail");
-    expect(resolveIndexStage("Indexing extracting messages: 1 indexed")).toBe("messages");
-    expect(resolveIndexStage("Indexing embedding vision: 1 indexed")).toBe("vision");
-    // Discovering and committing frames carry no stage.
-    expect(resolveIndexStage("Indexing discovering: 0 indexed")).toBeNull();
-    expect(resolveIndexStage("Indexing committing: 3 indexed")).toBeNull();
-    expect(resolveIndexStage("Indexing extracting: 3 indexed")).toBeNull();
-    expect(resolveIndexStage("Indexing unknownstage: 0")).toBeNull();
-    expect(resolveIndexStage(null)).toBeNull();
-  });
-
   it("maps phase and stage to stage-aware header copy", () => {
     expect(resolveIndexLiveTitle("extracting", "files")).toBe("Reading files…");
     expect(resolveIndexLiveTitle("embedding", null)).toBe("Vectorizing…");
@@ -223,11 +198,11 @@ describe("IndexingPanel helpers", () => {
     expect(resolveIndexLiveTitle(null, null)).toBe("Running…");
   });
 
-  it("adopts index frames by tool name or during an active run", () => {
+  it("adopts index frames by tool name only", () => {
     expect(isIndexProgressFrame({ toolName: "index" }, false)).toBe(false);
     expect(isIndexProgressFrame({ toolName: "index" }, true)).toBe(true);
     expect(isIndexProgressFrame({ toolName: "email.search" }, true)).toBe(false);
-    expect(isIndexProgressFrame({ toolName: "" }, true)).toBe(true);
+    expect(isIndexProgressFrame({ toolName: "" }, true)).toBe(false);
     expect(isIndexProgressFrame({ toolName: "" }, false)).toBe(false);
   });
 
@@ -261,20 +236,112 @@ describe("IndexingPanel helpers", () => {
   });
 
   it("summarizes the last run strip with counts and finish time", () => {
-    expect(describeIndexLastRun(null)).toBe("No runs yet");
+    expect(describeIndexRun(null)).toBe("No runs yet");
+    expect(describeIndexRun(null)).toBe("No runs yet");
     expect(
-      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
+      describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
     ).toContain("Last run ok");
     expect(
-      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
+      describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
     ).toContain("3 indexed");
   });
 
-  it("formats the active-card rate honestly, omitting it without work or time", () => {
-    expect(formatIndexRate(5, 1000)).toBe("5 scanned/s");
-    expect(formatIndexRate(33, 10000)).toBe("3.3 scanned/s");
-    expect(formatIndexRate(0, 1000)).toBeNull();
-    expect(formatIndexRate(5, 0)).toBeNull();
+  it("shares one run formatter across the notice and the strip", () => {
+    // The top notice and the last-run strip render one identical line per
+    // status, so a completed run can never read differently in the two places.
+    const finishedAt = Math.floor(Date.now() / 1000);
+    for (const status of ["ok", "cancelled", "skipped", "error"]) {
+      const summary = {
+        sessionID: "s1",
+        trigger: "onDemand",
+        status,
+        documentsIndexed: 675,
+        vectorChunks: 600,
+        keywordChunks: 75,
+        scanned: 7028,
+        skipped: 0,
+        errors: status === "error" ? 2 : 0,
+        warnings: [],
+        startedAt: 0,
+        finishedAt,
+        indexAsOf: finishedAt,
+        skippedReason: null,
+      };
+      const lastRun = {
+        status,
+        indexed: 675,
+        scanned: 7028,
+        errors: status === "error" ? 2 : 0,
+        finishedAt,
+        trigger: "onDemand",
+      };
+      const notice = describeIndexRun(summary);
+      const strip = describeIndexRun(lastRun);
+      // Identical wording: same status prefix, trigger label, and counts.
+      expect(notice).toBe(strip);
+      expect(notice).toContain(`Last run ${status}`);
+      expect(notice).toContain("Manual Run");
+      expect(notice).toContain("675 indexed");
+      expect(notice).toContain("7028 scanned");
+      if (status === "cancelled") {
+        expect(notice).toMatch(/committed work is kept/i);
+      } else {
+        expect(notice).not.toMatch(/committed work is kept/i);
+      }
+    }
+  });
+
+  it("keeps the kept-work copy on cancelled runs only", () => {
+    const finishedAt = Math.floor(Date.now() / 1000);
+    expect(
+      describeIndexRun({ status: "cancelled", indexed: 1, scanned: 2, errors: 0, finishedAt, trigger: "onDemand" }),
+    ).toMatch(/committed work is kept/i);
+    expect(
+      describeIndexRun({ status: "ok", indexed: 1, scanned: 2, errors: 0, finishedAt, trigger: "onDemand" }),
+    ).not.toMatch(/committed work is kept/i);
+    expect(
+      describeIndexRun({ status: "skipped", indexed: 0, scanned: 2, errors: 0, finishedAt, trigger: "onDemand" }),
+    ).not.toMatch(/committed work is kept/i);
+    expect(
+      describeIndexRun({ status: "error", indexed: 1, scanned: 2, errors: 1, finishedAt, trigger: "onDemand" }),
+    ).not.toMatch(/committed work is kept/i);
+  });
+
+  it("resolves the strip copy without contradiction", () => {
+    // No run ever recorded and idle reads as an honest empty state.
+    expect(resolveIndexLastRunText(null, false)).toBe("No runs yet");
+    // No run recorded but a first pass in flight names itself.
+    expect(resolveIndexLastRunText(null, true)).toBe("First run in progress…");
+    // Any recorded run always renders its entry, whether idle or active, so
+    // a completed or cancelled run can never vanish behind an empty copy.
+    const finishedAt = Math.floor(Date.now() / 1000);
+    for (const status of ["ok", "cancelled", "skipped", "error"]) {
+      const entry = { status, indexed: 1, scanned: 2, errors: 0, finishedAt, trigger: "onDemand" };
+      expect(resolveIndexLastRunText(entry, false)).toContain(`Last run ${status}`);
+      expect(resolveIndexLastRunText(entry, true)).toContain(`Last run ${status}`);
+      expect(resolveIndexLastRunText(entry, false)).not.toBe("No runs yet");
+      expect(resolveIndexLastRunText(entry, true)).not.toBe("No runs yet");
+      expect(resolveIndexLastRunText(entry, false)).not.toBe("First run in progress…");
+    }
+  });
+
+  it("formats the engine rate honestly, omitting it without work", () => {
+    expect(formatIndexRate(5)).toBe("5 docs/s");
+    expect(formatIndexRate(3.3)).toBe("3.3 docs/s");
+    expect(formatIndexRate(41)).toBe("41 docs/s");
+    expect(formatIndexRate(0)).toBeNull();
+    expect(formatIndexRate(null)).toBeNull();
+    expect(formatIndexRate(undefined)).toBeNull();
+    // Non-finite and absurd wire values degrade to absent instead of
+    // rendering a jittering or impossible figure.
+    expect(formatIndexRate(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(formatIndexRate(Number.NaN)).toBeNull();
+    expect(formatIndexRate(2000000)).toBeNull();
+    // Early-run spikes read as absent until the honest elapsed floor, while a
+    // settled window keeps the same rate.
+    expect(formatIndexRate(100, 10)).toBeNull();
+    expect(formatIndexRate(100, 499)).toBeNull();
+    expect(formatIndexRate(41, 1500)).toBe("41 docs/s");
   });
 
   it("maps run triggers to display labels across notices, strip, and history rows", () => {
@@ -300,16 +367,16 @@ describe("IndexingPanel helpers", () => {
       indexAsOf: 1,
       skippedReason: null,
     };
-    expect(describeRunSummary({ ...baseSummary, trigger: "nightly" })).toContain("Nightly Run");
-    expect(describeRunSummary({ ...baseSummary, trigger: "nightly" })).toContain("Index run ok");
-    expect(describeRunSummary({ ...baseSummary, trigger: "onDemand" })).toContain("Manual Run");
-    expect(describeRunSummary({ ...baseSummary, trigger: "catchUp" })).toContain("Catch-Up Run");
+    expect(describeIndexRun({ ...baseSummary, trigger: "nightly" })).toContain("Nightly Run");
+    expect(describeIndexRun({ ...baseSummary, trigger: "nightly" })).toContain("Last run ok");
+    expect(describeIndexRun({ ...baseSummary, trigger: "onDemand" })).toContain("Manual Run");
+    expect(describeIndexRun({ ...baseSummary, trigger: "catchUp" })).toContain("Catch-Up Run");
     // Last-run strip carries the trigger label without dropping the status prefix.
     expect(
-      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, trigger: "catchUp" }),
+      describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, trigger: "catchUp" }),
     ).toContain("Catch-Up Run");
     expect(
-      describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, trigger: "catchUp" }),
+      describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, trigger: "catchUp" }),
     ).toContain("Last run ok");
     // Run-history rows parse the durable trigger token from either the
     // start message or the completion detail line.
@@ -668,9 +735,15 @@ describe("IndexingPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "Rebuild / Run Now" }));
 
+    // The top notice shares the strip formatter, so it reads as the same
+    // one-line outcome the strip renders. Both surfaces carry the status, so
+    // the assertions scope to all matches instead of a single element.
     await waitFor(() => {
-      expect(screen.getByText(/Index run ok: 3 indexed/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Last run ok/).length).toBeGreaterThanOrEqual(1);
     });
+    expect(screen.getAllByText(/3 indexed/).length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("3 indexed");
   });
 
   it("shows a muted hint under Run when indexing is disabled", async () => {
@@ -794,119 +867,104 @@ describe("IndexingPanel", () => {
     ).toBeNull();
   });
 
-  it("renders live phase steps and the current item from a progress frame", async () => {
-    const capture = createMockWebSocketCapture();
+  it("mounts the grep-style live block only with live", async () => {
     const { fetchMock } = stubFetch({
       settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        live: {
+          trigger: "onDemand",
+          phase: "extracting",
+          stage: "files",
+          scanned: 5,
+          indexed: 3,
+          elapsedMs: 1500,
+          current: "notes/ideas.md",
+        },
+      },
     });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IndexingPanel />);
 
-    await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 1500,
-      current: "notes/ideas.md",
-    });
-
-    // The active mini-card carries the truncated current file plus counts.
-    await waitFor(() => {
-      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
-        "notes/ideas.md",
-      );
-    });
-    // The extracting phase step is highlighted and the shimmer proves liveness.
-    // The step renders the plain-language copy ("Reading") for the wire token.
-    expect(screen.getByText("Reading")).toBeInTheDocument();
-    expect(screen.getByTestId("index-step-counts-extracting")).toHaveTextContent(
-      "5 scanned",
-    );
-    expect(screen.getByTestId("index-step-counts-extracting")).toHaveTextContent(
-      "3 indexed",
-    );
-    expect(screen.getByTestId("index-progress-shimmer")).toBeInTheDocument();
-    // The live header is text only with the stage-aware title plus counts.
-    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading…");
-  });
-
-  it("renders a single pill with a wrapping icon strip keeping progressbar semantics", async () => {
-    const capture = createMockWebSocketCapture();
-    const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
-    });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<IndexingPanel />);
-
-    // The old Progress card is gone: no heading and no pill inside the live
-    // block, while the Status pill below stays the single running indicator.
+    // The single live block mounts from the polled snapshot with its header,
+    // one file line, and the activity bar — never the old cards or strip.
     await waitFor(() => {
       expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
     });
-    expect(
-      screen.queryByRole("heading", { name: "Progress" }),
-    ).toBeNull();
-    expect(
-      within(screen.getByTestId("index-live-progress")).queryByText("Indexing"),
-    ).toBeNull();
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Manual Run");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("3 indexed");
+    expect(screen.getByTestId("index-live-current")).toHaveTextContent("notes/ideas.md");
+    expect(screen.getByTestId("index-live-activity")).toBeInTheDocument();
+    expect(screen.queryByTestId("index-live-strip")).toBeNull();
+    expect(screen.queryByTestId("index-progress-shimmer")).toBeNull();
+    expect(screen.queryByTestId("index-mini-card-extracting")).toBeNull();
+  });
+
+  it("renders nothing without live even while running", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, enabled: true },
+      status: { ...statusPayload, enabled: true, running: true, live: null },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Running")).toBeInTheDocument();
+    });
+    // No live data renders nothing; the Status pill owns Running.
+    expect(screen.queryByTestId("index-live-progress")).toBeNull();
+    expect(screen.queryByTestId("index-live-header")).toBeNull();
+    expect(screen.queryByTestId("index-live-current")).toBeNull();
+    expect(screen.queryByTestId("index-live-activity")).toBeNull();
+  });
+
+  it("renders a single file line with full-path title and activity semantics", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, enabled: true },
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        live: {
+          trigger: "nightly",
+          phase: "extracting",
+          stage: "mail",
+          scanned: 7,
+          indexed: 4,
+          elapsedMs: 2500,
+          current: "notes/ideas.md",
+        },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-current")).toBeInTheDocument();
+    });
+    // Exactly one file line, truncated via CSS with the full path on title.
+    expect(screen.getAllByTestId("index-live-current").length).toBe(1);
+    expect(screen.getByTestId("index-live-current")).toHaveTextContent("notes/ideas.md");
+    expect(screen.getByTestId("index-live-current")).toHaveAttribute("title", "notes/ideas.md");
+    // Header names the trigger label explicitly.
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Nightly Run");
+    // Activity bar reuses the ToolProgress shimmer style for activity only.
+    const activity = screen.getByTestId("index-live-activity");
+    expect(activity).toHaveClass("tool-progress-shimmer");
+    expect(activity).toHaveAttribute("role", "progressbar");
+    expect(activity).toHaveAttribute("aria-label", "Index run in progress");
+    expect(activity.textContent ?? "").not.toMatch(/%/);
+    // No duplicate Running text inside the live block.
+    expect(within(screen.getByTestId("index-live-progress")).queryByText(/Running/)).toBeNull();
     const runningPills = document.querySelectorAll(".status-pill.running");
     expect(runningPills.length).toBe(1);
-
-    await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 1500,
-      current: "notes/ideas.md",
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
-        "notes/ideas.md",
-      );
-    });
-
-    // The shimmer keeps progressbar semantics for assistive tech.
-    const shimmer = screen.getByTestId("index-progress-shimmer");
-    expect(shimmer).toHaveAttribute("role", "progressbar");
-    expect(shimmer).toHaveAttribute("aria-label", "Index run in progress");
-
-    // The strip wraps instead of scrolling via the base flex-wrap rule, with
-    // no redundant wrap modifier.
-    const strip = screen.getByTestId("index-live-strip");
-    expect(strip).toHaveClass("index-live-strip");
-    expect(strip).not.toHaveClass("index-live-strip--wrap");
-
-    // Each mini-card renders its step icon alongside the label.
-    for (const step of INDEX_STEPS) {
-      const card = screen.getByTestId(`index-mini-card-${step.id}`);
-      expect(card).toBeInTheDocument();
-      expect(card.querySelector("svg")).not.toBeNull();
-    }
-
-    // Phase steps and live counts stay inside the strip.
-    expect(within(strip).getByText("Reading")).toBeInTheDocument();
-    expect(screen.getByTestId("index-progress-shimmer")).toBeInTheDocument();
   });
 
   it("ignores progress frames from other tools", async () => {
@@ -932,7 +990,8 @@ describe("IndexingPanel", () => {
     });
 
     expect(screen.queryByTestId("index-live-progress")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("index-live-strip")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-live-activity")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-live-current")).not.toBeInTheDocument();
   });
 
   it("holds a cancelling state until the run settles, then re-enables Run", async () => {
@@ -940,10 +999,18 @@ describe("IndexingPanel", () => {
     // Remote run in flight: the panel did not start it, so Cancel stays
     // enabled until it is clicked and the cancelling window opens.
     let running = true;
+    let lastRun: Record<string, unknown> = {
+      status: "ok",
+      indexed: 3,
+      scanned: 5,
+      errors: 0,
+      finishedAt: 1,
+      trigger: "onDemand",
+    };
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {
-        return jsonResponse({ ...statusPayload, enabled: true, running });
+        return jsonResponse({ ...statusPayload, enabled: true, running, lastRun, live: null });
       }
       if (url === "/index/cancel") {
         return jsonResponse({ cancelled: true });
@@ -989,8 +1056,17 @@ describe("IndexingPanel", () => {
     ).toBeDisabled();
 
     // Settle the run: the terminal broadcast plus a stopped status probe ends
-    // the window with the kept-work notice and no separate Stopped variant.
+    // the window with the shared kept-work notice and no separate Stopped
+    // variant. The fresh strip entry carries the cancelled outcome counts.
     running = false;
+    lastRun = {
+      status: "cancelled",
+      indexed: 1,
+      scanned: 2,
+      errors: 0,
+      finishedAt: Math.floor(Date.now() / 1000),
+      trigger: "onDemand",
+    };
     await waitFor(() => {
       expect(capture.onMessage).not.toBeNull();
     });
@@ -1004,10 +1080,25 @@ describe("IndexingPanel", () => {
       },
     });
 
+    // The shared notice shows the cancelled outcome with its kept-work copy.
+    // Both the notice and the strip carry the shared line, so the assertions
+    // scope to all matches instead of a single element.
     await waitFor(() => {
-      expect(screen.getByText(/Index run cancelled:/)).toBeInTheDocument();
+      expect(screen.getAllByText(/Last run cancelled/).length).toBeGreaterThanOrEqual(1);
     });
-    expect(screen.getByText(/committed work is kept/)).toBeInTheDocument();
+    expect(screen.getAllByText(/committed work is kept/i).length).toBeGreaterThanOrEqual(1);
+    // The live block unmounts on settle with no persistence.
+    await waitFor(() => {
+      expect(screen.queryByTestId("index-live-progress")).toBeNull();
+    });
+    // The strip shows the same cancelled entry instead of an empty history.
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run cancelled");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("1 indexed");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("2 scanned");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent(/committed work is kept/i);
+    expect(screen.getByTestId("index-last-run")).not.toHaveTextContent("No runs yet");
+    // No additional elements: no separate Stopped variant survives settle.
+    expect(screen.queryByText("Stopped")).toBeNull();
     await waitFor(() => {
       expect(screen.getByText("Enabled")).toBeInTheDocument();
     });
@@ -1017,335 +1108,233 @@ describe("IndexingPanel", () => {
     ).toBeEnabled();
   });
 
-  it("adopts auto-started run frames that omit the tool name", async () => {
-    const capture = createMockWebSocketCapture();
+  it("populates the strip from a cancelled run with kept work", async () => {
+    // Regression read: a cancelled pass keeps its committed batches, so the
+    // strip renders the partial counts instead of an empty history.
+    const finishedAt = Math.floor(Date.now() / 1000);
     const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
-    });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<IndexingPanel />);
-
-    // The engine reports a run in flight this panel did not start, so the
-    // Status pill is the authoritative Running source with no local flight.
-    await waitFor(() => {
-      expect(screen.getByText("Running")).toBeInTheDocument();
-    });
-    await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    // Older engines omit the tool name; the frame is still adopted because a
-    // run is in flight via the status probe.
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "",
-      message: "Indexing extracting files: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 1500,
-      current: "notes/ideas.md",
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
-        "notes/ideas.md",
-      );
-    });
-    expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-      "Reading files…",
-    );
-  });
-
-  it("renders stage-aware header copy per stage", async () => {
-    const capture = createMockWebSocketCapture();
-    const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
-    });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<IndexingPanel />);
-
-    await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting files: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 1500,
-      current: "notes/ideas.md",
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Reading files…",
-      );
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing embedding: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 2500,
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Vectorizing…",
-      );
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing embedding vision: 1 indexed, 2 scanned",
-      scanned: 2,
-      matched: 1,
-      elapsedMs: 3500,
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Describing images…",
-      );
-    });
-  });
-
-  it(
-    "falls back to Running… when a run stays without frames",
-    async () => {
-      const { fetchMock } = stubFetch({
-        settings: { ...indexConfig, enabled: true },
-        status: { ...statusPayload, enabled: true, running: true },
-      });
-      vi.stubGlobal("fetch", fetchMock);
-
-      render(<IndexingPanel />);
-
-      await waitFor(() => {
-        expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
-      });
-      // Before any frame the header starts on Starting….
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Starting…",
-      );
-      // Well under two seconds without a frame it falls back to Running…
-      // instead of freezing on Starting…, while the Status pill stays
-      // authoritative.
-      await waitFor(
-        () => {
-          expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-            "Running…",
-          );
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: false,
+        live: null,
+        lastRun: {
+          status: "cancelled",
+          indexed: 675,
+          scanned: 7028,
+          errors: 0,
+          finishedAt,
+          trigger: "onDemand",
         },
-        { timeout: 5000 },
-      );
-      expect(screen.getByText("Running")).toBeInTheDocument();
-    },
-    10000,
-  );
-
-  it("maps phase and stage tokens onto one explained step", () => {
-    expect(resolveIndexStep("discovering", null)).toBe("discovering");
-    expect(resolveIndexStep("extracting", "files")).toBe("extracting");
-    expect(resolveIndexStep("embedding", null)).toBe("embedding");
-    expect(resolveIndexStep("committing", null)).toBe("committing");
-    // Vision wins over any phase token so image work never reads as another step.
-    expect(resolveIndexStep("embedding", "vision")).toBe("vision");
-    expect(resolveIndexStep("extracting", "vision")).toBe("vision");
-    expect(resolveIndexStep(null, null)).toBeNull();
-    expect(resolveIndexStep("unknown", null)).toBeNull();
-  });
-
-  it("marks vision frames as both phase and vision visits", () => {
-    expect(indexStepsForFrame("discovering", null)).toEqual(["discovering"]);
-    expect(indexStepsForFrame("embedding", "vision")).toEqual([
-      "embedding",
-      "vision",
-    ]);
-    expect(indexStepsForFrame(null, "vision")).toEqual(["vision"]);
-    expect(indexStepsForFrame(null, null)).toEqual([]);
-  });
-
-  it("resolves done/active/pending from the active step and visits", () => {
-    const visited = new Set(["discovering", "extracting"]);
-    expect(resolveIndexStepStatus("extracting", "extracting", visited)).toBe(
-      "active",
-    );
-    // The other visited step reads done while the active step holds the counts.
-    expect(resolveIndexStepStatus("discovering", "embedding", visited)).toBe(
-      "done",
-    );
-    expect(resolveIndexStepStatus("embedding", "embedding", visited)).toBe(
-      "active",
-    );
-    expect(resolveIndexStepStatus("committing", "embedding", visited)).toBe(
-      "pending",
-    );
-    // The completed summary has no active step, so every visit reads done.
-    expect(resolveIndexStepStatus("discovering", null, visited)).toBe("done");
-    expect(resolveIndexStepStatus("committing", null, visited)).toBe("pending");
-  });
-
-  it("explains all five steps with tooltips", async () => {
-    const capture = createMockWebSocketCapture();
-    const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
+      },
     });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
+      expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run cancelled");
     });
-
-    // All five explained steps render in run order with plain-language labels.
-    expect(INDEX_STEPS.map((step) => step.id)).toEqual([
-      "discovering",
-      "extracting",
-      "embedding",
-      "vision",
-      "committing",
-    ]);
-    expect(screen.getByText("Discovering")).toBeInTheDocument();
-    expect(screen.getByText("Reading")).toBeInTheDocument();
-    expect(screen.getByText("Vectorizing")).toBeInTheDocument();
-    expect(screen.getByText("Describing images")).toBeInTheDocument();
-    expect(screen.getByText("Committing")).toBeInTheDocument();
-    // Each step carries an explanatory tooltip rather than a wire token.
-    expect(
-      screen.getByText("Discovering").closest("li"),
-    ).toHaveAttribute("title", expect.stringMatching(/finding candidates/i));
-    expect(
-      screen.getByText("Reading").closest("li"),
-    ).toHaveAttribute("title", expect.stringMatching(/extracting text/i));
-    expect(
-      screen.getByText("Vectorizing").closest("li"),
-    ).toHaveAttribute("title", expect.stringMatching(/building embeddings/i));
-    expect(
-      screen.getByText("Describing images").closest("li"),
-    ).toHaveAttribute(
-      "title",
-      expect.stringMatching(/describing images with llm/i),
-    );
-    expect(
-      screen.getByText("Committing").closest("li"),
-    ).toHaveAttribute("title", expect.stringMatching(/saving to the index/i));
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("675 indexed");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("7028 scanned");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("Manual Run");
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent(/committed work is kept/i);
+    expect(screen.getByTestId("index-last-run")).not.toHaveTextContent("No runs yet");
+    expect(screen.getByTestId("index-last-run")).not.toHaveTextContent("First run in progress");
+    // The live block stays unmounted for a settled cancelled run.
+    expect(screen.queryByTestId("index-live-progress")).toBeNull();
   });
 
-  it("activates the Describing images step on vision-stage frames with live counts", async () => {
-    const capture = createMockWebSocketCapture();
+  it("renders stage-aware copy from the polled live snapshot", async () => {
     const { fetchMock } = stubFetch({
       settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        live: {
+          trigger: "onDemand",
+          phase: "extracting",
+          stage: "files",
+          scanned: 5,
+          indexed: 3,
+          elapsedMs: 1500,
+          current: "notes/ideas.md",
+        },
+      },
     });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
+      expect(screen.getByTestId("index-live-progress")).toHaveTextContent("Reading files…");
     });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing embedding vision: 1 indexed, 2 scanned",
-      scanned: 2,
-      matched: 1,
-      elapsedMs: 3500,
-    });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Describing images…",
-      );
-    });
-
-    // Vision is its own step: active on the stage token with live counts.
-    const visionStep = screen.getByText("Describing images").closest("li");
-    expect(visionStep).not.toBeNull();
-    expect(visionStep).toHaveClass("active");
-    expect(visionStep).toHaveAttribute(
-      "title",
-      expect.stringMatching(/describing images with llm/i),
-    );
-    expect(visionStep).toHaveTextContent("2 scanned");
-    expect(visionStep).toHaveTextContent("1 indexed");
-    // Its phase companion already reads done while describing stays active.
-    const vectorStep = screen.getByText("Vectorizing").closest("li");
-    expect(vectorStep).toHaveClass("done");
-    expect(vectorStep).toHaveAttribute(
-      "title",
-      expect.stringMatching(/building embeddings/i),
-    );
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Manual Run");
   });
 
-  it("carries live counts on the active step", async () => {
-    const capture = createMockWebSocketCapture();
-    const { fetchMock } = stubFetch({
-      settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
-    });
-    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
-    vi.stubGlobal("fetch", fetchMock);
-
-    render(<IndexingPanel />);
-
-    await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting files: 3 indexed (2 vectors), 5 scanned",
+  it("takes numbers from the poll, not the frame", async () => {
+    let live = {
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
       scanned: 5,
-      matched: 3,
+      indexed: 3,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
+    };
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse({ ...statusPayload, enabled: true, running: true, live });
+      }
+      return jsonResponse({ engineName: "Test Engine", index: indexConfig });
+    });
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("5 scanned");
+    });
+    const callsBefore = fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length;
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    // A frame with different numbers only triggers a poll; the header keeps
+    // the polled snapshot instead of adopting the frame counters.
+    live = { ...live, scanned: 9, indexed: 7, elapsedMs: 2500 };
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_progress",
+      callID: "c1",
+      toolName: "index",
+      message: "Indexing extracting files: 99 indexed, 99 scanned",
+      scanned: 99,
+      matched: 99,
+      elapsedMs: 99000,
+      current: "other/file.md",
+    });
+    await waitFor(() => {
+      const calls = fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length;
+      expect(calls).toBeGreaterThan(callsBefore);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("9 scanned");
+    });
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("7 indexed");
+    expect(screen.getByTestId("index-live-header")).not.toHaveTextContent("99 scanned");
+  });
+
+  it("maps the live stage title without duplicating Running", () => {
+    expect(resolveIndexLiveStageTitle("extracting", "files")).toBe("Reading files…");
+    expect(resolveIndexLiveStageTitle("embedding", null)).toBe("Vectorizing…");
+    expect(resolveIndexLiveStageTitle("embedding", "vision")).toBe("Describing images…");
+    expect(resolveIndexLiveStageTitle(null, null)).toBe("Indexing…");
+  });
+
+  it("formats the grep-style live header from the polled snapshot", () => {
+    const header = formatIndexLiveHeader({
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 5,
+      indexed: 3,
+      skipped: 0,
+      errors: 0,
+      rate: 41,
       elapsedMs: 1500,
       current: "notes/ideas.md",
     });
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Reading files…",
-      );
+    expect(header).toContain("Manual Run");
+    expect(header).toContain("Reading files…");
+    expect(header).toContain("5 scanned");
+    expect(header).toContain("3 indexed");
+    expect(header).toContain("41 docs/s");
+    expect(header).toContain("1.5s");
+    expect(header).not.toMatch(/Running/);
+    expect(formatIndexLiveHeader(null)).toBeNull();
+    // Non-zero skipped/errors mid-run render inline; zero values stay omitted.
+    const withSkips = formatIndexLiveHeader({
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 5,
+      indexed: 3,
+      skipped: 2,
+      errors: 1,
+      rate: 41,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
     });
-    const readingStep = screen.getByText("Reading").closest("li");
-    expect(readingStep).toHaveClass("active");
-    expect(readingStep).toHaveTextContent("5 scanned");
-    expect(readingStep).toHaveTextContent("3 indexed");
-    // The active card also carries elapsed, rate, and the truncated file.
-    expect(readingStep).toHaveTextContent("1.5s");
-    expect(readingStep).toHaveTextContent("3.3 scanned/s");
-    expect(
-      within(readingStep as HTMLElement).getByTestId("index-step-current-extracting"),
-    ).toHaveTextContent("notes/ideas.md");
+    expect(withSkips).toContain("2 skipped");
+    expect(withSkips).toContain("1 errors");
+    expect(header).not.toContain("skipped");
+    // An early-run spike omits the rate until the honest elapsed floor.
+    const early = formatIndexLiveHeader({
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 5,
+      indexed: 1,
+      skipped: 0,
+      errors: 0,
+      rate: 100,
+      elapsedMs: 10,
+      current: "notes/ideas.md",
+    });
+    expect(early).not.toContain("docs/s");
   });
 
-  it("unmounts the strip on settle with no persistence", async () => {
+  it("renders vision stage copy from the polled live snapshot", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, enabled: true },
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        live: {
+          trigger: "onDemand",
+          phase: "embedding",
+          stage: "vision",
+          scanned: 2,
+          indexed: 1,
+          elapsedMs: 3500,
+          current: null,
+        },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-progress")).toHaveTextContent("Describing images…");
+    });
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Manual Run");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("2 scanned");
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("1 indexed");
+  });
+
+  // Mini-card step tests left with the deleted cards; the grep-style block
+  // covers vision and counts through the polled snapshot above.
+
+  it("unmounts the live block on settle with no persistence", async () => {
+    let live: Record<string, unknown> | null = {
+      trigger: "onDemand",
+      phase: "committing",
+      stage: null,
+      scanned: 5,
+      indexed: 3,
+      elapsedMs: 5000,
+      current: "notes/ideas.md",
+    };
     let running = true;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {
-        return jsonResponse({ ...statusPayload, enabled: true, running });
+        return jsonResponse({ ...statusPayload, enabled: true, running, live });
       }
       return jsonResponse({
         engineName: "Test Engine",
@@ -1359,39 +1348,18 @@ describe("IndexingPanel", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
+      expect(screen.getByTestId("index-live-progress")).toHaveTextContent("Committing…");
+    });
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Manual Run");
+    expect(screen.getByTestId("index-live-current")).toHaveTextContent("notes/ideas.md");
+
+    // Settle the run: the cleared snapshot plus the terminal broadcast
+    // unmounts the block instead of leaving a completed summary behind.
+    live = null;
+    running = false;
+    await waitFor(() => {
       expect(capture.onMessage).not.toBeNull();
     });
-
-    const frames = [
-      "Indexing discovering: 0 indexed, 1 scanned",
-      "Indexing extracting files: 1 indexed, 2 scanned",
-      "Indexing embedding: 2 indexed, 3 scanned",
-      "Indexing embedding vision: 2 indexed, 4 scanned",
-      "Indexing committing: 3 indexed, 5 scanned",
-    ];
-    for (const [index, message] of frames.entries()) {
-      await dispatchFrameOrThrow(capture.onMessage, {
-        type: "tool_progress",
-        callID: "c1",
-        toolName: "index",
-        message,
-        scanned: index + 1,
-        matched: index,
-        elapsedMs: 1000 * (index + 1),
-      });
-    }
-
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Committing…",
-      );
-    });
-    // The committing step is live with its counts before the run settles.
-    expect(screen.getByText("Committing").closest("li")).toHaveClass("active");
-
-    // Settle the run: the terminal broadcast unmounts the strip instead of
-    // leaving a completed summary behind.
-    running = false;
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
       run: {
@@ -1405,17 +1373,19 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("index-live-progress")).toBeNull();
     });
-    expect(screen.queryByTestId("index-live-strip")).toBeNull();
-    expect(screen.queryByTestId("index-progress-shimmer")).toBeNull();
+    expect(screen.queryByTestId("index-live-header")).toBeNull();
+    expect(screen.queryByTestId("index-live-current")).toBeNull();
+    expect(screen.queryByTestId("index-live-activity")).toBeNull();
     expect(screen.queryByText("Completed")).toBeNull();
   });
 
-  it("mounts a fresh strip when the next run starts", async () => {
-    let running = true;
+  it("mounts a fresh live block when the next run starts", async () => {
+    let live: Record<string, unknown> | null = null;
+    let running = false;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {
-        return jsonResponse({ ...statusPayload, enabled: true, running });
+        return jsonResponse({ ...statusPayload, enabled: true, running, live });
       }
       return jsonResponse({
         engineName: "Test Engine",
@@ -1429,68 +1399,40 @@ describe("IndexingPanel", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(capture.onMessage).not.toBeNull();
-    });
-
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting files: 1 indexed, 2 scanned",
-      scanned: 2,
-      matched: 1,
-      elapsedMs: 1500,
-    });
-    await waitFor(() => {
-      expect(screen.getByText("Reading").closest("li")).toHaveClass("active");
-    });
-
-    // Settle the first pass: the strip unmounts with no persisted summary.
-    running = false;
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "run_completed",
-      run: {
-        kind: "index",
-        status: "ok",
-        message: "Index run ok: 1 indexed, 2 scanned",
-        response: "Index run ok: 1 indexed, 2 scanned",
-      },
-    });
-    await waitFor(() => {
       expect(screen.queryByTestId("index-live-progress")).toBeNull();
     });
 
-    // The next run begins: a fresh strip mounts with every step pending
-    // before new frames rebuild the live state.
+    // The next run begins: the polled snapshot mounts one fresh block with a
+    // single file line and no stale cards.
+    live = {
+      trigger: "catchUp",
+      phase: "extracting",
+      stage: "files",
+      scanned: 2,
+      indexed: 1,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
+    };
     running = true;
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_started",
       run: {
         kind: "index",
-        message: "Index run started (onDemand)",
+        message: "Index run started (catchUp)",
         response: null,
       },
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Starting…",
-      );
+      expect(screen.getByTestId("index-live-progress")).toHaveTextContent("Catch-Up Run");
     });
-    expect(
-      screen.getByText("Discovering").closest("li"),
-    ).toHaveClass("pending");
-    expect(screen.getByText("Reading").closest("li")).toHaveClass("pending");
-    expect(screen.getByText("Vectorizing").closest("li")).toHaveClass(
-      "pending",
-    );
-    expect(screen.getByText("Describing images").closest("li")).toHaveClass(
-      "pending",
-    );
-    expect(screen.getByText("Committing").closest("li")).toHaveClass("pending");
-    expect(
-      within(screen.getByTestId("index-live-progress")).queryByText(/✓/),
-    ).toBeNull();
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
+    expect(screen.getAllByTestId("index-live-current").length).toBe(1);
+    expect(screen.queryByTestId("index-live-strip")).toBeNull();
+    expect(screen.queryByTestId("index-progress-shimmer")).toBeNull();
   });
 
   it("names the first run in progress instead of an empty history", async () => {
@@ -1525,28 +1467,37 @@ describe("IndexingPanel", () => {
     expect(screen.queryByTestId("index-live-progress")).toBeNull();
   });
 
-  it("renders one icon per mini-card from the shared set", async () => {
+  it("renders no mini-cards for the grep-style block", async () => {
     const { fetchMock } = stubFetch({
       settings: { ...indexConfig, enabled: true },
-      status: { ...statusPayload, enabled: true, running: true },
+      status: {
+        ...statusPayload,
+        enabled: true,
+        running: true,
+        live: {
+          trigger: "onDemand",
+          phase: "extracting",
+          stage: "files",
+          scanned: 5,
+          indexed: 3,
+          elapsedMs: 1500,
+          current: "notes/ideas.md",
+        },
+      },
     });
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-live-strip")).toBeInTheDocument();
+      expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
     });
 
-    // Every step id maps to a shared icon component rendering one svg.
-    expect(Object.keys(INDEX_STEP_ICONS).sort()).toEqual(
-      ["committing", "discovering", "embedding", "extracting", "vision"].sort(),
-    );
-    for (const step of INDEX_STEPS) {
-      const card = screen.getByTestId(`index-mini-card-${step.id}`);
-      const icon = card.querySelector(".index-mini-card-icon svg");
-      expect(icon).not.toBeNull();
-    }
+    // The five mini-cards and the strip are gone; one file line remains.
+    expect(screen.queryByTestId("index-live-strip")).toBeNull();
+    expect(screen.queryByTestId("index-mini-card-extracting")).toBeNull();
+    expect(screen.queryByTestId("index-progress-shimmer")).toBeNull();
+    expect(screen.getAllByTestId("index-live-current").length).toBe(1);
   });
 
   it(
@@ -1576,7 +1527,9 @@ describe("IndexingPanel", () => {
         ([url]) => String(url) === "/index/status",
       ).length;
       // One poll tick (~2s) while the run window stays open re-reads status.
-      await new Promise((resolve) => setTimeout(resolve, 2300));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 2300));
+      });
       const callsDuringRun = fetchMock.mock.calls.filter(
         ([url]) => String(url) === "/index/status",
       ).length;
@@ -1613,8 +1566,17 @@ describe("IndexingPanel", () => {
     15000,
   );
 
-  it("updates cards mid-run from the polled sequence while frames drive the live line", async () => {
+  it("updates cards mid-run from the polled live snapshot", async () => {
     let documents = 42;
+    let live: Record<string, unknown> | null = {
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 5,
+      indexed: 3,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
+    };
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
       if (url === "/index/status") {
@@ -1623,6 +1585,7 @@ describe("IndexingPanel", () => {
           enabled: true,
           running: true,
           documents,
+          live,
         });
       }
       return jsonResponse({
@@ -1656,22 +1619,10 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("87");
     });
-    // The live strip stays mounted through the committed update.
+    // The live block stays mounted through the committed update with its
+    // polled header.
     expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
-    // Frames remain the in-flight source: a progress frame still drives the
-    // stage-aware header after the committed update lands.
-    await dispatchFrameOrThrow(capture.onMessage, {
-      type: "tool_progress",
-      callID: "c1",
-      toolName: "index",
-      message: "Indexing extracting files: 3 indexed (2 vectors), 5 scanned",
-      scanned: 5,
-      matched: 3,
-      elapsedMs: 1500,
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
-    });
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
   });
 
   it("flashes changed Size/Documents/Chunks values on update only", async () => {

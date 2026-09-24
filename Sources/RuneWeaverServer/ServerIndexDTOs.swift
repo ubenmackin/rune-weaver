@@ -94,6 +94,10 @@ public struct IndexLastRunStatus: Content, Equatable {
     /// the run message or response carried a trigger token. Nil for rows whose
     /// wording predates trigger tracking so older engines still decode.
     public let trigger: String?
+    /// Why the run did not execute, when the completion response carried a
+    /// `Skipped:` detail line. Nil for executed runs and for rows whose
+    /// wording predates skip-reason tracking so older engines still decode.
+    public let skippedReason: String?
 
     /// Creates a last-run row.
     /// - Parameters:
@@ -103,13 +107,130 @@ public struct IndexLastRunStatus: Content, Equatable {
     ///   - errors: Items that could not be processed.
     ///   - finishedAt: Instant the run finished.
     ///   - trigger: What caused the run, when known.
-    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil, trigger: String? = nil) {
+    ///   - skippedReason: Why the run did not execute, when known.
+    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil, trigger: String? = nil, skippedReason: String? = nil) {
         self.status = status
         self.indexed = indexed
         self.scanned = scanned
         self.errors = errors
         self.finishedAt = finishedAt
         self.trigger = trigger
+        self.skippedReason = skippedReason
+    }
+
+    /// Coding keys for the version-tolerant last-run contract.
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case indexed
+        case scanned
+        case errors
+        case finishedAt
+        case trigger
+        case skippedReason
+    }
+
+    /// Decodes a last-run row, defaulting absent counts and the skip reason to
+    /// nil so payloads built against an older engine still decode.
+    /// - Parameter decoder: Decoder carrying the row.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        status = try container.decode(String.self, forKey: .status)
+        indexed = try container.decodeIfPresent(Int.self, forKey: .indexed)
+        scanned = try container.decodeIfPresent(Int.self, forKey: .scanned)
+        errors = try container.decodeIfPresent(Int.self, forKey: .errors)
+        finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
+        trigger = try container.decodeIfPresent(String.self, forKey: .trigger)
+        skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+    }
+
+    /// Encodes a last-run row, omitting absent counts and the skip reason.
+    /// - Parameter encoder: Encoder receiving the row.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(indexed, forKey: .indexed)
+        try container.encodeIfPresent(scanned, forKey: .scanned)
+        try container.encodeIfPresent(errors, forKey: .errors)
+        try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(trigger, forKey: .trigger)
+        try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
+    }
+}
+
+/// Live in-flight index run snapshot on `GET /index/status`, derived from the
+/// coordinator's `liveTotals`. Null when idle so polling surfaces unmount the
+/// live strip without persisting any post-run summary.
+public struct IndexLiveStatus: Content, Equatable {
+    /// What caused the run (`"nightly"`, `"catchUp"`, or `"onDemand"`).
+    public let trigger: String
+    /// Active phase (`"discovering"`, `"extracting"`, `"embedding"`, `"committing"`).
+    public let phase: String
+    /// Active source stage (`"files"`, `"mail"`, `"messages"`, `"vision"`), or nil.
+    public let stage: String?
+    /// Items examined across completed work plus observed in-flight progress.
+    public let scanned: Int
+    /// Documents written across completed work plus observed in-flight progress.
+    public let indexed: Int
+    /// Items deliberately skipped across completed stages.
+    public let skipped: Int
+    /// Items that could not be processed across completed stages.
+    public let errors: Int
+    /// Documents per second derived from indexed over elapsed time.
+    public let rate: Double
+    /// Milliseconds elapsed since the run began.
+    public let elapsedMs: Int
+    /// Last relative item reported, for the display `current` field.
+    public let current: String?
+
+    /// Creates a live snapshot row.
+    /// - Parameters:
+    ///   - trigger: What caused the run.
+    ///   - phase: Active phase token.
+    ///   - stage: Active source stage token, or nil.
+    ///   - scanned: Items examined.
+    ///   - indexed: Documents written.
+    ///   - skipped: Items deliberately skipped.
+    ///   - errors: Items that could not be processed.
+    ///   - rate: Documents per second.
+    ///   - elapsedMs: Milliseconds elapsed since the run began.
+    ///   - current: Last relative item reported.
+    public init(
+        trigger: String,
+        phase: String,
+        stage: String? = nil,
+        scanned: Int = 0,
+        indexed: Int = 0,
+        skipped: Int = 0,
+        errors: Int = 0,
+        rate: Double = 0,
+        elapsedMs: Int = 0,
+        current: String? = nil
+    ) {
+        self.trigger = trigger
+        self.phase = phase
+        self.stage = stage
+        self.scanned = scanned
+        self.indexed = indexed
+        self.skipped = skipped
+        self.errors = errors
+        self.rate = rate
+        self.elapsedMs = elapsedMs
+        self.current = current
+    }
+
+    /// Maps coordinator live totals onto the wire shape.
+    /// - Parameter totals: In-flight snapshot from `IndexCoordinator.liveTotals`.
+    public init(_ totals: IndexLiveTotals) {
+        self.trigger = totals.trigger.rawValue
+        self.phase = totals.phase.rawValue
+        self.stage = totals.stage?.rawValue
+        self.scanned = totals.scanned
+        self.indexed = totals.indexed
+        self.skipped = totals.skipped
+        self.errors = totals.errors
+        self.rate = totals.rate
+        self.elapsedMs = totals.elapsedMs
+        self.current = totals.current
     }
 }
 
@@ -141,6 +262,9 @@ public struct IndexStatusResponse: Content, Equatable {
     public let byExtractStatus: [IndexExtractStatusCounts]
     /// Latest index run outcome, or nil when no run has been recorded.
     public let lastRun: IndexLastRunStatus?
+    /// Live in-flight snapshot, or nil when idle. Additive and optional so
+    /// payloads built against an older engine still decode.
+    public let live: IndexLiveStatus?
 
     /// Creates an index status snapshot.
     /// - Parameters:
@@ -157,6 +281,7 @@ public struct IndexStatusResponse: Content, Equatable {
     ///   - bySource: Per-source content aggregates.
     ///   - byExtractStatus: Extraction-outcome breakdown.
     ///   - lastRun: Latest run outcome, or nil.
+    ///   - live: Live in-flight snapshot, or nil when idle.
     public init(
         enabled: Bool = false,
         running: Bool = false,
@@ -170,7 +295,8 @@ public struct IndexStatusResponse: Content, Equatable {
         lastErrors: [String] = [],
         bySource: [IndexSourceCounts] = [],
         byExtractStatus: [IndexExtractStatusCounts] = [],
-        lastRun: IndexLastRunStatus? = nil
+        lastRun: IndexLastRunStatus? = nil,
+        live: IndexLiveStatus? = nil
     ) {
         self.enabled = enabled
         self.running = running
@@ -185,6 +311,7 @@ public struct IndexStatusResponse: Content, Equatable {
         self.bySource = bySource
         self.byExtractStatus = byExtractStatus
         self.lastRun = lastRun
+        self.live = live
     }
 }
 
@@ -194,20 +321,25 @@ public struct IndexStatusResponse: Content, Equatable {
 /// Kept as a free function so the shape has one definition independent of the
 /// transport: the route only gathers inputs, and callers without a document
 /// store or coordinator report an honest empty/stopped snapshot instead of
-/// failing.
+/// failing. The `live` snapshot is additive: existing callers omit it and
+/// report an idle strip, while the route passes the coordinator's live totals
+/// through when a run is in flight.
+///
 /// - Parameters:
 ///   - config: Active index policy driving enablement.
 ///   - stats: Aggregate store stats, or nil when no store is wired.
 ///   - running: Whether a run is in flight.
 ///   - lastErrors: Recent run failures, newest first.
 ///   - lastRun: Latest run outcome, or nil when no run has been recorded.
+///   - live: Live in-flight snapshot, or nil when idle.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
     stats: IndexStats?,
     running: Bool,
     lastErrors: [String],
-    lastRun: IndexLastRunStatus? = nil
+    lastRun: IndexLastRunStatus? = nil,
+    live: IndexLiveStatus? = nil
 ) -> IndexStatusResponse {
     let sources = [
         IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: config.enabled && config.files),
@@ -233,7 +365,8 @@ func makeIndexStatusResponse(
         lastErrors: lastErrors,
         bySource: bySource,
         byExtractStatus: byExtractStatus,
-        lastRun: lastRun
+        lastRun: lastRun,
+        live: live
     )
 }
 

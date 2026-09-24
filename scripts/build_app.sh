@@ -128,8 +128,25 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
 </plist>
 PLIST_EOF
 
-# Code sign ad-hoc
-echo "==> Ad-hoc signing ${APP_NAME}..."
-codesign --force --deep --sign - "${APP_BUNDLE}"
+# Code signing: prefer explicit CODE_SIGN_IDENTITY, or search for an available codesigning identity.
+# Stable identities preserve macOS Keychain ACLs across app rebuilds, whereas ad-hoc ("-") signatures
+# change their CDHash with every compile, causing macOS to re-prompt for Keychain access.
+SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:-}"
+
+if [ -z "${SIGNING_IDENTITY}" ]; then
+    # Look for Apple Development, Developer ID, or a local code signing certificate
+    AVAILABLE_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -E 'Apple Development|Developer ID Application|RuneWeaver' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+    if [ -n "${AVAILABLE_IDENTITY}" ]; then
+        SIGNING_IDENTITY="${AVAILABLE_IDENTITY}"
+    fi
+fi
+
+if [ -n "${SIGNING_IDENTITY}" ]; then
+    echo "==> Signing ${APP_NAME} with identity: ${SIGNING_IDENTITY}..."
+    codesign --force --deep --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
+else
+    echo "==> Ad-hoc signing ${APP_NAME} (Note: set CODE_SIGN_IDENTITY or create a local signing cert to persist Keychain access across rebuilds)..."
+    codesign --force --deep --sign - "${APP_BUNDLE}"
+fi
 
 echo "==> Successfully built: ${APP_BUNDLE}"

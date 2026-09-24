@@ -151,10 +151,16 @@ struct IndexCoordinatorTests {
         #expect(summary.skippedReason != nil)
         let recorded = await calls.snapshot()
         #expect(recorded.isEmpty)
+        // Skipped runs still persist one `run_logs` row (start plus terminal
+        // `skipped` completion) so the kind-filtered latest-run lookup
+        // observes every run and the strip agrees with the run notice.
         let started = await events.startedEvents()
         let completed = await events.completedEvents()
-        #expect(started.isEmpty)
-        #expect(completed.isEmpty)
+        #expect(started.count == 1)
+        #expect(completed.count == 1)
+        #expect(completed.first?.status == .skipped)
+        #expect(completed.first?.sessionID == summary.sessionID)
+        #expect(completed.first?.response?.contains("Skipped:") == true)
 
         let nightly = await coordinator.fireNightly(now: Date())
         #expect(nightly == nil)
