@@ -773,6 +773,134 @@ describe("IndexingPanel", () => {
     );
   });
 
+  it("restarts the running scan on policy save", async () => {
+    // A policy saved mid-scan stops the old generation and starts a fresh run
+    // so the new roots/excludes/caps apply without waiting for the next
+    // nightly pass.
+    const user = userEvent.setup();
+    let running = true;
+    const calls: Array<{ url: string; method: string; body: unknown }> = [];
+    const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      let body: unknown = undefined;
+      if (typeof init?.body === "string") {
+        try {
+          body = JSON.parse(init.body) as unknown;
+        } catch {
+          body = init.body;
+        }
+      }
+      calls.push({ url, method, body });
+      if (url === "/index/status") {
+        return jsonResponse({ ...statusPayload, enabled: true, running, live: null });
+      }
+      if (url === "/index/cancel") {
+        running = false;
+        return jsonResponse({ cancelled: true });
+      }
+      if (url === "/index/run") {
+        return jsonResponse({
+          sessionID: "s1",
+          trigger: "onDemand",
+          status: "ok",
+          documentsIndexed: 3,
+          vectorChunks: 2,
+          keywordChunks: 1,
+          scanned: 5,
+          skipped: 0,
+          errors: 0,
+          warnings: [],
+          startedAt: 0,
+          finishedAt: 1,
+          indexAsOf: 1,
+          skippedReason: null,
+        });
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: { ...indexConfig, enabled: true },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Exclude patterns/)).toBeInTheDocument();
+    });
+    // The boot status read settles the in-flight flag before Save, so the
+    // restart decision observes the running scan instead of the initial null.
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
+      ).toBeGreaterThanOrEqual(1);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Index settings saved. Restarted the running scan so new settings apply.",
+        ),
+      ).toBeInTheDocument();
+    });
+    // The fresh run outcome shares the strip formatter.
+    expect(screen.getByText(/Last run ok/)).toBeInTheDocument();
+    const cancelAt = calls.findIndex((call) => call.url === "/index/cancel");
+    const runAt = calls.findIndex((call) => call.url === "/index/run");
+    expect(cancelAt).toBeGreaterThan(-1);
+    expect(runAt).toBeGreaterThan(cancelAt);
+    // The policy persists before any restart step.
+    const putAt = calls.findIndex(
+      (call) => call.url === "/settings" && call.method === "PUT",
+    );
+    expect(putAt).toBeGreaterThan(-1);
+    expect(putAt).toBeLessThan(cancelAt);
+  });
+
+  it("saves without restarting when idle", async () => {
+    // An idle save keeps the save-only path: no stop, no fresh run, just the
+    // plain confirmation.
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      settings: { ...indexConfig, enabled: true },
+      status: { ...statusPayload, enabled: true, running: false },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Exclude patterns/)).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.filter(([url]) => String(url) === "/index/status").length,
+      ).toBeGreaterThanOrEqual(1);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Index settings saved.")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(
+        "Index settings saved. Restarted the running scan so new settings apply.",
+      ),
+    ).toBeNull();
+    expect(calls.some((call) => call.url === "/index/cancel")).toBe(false);
+    expect(calls.some((call) => call.url === "/index/run")).toBe(false);
+  });
+
   it("keeps the shared Save fill in the stylesheet", () => {
     // The Save control owns no local color: both Settings footers share one
     // stylesheet fill so an enabled Save stays solid theme blue even as forms

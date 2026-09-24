@@ -2292,6 +2292,45 @@ export function IndexPolicyPanel() {
   // instead of duplicating, matching the Settings save pattern.
   const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
     useToastStack();
+  // Save-and-restart inputs come from the fresh post-PUT status read in
+  // handleSave, never from a cached flag, so a run started between boot and
+  // save still counts and a disable-then-save never restarts. No running refs
+  // are kept here (the dead runActiveRef was removed): the dashboard owns its
+  // runActive/statusRunning guards for live polling, while this form only
+  // needs the effort core count plus the fresh decision read. The loadStatus
+  // and notice duplication with the dashboard stays local — different owners
+  // with different lifecycles — to avoid a shared-hook refactor risk.
+  // Restart outcome line rendered under the toast stack: the shared run
+  // formatter keeps it identical to the status strip so the fresh run reads
+  // the same in both places.
+  const [notice, setNotice] = useState<string | null>(null);
+  // Mounted guard for the save-and-restart chain: persist, status reads, the
+  // cancel/poll/run sequence, and the toasts all settle after awaits, so an
+  // unmount mid-save must skip every state update instead of writing into a
+  // retired tree.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Fresh status read shared by the boot load and the save-and-restart flow:
+  // the saved policy stays enabled-aware while the running flag settles, so
+  // the restart decision always observes the engine rather than a stale flag.
+  // Only the effort core count is cached; running/enabled come from the fresh
+  // response in handleSave.
+  const loadStatus = useCallback(async () => {
+    try {
+      const response = await getIndexStatus();
+      if (!mountedRef.current) return response;
+      setPolicyCoreCount(resolveStatusEffort(response).coreCount);
+      return response;
+    } catch {
+      return null;
+    }
+  }, []);
 
   // Loads the [index] section through the shared settings read so the editable
   // form starts from the stored policy. An older engine without the section
@@ -2346,22 +2385,20 @@ export function IndexPolicyPanel() {
       // A settings read failure leaves the local defaults; the save path
       // surfaces transport errors so the form stays usable.
     }
-    // Engine core count for the effort reality line: prefer the status
-    // effort.activeProcessors so a remote dashboard resolves against the
-    // engine hardware instead of the browser hardwareConcurrency. A status
+    // Status snapshot for the effort reality line and the save-and-restart
+    // decision: the shared loader keeps the running flag fresh while a status
     // failure leaves the browser fallback in place.
-    try {
-      const status = await getIndexStatus();
-      setPolicyCoreCount(resolveStatusEffort(status).coreCount);
-    } catch {
-      // Keep the browser fallback; the reality line still renders.
-    }
-  }, []);
+    await loadStatus();
+  }, [loadStatus]);
 
   useEffect(() => {
     void loadConfig();
   }, [loadConfig]);
 
+  // Persists the [index] patch and returns the saved enabled flag from the
+  // PUT response (falling back to the pre-save closure only when the engine
+  // omits the section), so handleSave restarts solely from post-save truth.
+  // Throws on transport failure; the caller surfaces it as a save error.
   const persistConfig = useCallback(async (): Promise<boolean> => {
     const exclude = excludeText
       .split("\n")
@@ -2415,27 +2452,104 @@ export function IndexPolicyPanel() {
           ? (index as IndexConfigData).always_skipped
           : undefined,
       };
-      setConfig(merged);
-      setExcludeText(merged.exclude.join("\n"));
+      if (mountedRef.current) {
+        setConfig(merged);
+        setExcludeText(merged.exclude.join("\n"));
+      }
     }
-    return true;
+    // Saved enabled truth for the restart gate: the engine echo wins so a
+    // disable-then-save never restarts from a stale pre-save closure.
+    return typeof index?.enabled === "boolean" ? index.enabled : config.enabled;
   }, [config, excludeText]);
 
-  // Persists the policy form through the [index]-only patch; the status
-  // dashboard re-reads its own snapshot whenever it next mounts or a run
-  // broadcast arrives, so no cross-tab control surface is needed here.
+  // Sole owner of save-and-restart: the settings patch never auto-starts a
+  // run, so a policy saved mid-scan must stop the old generation and start a
+  // fresh one with the new roots/excludes/caps. An idle save or a save with
+  // the master switch off keeps the save-only path and starts nothing, while
+  // a restart failure still leaves the saved policy in place. Order stays
+  // persist -> cancel -> poll -> run -> load; both decision inputs come from
+  // post-PUT truth (saved enabled plus the fresh status read) so a run that
+  // started between boot and save is not missed and a disable never restarts.
+  // The restart line clears at save start and on every idle/error path so a
+  // stale outcome never lingers under a fresh toast; every post-await update
+  // bails when the panel unmounts mid-save.
   const handleSave = async () => {
     if (saving) return;
     setSaving(true);
+    // A stale restart line must never survive a new save: an idle save would
+    // otherwise keep rendering the previous run under the fresh toast.
+    setNotice(null);
     try {
-      await persistConfig();
-      pushSuccessToast("Index settings saved.");
+      const savedEnabled = await persistConfig();
+      if (!mountedRef.current) return;
+      const fresh = await loadStatus();
+      if (!mountedRef.current) return;
+      const wasRunning = fresh?.running === true;
+      if (wasRunning && savedEnabled) {
+        try {
+          // Explicit cancel outcome: 404 means no run to stop so the restart
+          // continues; any other failure aborts before polling instead of
+          // silently continuing over a half-stopped generation.
+          try {
+            await cancelIndex();
+          } catch (failure) {
+            if (!(failure instanceof ApiError && failure.status === 404)) {
+              throw failure;
+            }
+          }
+          if (!mountedRef.current) return;
+          let settled = false;
+          for (let attempt = 0; attempt < 10; attempt += 1) {
+            const polled = await getIndexStatus();
+            if (!mountedRef.current) return;
+            if (polled?.running === false) {
+              settled = true;
+              break;
+            }
+            if (attempt < 9) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              if (!mountedRef.current) return;
+            }
+          }
+          // Single-flight guard: never start a second generation over a
+          // still-running one (the engine answers 409); abort honestly with
+          // an error toast instead of dialing.
+          if (!settled) {
+            if (!mountedRef.current) return;
+            setNotice(null);
+            pushErrorToast(
+              "Failed to restart index run: previous scan is still running.",
+            );
+            return;
+          }
+          const summary = await runIndex();
+          if (!mountedRef.current) return;
+          setNotice(describeIndexRun(summary));
+          await loadStatus();
+          if (!mountedRef.current) return;
+          pushSuccessToast(
+            "Index settings saved. Restarted the running scan so new settings apply.",
+          );
+        } catch (failure) {
+          if (!mountedRef.current) return;
+          setNotice(null);
+          pushErrorToast(
+            failure instanceof ApiError ? failure.message : "Failed to restart index run",
+          );
+        }
+      } else {
+        if (!mountedRef.current) return;
+        setNotice(null);
+        pushSuccessToast("Index settings saved.");
+      }
     } catch (failure) {
+      if (!mountedRef.current) return;
+      setNotice(null);
       pushErrorToast(
         failure instanceof ApiError ? failure.message : "Failed to save index settings",
       );
     } finally {
-      setSaving(false);
+      if (mountedRef.current) setSaving(false);
     }
   };
 
@@ -2534,6 +2648,7 @@ export function IndexPolicyPanel() {
       </div>
 
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      {notice ? <p className="muted text-sm">{notice}</p> : null}
 
       <div className="index-policy-section">
         <h3>Policy</h3>

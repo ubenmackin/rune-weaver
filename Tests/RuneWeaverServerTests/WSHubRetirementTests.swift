@@ -150,15 +150,168 @@ struct WSHubRetirementTests {
             #expect(!isAllowedWebSocketOrigin("https://attacker.org", request: request))
             #expect(!isAllowedWebSocketOrigin("not-a-valid-url", request: request))
 
-            // DNS rebinding protection: even if Host matches Origin, non-loopback non-configured hosts are rejected
-            var rebindingHeaders = HTTPHeaders()
-            rebindingHeaders.replaceOrAdd(name: "Host", value: "rebind.attacker.com:8082")
-            let rebindingRequest = Request(
+            // Host-omitting request keeps prior behavior: loopback passes,
+            // arbitrary cross-site origins fail, and malformed origins fail closed.
+            #expect(isAllowedWebSocketOrigin("http://localhost:3000", request: request))
+            #expect(!isAllowedWebSocketOrigin("https://evil.com", request: request))
+
+            // Reverse-proxy parity: the request Host already passed
+            // HostValidationMiddleware, so an Origin matching that validated
+            // Host is the same site behind a proxy name rather than cross-site.
+            var proxyHeaders = HTTPHeaders()
+            proxyHeaders.replaceOrAdd(name: "Host", value: "runeweaver.int.volcrypt.com")
+            let proxyRequest = Request(
                 application: app,
-                headers: rebindingHeaders,
+                headers: proxyHeaders,
                 on: app.eventLoopGroup.any()
             )
-            #expect(!isAllowedWebSocketOrigin("http://rebind.attacker.com:8082", request: rebindingRequest))
+            #expect(isAllowedWebSocketOrigin("wss://runeweaver.int.volcrypt.com/ws", request: proxyRequest))
+            // Cross-host Origin against the same validated Host still refuses.
+            #expect(!isAllowedWebSocketOrigin("https://evil.com", request: proxyRequest))
+
+            // Port-stripped parity: a Host carrying a port matches the bare Origin host.
+            var proxyPortHeaders = HTTPHeaders()
+            proxyPortHeaders.replaceOrAdd(name: "Host", value: "runeweaver.int.volcrypt.com:443")
+            let proxyPortRequest = Request(
+                application: app,
+                headers: proxyPortHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("https://runeweaver.int.volcrypt.com", request: proxyPortRequest))
+            #expect(!isAllowedWebSocketOrigin("https://evil.com", request: proxyPortRequest))
+
+            // Mismatched Host and Origin still fails: rebinding defense lives in
+            // HostValidationMiddleware upstream, and the Origin check only trusts
+            // exact parity with that already-validated Host.
+            var mismatchedHeaders = HTTPHeaders()
+            mismatchedHeaders.replaceOrAdd(name: "Host", value: "runeweaver.int.volcrypt.com")
+            let mismatchedRequest = Request(
+                application: app,
+                headers: mismatchedHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(!isAllowedWebSocketOrigin("http://rebind.attacker.com:8082", request: mismatchedRequest))
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test
+    func `Bracketed IPv6 Host-Origin parity passes under one normalization`() async throws {
+        // `URL.host` strips `[::1]` brackets while the normalized Host header
+        // keeps them; both sides canonicalize to the bare form so a bracketed
+        // IPv6 proxy matches instead of failing parity.
+        let app = try await Application.make(.testing)
+        do {
+            var bracketedHeaders = HTTPHeaders()
+            bracketedHeaders.replaceOrAdd(name: "Host", value: "[::1]:8080")
+            let bracketedRequest = Request(
+                application: app,
+                headers: bracketedHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("http://[::1]:3000", request: bracketedRequest))
+            #expect(isAllowedWebSocketOrigin("ws://[::1]:8082", request: bracketedRequest))
+
+            var bareHeaders = HTTPHeaders()
+            bareHeaders.replaceOrAdd(name: "Host", value: "[::1]")
+            let bareRequest = Request(
+                application: app,
+                headers: bareHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("http://[::1]:3000", request: bareRequest))
+
+            // Non-loopback bracketed IPv6 parity exercises the fixed path:
+            // loopback `::1` already passes before parity, so only a
+            // non-loopback literal proves the bracket canonicalization.
+            var ulaHeaders = HTTPHeaders()
+            ulaHeaders.replaceOrAdd(name: "Host", value: "[fd00::1]:443")
+            let ulaRequest = Request(
+                application: app,
+                headers: ulaHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("https://[fd00::1]", request: ulaRequest))
+            #expect(!isAllowedWebSocketOrigin("https://evil.com", request: ulaRequest))
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test
+    func `Trailing-dot Host-Origin parity fails closed locally`() async throws {
+        // Defense in depth at the origin layer: trailing-dot hosts are rejected
+        // here even when Host==Origin matches, instead of relying solely on
+        // upstream `HostValidationMiddleware` or riding parity under a stripped
+        // spelling.
+        let app = try await Application.make(.testing)
+        do {
+            var trailingHeaders = HTTPHeaders()
+            trailingHeaders.replaceOrAdd(name: "Host", value: "evil.com.")
+            let trailingRequest = Request(
+                application: app,
+                headers: trailingHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(!isAllowedWebSocketOrigin("http://evil.com./", request: trailingRequest))
+            #expect(!isAllowedWebSocketOrigin("http://evil.com.", request: trailingRequest))
+
+            var proxyTrailingHeaders = HTTPHeaders()
+            proxyTrailingHeaders.replaceOrAdd(name: "Host", value: "runeweaver.int.volcrypt.com.")
+            let proxyTrailingRequest = Request(
+                application: app,
+                headers: proxyTrailingHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(!isAllowedWebSocketOrigin("https://runeweaver.int.volcrypt.com.", request: proxyTrailingRequest))
+            try await app.asyncShutdown()
+        } catch {
+            try? await app.asyncShutdown()
+            throw error
+        }
+    }
+
+    @Test
+    func `Attacker Host-Origin parity relies on upstream Host gate`() async throws {
+        // Pins the middleware ordering assumption: parity alone passes any
+        // Host==Origin pair (including `rebind.attacker.com`), so end-to-end
+        // safety for that pair rests on `HostValidationMiddleware` rejecting the
+        // attacker Host upstream (`registerRuneWeaverRoutes` installs the Host
+        // gate before the `/ws` route). An allowlisted proxy Host passes both
+        // layers while the attacker Host passes only the origin layer in
+        // isolation and fails the combined stack.
+        let app = try await Application.make(.testing)
+        do {
+            var attackerHeaders = HTTPHeaders()
+            attackerHeaders.replaceOrAdd(name: "Host", value: "rebind.attacker.com")
+            let attackerRequest = Request(
+                application: app,
+                headers: attackerHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("http://rebind.attacker.com:8082", request: attackerRequest))
+            let defaultGate = HostValidationMiddleware(hostname: "127.0.0.1", allowedHosts: [], authConfigured: false)
+            #expect(!defaultGate.isAllowedHost(HostValidationMiddleware.extractHost(from: "rebind.attacker.com")))
+
+            var proxyHeaders = HTTPHeaders()
+            proxyHeaders.replaceOrAdd(name: "Host", value: "runeweaver.int.volcrypt.com")
+            let proxyRequest = Request(
+                application: app,
+                headers: proxyHeaders,
+                on: app.eventLoopGroup.any()
+            )
+            #expect(isAllowedWebSocketOrigin("wss://runeweaver.int.volcrypt.com/ws", request: proxyRequest))
+            let proxyGate = HostValidationMiddleware(
+                hostname: "127.0.0.1",
+                allowedHosts: ["runeweaver.int.volcrypt.com"],
+                authConfigured: false
+            )
+            #expect(proxyGate.isAllowedHost(HostValidationMiddleware.extractHost(from: "runeweaver.int.volcrypt.com")))
             try await app.asyncShutdown()
         } catch {
             try? await app.asyncShutdown()

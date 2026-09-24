@@ -1176,6 +1176,7 @@ export default function ChatView({ health }: ChatViewProps) {
   // and running turns keep their server slot; recovery clears the notice on
   // reconnect instead of cancelling anything.
   const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectDismissed, setReconnectDismissed] = useState(false);
   // Visible record of lossy flight trims (live evictions, refusals, expired
   // live reclaims). The dev log stays loud locally but is silent in
   // production, so this state is the shipped signal that a background timeline
@@ -1245,6 +1246,11 @@ export default function ChatView({ health }: ChatViewProps) {
   // small threshold (150 px) of the scroll end.
   const userHasScrolledUpRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  // Per-mounted input history for Up/Down recall at caret edges. In-memory
+  // only so a send-session change persists naturally with the refs.
+  const inputHistoryRef = useRef<string[]>([]);
+  const historyIndexRef = useRef<number>(-1);
+  const draftRef = useRef<string>("");
   const sessionIDRef = useRef(sessionID);
   const isFirstMessageRef = useRef(false);
   const latestPromptRef = useRef("");
@@ -1530,6 +1536,7 @@ export default function ChatView({ health }: ChatViewProps) {
   // fire while hidden and cancel a turn the server still owns.
   const handleWSClose = useCallback(() => {
     setReconnecting(true);
+    setReconnectDismissed(false);
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
       turnTimeoutRef.current = null;
@@ -2999,7 +3006,24 @@ export default function ChatView({ health }: ChatViewProps) {
     }
   }, [armTurnTimeout, clearTurnTimeout, clearAllToolProgress, forgetToolCall, forgetToolCancelMark, refreshApprovals, updateParkedFlightFromFrame, markBackgroundRunning]);
 
-  const { sendMessage, isOpen } = useSharedWebSocket(handleWSMessage, handleWSClose, handleWSOpen);
+  const { sendMessage, isOpen, retryConnection } = useSharedWebSocket(
+    handleWSMessage,
+    handleWSClose,
+    handleWSOpen,
+  );
+
+  // Clears the header pill when a REST round-trip or poll tick proves the
+  // shared socket is OPEN again; a still-closed socket keeps the pill.
+  const reconcileReconnecting = useCallback(() => {
+    if (reconnecting && isOpen()) setReconnecting(false);
+  }, [reconnecting, isOpen]);
+
+  // Owns the Retry button: forces a redial through the shared client, then
+  // clears immediately when the socket is already OPEN again.
+  const handleRetryConnection = useCallback(() => {
+    retryConnection();
+    if (isOpen()) setReconnecting(false);
+  }, [retryConnection, isOpen]);
 
   // Cancels one executing tool by call identity, distinct from the session-wide
   // turn cancel: this stops a single call and lets the model reason about the
@@ -3163,6 +3187,7 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     sharedRunsRef.current = sharedRuns;
     sharedRunningIDsRef.current = sharedRunningIDs;
+    reconcileReconnecting();
     // The shared poll tick doubles as the scheduled expiry sweep so TTL
     // enforces even when no park or frame arrives; live reaps surface through
     // state instead of the production-silent log.
@@ -3274,7 +3299,7 @@ export default function ChatView({ health }: ChatViewProps) {
         }
       }
     }
-  }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface]);
+  }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface, reconcileReconnecting]);
 
   useEffect(() => {
     // Own sends reset the lock before appending, so this suppresses only remote
@@ -3295,7 +3320,15 @@ export default function ChatView({ health }: ChatViewProps) {
   }, []);
 
   const handleInputChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setInput(event.target.value);
+    const next = event.target.value;
+    // Editing after a recall exits history mode so the next Up stashes these
+    // edits as the fresh draft instead of discarding them, and a later Down
+    // cannot restore the stale pre-recall draft over them.
+    if (historyIndexRef.current !== -1) {
+      historyIndexRef.current = -1;
+      draftRef.current = next;
+    }
+    setInput(next);
     const target = event.target;
     target.style.height = "auto";
     const maxHeight = 240; // ~10 lines
@@ -3404,7 +3437,82 @@ export default function ChatView({ health }: ChatViewProps) {
     });
   };
 
+  // Recalled entries can span lines while the box still sits at its prior
+  // height, and the caret would keep its pre-recall offset, so grow the box
+  // to the recalled content and park the caret at the end once committed.
+  const applyHistoryRecall = (value: string, target: HTMLTextAreaElement) => {
+    setInput(value);
+    const settle = () => {
+      const el = textareaRef.current ?? target;
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
+      const end = el.value.length;
+      el.selectionStart = end;
+      el.selectionEnd = end;
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(settle);
+    } else {
+      setTimeout(settle, 0);
+    }
+  };
+
   const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Never hijack IME composition: Up/Down/Enter belong to the candidate
+    // window while composing, so leave the keystroke untouched.
+    if (event.nativeEvent?.isComposing || (event as unknown as { isComposing?: boolean }).isComposing) return;
+    // Up/Down history recall at caret edges only: first-line Up steps toward
+    // the oldest send while last-line Down steps toward newer and restores
+    // the pre-recall draft past the newest. Anywhere else keeps native
+    // cursor movement with no preventDefault.
+    if (
+      event.key === "ArrowUp" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      const target = event.currentTarget;
+      const caret = target.selectionStart ?? 0;
+      const end = target.selectionEnd ?? 0;
+      if (caret === end && !target.value.slice(0, caret).includes("\n")) {
+        event.preventDefault();
+        const history = inputHistoryRef.current;
+        if (history.length === 0) return;
+        if (historyIndexRef.current === -1) {
+          draftRef.current = target.value;
+          historyIndexRef.current = history.length - 1;
+        } else if (historyIndexRef.current > 0) {
+          historyIndexRef.current -= 1;
+        }
+        applyHistoryRecall(history[historyIndexRef.current], target);
+        return;
+      }
+    }
+    if (
+      event.key === "ArrowDown" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      const target = event.currentTarget;
+      const caret = target.selectionStart ?? 0;
+      const end = target.selectionEnd ?? 0;
+      if (caret === end && !target.value.slice(caret).includes("\n")) {
+        event.preventDefault();
+        const history = inputHistoryRef.current;
+        if (historyIndexRef.current === -1) return;
+        if (historyIndexRef.current < history.length - 1) {
+          historyIndexRef.current += 1;
+          applyHistoryRecall(history[historyIndexRef.current], target);
+        } else {
+          historyIndexRef.current = -1;
+          applyHistoryRecall(draftRef.current, target);
+        }
+        return;
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
       if (pending) {
@@ -3517,6 +3625,11 @@ export default function ChatView({ health }: ChatViewProps) {
     userHasScrolledUpRef.current = false;
     setMessages((prev) => [...prev, userMessage].slice(-MAX_MESSAGES));
     setInput("");
+    // Sent inputs feed the Up/Down recall stack capped at 50 entries; a
+    // successful send exits recall and clears the stashed draft.
+    inputHistoryRef.current = [...inputHistoryRef.current, text].slice(-50);
+    historyIndexRef.current = -1;
+    draftRef.current = "";
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -3552,6 +3665,7 @@ export default function ChatView({ health }: ChatViewProps) {
     // Fallback to REST postChat
     try {
       const response = await postChat(text, sessionID, "dashboard");
+      reconcileReconnecting();
       // The server stored the optimistic bubble, so no retraction remains.
       pendingNormalRef.current = null;
       // A cancel racing the REST round-trip must not append the late
@@ -3850,6 +3964,30 @@ export default function ChatView({ health }: ChatViewProps) {
             <span className="session-id-tag font-mono" title={sessionID}>
               {sessionID.slice(0, 8)}
             </span>
+            {reconnecting && !reconnectDismissed ? (
+              <span
+                className="connection-status-pill"
+                data-testid="chat-reconnecting"
+              >
+                <span role="status" aria-label="Connection to server lost">
+                  Live updates paused — reconnecting to server… Chat still sends; streaming will resume.
+                </span>
+                <button
+                  type="button"
+                  data-testid="chat-reconnect-retry"
+                  onClick={handleRetryConnection}
+                >
+                  Retry now
+                </button>
+                <button
+                  type="button"
+                  data-testid="chat-reconnect-dismiss"
+                  onClick={() => setReconnectDismissed(true)}
+                >
+                  Dismiss
+                </button>
+              </span>
+            ) : null}
             {sessionPendingCount > 0 ? (
               <span
                 className="pending-approval-badge"
@@ -4135,20 +4273,6 @@ export default function ChatView({ health }: ChatViewProps) {
         </div>
 
         {error ? <p className="error chat-error">{error}</p> : null}
-
-        {/* Reconnecting notice stays informational while the socket recovers:
-            running turns keep their server slots, so the input never locks and
-            no retry copy appears here. */}
-        {reconnecting ? (
-          <p
-            className="muted chat-reconnecting"
-            role="status"
-            aria-label="Reconnecting to server"
-            data-testid="chat-reconnecting"
-          >
-            Reconnecting… background turns keep running.
-          </p>
-        ) : null}
 
         {/* Trimmed-flight notice surfaces lossy LRU/TTL evictions through
             visible state: the dev log stays silent in production, so without

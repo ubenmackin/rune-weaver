@@ -8,7 +8,7 @@
 // stubbed socket so the guard's counter and owner-tag checks are exercised on
 // the actual message path rather than through a pre-sanitized object.
 
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   resetSharedSocket,
@@ -49,6 +49,28 @@ async function mountSharedSocket(): Promise<{
   renderHook(() => useSharedWebSocket((frame) => received.push(frame)));
   await waitFor(() => expect(capture.onMessage).not.toBeNull());
   return { capture, received };
+}
+
+// Builds a stub socket class that records every dialed instance alongside its
+// capture, so retry tests can count redials on the real singleton path
+// instead of asserting on timers.
+function makeCountingSocket(): {
+  capture: ReturnType<typeof createMockWebSocketCapture>;
+  instances: WebSocket[];
+  CountingSocket: new (url?: string) => WebSocket;
+} {
+  const capture = createMockWebSocketCapture();
+  const BaseSocket = createMockWebSocket(capture) as unknown as new (
+    url?: string,
+  ) => WebSocket;
+  const instances: WebSocket[] = [];
+  class CountingSocket extends BaseSocket {
+    constructor(url?: string) {
+      super(url);
+      instances.push(this);
+    }
+  }
+  return { capture, instances, CountingSocket };
 }
 
 describe("shared WebSocket tool_progress guard", () => {
@@ -136,5 +158,46 @@ describe("shared WebSocket tool_progress guard", () => {
     // dropping an otherwise complete progress line.
     await dispatchFrameOrThrow(capture.onMessage, { ...validFrame, warning: 7 });
     expect(received).toHaveLength(2);
+  });
+
+  it("redials immediately when retryConnection is called after a close", async () => {
+    // A user-triggered retry must bypass the idle backoff so a visible retry
+    // affordance rejoins live without waiting out the scheduled timer.
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const { result, unmount } = renderHook(() =>
+      useSharedWebSocket(() => {}),
+    );
+    await waitFor(() => expect(instances.length).toBe(1));
+    await act(async () => {
+      instances[0].close();
+    });
+    const dialedBeforeRetry = instances.length;
+    await act(async () => {
+      result.current.retryConnection();
+    });
+    expect(instances.length).toBe(dialedBeforeRetry + 1);
+    expect(capture.url).toBe("ws://localhost:3000/ws");
+    unmount();
+  });
+
+  it("reports isOpen false after close and true after open", async () => {
+    // Views derive their reconnecting notice from the shared open probe, so the
+    // probe must track the live handle across a drop and the forced redial.
+    const { instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    const { result, unmount } = renderHook(() =>
+      useSharedWebSocket(() => {}),
+    );
+    await waitFor(() => expect(result.current.isOpen()).toBe(true));
+    await act(async () => {
+      instances[0].close();
+    });
+    expect(result.current.isOpen()).toBe(false);
+    await act(async () => {
+      result.current.retryConnection();
+    });
+    await waitFor(() => expect(result.current.isOpen()).toBe(true));
+    unmount();
   });
 });

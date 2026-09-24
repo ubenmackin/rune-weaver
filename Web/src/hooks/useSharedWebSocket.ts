@@ -1,7 +1,7 @@
 // Shared WebSocket client connecting to /ws with multi-subscriber support.
 // Keeps a single persistent connection across the entire dashboard to avoid duplicate connections.
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   isValidToolIDs,
   parseToolProgress,
@@ -339,6 +339,21 @@ class SharedWebSocketClient {
   private openListeners: Set<() => void> = new Set();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private isConnecting = false;
+  // Named platform wake handlers so they can be removed on dispose and test
+  // reset. Anonymous closures would leak across HMR and test re-runs because
+  // removeEventListener would have nothing to match.
+  private readonly handleOnline = (): void => {
+    this.scheduleReconnect();
+  };
+  private readonly handleVisibilityChange = (): void => {
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    ) {
+      this.scheduleReconnect();
+    }
+  };
+  private platformListenersAttached = false;
 
   constructor() {
     // The socket follows the owner-auth gate: a login or rotation must present
@@ -348,6 +363,71 @@ class SharedWebSocketClient {
     subscribeAuthState((authenticated) => {
       this.handleAuthStateChange(authenticated);
     });
+    // A laptop that sleeps or drops offline must re-arm the shared dial as soon
+    // as connectivity returns, so platform wake signals re-enter the pending
+    // backoff instead of waiting for the next poll tick.
+    this.attachPlatformListeners();
+  }
+
+  // Attaches the online/visibility re-arm exactly once so repeated resets
+  // never stack duplicate wake signals. Marks attached only when a listener
+  // was actually installed so a render without window/document can still
+  // attach later on hydration instead of staying permanently detached.
+  private attachPlatformListeners(): void {
+    if (this.platformListenersAttached) return;
+    let attached = false;
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.handleOnline);
+      attached = true;
+    }
+    if (typeof document !== "undefined") {
+      document.addEventListener(
+        "visibilitychange",
+        this.handleVisibilityChange,
+      );
+      attached = true;
+    }
+    if (attached) {
+      this.platformListenersAttached = true;
+    }
+  }
+
+  // Detaches the platform wake signals so HMR disposal and test resets leave
+  // no orphaned listeners behind.
+  private detachPlatformListeners(): void {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.handleOnline);
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener(
+        "visibilitychange",
+        this.handleVisibilityChange,
+      );
+    }
+    this.platformListenersAttached = false;
+  }
+
+  // Releases platform wake signals plus any pending reconnect and the cached
+  // socket so module replacement leaves no orphaned listeners, timers, or
+  // sockets behind. Subscribers stay owned by their mounted views: the next
+  // subscribe re-dials on demand, while a stale timer or socket must never
+  // outlive the module and dial after replacement.
+  public dispose(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const closing = this.ws;
+    this.ws = null;
+    this.isConnecting = false;
+    if (closing) {
+      try {
+        closing.close();
+      } catch {
+        // Teardown is best-effort; a stubbed socket may throw on close.
+      }
+    }
+    this.detachPlatformListeners();
   }
 
   public connect() {
@@ -531,7 +611,8 @@ class SharedWebSocketClient {
 
   // Forces a fresh upgrade so the new token is presented immediately. The old
   // handle is detached before close so its asynchronous onclose cannot clobber
-  // the replacement socket.
+  // the replacement socket. Private forced-redial primitive; views reach it
+  // only through the single public retryConnection entry below.
   private reconnectNow(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -548,6 +629,13 @@ class SharedWebSocketClient {
       }
     }
     this.connect();
+  }
+
+  // Sole public retry entry for views: delegates to the private forced redial
+  // so hook consumers never reach into the reconnect primitive directly and a
+  // user gesture dials immediately instead of waiting out the backoff timer.
+  public retryConnection(): void {
+    this.reconnectNow();
   }
 
   public subscribe(
@@ -628,6 +716,11 @@ class SharedWebSocketClient {
     }
     this.ws = null;
     this.isConnecting = false;
+    // Clear the platform wake signals so repeated resets never stack
+    // duplicates across HMR and test re-runs, then re-arm exactly one copy
+    // so online/visible redial keeps working after the reset.
+    this.detachPlatformListeners();
+    this.attachPlatformListeners();
   }
 }
 
@@ -689,8 +782,21 @@ export function useSharedWebSocket(onMessage?: MessageHandler, onClose?: () => v
     return unsubscribe;
   }, [wantsMessage, wantsClose, wantsOpen]);
 
-  return {
-    sendMessage: (payload: unknown) => sharedWebSocket.send(payload),
-    isOpen: () => sharedWebSocket.isOpen(),
-  };
+  // Memoized against the singleton so hook consumers see stable identities
+  // across renders; fresh closures here would churn isOpen/retryConnection
+  // and re-trigger poll and reconnect effects every render.
+  const sendMessage = useCallback(
+    (payload: unknown) => sharedWebSocket.send(payload),
+    [],
+  );
+  const isOpen = useCallback(() => sharedWebSocket.isOpen(), []);
+  const retryConnection = useCallback(
+    () => sharedWebSocket.retryConnection(),
+    [],
+  );
+
+  return useMemo(
+    () => ({ sendMessage, isOpen, retryConnection }),
+    [sendMessage, isOpen, retryConnection],
+  );
 }
