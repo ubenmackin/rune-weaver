@@ -220,6 +220,60 @@ public struct IndexRunSummary: Sendable, Equatable {
     }
 }
 
+/// Lightweight snapshot of an in-flight index run for polling surfaces.
+///
+/// Returned by ``IndexCoordinator/liveTotals``; nil when no run is in flight.
+/// Carries cumulative counts plus the active phase and stage tokens so a
+/// menu-bar or dashboard poll can render liveness without touching run state.
+public struct IndexLiveTotals: Sendable, Equatable {
+    /// What caused the run.
+    public let trigger: IndexRunTrigger
+    /// Active phase.
+    public let phase: IndexPhase
+    /// Active source stage, or nil for discovering and committing frames.
+    public let stage: IndexSourceKind?
+    /// Items examined across completed work plus observed in-flight progress.
+    public let scanned: Int
+    /// Documents written across completed stages.
+    public let indexed: Int
+    /// Milliseconds elapsed since the run began.
+    public let elapsedMs: Int
+    /// Last relative item reported, for the display `current` field.
+    public let current: String?
+    /// Instant the run began.
+    public let startedAt: Date
+
+    /// Creates a live snapshot.
+    /// - Parameters:
+    ///   - trigger: What caused the run.
+    ///   - phase: Active phase.
+    ///   - stage: Active source stage, or nil.
+    ///   - scanned: Items examined.
+    ///   - indexed: Documents written.
+    ///   - elapsedMs: Milliseconds elapsed since the run began.
+    ///   - current: Last relative item reported.
+    ///   - startedAt: Instant the run began.
+    public init(
+        trigger: IndexRunTrigger,
+        phase: IndexPhase,
+        stage: IndexSourceKind?,
+        scanned: Int,
+        indexed: Int,
+        elapsedMs: Int,
+        current: String?,
+        startedAt: Date
+    ) {
+        self.trigger = trigger
+        self.phase = phase
+        self.stage = stage
+        self.scanned = scanned
+        self.indexed = indexed
+        self.elapsedMs = elapsedMs
+        self.current = current
+        self.startedAt = startedAt
+    }
+}
+
 /// One run lifecycle event delivered to the reporting seam.
 ///
 /// Carries the per-run session identifier and stable event identifier so an
@@ -495,6 +549,19 @@ public actor IndexRunStateStore {
 public actor IndexCoordinator {
     /// Minimum spacing between progress frames (2 Hz), shared with `ToolProgress`.
     static let minimumFrameInterval: TimeInterval = Double(ToolProgress.minimumReportIntervalNanoseconds) / 1_000_000_000
+    /// Heartbeat cadence for stalled runs, bypassing the frame floor.
+    ///
+    /// A run that makes no progress still emits a liveness frame on this
+    /// cadence so a slow IMAP fetch, embedding batch, or vision turn never
+    /// looks wedged. Heartbeats reuse the coordinator emit path, so they carry
+    /// the same elapsed, rate, cumulative counts, and phase/stage tokens.
+    /// The nanosecond form below derives from this single value so the two
+    /// can never drift apart.
+    static let heartbeatInterval: TimeInterval = 2.0
+    /// Heartbeat cadence in nanoseconds, derived for `Task.sleep`.
+    static var heartbeatIntervalNanoseconds: UInt64 {
+        UInt64(heartbeatInterval * 1_000_000_000)
+    }
 
     /// Index policy gating sources and budgets. Mutable so a settings save can
     /// hot-reload the next run without rebuilding stages or restarting.
@@ -529,6 +596,28 @@ public actor IndexCoordinator {
     private var running = false
     /// Instant of the last emitted liveness frame.
     private var lastFrameAt: Date?
+    /// Trigger of the run in flight, for the live snapshot and heartbeats.
+    private var liveTrigger: IndexRunTrigger?
+    /// Instant the run in flight began, for elapsed and rate math.
+    private var liveStartedAt: Date?
+    /// Active phase of the run in flight.
+    private var livePhase: IndexPhase?
+    /// Active source stage, or nil for discovering and committing frames.
+    private var liveStage: IndexSourceKind?
+    /// Cumulative items examined, including observed in-flight stage progress.
+    private var liveScanned = 0
+    /// Cumulative documents written across completed stages.
+    private var liveIndexed = 0
+    /// Cumulative items deliberately skipped across completed stages.
+    private var liveSkipped = 0
+    /// Cumulative items that could not be processed across completed stages.
+    private var liveErrors = 0
+    /// Cumulative chunks written with an embedding across completed stages.
+    private var liveVectorChunks = 0
+    /// Cumulative chunks written without an embedding across completed stages.
+    private var liveKeywordChunks = 0
+    /// Last relative item reported, for the display `current` field.
+    private var liveCurrent: String?
 
     /// Creates an index coordinator.
     /// - Parameters:
@@ -563,6 +652,32 @@ public actor IndexCoordinator {
     /// Whether a run is currently in flight.
     public var isRunning: Bool {
         running
+    }
+
+    /// Lightweight snapshot of the run in flight, or nil when idle.
+    ///
+    /// Reads only the cached live counters so menu-bar and dashboard polling
+    /// never touches run state, the document store, or the watermark. Nil once
+    /// the run settles.
+    /// - Returns: The live snapshot, or nil when no run is in flight.
+    public var liveTotals: IndexLiveTotals? {
+        guard running,
+              let trigger = liveTrigger,
+              let startedAt = liveStartedAt,
+              let phase = livePhase
+        else { return nil }
+        let timestamp = now()
+        let elapsedMs = max(0, Int(timestamp.timeIntervalSince(startedAt) * 1000))
+        return IndexLiveTotals(
+            trigger: trigger,
+            phase: phase,
+            stage: liveStage,
+            scanned: liveScanned,
+            indexed: liveIndexed,
+            elapsedMs: elapsedMs,
+            current: liveCurrent,
+            startedAt: startedAt
+        )
     }
 
     /// Updates the live index policy so saved `[index]` values take effect without a restart.
@@ -662,7 +777,9 @@ public actor IndexCoordinator {
     /// Runs in the run task's context so Task cancellation from `cancel()` is
     /// observed at the next per-batch checkpoint. A failing stage is counted
     /// and the pass continues; cancellation stops between batches, leaving
-    /// committed work for the next run.
+    /// committed work for the next run. A heartbeat task re-emits the current
+    /// cumulative totals on ``heartbeatInterval`` so a stalled stage never
+    /// looks wedged, and the live snapshot stays fresh for polling surfaces.
     /// - Parameters:
     ///   - trigger: What caused the run.
     ///   - sessionID: Per-run session identifier for the log row.
@@ -676,7 +793,7 @@ public actor IndexCoordinator {
         startedAt: Date
     ) async -> IndexRunSummary {
         var totals = Totals()
-
+        resetLiveState(trigger: trigger, startedAt: startedAt)
         await reporter.runStarted(IndexRunEvent(
             id: eventID,
             sessionID: sessionID,
@@ -686,36 +803,162 @@ public actor IndexCoordinator {
             timestamp: startedAt
         ))
         await emit(phase: .discovering, totals: totals, startedAt: startedAt, force: true)
+        let heartbeat = startHeartbeat(startedAt: startedAt)
+        let ranAny = await runEnabledStages(totals: &totals, startedAt: startedAt)
+        activeStage = nil
+        // Join the heartbeat before the committing frame so a stale wake
+        // between the committing emit and clearLiveState cannot re-emit the
+        // prior phase after it (phase regression/out-of-order frame). No defer
+        // here: the explicit cancel plus join below is the single teardown
+        // path, and a deferred cancel would only fire as a no-op after it.
+        heartbeat.cancel()
+        await heartbeat.value
+        return await finishRun(
+            trigger: trigger,
+            sessionID: sessionID,
+            eventID: eventID,
+            startedAt: startedAt,
+            totals: totals,
+            ranAny: ranAny
+        )
+    }
 
+    /// Resets the cached live counters for a fresh run.
+    ///
+    /// Centralized so the run entry and the live snapshot read from one place;
+    /// polling surfaces observe these fields without touching run state.
+    /// - Parameters:
+    ///   - trigger: What caused the run.
+    ///   - startedAt: Instant the run began.
+    private func resetLiveState(trigger: IndexRunTrigger, startedAt: Date) {
+        liveTrigger = trigger
+        liveStartedAt = startedAt
+        livePhase = .discovering
+        liveStage = nil
+        liveScanned = 0
+        liveIndexed = 0
+        liveSkipped = 0
+        liveErrors = 0
+        liveVectorChunks = 0
+        liveKeywordChunks = 0
+        liveCurrent = nil
+    }
+
+    /// Starts the stalled-run heartbeat re-emitting current totals.
+    ///
+    /// A slow fetch or embedding batch still proves liveness on this cadence
+    /// by reusing the coordinator emit path with identical tokens and counts.
+    /// - Parameter startedAt: Instant the run began.
+    /// - Returns: The heartbeat task, cancelled when the run settles.
+    private func startHeartbeat(startedAt: Date) -> Task<Void, Never> {
+        Task<Void, Never> {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanoseconds)
+                if Task.isCancelled {
+                    break
+                }
+                await self.emitHeartbeat(startedAt: startedAt)
+            }
+        }
+    }
+
+    /// Runs every enabled stage in canonical order, folding reports into totals.
+    ///
+    /// A failing stage is counted and the pass continues so one bad source
+    /// never aborts remaining work; cancellation stops between stages with
+    /// committed batches kept for the next run to resume from.
+    /// - Parameters:
+    ///   - totals: Running counts folded across stages.
+    ///   - startedAt: Instant the run began.
+    /// - Returns: Whether any stage produced work or a counted failure.
+    private func runEnabledStages(totals: inout Totals, startedAt: Date) async -> Bool {
         var ranAny = false
         for stage in orderedStages where stage.isEnabled {
             if cancelFlag.isSet || Task.isCancelled {
                 break
             }
-            activeStage = stage
-            let phase: IndexPhase = stage.kind == .vision ? .embedding : .extracting
-            await emit(phase: phase, stage: stage.kind, totals: totals, startedAt: startedAt, force: true)
-            let flag = cancelFlag
-            let cancellationProbe: @Sendable () -> Bool = { flag.isSet || Task.isCancelled }
-            do {
-                let report = try await stage.run(reporter: progress, isCancelled: cancellationProbe)
-                ranAny = true
-                totals.add(report)
-                if cancelFlag.isSet || Task.isCancelled {
-                    break
-                }
-            } catch is CancellationError {
-                cancelFlag.set()
+            let didRun = await executeStage(stage, totals: &totals, startedAt: startedAt)
+            ranAny = ranAny || didRun
+            if cancelFlag.isSet || Task.isCancelled {
                 break
-            } catch {
-                ranAny = true
-                totals.errors += 1
-                totals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
             }
-            activeStage = nil
         }
-        activeStage = nil
+        return ranAny
+    }
 
+    /// Executes one source stage and folds its report into the running totals.
+    ///
+    /// Stage frames carry per-stage counts, so progress is offset by the totals
+    /// at stage start to keep the live snapshot cumulative and monotonic.
+    /// - Parameters:
+    ///   - stage: Source stage to run.
+    ///   - totals: Running counts to fold the report into.
+    ///   - startedAt: Instant the run began.
+    /// - Returns: Whether the stage contributed work or a counted failure.
+    private func executeStage(
+        _ stage: any IndexSourceStage,
+        totals: inout Totals,
+        startedAt: Date
+    ) async -> Bool {
+        activeStage = stage
+        let phase: IndexPhase = stage.kind == .vision ? .embedding : .extracting
+        livePhase = phase
+        liveStage = stage.kind
+        await emit(phase: phase, stage: stage.kind, totals: totals, startedAt: startedAt, force: true)
+        let flag = cancelFlag
+        let cancellationProbe: @Sendable () -> Bool = { flag.isSet || Task.isCancelled }
+        let sink = progress
+        let baseScanned = totals.scanned
+        let baseIndexed = totals.indexed
+        let stageReporter: ToolProgressReporter = { frame in
+            await self.observeStageProgress(frame, baseScanned: baseScanned, baseIndexed: baseIndexed)
+            await sink(frame)
+        }
+        defer { activeStage = nil }
+        do {
+            let report = try await stage.run(reporter: stageReporter, isCancelled: cancellationProbe)
+            totals.add(report)
+            liveScanned = max(liveScanned, totals.scanned)
+            liveIndexed = max(liveIndexed, totals.indexed)
+            liveSkipped = totals.skipped
+            liveErrors = totals.errors
+            liveVectorChunks = totals.vectorChunks
+            liveKeywordChunks = totals.keywordChunks
+            if let item = report.lastItem {
+                liveCurrent = item
+            }
+            return true
+        } catch is CancellationError {
+            cancelFlag.set()
+            return false
+        } catch {
+            totals.errors += 1
+            totals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
+            liveErrors = totals.errors
+            return true
+        }
+    }
+
+    /// Finalizes a run into its summary, watermark, and completion broadcast.
+    ///
+    /// Committing progress, the durable watermark, and the terminal frame all
+    /// derive here so the stage loop stays focused on sequencing alone.
+    /// - Parameters:
+    ///   - trigger: What caused the run.
+    ///   - sessionID: Per-run session identifier for the log row.
+    ///   - eventID: Stable event identifier for start and completion events.
+    ///   - startedAt: Instant the run began.
+    ///   - totals: Accumulated counts across stages.
+    ///   - ranAny: Whether any stage produced work or a counted failure.
+    /// - Returns: A summary describing the pass.
+    private func finishRun(
+        trigger: IndexRunTrigger,
+        sessionID: UUID,
+        eventID: UUID,
+        startedAt: Date,
+        totals: Totals,
+        ranAny: Bool
+    ) async -> IndexRunSummary {
         let finishedAt = now()
         let cancelled = cancelFlag.isSet || Task.isCancelled
         let status: IndexRunStatus = if cancelled {
@@ -725,8 +968,9 @@ public actor IndexCoordinator {
         } else {
             .ok
         }
-
         if !cancelled {
+            livePhase = .committing
+            liveStage = nil
             await emit(phase: .committing, totals: totals, startedAt: startedAt, force: true)
         }
         let stats = try? await store?.stats()
@@ -752,7 +996,6 @@ public actor IndexCoordinator {
             skippedReason: nil
         )
         await emitFinal(summary: summary, startedAt: startedAt)
-
         await reporter.runCompleted(IndexRunEvent(
             id: eventID,
             sessionID: sessionID,
@@ -763,7 +1006,69 @@ public actor IndexCoordinator {
             response: Self.detailLine(summary),
             durationMs: durationMs
         ))
+        clearLiveState()
         return summary
+    }
+
+    /// Clears the cached live counters once a run settles.
+    ///
+    /// Polling surfaces read nil as idle, so clearing here unmounts the live
+    /// strip without persisting any post-run summary.
+    private func clearLiveState() {
+        liveTrigger = nil
+        liveStartedAt = nil
+        livePhase = nil
+        liveStage = nil
+        liveScanned = 0
+        liveIndexed = 0
+        liveSkipped = 0
+        liveErrors = 0
+        liveVectorChunks = 0
+        liveKeywordChunks = 0
+        liveCurrent = nil
+    }
+
+    /// Folds one stage progress frame into the cached live counters.
+    ///
+    /// Stage frames carry per-stage counts, so they are offset by the completed
+    /// totals at stage start to keep the live snapshot cumulative. The cached
+    /// values only move forward so a late or duplicate frame never rewinds the
+    /// snapshot or a heartbeat derived from it.
+    /// - Parameters:
+    ///   - frame: Frame reported by the active stage.
+    ///   - baseScanned: Completed scanned total when the stage started.
+    ///   - baseIndexed: Completed indexed total when the stage started.
+    private func observeStageProgress(_ frame: ToolProgress, baseScanned: Int, baseIndexed: Int) {
+        let cumulativeScanned = baseScanned + frame.scanned
+        let cumulativeIndexed = baseIndexed + frame.matched
+        if cumulativeScanned > liveScanned {
+            liveScanned = cumulativeScanned
+        }
+        if cumulativeIndexed > liveIndexed {
+            liveIndexed = cumulativeIndexed
+        }
+        if let current = frame.current {
+            liveCurrent = current
+        }
+    }
+
+    /// Emits one heartbeat frame, bypassing the cadence floor.
+    ///
+    /// Reuses the coordinator emit path so the heartbeat carries the same
+    /// elapsed, rate, cumulative counts, current item, and phase/stage tokens
+    /// as any other frame. No-ops when no run is in flight.
+    /// - Parameter startedAt: Instant the run began.
+    private func emitHeartbeat(startedAt: Date) async {
+        guard running, let phase = livePhase else { return }
+        var snapshot = Totals()
+        snapshot.scanned = liveScanned
+        snapshot.indexed = liveIndexed
+        snapshot.skipped = liveSkipped
+        snapshot.errors = liveErrors
+        snapshot.vectorChunks = liveVectorChunks
+        snapshot.keywordChunks = liveKeywordChunks
+        snapshot.lastItem = liveCurrent
+        await emit(phase: phase, stage: liveStage, totals: snapshot, startedAt: startedAt, force: true)
     }
 
     /// Requests cancellation of the run in flight.

@@ -42,8 +42,18 @@ import type {
   WSToolProgressFrame,
 } from "../hooks/useSharedWebSocket";
 import { formatRelativeAgo } from "../relativeTime";
-import { AlertTriangleIcon, StopIcon, TrashIcon } from "./icons";
+import {
+  AlertTriangleIcon,
+  IndexCommitIcon,
+  IndexDiscoverIcon,
+  IndexReadingIcon,
+  IndexVectorIcon,
+  IndexVisionIcon,
+  StopIcon,
+  TrashIcon,
+} from "./icons";
 import Modal from "./Modal";
+import MarkdownText from "./MarkdownText";
 import { ToastStack } from "./Toast";
 import { useToastStack } from "../hooks/useToastStack";
 
@@ -89,6 +99,71 @@ export function isFullDiskAccessError(detail: string | null | undefined): boolea
 export function hasFullDiskAccessError(errors: unknown): boolean {
   if (!Array.isArray(errors)) return false;
   return errors.some((detail) => typeof detail === "string" && isFullDiskAccessError(detail));
+}
+
+// Collapsed row budget for the last-errors list. Past this count the list
+// shows a show-all toggle so a noisy pass cannot push the charts below the
+// fold while a short failure still reads in full.
+export const INDEX_LAST_ERRORS_COLLAPSED_COUNT = 3;
+
+// Preview budget for one last-error line. Past this length the row renders a
+// truncated preview with an expand control so a path-heavy failure cannot
+// stretch the status card while the full text stays one click away.
+export const INDEX_LAST_ERROR_PREVIEW_CHARS = 180;
+
+// Dedupes the string[] last-errors payload in first-seen order so a repeated
+// engine line reads once. Non-string entries degrade to skipped rather than
+// rendering a blank row or crashing the slice below.
+export function dedupeIndexErrors(errors: unknown): string[] {
+  if (!Array.isArray(errors)) return [];
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const entry of errors) {
+    if (typeof entry !== "string") continue;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+// Display list for the last-errors card: deduped lines with the raw Full Disk
+// Access bullet suppressed whenever the guided onboarding renders, since the
+// guidance is the formatted form of that same failure and keeping both would
+// read as a duplicate. No backend shape change — the engine still sends
+// string[] and this stays a frontend-only projection.
+export function resolveDisplayIndexErrors(errors: unknown): string[] {
+  const deduped = dedupeIndexErrors(errors);
+  if (hasFullDiskAccessError(deduped)) {
+    return deduped.filter((detail) => !isFullDiskAccessError(detail));
+  }
+  return deduped;
+}
+
+// Truncated preview for one long error line, keeping the full text on title
+// for hover. Short lines pass through untouched so the common case never
+// gains an expand control.
+export function truncateIndexError(detail: string): string {
+  if (detail.length <= INDEX_LAST_ERROR_PREVIEW_CHARS) return detail;
+  return `${detail.slice(0, INDEX_LAST_ERROR_PREVIEW_CHARS)}…`;
+}
+
+// Whether one error line needs the expand control. Kept beside the truncate
+// helper so the row and the tests share one length rule.
+export function isLongIndexError(detail: string): boolean {
+  return typeof detail === "string" && detail.length > INDEX_LAST_ERROR_PREVIEW_CHARS;
+}
+
+// Short stable digest for one error line, used for React keys so a
+// kilobyte-long failure never becomes a full-text key. Collisions only reuse
+// a row element, never drop an entry, because the visible position joins the
+// key at the call site.
+export function hashIndexError(detail: string): string {
+  let hash = 5381;
+  for (let i = 0; i < detail.length; i += 1) {
+    hash = ((hash << 5) + hash + detail.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16);
 }
 
 // Ordered index phases, mirroring IndexPhase on the engine. The live progress
@@ -164,9 +239,9 @@ export function indexStepsForFrame(
 }
 
 // Done/active/pending state for one explained step: the live step stays
-// active, every other visited step reads done, and the rest stay pending. The
-// completed summary reuses the same rule with no active step, so every visited
-// step renders checked and the rest stay pending.
+// active, every other visited step reads done, and the rest stay pending.
+// The strip only mounts while a run is in flight, so the rule doubles as the
+// live intra-run state without any post-run persistence.
 export function resolveIndexStepStatus(
   stepID: string,
   activeStep: string | null | undefined,
@@ -176,6 +251,29 @@ export function resolveIndexStepStatus(
   const has =
     visited instanceof Set ? visited.has(stepID) : Array.isArray(visited) ? visited.includes(stepID) : false;
   return has ? "done" : "pending";
+}
+
+// Per-step glyph for the horizontal live strip. Icons stay in the shared set
+// so chat and index surfaces reuse one stroke style with no extra dependency.
+export const INDEX_STEP_ICONS: Record<string, typeof IndexDiscoverIcon> = {
+  discovering: IndexDiscoverIcon,
+  extracting: IndexReadingIcon,
+  embedding: IndexVectorIcon,
+  vision: IndexVisionIcon,
+  committing: IndexCommitIcon,
+};
+
+// Scanned items-per-second for the active mini-card: scanned work over elapsed
+// time, labeled explicitly so the active card never reads as indexed work.
+// Returns null when the rate cannot read honestly (no time or no work yet) so
+// the card omits it instead of rendering a jittering zero.
+export function formatIndexRate(scanned: number, elapsedMs: number): string | null {
+  if (!Number.isFinite(scanned) || !Number.isFinite(elapsedMs)) return null;
+  if (scanned <= 0 || elapsedMs <= 0) return null;
+  const perSecond = scanned / (elapsedMs / 1000);
+  if (!Number.isFinite(perSecond) || perSecond <= 0) return null;
+  const rounded = perSecond >= 10 ? Math.round(perSecond) : Math.round(perSecond * 10) / 10;
+  return `${rounded} scanned/s`;
 }
 
 // Chart palette drawn from the dashboard theme tokens: the vector segment uses
@@ -289,16 +387,39 @@ export function resolveIndexSourceContent(
   });
 }
 
-// Bar width for one chart row scaled by its document share of the largest
-// bucket, so the longest bar always fills the track and the rest read as real
-// proportions instead of binary on/off fills. Shared by the per-source and
-// extraction-outcome charts, whose scaling rule is identical, keeping
-// single-document buckets visible next to large ones.
-export function indexSourceBarWidth(documents: number, maxDocuments: number): string {
+// Sanitized share of the largest bucket for one chart row: the true
+// documents/max fraction capped to 0..1, degrading malformed, negative, or
+// zero inputs to zero so bars and labels never render NaN or Infinity.
+// Shared by the width and percent helpers below, whose guard rule is
+// identical and must stay in one place.
+export function indexShare(documents: number, maxDocuments: number): number {
   const docs = Number.isFinite(documents) && documents > 0 ? documents : 0;
   const max = Number.isFinite(maxDocuments) && maxDocuments > 0 ? maxDocuments : 0;
-  if (max <= 0 || docs <= 0) return "0%";
-  return `${Math.min(100, Math.max(4, Math.round((docs / max) * 100)))}%`;
+  if (max <= 0 || docs <= 0) return 0;
+  return Math.min(1, docs / max);
+}
+
+// Visual track width for one chart row scaled by its document share of the
+// largest bucket, so the longest bar always fills the track and the rest read
+// as real proportions instead of binary on/off fills. Shared by the per-source
+// and extraction-outcome charts, whose scaling rule is identical. Floored to a
+// 4% minimum so single-document buckets stay visible next to large ones; the
+// honest percent label comes from indexSourceBarPercent below, never this
+// floored width.
+export function indexSourceBarWidth(documents: number, maxDocuments: number): string {
+  const share = indexShare(documents, maxDocuments);
+  if (share <= 0) return "0%";
+  return `${Math.min(100, Math.max(4, Math.round(share * 100)))}%`;
+}
+
+// Honest share-of-largest percent label for one chart row: the true rounded
+// share with no visibility floor, so a 1/100 bucket labels 1% while its track
+// still paints at the floored width above. Shared by the per-source and
+// extraction-outcome charts alongside indexSourceBarWidth.
+export function indexSourceBarPercent(documents: number, maxDocuments: number): string {
+  const share = indexShare(documents, maxDocuments);
+  if (share <= 0) return "0%";
+  return `${Math.min(100, Math.round(share * 100))}%`;
 }
 
 // Display label for an extraction-outcome token, falling back to the engine's
@@ -433,9 +554,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const actionBusy = action !== null;
   const [cancelBusy, setCancelBusy] = useState(false);
   const [liveProgress, setLiveProgress] = useState<IndexLiveProgress | null>(null);
-  // Client-side visited steps for the explained phase list. Marked as frames
-  // arrive, kept through the terminal broadcast as a post-run mini-summary of
-  // what ran, and cleared only when the next run starts or the store resets.
+  // Client-side visited steps for the live strip. Marked as frames arrive and
+  // cleared when the run settles, so the strip mounts only while a run is in
+  // flight and never persists as a post-run summary.
   const [visitedSteps, setVisitedSteps] = useState<Set<string>>(
     () => new Set<string>(),
   );
@@ -464,6 +585,46 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // error slot so a confirm blocked by an in-flight run explains itself
   // instead of landing as a dead click.
   const [resetError, setResetError] = useState<string | null>(null);
+  // Last-errors display state: collapsed to a few rows with a show-all toggle,
+  // plus per-row expansion for long lines. The expanded set is pruned to the
+  // current display list on every status change so stale full-text entries
+  // cannot accumulate unbounded across polls.
+  const [showAllErrors, setShowAllErrors] = useState(false);
+  const [expandedErrors, setExpandedErrors] = useState<Set<string>>(
+    () => new Set<string>(),
+  );
+  // Brief accent flash for committed-growth updates. Each flag marks one stat
+  // value whose committed total changed on the latest snapshot, so Size /
+  // Documents / Chunks flash once per change while Last-indexed, the pills,
+  // and the last-run strip never carry the class.
+  const [flashedStats, setFlashedStats] = useState({
+    size: false,
+    documents: false,
+    chunks: false,
+  });
+  // Previous committed totals for the flash comparison. Null until the first
+  // snapshot so the initial mount never flashes; every later snapshot diffs
+  // against this ref before it is replaced.
+  const prevTotalsRef = useRef<{
+    bytes: number;
+    documents: number;
+    chunks: number;
+  } | null>(null);
+  // Pending flash-clear timers. Tracked so unmount clears them instead of
+  // setting state on a detached panel after the brief flash window.
+  const flashTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  // Per-stat flash generations so overlapping committed-growth polls extend
+  // the accent window instead of truncating it: each growth bumps its stat's
+  // generation, and a timer only clears when no newer growth arrived first
+  // (broadcast plus poll can land within one 1200ms window).
+  const flashGenerationRef = useRef({ size: 0, documents: 0, chunks: 0 });
+  useEffect(() => {
+    const pending = flashTimersRef.current;
+    return () => {
+      for (const timer of pending) clearTimeout(timer);
+      pending.length = 0;
+    };
+  }, []);
 
   // True whenever the engine reports a run in flight or this panel started one,
   // so progress frames are only adopted during a real run. The Status pill
@@ -477,16 +638,16 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   useEffect(() => {
     statusRunningRef.current = status?.running === true;
   }, [status?.running]);
-  // Fallback so a run with no frame never freezes on "Starting…": after ~3s
-  // without live progress the header reads "Running…" until a frame arrives
-  // or the run settles.
+  // Fallback so a run with no frame never freezes on "Starting…": well under
+  // two seconds without live progress the header reads "Running…" until a
+  // frame arrives or the run settles.
   const [staleRunning, setStaleRunning] = useState(false);
   useEffect(() => {
     if (!progressActive || liveProgress || cancelling) {
       setStaleRunning(false);
       return;
     }
-    const timer = setTimeout(() => setStaleRunning(true), 3000);
+    const timer = setTimeout(() => setStaleRunning(true), 1500);
     return () => clearTimeout(timer);
   }, [progressActive, liveProgress, cancelling]);
 
@@ -528,14 +689,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // tokens plus counters and the relative current item. The tail is
   // relative-only server-side, so the panel never renders a filesystem path
   // even though the frame could not carry one. Each frame also marks its
-  // explained step visited so the phase list can render a post-run summary.
-  // A new index run clears the visited set so the summary never leaks across
-  // passes, while the terminal broadcast keeps it and drops only the live
-  // counts. Any run broadcast — a pass starting elsewhere or reaching its
-  // terminal summary — reloads status so the cards stay fresh without a manual
-  // Refresh control. A launch-triggered nightly or catch-up pass this panel
-  // did not start also raises an auto-start notice naming the trigger display
-  // label explicitly.
+  // explained step visited so earlier phases read done while the live step
+  // stays active. The terminal broadcast clears both the live counts and the
+  // visited set, so the strip unmounts on settle with no persistence. Any run
+  // broadcast — a pass starting elsewhere or reaching its terminal summary —
+  // reloads status so the cards stay fresh without a manual Refresh control.
+  // A launch-triggered nightly or catch-up pass this panel did not start also
+  // raises an auto-start notice naming the trigger display label explicitly.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as WSGenericFrame).type;
@@ -561,9 +721,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           }
         }
         if (frameType === "run_completed" && isIndexKind) {
-          // The pass settled: keep the visited steps as a checked summary and
-          // drop only the live counts, so idle still shows what ran.
+          // The pass settled: drop the live counts and the visited steps so
+          // the strip unmounts instead of persisting as a summary.
           setLiveProgress(null);
+          setVisitedSteps(new Set<string>());
           if (cancellingRef.current) {
             // The cancelling window ends on the terminal broadcast. A run this
             // panel started still resolves through its awaiting run request with
@@ -632,7 +793,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // run started from another tab still settles the panel's busy state. The
   // cancelling window settles the same way when the broadcast is missed: the
   // status probe is authoritative, so a remote cancel still reaches its kept-
-  // work notice and re-enables Run without a separate Stopped variant.
+  // work notice and re-enables Run without a separate Stopped variant. The
+  // live strip unmounts here as well, so a missed broadcast never strands
+  // stale steps on screen. A locally started run keeps its live line until
+  // its awaiting request settles, so the probe never wipes an active flight.
   useEffect(() => {
     if (status?.running !== false) return;
     // Capture locality before clearing: a run this panel started resolves
@@ -642,35 +806,94 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     if (wasLocalRun) {
       runActiveRef.current = false;
       setRunActive(false);
+    } else {
+      setLiveProgress(null);
+      setVisitedSteps(new Set<string>());
     }
     if (!cancellingRef.current) return;
     if (!wasLocalRun) {
       setNotice(
         "Index run cancelled: committed work is kept and the next run resumes from there.",
       );
-      setLiveProgress(null);
     }
     cancellingRef.current = false;
     setCancelling(false);
   }, [status?.running]);
 
-  // Re-polls status while the cancelling window is open so a missed broadcast
-  // still observes the settled run promptly instead of stranding the pill.
+  // Committed-growth poll while a run is in flight: polls status about every
+  // two seconds while progress is active or the cancelling window is open, so
+  // the cards track committed batches between frames with no idle polling.
+  // Pauses while the tab is hidden and clears on settle through the effect
+  // deps. Mount, broadcast, and after-action loads stay untouched; the
+  // frame-driven live line remains the in-flight source while this poll covers
+  // committed growth, and a missed broadcast still settles promptly.
   useEffect(() => {
-    if (!cancelling) return;
+    if (!progressActive && !cancelling) return;
     const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       void loadStatus();
     }, 2000);
     return () => clearInterval(timer);
-  }, [cancelling, loadStatus]);
+  }, [progressActive, cancelling, loadStatus]);
+
+  // Flags Size/Documents/Chunks values whose committed totals grew on the
+  // latest mid-run snapshot, then clears the accent after a brief window. The
+  // first snapshot seeds the baseline with no flash. Only committed growth
+  // while a run is in flight flashes: idle reloads update the baseline
+  // silently, and decreases (prune/reset shrinkage) never flash, so the
+  // accent stays a committed-growth signal instead of firing on any delta.
+  useEffect(() => {
+    if (!status) return;
+    const next = {
+      bytes: status.bytes,
+      documents: status.documents,
+      chunks: status.chunks,
+    };
+    const previous = prevTotalsRef.current;
+    prevTotalsRef.current = next;
+    if (!previous) return;
+    if (!progressActive && !cancelling) return;
+    const changed = {
+      size: next.bytes > previous.bytes,
+      documents: next.documents > previous.documents,
+      chunks: next.chunks > previous.chunks,
+    };
+    if (!changed.size && !changed.documents && !changed.chunks) return;
+    const generations = flashGenerationRef.current;
+    if (changed.size) generations.size += 1;
+    if (changed.documents) generations.documents += 1;
+    if (changed.chunks) generations.chunks += 1;
+    const captured = { ...generations };
+    setFlashedStats((current) => ({
+      size: current.size || changed.size,
+      documents: current.documents || changed.documents,
+      chunks: current.chunks || changed.chunks,
+    }));
+    const timer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      const latest = flashGenerationRef.current;
+      setFlashedStats((current) => ({
+        size: latest.size === captured.size ? false : current.size,
+        documents: latest.documents === captured.documents ? false : current.documents,
+        chunks: latest.chunks === captured.chunks ? false : current.chunks,
+      }));
+      // Drop the fired timer so every committed-growth poll does not leak one
+      // entry in the pending list; unmount still clears any timer in flight.
+      const pending = flashTimersRef.current;
+      const finished = pending.indexOf(timer);
+      if (finished >= 0) {
+        pending.splice(finished, 1);
+      }
+    }, 1200);
+    flashTimersRef.current.push(timer);
+  }, [status, progressActive, cancelling]);
 
   // Starts an on-demand run and awaits its terminal summary. Progress frames
   // keep the live line honest while the request is in flight; the summary fills
   // the notice so a skipped run explains why instead of appearing silent.
   // A locally cancelled run settles here with its full counts, clearing the
   // cancelling window without overwriting the detailed summary. The visited
-  // set clears here so the previous summary collapses before the new frames
-  // rebuild it.
+  // set clears at both ends so the strip mounts fresh and unmounts on settle
+  // with no persistence.
   const handleRun = async () => {
     if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     runActiveRef.current = true;
@@ -698,6 +921,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       setRunActive(false);
       setAction(null);
       setLiveProgress(null);
+      setVisitedSteps(new Set<string>());
     }
   };
 
@@ -815,23 +1039,71 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // Explained step active right now, or null once the run settles. The idle
-  // summary keeps the visited set with no active step so every visited step
-  // renders checked and no step carries live counts.
+  // Explained step active right now, or null without live progress. Visited
+  // steps mark earlier phases done while the run is in flight; both clear on
+  // settle so the strip never persists idle.
   const activeStep = liveProgress
     ? resolveIndexStep(liveProgress.phase, liveProgress.stage)
     : null;
-  // The Progress card stays visible while a run is in flight and while a
-  // completed summary exists. Idle with a previous run keeps the checked steps
-  // without live counts; a fresh panel with no run yet stays hidden, and the
-  // next run or a reset collapses the summary back to hidden before new steps
-  // arrive.
+  // The live strip mounts only while a run is in flight — engine status, local
+  // flight, cancelling window, or live counts — and unmounts on settle with no
+  // persistence. The Status pill below stays the single running indicator.
+  // One flag drives both the outer block and the shimmer so the two can never
+  // disagree about liveness.
   const showProgressBlock =
-    progressActive ||
-    liveProgress != null ||
-    cancelling ||
-    visitedSteps.size > 0;
-  const showLiveLiveness = progressActive || liveProgress != null || cancelling;
+    progressActive || liveProgress != null || cancelling;
+  // Live header text without any pill: stage-aware title plus counts while
+  // frames arrive, Cancelling… during the stop window, and the Running…
+  // fallback when a run stays without frames.
+  const liveHeaderText = cancelling
+    ? liveProgress
+      ? `Cancelling… ${liveProgress.scanned} scanned · ${liveProgress.indexed} indexed · ${formatToolProgressElapsedMs(liveProgress.elapsedMs)}`
+      : "Cancelling…"
+    : liveProgress
+      ? `${resolveIndexLiveTitle(liveProgress.phase, liveProgress.stage)} ${liveProgress.scanned} scanned · ${liveProgress.indexed} indexed · ${formatToolProgressElapsedMs(liveProgress.elapsedMs)}`
+      : staleRunning
+        ? "Running…"
+        : "Starting…";
+  // Fresh stores have no last run yet: while the first pass is in flight the
+  // strip header already proves liveness, so the last-run line names it
+  // instead of reading as an empty history.
+  const lastRunText =
+    status?.lastRun == null && showProgressBlock
+      ? "First run in progress…"
+      : describeIndexLastRun(status?.lastRun ?? null);
+  // Last-errors card projection: deduped lines with the raw Full Disk Access
+  // bullet suppressed whenever the guided onboarding renders, since the
+  // guidance is the formatted form of that failure. The guidance flag reads
+  // the raw payload so it still fires when every line is a denial and the
+  // visible list collapses to guidance-only.
+  const displayErrors = resolveDisplayIndexErrors(status?.lastErrors);
+  const showFdaGuidance = hasFullDiskAccessError(status?.lastErrors);
+  const hasErrorBlock = displayErrors.length > 0 || showFdaGuidance;
+  const visibleErrors = showAllErrors
+    ? displayErrors
+    : displayErrors.slice(0, INDEX_LAST_ERRORS_COLLAPSED_COUNT);
+  // Prunes the expanded set to the current display list so a failure that
+  // ages out of lastErrors cannot keep its full text alive in state, bounding
+  // the set to the visible rows instead of every error ever seen.
+  useEffect(() => {
+    const allowed = new Set(resolveDisplayIndexErrors(status?.lastErrors));
+    setExpandedErrors((previous) => {
+      if (previous.size === 0) return previous;
+      let pruned = false;
+      for (const entry of previous) {
+        if (!allowed.has(entry)) {
+          pruned = true;
+          break;
+        }
+      }
+      if (!pruned) return previous;
+      const next = new Set<string>();
+      for (const entry of previous) {
+        if (allowed.has(entry)) next.add(entry);
+      }
+      return next;
+    });
+  }, [status?.lastErrors]);
 
   return (
     <section className="panel indexing-panel" aria-label="Index Status">
@@ -917,98 +1189,91 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         ) : null}
       </div>
 
-      {/* Explained phase steps + shimmer while a run is in flight: the engine
-          publishes no fraction, so an animated shimmer proves liveness. The
-          header names the active stage ("Reading files…", "Vectorizing…",
-          "Describing images…") with live counts, falling back to "Running…"
-          when no frame arrives within ~3s so it never freezes on "Starting…".
-          A cancelling run keeps the same block with a Cancelling pill and
-          header so every Running indicator flips together until the run
-          settles. After the terminal broadcast the visited steps stay visible
-          as a checked summary with no live counts until the next run or a
-          reset collapses them. */}
+      {/* Live strip while a run is in flight: the engine publishes no fraction,
+          so an animated shimmer proves liveness. The header is live text only
+          — stage-aware title plus counts — falling back to Running… well under
+          two seconds so it never freezes on Starting…. The Status pill below
+          stays the single running indicator. The strip unmounts on settle with
+          no persistence. */}
       {showProgressBlock && (
         <div className="index-live-progress" data-testid="index-live-progress">
-          <div className="card">
-            <h3>Progress</h3>
-            <div className="index-live-header">
-              <span
-                className={`status-pill ${cancelling || showLiveLiveness ? "running" : "ok"}`}
-              >
-                {cancelling ? "Cancelling" : showLiveLiveness ? "Indexing" : "Completed"}
-              </span>
-              {cancelling ? (
-                <span className="muted text-xs">
-                  Cancelling…
-                  {liveProgress ? (
+          <div
+            className="index-live-header muted text-xs"
+            data-testid="index-live-header"
+          >
+            {liveHeaderText}
+          </div>
+          {/* Horizontal wrapping mini-cards in run order: the live step stays
+              active with its counts, visited steps read done, and the rest stay
+              pending. The active card also carries elapsed, rate, and the
+              truncated current file. Unknown wording holds the previous
+              position. */}
+          <ol
+            className="index-live-strip"
+            data-testid="index-live-strip"
+          >
+            {INDEX_STEPS.map((step) => {
+              const stepStatus = resolveIndexStepStatus(step.id, activeStep, visitedSteps);
+              const isActiveStep = stepStatus === "active";
+              const isDoneStep = stepStatus === "done";
+              const StepIcon = INDEX_STEP_ICONS[step.id] ?? IndexDiscoverIcon;
+              const rate =
+                isActiveStep && liveProgress
+                  ? formatIndexRate(liveProgress.scanned, liveProgress.elapsedMs)
+                  : null;
+              return (
+                <li
+                  key={step.id}
+                  className={`index-mini-card ${stepStatus}`}
+                  title={step.title}
+                  data-testid={`index-mini-card-${step.id}`}
+                  aria-label={`${step.label}: ${stepStatus}`}
+                  aria-current={isActiveStep ? "step" : undefined}
+                >
+                  <span className="index-mini-card-top">
+                    <span className="index-mini-card-icon" aria-hidden="true">
+                      <StepIcon size={16} />
+                    </span>
+                    <span className="index-mini-card-label">{step.label}</span>
+                    {isDoneStep ? <span aria-hidden="true">✓</span> : null}
+                  </span>
+                  {isActiveStep && liveProgress ? (
                     <>
-                      {" "}
-                      {liveProgress.scanned} scanned · {liveProgress.indexed}{" "}
-                      indexed · {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
-                    </>
-                  ) : null}
-                </span>
-              ) : liveProgress ? (
-                <span className="muted text-xs">
-                  {resolveIndexLiveTitle(liveProgress.phase, liveProgress.stage)}{" "}
-                  {liveProgress.scanned} scanned · {liveProgress.indexed} indexed ·{" "}
-                  {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
-                </span>
-              ) : progressActive ? (
-                <span className="muted text-xs">{staleRunning ? "Running…" : "Starting…"}</span>
-              ) : (
-                <span className="muted text-xs">Completed — steps visited this run</span>
-              )}
-            </div>
-            {/* Explained steps in run order: the live step stays active with
-                its counts, visited steps read done, and the rest stay pending.
-                The completed summary reuses the same list with no active step,
-                so visited steps render checked and carry no live counts.
-                Unknown wording holds the previous position. */}
-            <ol className="index-phase-steps">
-              {INDEX_STEPS.map((step) => {
-                const stepStatus = resolveIndexStepStatus(step.id, activeStep, visitedSteps);
-                const isActiveStep = stepStatus === "active";
-                const isDoneStep = stepStatus === "done";
-                return (
-                  <li key={step.id} className={stepStatus} title={step.title}>
-                    {isDoneStep ? <span aria-hidden="true">✓ </span> : null}
-                    <span>{step.label}</span>
-                    {isActiveStep && liveProgress ? (
                       <span
-                        className="muted text-xs"
+                        className="index-mini-card-counts"
                         data-testid={`index-step-counts-${step.id}`}
                       >
-                        {" "}
-                        {liveProgress.scanned} scanned · {liveProgress.indexed} indexed
+                        {liveProgress.scanned} scanned · {liveProgress.indexed} indexed ·{" "}
+                        {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
+                        {rate ? ` · ${rate}` : null}
                       </span>
-                    ) : null}
-                  </li>
-                );
-              })}
-            </ol>
-            {liveProgress?.message ? (
-              <div className="index-live-message">{liveProgress.message}</div>
-            ) : null}
-            {liveProgress?.current ? (
-              <div
-                className="tool-progress-current"
-                data-testid="index-progress-current"
-                title={liveProgress.current}
-              >
-                current: {liveProgress.current}
-              </div>
-            ) : null}
-            {showLiveLiveness ? (
-              <div
-                className="tool-progress-shimmer"
-                data-testid="index-progress-shimmer"
-                role="progressbar"
-                aria-label="Index run in progress"
-                aria-valuetext="In progress"
-              />
-            ) : null}
-          </div>
+                      {liveProgress.current ? (
+                        <span
+                          className="tool-progress-current index-mini-card-current"
+                          data-testid={`index-step-current-${step.id}`}
+                          title={liveProgress.current}
+                        >
+                          {liveProgress.current}
+                        </span>
+                      ) : null}
+                    </>
+                  ) : null}
+                </li>
+              );
+            })}
+          </ol>
+          {liveProgress?.message ? (
+            <div className="index-live-message muted text-xs">{liveProgress.message}</div>
+          ) : null}
+          {showProgressBlock ? (
+            <div
+              className="tool-progress-shimmer"
+              data-testid="index-progress-shimmer"
+              role="progressbar"
+              aria-label="Index run in progress"
+              aria-valuetext="In progress"
+            />
+          ) : null}
         </div>
       )}
 
@@ -1033,13 +1298,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           <>
             {/* Last-run strip distilled from the newest index-kind run log row:
                 status plus indexed/scanned/errors and the finish time, so the
-                latest outcome reads without opening run history. */}
+                latest outcome reads without opening run history. A first run
+                in flight names itself instead of reading as empty history. */}
             <div
               className="index-last-run"
               data-testid="index-last-run"
               style={{ marginTop: 12 }}
             >
-              <span className="muted text-sm">{describeIndexLastRun(status.lastRun ?? null)}</span>
+              <span className="muted text-sm">{lastRunText}</span>
             </div>
             <div
               className="index-stat-cards"
@@ -1052,19 +1318,31 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             >
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Size</div>
-                <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>
+                <div
+                  className={flashedStats.size ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  data-testid="index-stat-size-value"
+                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
+                >
                   {formatIndexBytes(status.bytes)}
                 </div>
               </div>
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Documents</div>
-                <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>
+                <div
+                  className={flashedStats.documents ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  data-testid="index-stat-documents-value"
+                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
+                >
                   {status.documents}
                 </div>
               </div>
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
                 <div className="muted text-xs">Chunks</div>
-                <div style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}>
+                <div
+                  className={flashedStats.chunks ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
+                  data-testid="index-stat-chunks-value"
+                  style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
+                >
                   {status.chunks}
                 </div>
                 <div className="muted text-xs" style={{ marginTop: 2 }}>
@@ -1107,14 +1385,96 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               </div>
             ) : null}
 
-            {status.lastErrors.length > 0 ? (
-              <div className="index-errors" aria-label="Last index errors">
+            {hasErrorBlock ? (
+              <div
+                className="index-errors"
+                aria-label="Last index errors"
+                data-testid="index-last-errors"
+              >
                 <h4>Last errors</h4>
-                <ul>
-                  {status.lastErrors.map((detail, index) => (
-                    <li key={`${index}-${detail.slice(0, 24)}`}>{detail}</li>
-                  ))}
-                </ul>
+                {displayErrors.length > 0 ? (
+                  <>
+                    {/* Raw error rows own this list so guidance steps below never
+                        read as raw rows when scoped by test id or assistive tech. */}
+                    <ul data-testid="index-error-list">
+                      {visibleErrors.map((detail, index) => {
+                        // Per-row expansion looks up the full error text so the
+                        // toggle survives the show-all slice and status polls,
+                        // while the React key stays a short hash plus position
+                        // so kilobyte-long failures never become full-text keys.
+                        // The test id uses the visible position so it stays
+                        // O(1) and stable under the show-all slice.
+                        const expanded = expandedErrors.has(detail);
+                        const long = isLongIndexError(detail);
+                        const visibleText = expanded ? detail : truncateIndexError(detail);
+                        // Truncated previews render as plain text: slicing raw
+                        // markdown at the preview budget can split emphasis,
+                        // code, or link syntax and misrender through MarkdownText,
+                        // so only the expanded full text keeps markdown.
+                        const showPlainPreview = long && !expanded;
+                        return (
+                          <li
+                            key={`index-error-${index}-${hashIndexError(detail)}`}
+                            data-testid={`index-last-error-${index}`}
+                            className="index-error-row"
+                          >
+                            <span className="index-error-icon" aria-hidden="true">
+                              <AlertTriangleIcon size={14} />
+                            </span>
+                            <span
+                              className="index-error-text-wrap"
+                              title={long && !expanded ? detail : undefined}
+                            >
+                              {showPlainPreview ? (
+                                <span className="index-error-text">{visibleText}</span>
+                              ) : (
+                                <MarkdownText
+                                  text={visibleText}
+                                  className="index-error-text"
+                                />
+                              )}
+                            </span>
+                            {long ? (
+                              <button
+                                type="button"
+                                className="ghost index-error-expand"
+                                aria-expanded={expanded}
+                                onClick={() => {
+                                  setExpandedErrors((previous) => {
+                                    const next = new Set(previous);
+                                    if (next.has(detail)) {
+                                      next.delete(detail);
+                                    } else {
+                                      next.add(detail);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                              >
+                                <span>{expanded ? "Show less" : "Show more"}</span>
+                              </button>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                    {displayErrors.length > INDEX_LAST_ERRORS_COLLAPSED_COUNT ? (
+                      <button
+                        type="button"
+                        className="ghost index-errors-toggle"
+                        data-testid="index-errors-toggle"
+                        aria-expanded={showAllErrors}
+                        onClick={() => setShowAllErrors((previous) => !previous)}
+                      >
+                        <span>
+                          {showAllErrors
+                            ? "Show fewer"
+                            : `Show all ${displayErrors.length} errors`}
+                        </span>
+                      </button>
+                    ) : null}
+                  </>
+                ) : null}
                 {/* Guided onboarding for the Full Disk Access denial: macOS
                     offers no prompt API, so the denial only surfaces at
                     run time. The button navigates the top frame to the exact
@@ -1122,8 +1482,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     blocked popup for this system scheme. The steps name both
                     grants because macOS attributes the read to the host
                     process: RuneWeaver.app for the app, the terminal emulator
-                    for rune-weaver serve. */}
-                {hasFullDiskAccessError(status.lastErrors) ? (
+                    for rune-weaver serve. The raw denial bullet stays hidden
+                    while this renders — the guidance is its formatted form. */}
+                {showFdaGuidance ? (
                   <div
                     className="index-fda-guidance"
                     data-testid="index-fda-guidance"
@@ -1255,39 +1616,77 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 gap: 8,
               }}
             >
-              {sourceContent.map((source) => (
-                <div
-                  key={source.kind}
-                  style={{ display: "flex", alignItems: "center", gap: 8 }}
-                >
-                  <span className="text-xs muted" style={{ width: 72 }}>
-                    {sourceLabel(source.kind)}
-                  </span>
+              {/* Share-of-largest heading keeps the scaling honest: every bar
+                  below is a fraction of the largest bucket, not of the total. */}
+              <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+                Documents by source — share of largest
+              </h4>
+              {sourceContent.map((source) => {
+                // The track floors tiny buckets to 4% so they stay visible while
+                // the label keeps the honest rounded share. Zero-document rows
+                // skip the track entirely so an empty bar never reads as
+                // missing paint.
+                const barWidth = indexSourceBarWidth(
+                  source.documents,
+                  maxSourceDocuments,
+                );
+                const barLabel = indexSourceBarPercent(
+                  source.documents,
+                  maxSourceDocuments,
+                );
+                const isEmpty = source.documents <= 0;
+                return (
                   <div
-                    style={{
-                      flex: 1,
-                      height: 10,
-                      borderRadius: 5,
-                      background: CHART_TRACK_COLOR,
-                      overflow: "hidden",
-                    }}
+                    key={source.kind}
+                    style={{ display: "flex", alignItems: "center", gap: 8 }}
                   >
-                    <div
-                      data-testid={`index-bar-${source.kind}`}
-                      aria-label={`${sourceLabel(source.kind)} ${source.documents} documents`}
-                      style={{
-                        width: indexSourceBarWidth(source.documents, maxSourceDocuments),
-                        height: "100%",
-                        borderRadius: 5,
-                        background: CHART_VECTOR_COLOR,
-                      }}
-                    />
+                    <span className="text-xs muted" style={{ width: 72 }}>
+                      {sourceLabel(source.kind)}
+                    </span>
+                    {isEmpty ? (
+                      <span
+                        className="text-xs muted"
+                        data-testid={`index-bar-empty-${source.kind}`}
+                      >
+                        No data yet
+                      </span>
+                    ) : (
+                      <div
+                        style={{
+                          flex: 1,
+                          height: 10,
+                          borderRadius: 5,
+                          background: CHART_TRACK_COLOR,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div
+                          data-testid={`index-bar-${source.kind}`}
+                          aria-label={`${sourceLabel(source.kind)} ${source.documents} documents`}
+                          style={{
+                            width: barWidth,
+                            height: "100%",
+                            borderRadius: 5,
+                            background: CHART_VECTOR_COLOR,
+                          }}
+                        />
+                      </div>
+                    )}
+                    {isEmpty ? null : (
+                      <span
+                        className="text-xs muted"
+                        data-testid={`index-bar-pct-${source.kind}`}
+                        style={{ minWidth: 40, textAlign: "right" }}
+                      >
+                        {barLabel}
+                      </span>
+                    )}
+                    <span className="text-xs muted" style={{ minWidth: 120, textAlign: "right" }}>
+                      {source.documents} docs · {source.chunks} chunks · {formatIndexBytes(source.bytes)}
+                    </span>
                   </div>
-                  <span className="text-xs muted" style={{ minWidth: 120, textAlign: "right" }}>
-                    {source.documents} docs · {source.chunks} chunks · {formatIndexBytes(source.bytes)}
-                  </span>
-                </div>
-              ))}
+                );
+              })}
             </div>
 
             <div
@@ -1300,42 +1699,80 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 gap: 8,
               }}
             >
+              {/* Same share-of-largest contract as the source bars so both
+                  breakdowns read as proportions of their own largest bucket. */}
+              <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
+                Extraction outcomes — share of largest
+              </h4>
               {extractRows.length > 0 ? (
-                extractRows.map((row) => (
-                  <div
-                    key={row.status}
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
-                  >
-                    <span className="text-xs muted" style={{ width: 96 }}>
-                      {extractStatusLabel(row.status)}
-                    </span>
+                extractRows.map((row) => {
+                  // Floored width keeps tiny buckets visible; the label keeps
+                  // the honest rounded share like the source bars above.
+                  const barWidth = indexSourceBarWidth(
+                    row.documents,
+                    maxExtractDocuments,
+                  );
+                  const barLabel = indexSourceBarPercent(
+                    row.documents,
+                    maxExtractDocuments,
+                  );
+                  const isEmpty = row.documents <= 0;
+                  return (
                     <div
-                      style={{
-                        flex: 1,
-                        height: 10,
-                        borderRadius: 5,
-                        background: CHART_TRACK_COLOR,
-                        overflow: "hidden",
-                      }}
+                      key={row.status}
+                      style={{ display: "flex", alignItems: "center", gap: 8 }}
                     >
-                      <div
-                        data-testid={`index-extract-bar-${row.status}`}
-                        aria-label={`${extractStatusLabel(row.status)} ${row.documents} documents`}
-                        style={{
-                          width: indexSourceBarWidth(row.documents, maxExtractDocuments),
-                          height: "100%",
-                          borderRadius: 5,
-                          background: CHART_EXTRACT_COLOR,
-                        }}
-                      />
+                      <span className="text-xs muted" style={{ width: 96 }}>
+                        {extractStatusLabel(row.status)}
+                      </span>
+                      {isEmpty ? (
+                        <span
+                          className="text-xs muted"
+                          data-testid={`index-extract-empty-${row.status}`}
+                        >
+                          No data yet
+                        </span>
+                      ) : (
+                        <div
+                          style={{
+                            flex: 1,
+                            height: 10,
+                            borderRadius: 5,
+                            background: CHART_TRACK_COLOR,
+                            overflow: "hidden",
+                          }}
+                        >
+                          <div
+                            data-testid={`index-extract-bar-${row.status}`}
+                            aria-label={`${extractStatusLabel(row.status)} ${row.documents} documents`}
+                            style={{
+                              width: barWidth,
+                              height: "100%",
+                              borderRadius: 5,
+                              background: CHART_EXTRACT_COLOR,
+                            }}
+                          />
+                        </div>
+                      )}
+                      {isEmpty ? null : (
+                        <span
+                          className="text-xs muted"
+                          data-testid={`index-extract-pct-${row.status}`}
+                          style={{ minWidth: 40, textAlign: "right" }}
+                        >
+                          {barLabel}
+                        </span>
+                      )}
+                      <span className="text-xs muted" style={{ minWidth: 64, textAlign: "right" }}>
+                        {row.documents} docs
+                      </span>
                     </div>
-                    <span className="text-xs muted" style={{ minWidth: 64, textAlign: "right" }}>
-                      {row.documents} docs
-                    </span>
-                  </div>
-                ))
+                  );
+                })
               ) : (
-                <span className="text-xs muted">No extraction breakdown yet</span>
+                <span className="text-xs muted" data-testid="index-extract-empty">
+                  No data yet
+                </span>
               )}
             </div>
           </div>
