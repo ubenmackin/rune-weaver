@@ -1,5 +1,8 @@
 // Rune Weaver Dashboard — Collapsible session history sidebar for Chat.
 // Lists past sessions, supports instant switching, inline renaming, and session deletion.
+// Renders as a static inline column on desktop and as a dismissible fixed drawer
+// with a dim backdrop on handheld widths, closing on backdrop, Escape, or
+// session select with focus returned to the History trigger.
 
 import {
   useCallback,
@@ -9,6 +12,7 @@ import {
   useState,
   type FormEvent,
   type MouseEvent,
+  type RefObject,
 } from "react";
 import {
   deleteSession,
@@ -26,6 +30,7 @@ import {
   runSessionID,
 } from "../approvalsSession";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import type { WSGenericFrame } from "../hooks/useSharedWebSocket";
 import {
@@ -54,6 +59,19 @@ interface SessionSidebarProps {
   // other sessions. The sidebar merges these with polled run rows so a
   // background turn stays badged even before its run record persists.
   runningSessionIDs?: Set<string> | string[] | null;
+  // Live handheld flag from the owner. When omitted the sidebar reads the
+  // shared breakpoint hook directly so standalone renders still adapt; the
+  // explicit prop exists so the chat view can pass its own live value and
+  // tests can pin a breakpoint without mocking matchMedia internals.
+  isMobile?: boolean;
+  // Close-only dismissal for the mobile drawer. Falls back to the toggle
+  // when omitted so existing callers keep working; unlike the toggle it can
+  // never reopen a closed drawer from backdrop or Escape paths.
+  onClose?: () => void;
+  // History trigger owned by the chat view. The drawer returns focus here
+  // after every mobile dismissal so keyboard users land back on the control
+  // that opened the drawer instead of losing focus to the document body.
+  historyButtonRef?: RefObject<HTMLButtonElement | null>;
 }
 
 interface GroupedSessions {
@@ -125,7 +143,14 @@ function isScheduledSession(session: SessionSummary | null | undefined): boolean
   return typeof raw === "string" && raw.trim().toLowerCase() === "scheduler";
 }
 
-export default function SessionSidebar({
+// Resolved props for the presentational view. The handheld flag is required
+// here because the wrapper below resolves it from exactly one source: either
+// the explicit owner prop or the shared hook, never both at once.
+type SessionSidebarViewProps = Omit<SessionSidebarProps, "isMobile"> & {
+  isMobile: boolean;
+};
+
+function SessionSidebarView({
   currentSessionID,
   onSelectSession,
   onNewSession,
@@ -134,7 +159,12 @@ export default function SessionSidebar({
   refreshTrigger,
   pendingApprovals,
   runningSessionIDs,
-}: SessionSidebarProps) {
+  isMobile,
+  onClose,
+  historyButtonRef,
+}: SessionSidebarViewProps) {
+  // Drawer container for initial focus when the mobile drawer opens.
+  const sidebarRef = useRef<HTMLElement | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<SessionFilter>(getSavedSessionFilter);
@@ -153,6 +183,154 @@ export default function SessionSidebar({
   const focusRenameInput = useCallback((node: HTMLInputElement | null) => {
     if (node) node.focus();
   }, []);
+
+  // Pending focus-restore timer for mobile dismissal. Stored in a ref so an
+  // unmount before the tick can clear it instead of focusing a detached node.
+  const focusTimeoutRef = useRef<ReturnType<typeof window.setTimeout> | null>(
+    null,
+  );
+
+  // Returns focus to the History trigger after a mobile dismissal. The lookup
+  // stays inside the timeout because the trigger only mounts once the drawer
+  // closes; reading the ref while the drawer is still open would see no
+  // mounted trigger and skip the focus entirely, stranding keyboard users on
+  // the document body.
+  const returnFocusToTrigger = useCallback(() => {
+    if (focusTimeoutRef.current !== null) {
+      window.clearTimeout(focusTimeoutRef.current);
+    }
+    focusTimeoutRef.current = window.setTimeout(() => {
+      focusTimeoutRef.current = null;
+      historyButtonRef?.current?.focus();
+    }, 0);
+  }, [historyButtonRef]);
+
+  useEffect(() => {
+    return () => {
+      if (focusTimeoutRef.current !== null) {
+        window.clearTimeout(focusTimeoutRef.current);
+        focusTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // Close-only dismissal shared by every mobile exit path. Prefers the
+  // explicit onClose so backdrop and Escape can never reopen the drawer by
+  // reusing the toggle; the toggle remains as the fallback for callers that
+  // never provided onClose.
+  const requestDrawerClose = useCallback(() => {
+    if (onClose) {
+      onClose();
+      return;
+    }
+    if (isOpen) {
+      onToggleOpen();
+    }
+  }, [onClose, isOpen, onToggleOpen]);
+
+  // Backdrop dismissal for the mobile drawer. Desktop never renders a
+  // backdrop so this handler only fires on handheld widths; it closes the
+  // drawer and returns focus to the History trigger.
+  const handleBackdropClick = useCallback(() => {
+    requestDrawerClose();
+    returnFocusToTrigger();
+  }, [requestDrawerClose, returnFocusToTrigger]);
+
+  // Escape dismissal for the mobile drawer. Registered on window only while
+  // the handheld drawer is open so desktop Escape handling elsewhere never
+  // double-fires; closes the drawer and returns focus to the History trigger.
+  const handleEscape = useCallback(
+    (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      requestDrawerClose();
+      returnFocusToTrigger();
+    },
+    [requestDrawerClose, returnFocusToTrigger],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !isMobile) return;
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [isOpen, isMobile, handleEscape]);
+
+  // Modal drawer contract for the handheld drawer: trap Tab inside the drawer
+  // while it is open so keyboard focus cannot reach the dimmed background
+  // behind the backdrop, and lock background scroll until dismissal. Desktop
+  // stays an inline column with no trap or lock. The trap wraps first-to-last
+  // so Shift+Tab on the first control lands on the last and Tab on the last
+  // lands on the first; an empty drawer consumes Tab rather than leaking it.
+  useEffect(() => {
+    if (!isOpen || !isMobile) return;
+    const container = sidebarRef.current;
+    if (!container) return;
+    function handleTabTrap(event: KeyboardEvent) {
+      if (event.key !== "Tab") return;
+      if (!container) return;
+      const focusable = Array.from(
+        container.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (event.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !container.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    window.addEventListener("keydown", handleTabTrap);
+    return () => window.removeEventListener("keydown", handleTabTrap);
+  }, [isOpen, isMobile]);
+
+  // Locks background scroll while the handheld drawer is open and restores
+  // the prior value on close or unmount so the page behind the dim backdrop
+  // cannot scroll under the drawer.
+  useEffect(() => {
+    if (!isOpen || !isMobile) return;
+    if (typeof document === "undefined") return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [isOpen, isMobile]);
+
+  // Moves focus into the drawer when it opens on mobile so keyboard and
+  // screen-reader users land inside the history list; desktop keeps its
+  // existing focus because the sidebar is always inline there. Guarded to the
+  // open transition so an already-open desktop sidebar never steals focus on
+  // mount or unrelated renders.
+  useEffect(() => {
+    if (!isOpen || !isMobile) return;
+    sidebarRef.current?.focus();
+  }, [isOpen, isMobile]);
+
+  // Session select that also dismisses the mobile drawer. Desktop keeps the
+  // inline sidebar open across switches; mobile closes it and returns focus
+  // to the History trigger. Fail-closed on empty identifiers: an invalid id
+  // never reaches the owner callback.
+  const handleSelectAndMaybeClose = useCallback(
+    (id: unknown) => {
+      if (typeof id !== "string" || id.trim().length === 0) return;
+      onSelectSession(id);
+      if (isMobile) {
+        requestDrawerClose();
+        returnFocusToTrigger();
+      }
+    },
+    [onSelectSession, isMobile, requestDrawerClose, returnFocusToTrigger],
+  );
 
   // Sessions with a turn still running on the engine while the user browses
   // elsewhere. Live broadcasts mark the start immediately while the shared
@@ -384,7 +562,7 @@ export default function SessionSidebar({
             <div
               key={session.id}
               className={`session-item ${isActive ? "active" : ""}`}
-              onClick={() => !isEditing && onSelectSession(session.id)}
+              onClick={() => !isEditing && handleSelectAndMaybeClose(session.id)}
               role="button"
               tabIndex={0}
               aria-label={`Open session ${session.title}`}
@@ -392,7 +570,7 @@ export default function SessionSidebar({
                 if (isEditing) return;
                 if (e.key === "Enter" || e.key === " ") {
                   e.preventDefault();
-                  onSelectSession(session.id);
+                  handleSelectAndMaybeClose(session.id);
                 }
               }}
             >
@@ -499,7 +677,29 @@ export default function SessionSidebar({
 
   return (
     <>
-      <aside className={`session-sidebar ${isOpen ? "open" : "collapsed"}`}>
+      {/* Dim backdrop for the handheld drawer. Mount follows the open state
+          alone while the stylesheet owns visibility: the handheld query
+          reveals it and the wide query keeps it hidden, so desktop never
+          shows a dim layer. A real button keeps the dismiss affordance
+          keyboard-operable (Enter/Space) alongside the Escape path instead of
+          hiding a clickable layer from assistive technology. */}
+      {isOpen ? (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          data-testid="sidebar-backdrop"
+          aria-label="Close history"
+          onClick={handleBackdropClick}
+        />
+      ) : null}
+      <aside
+        ref={sidebarRef}
+        tabIndex={-1}
+        aria-label="Session history"
+        role={isMobile && isOpen ? "dialog" : undefined}
+        aria-modal={isMobile && isOpen ? true : undefined}
+        className={`session-sidebar ${isOpen ? "open" : "collapsed"}`}
+      >
         <div className="sidebar-header">
           <button
             type="button"
@@ -618,4 +818,27 @@ export default function SessionSidebar({
       ) : null}
     </>
   );
+}
+
+// Hook-backed entry for standalone renders without an owner flag. Owns the
+// single MediaQueryList subscription for those renders only.
+function SessionSidebarHooked(
+  props: Omit<SessionSidebarProps, "isMobile"> & { isMobile?: undefined },
+) {
+  const hookIsMobile = useIsMobile();
+  return <SessionSidebarView {...props} isMobile={hookIsMobile} />;
+}
+
+export default function SessionSidebar({
+  isMobile: isMobileProp,
+  ...rest
+}: SessionSidebarProps) {
+  // Single-owner handheld truth: ChatView always passes its live `isMobile`
+  // flag, so render directly with no second subscription here. Only
+  // standalone renders without a prop mount the shared hook, keeping exactly
+  // one MediaQueryList listener per mounted sidebar.
+  if (isMobileProp !== undefined) {
+    return <SessionSidebarView {...rest} isMobile={isMobileProp} />;
+  }
+  return <SessionSidebarHooked {...rest} />;
 }

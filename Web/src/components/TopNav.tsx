@@ -14,19 +14,15 @@ import {
 } from "../api";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
 import {
-  ApprovalsIcon,
   BellIcon,
-  ChatIcon,
   ChevronDownIcon,
-  MemoryIcon,
   RuneGlyph,
-  RunsIcon,
-  SchedulesIcon,
   SearchIcon,
   SettingsIcon,
   StopIcon,
   UserIcon,
 } from "./icons";
+import { NAV_ITEMS, formatBadgeCount, normalizeBadgeCount } from "./navigationConfig";
 
 export type Tab = "chat" | "approvals" | "memory" | "runs" | "schedules" | "settings";
 
@@ -95,13 +91,25 @@ export default function TopNav({
     health?.searchURL ||
     DEFAULT_SEARCH_SEARXNG_URL;
 
-  const navItems: NavItemConfig[] = [
-    { id: "chat", label: "Chat", icon: ChatIcon },
-    { id: "approvals", label: "Approvals", icon: ApprovalsIcon, badge: approvalsBadge },
-    { id: "memory", label: "Memory", icon: MemoryIcon },
-    { id: "runs", label: "Runs", icon: RunsIcon, badge: runsBadge },
-    { id: "schedules", label: "Schedules", icon: SchedulesIcon },
-  ];
+  // Section tabs derive labels, ids, and icons from the shared navigation
+  // contract so desktop and mobile cannot drift. Badge wiring stays local so
+  // approvals and runs counts keep their existing behavior unchanged.
+  const badgeByTab: Partial<Record<Tab, number>> = {
+    approvals: approvalsBadge,
+    runs: runsBadge,
+  };
+  const navItems: NavItemConfig[] = NAV_ITEMS.map((item) => ({
+    id: item.id,
+    label: item.label,
+    icon: item.icon,
+    badge: badgeByTab[item.id] ?? 0,
+  }));
+  // Shared normalization keeps the bell badge floored through the single
+  // navigation-contract helper so desktop and mobile never drift; the
+  // normalized count feeds both the display string and the owning button's
+  // accessible name so fractional inputs announce what they render.
+  const normalizedWarnings = normalizeBadgeCount(warningsBadge);
+  const warningsDisplay = formatBadgeCount(normalizedWarnings);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -264,6 +272,18 @@ export default function TopNav({
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = currentTab === item.id;
+          // Normalized display keeps top and bottom bars identical through the
+          // shared contract helper: the floored non-negative count feeds both
+          // the capped display string and the owning button's accessible name
+          // so fractional inputs announce honestly. The badge pill itself is
+          // presentational (aria-hidden) because a bare aria-label on a
+          // generic span without a role is ignored by assistive tech.
+          const normalizedBadge = normalizeBadgeCount(item.badge ?? 0);
+          const badgeDisplay = formatBadgeCount(normalizedBadge);
+          const tabAccessibleLabel =
+            normalizedBadge > 0
+              ? `${item.label}, ${normalizedBadge} unread`
+              : item.label;
           return (
             <button
               key={item.id}
@@ -271,12 +291,13 @@ export default function TopNav({
               className={`top-nav-item ${isActive ? "active" : ""}`}
               onClick={() => onSelectTab(item.id)}
               aria-selected={isActive}
+              aria-label={tabAccessibleLabel}
             >
               <Icon size={16} className="nav-item-icon" />
               <span>{item.label}</span>
-              {item.badge && item.badge > 0 ? (
-                <span className="nav-badge" aria-label={`${item.badge} unread`}>
-                  {item.badge > 99 ? "99+" : item.badge}
+              {badgeDisplay ? (
+                <span className="nav-badge" aria-hidden="true">
+                  {badgeDisplay}
                 </span>
               ) : null}
             </button>
@@ -298,13 +319,17 @@ export default function TopNav({
               : "Enable browser notifications"
           }
           onClick={onRequestNotifications}
-          aria-label="Browser notifications"
+          aria-label={
+            normalizedWarnings > 0
+              ? `Browser notifications, ${normalizedWarnings} unread warnings`
+              : "Browser notifications"
+          }
         >
           <BellIcon size={16} />
-          {warningsBadge > 0 ? (
+          {warningsDisplay ? (
             <span
               className="nav-badge"
-              aria-label={`${warningsBadge} unread warnings`}
+              aria-hidden="true"
               style={{
                 position: "absolute",
                 top: "-8px",
@@ -312,7 +337,7 @@ export default function TopNav({
                 background: "#f59e0b",
               }}
             >
-              {warningsBadge > 99 ? "99+" : warningsBadge}
+              {warningsDisplay}
             </span>
           ) : null}
         </button>

@@ -496,7 +496,7 @@ a {
   border-radius: 12px;
   display: flex;
   flex-direction: column;
-  transition: width 0.2s ease, opacity 0.2s ease;
+  transition: width 0.2s ease, opacity 0.2s ease, transform 0.2s ease;
   overflow: hidden;
 }
 
@@ -506,6 +506,15 @@ a {
   border: none;
   opacity: 0;
   pointer-events: none;
+}
+
+/* Dim layer behind the handheld history drawer. Hidden by default so the
+ * desktop inline sidebar keeps zero backdrop; the mobile query below is the
+ * sole path that reveals it while the drawer is open. */
+.sidebar-backdrop {
+  display: none;
+  border: none;
+  padding: 0;
 }
 
 .sidebar-header {
@@ -3931,6 +3940,602 @@ button.danger:hover:not(:disabled) {
 @media (prefers-reduced-motion: reduce) {
   .index-stat-value-flash {
     animation: none;
+  }
+}
+
+/* ==========================================================================
+   Mobile Bottom Tab Bar + Slim Top (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Bottom bar owns the five canonical tabs on handheld widths. Fixed to the
+ * viewport bottom with safe-area clearance so the iOS home indicator never
+ * covers the touch targets. Hidden by default so desktop keeps top tabs only;
+ * the max-width query below is the sole path that reveals it. */
+.mobile-bottom-nav {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: calc(64px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  background: #15151b;
+  border-top: 1px solid var(--border-color);
+  z-index: 40;
+  display: none;
+  box-sizing: border-box;
+}
+
+/* Each tab keeps a 48px touch target (above the 44px minimum) with a 64px
+ * minimum width so five tabs share narrow screens without squeezing labels.
+ * The top border reserves the active indicator slot without shifting layout. */
+.mobile-bottom-tab {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 48px;
+  min-width: 64px;
+  padding: 6px 4px 4px;
+  background: transparent;
+  border: none;
+  border-top: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  position: relative;
+  transition: color 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+}
+
+.mobile-bottom-tab:hover {
+  color: #ffffff;
+}
+
+.mobile-bottom-tab:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: -2px;
+}
+
+/* Active tab reads as white text on a purple glow with a top indicator bar;
+ * the glyph itself takes the solid accent so icon and text stay distinct. */
+.mobile-bottom-tab.active {
+  color: #ffffff;
+  border-top-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+}
+
+.mobile-bottom-tab.active .mobile-bottom-tab-icon {
+  color: var(--accent-purple);
+}
+
+.mobile-bottom-tab-icon-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobile-bottom-tab-label {
+  font-size: 11px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+/* Unread badge floats above the icon's top-right so counts never push the
+ * label sideways. The numeric cap (99+) is applied in the navigation contract
+ * before render, so this rule only positions the pill. */
+.mobile-bottom-tab-badge {
+  position: absolute;
+  top: 4px;
+  left: calc(50% + 2px);
+  background: var(--accent-purple);
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Mobile reveals the bar as a space-around flex row; desktop explicitly keeps
+ * it hidden so wide viewports never show a duplicate tab surface. */
+@media (max-width: 640px) {
+  .mobile-bottom-nav {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-around;
+  }
+}
+
+@media (min-width: 641px) {
+  .mobile-bottom-nav {
+    display: none;
+  }
+}
+
+/* Slim mobile top: section links move to the bottom bar, leaving the glyph,
+ * compact title, bell, and an icon-only profile trigger. The profile menu
+ * stays absolutely anchored to the trigger with viewport-clamped width. */
+@media (max-width: 640px) {
+  .top-nav-links {
+    display: none;
+  }
+
+  .app-brand-title {
+    font-size: 14px;
+  }
+
+  /* Icon-only 32px circle: label, status dot, and chevron hide so only the
+   * user glyph remains centered. The aria-label on the trigger is untouched
+   * so assistive tech still announces the profile and settings menu. */
+  .profile-dropdown-btn {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    padding: 0;
+    border-radius: 50%;
+    justify-content: center;
+    gap: 0;
+  }
+
+  .profile-btn-label {
+    display: none;
+  }
+
+  .profile-dropdown-btn .status-dot {
+    display: none;
+  }
+
+  .profile-dropdown-btn .dropdown-chevron {
+    display: none;
+  }
+
+  .profile-dropdown-menu {
+    position: absolute;
+    right: 0;
+    min-width: 240px;
+    max-width: calc(100vw - 16px);
+  }
+
+  /* Handheld shell uses an exact 8px gutter on every side: the bottom adds
+   * the 64px bar plus an 8px gap and the home-indicator inset so the input
+   * never slides under the fixed bar while side gutters stay at 8px. */
+  .app-main-content {
+    padding: 8px 8px calc(72px + env(safe-area-inset-bottom));
+  }
+}
+
+/* ==========================================================================
+   Session History Drawer (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Handheld drawer sits between the 52px top nav and the 64px bottom bar with
+ * safe-area clearance, sliding in from the left above a dim backdrop. The
+ * fixed offsets keep the nav surfaces tappable while the drawer is open, and
+ * the width bound keeps the conversation partially visible on wide phones so
+ * the backdrop remains the single dismiss affordance alongside Escape. */
+@media (max-width: 640px) {
+  .session-sidebar {
+    position: fixed;
+    top: 52px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    left: 0;
+    width: min(320px, 85vw);
+    z-index: 50;
+    border-radius: 0;
+    border-right: 1px solid var(--border-color);
+    opacity: 1;
+    visibility: visible;
+  }
+
+  /* Closed drawer parks fully off-screen but stays mounted so the 200ms slide
+   * can animate on open; pointer events and visibility drop so off-screen
+   * controls never intercept taps or screen-reader focus while hidden. */
+  .session-sidebar.collapsed {
+    width: min(320px, 85vw);
+    padding: 0;
+    border: none;
+    transform: translateX(-100%);
+    opacity: 1;
+    pointer-events: none;
+    visibility: hidden;
+  }
+
+  /* Open drawer rests flush with the viewport edge with the same 200ms ease
+   * as the close path so both directions feel symmetric. */
+  .session-sidebar.open {
+    transform: translateX(0);
+    pointer-events: auto;
+    visibility: visible;
+  }
+
+  /* Dim sibling behind the drawer. One layer below the drawer but above the
+   * nav chrome so a tap anywhere outside the drawer dismisses it; the drawer
+   * itself never bubbles into this layer because the two are siblings. */
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+  }
+}
+
+/* Wide viewports keep the history list as a static flex child with zero
+ * backdrop. The explicit query mirrors the handheld ceiling above so exactly
+ * one layout owns the 640px boundary and the drawer rules can never leak
+ * onto desktop. */
+@media (min-width: 641px) {
+  .session-sidebar {
+    position: static;
+    width: 260px;
+    transform: none;
+    z-index: auto;
+    visibility: visible;
+  }
+
+  .session-sidebar.collapsed {
+    width: 0;
+    transform: none;
+    visibility: hidden;
+  }
+
+  .session-sidebar.open {
+    transform: none;
+    visibility: visible;
+  }
+
+  .sidebar-backdrop {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+   Full-Width Chat Shell (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Handheld chat spans the viewport with an exact 8px side gutter: the layout
+ * drops the desktop inter-column gap because the history list is a fixed
+ * drawer on small screens, and the height subtracts the 52px top nav plus
+ * the 64px bottom bar plus the 16px shell gutter so the input never slides
+ * under the fixed bar. The vh declaration stays as the fallback for engines
+ * without dynamic viewport units while dvh tracks the iOS toolbar. */
+@media (max-width: 640px) {
+  .chat-layout {
+    display: flex;
+    gap: 0;
+    height: calc(100vh - 52px - 64px - 16px - env(safe-area-inset-bottom));
+    height: calc(100dvh - 52px - 64px - 16px - env(safe-area-inset-bottom));
+    min-height: 0;
+    min-width: 0;
+  }
+
+  /* Single flex child fills the guttered shell; the tighter radius keeps the
+   * panel distinct from the viewport edge at 8px without wasting width. */
+  .chat-main-panel {
+    flex: 1;
+    min-width: 0;
+    border-radius: 10px;
+    overflow: hidden;
+  }
+
+  /* Compact stream padding keeps bubbles near full width on a 375px phone
+   * while preserving a readable rhythm between turns. */
+  .message-list {
+    padding: 8px;
+    gap: 10px;
+  }
+
+  /* Near-full-width bubbles: user turns keep a 5% trailing sliver for scan,
+   * assistant turns stretch edge to edge. Radius stays at the 12px desktop
+   * token so shape never shifts across breakpoints. */
+  .message {
+    border-radius: 12px;
+    min-width: 0;
+    box-sizing: border-box;
+  }
+
+  .message.user {
+    max-width: 95%;
+    align-self: flex-end;
+  }
+
+  .message.assistant {
+    max-width: 100%;
+    align-self: stretch;
+  }
+
+  /* Fail-closed overflow: long code and wide tables scroll inside the bubble
+   * instead of stretching the viewport, so one pasted file cannot break the
+   * 8px gutter on narrow screens. */
+  .message-text,
+  .markdown-content {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .markdown-content .chat-code-block-wrapper,
+  .markdown-content .chat-table-wrapper {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+
+  .markdown-content .chat-code-block {
+    overflow-x: auto;
+  }
+
+  /* Empty state stays a centered narrow column so the prompt never spans the
+   * full width on phones. */
+  .chat-empty-state {
+    margin: auto;
+    text-align: center;
+    max-width: 400px;
+  }
+}
+
+/* ==========================================================================
+   Chat Header + Input Row + Inline Approvals (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Handheld chat chrome wraps as one unit so the header, input row, and inline
+ * approval cards never overflow independently on narrow screens. Desktop rules
+ * above stay untouched; everything here is scoped to the handheld query. */
+@media (max-width: 640px) {
+  /* Header wraps so the title, session tag, History, and New Session never
+   * push each other off a 375px row; the tighter padding reclaims width for
+   * the actions while desktop spacing stays intact above the breakpoint. */
+  .chat-panel-header {
+    padding: 8px;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  /* Slightly smaller title keeps the wrapped header compact. */
+  .chat-panel-title h2 {
+    font-size: 15px;
+  }
+
+  /* Session tag truncates so a long identifier cannot shove header actions
+   * off-screen; the full value stays available on title for hover. */
+  .session-id-tag {
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Header actions stay tappable without taking the full input height, which
+   * would double the header once it wraps. Visibility itself stays owned by
+   * the chat view: History renders only while the drawer is closed and New
+   * Session always renders. */
+  .open-sidebar-btn,
+  .new-session-btn {
+    min-height: 36px;
+  }
+
+  /* Footer keeps the shell 8px gutter with a slimmer bottom so the input
+   * clears the fixed bottom bar without extra dead space. */
+  .chat-footer-box {
+    padding: 8px 8px 6px;
+  }
+
+  /* Input stacks: the textarea takes the full first row and the actions drop
+   * below, so neither squeezes the other on narrow screens. */
+  .chat-input-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  /* 16px blocks iOS auto-zoom on focus; the full-row basis puts the buttons
+   * on their own line while the height bounds keep long drafts from covering
+   * the message stream. Length itself stays enforced by the server
+   * MAX_CHAT_TEXT_LENGTH grapheme guard in the chat view, not by CSS. */
+  .chat-input-row textarea {
+    flex: 1 1 100%;
+    min-height: 56px;
+    max-height: 160px;
+    font-size: 16px;
+  }
+
+  /* Shared 44px targets clear the minimum touch size and stretch across the
+   * second row so Send, Steer, and Cancel stay reachable with thumbs. */
+  .chat-input-row .chat-send-btn,
+  .chat-input-row .chat-cancel-btn {
+    height: 44px;
+    min-height: 44px;
+    padding: 0 14px;
+    flex: 1 1 auto;
+  }
+
+  /* Inline approvals compress with the same gutter as the message stream so
+   * the cards align with bubbles instead of jutting past them. */
+  .inline-approval-list {
+    padding: 8px 8px 0;
+    gap: 8px;
+  }
+
+  .inline-approval-banner {
+    padding: 10px;
+    gap: 8px;
+  }
+
+  /* Actions wrap inside the card so Allow and Deny never overlap; the
+   * fail-closed invariant is layout-level here while decision logic stays
+   * untouched in the banner component. */
+  .inline-approval-actions {
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  /* Decision buttons keep touch size once wrapped onto their own lines. */
+  .inline-approval-actions .primary,
+  .inline-approval-actions .danger {
+    min-height: 44px;
+  }
+
+  /* Narrower basis with a zero minimum lets the split Allow control shrink
+   * on a 375px card; the desktop floor would otherwise overflow the gutter
+   * and force horizontal scrolling. */
+  .split-allow-group {
+    flex: 1 1 200px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* Chevron keeps a bounded tappable width so it never collapses under the
+   * main Allow face nor stretches the group past the card edge. */
+  .split-allow-chevron {
+    min-width: 40px;
+    max-width: 56px;
+  }
+
+  /* Duration menu stays viewport-clamped and right-anchored so long option
+   * labels cannot push it past the card edge on narrow screens. */
+  .split-allow-menu {
+    max-width: calc(100vw - 16px);
+    right: 0;
+  }
+
+  /* Profile menu re-affirms the slim-top clamp inside this unit so header,
+   * input, and approval checks share one viewport guarantee. */
+  .profile-dropdown-menu {
+    max-width: calc(100vw - 16px);
+    right: 0;
+  }
+}
+
+/* ==========================================================================
+   Condensed Footer Token Metadata (max-width 640px / min-width 641px)
+   ========================================================================== */
+
+/* Handheld summary stays out of the desktop row so wide viewports keep the
+ * four full metrics without a duplicate glanceable line; the detail block
+ * only exists while expanded, so its base style is the expanded layout. The
+ * desktop metrics wrapper uses contents so the four items plus dividers keep
+ * participating in the status-bar flex row directly; the queries below own
+ * the viewport guarantees. */
+.status-bar-mobile-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+
+.status-bar-desktop-metrics {
+  display: contents;
+}
+
+.status-bar-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  width: 100%;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.status-bar-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Expander keeps a real button so keyboard and screen-reader users get native
+ * activation; the base rule stays visible for the handheld branch while the
+ * wide-viewport query below is the single source that hides it on desktop. */
+.status-bar-details-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 14px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.status-bar-details-toggle:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+}
+
+.status-bar-details-toggle:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Handheld footer collapses to one glanceable line so the input keeps the
+ * screen on narrow phones; the desktop metrics wrapper hides as one unit so
+ * the glanceable line never duplicates Turn, Context, or Session below it. */
+@media (max-width: 640px) {
+  .status-bar-desktop-metrics {
+    display: none;
+  }
+
+  .status-bar-item--model {
+    display: none;
+  }
+
+  .chat-status-bar {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+  }
+
+  .status-bar-mobile-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+  }
+
+  .status-bar-details-toggle {
+    display: inline-flex;
+    min-height: 44px;
+    margin-left: auto;
+  }
+
+  .chat-status-bar.footer-expanded .status-bar-detail {
+    display: flex;
+  }
+
+  .status-bar-detail {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    width: 100%;
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+}
+
+/* Wide viewports keep the four full metrics with no expander; the explicit
+ * query mirrors the handheld ceiling above so exactly one layout owns the
+ * boundary and the condensed rules can never leak onto desktop. */
+@media (min-width: 641px) {
+  .status-bar-mobile-summary {
+    display: none;
+  }
+
+  .status-bar-detail {
+    display: none;
+  }
+
+  .status-bar-details-toggle {
+    display: none;
   }
 }
 
