@@ -310,5 +310,118 @@ describe("SessionSidebar", () => {
     await user.click(screen.getByRole("button", { name: "Scheduled" }));
     expect(screen.getByText("Nightly job")).toBeInTheDocument();
   });
+
+  it("exposes the mobile drawer as a modal dialog only while handheld and open", async () => {
+    const { rerender } = render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    await screen.findByText("Old title");
+    const dialog = screen.getByRole("dialog", { name: "Session history" });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+
+    // Closing the drawer drops the dialog semantics so the inline column
+    // never advertises a modal contract.
+    rerender(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen={false}
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    expect(screen.queryByRole("dialog", { name: "Session history" })).toBeNull();
+  });
+
+  it("keeps the desktop sidebar as an inline region with no dialog semantics", async () => {
+    render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        isMobile={false}
+      />,
+    );
+    await screen.findByText("Old title");
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("locks background scroll while the mobile drawer is open and restores on close", async () => {
+    document.body.style.overflow = "";
+    const { rerender, unmount } = render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    await screen.findByText("Old title");
+    expect(document.body.style.overflow).toBe("hidden");
+    rerender(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen={false}
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    expect(document.body.style.overflow).toBe("");
+    // Reopen then unmount to cover the cleanup path.
+    rerender(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    expect(document.body.style.overflow).toBe("hidden");
+    unmount();
+    expect(document.body.style.overflow).toBe("");
+  });
+
+  it("traps Tab inside the mobile drawer instead of reaching the background", async () => {
+    render(
+      <SessionSidebar
+        currentSessionID="session-1"
+        onSelectSession={() => {}}
+        onNewSession={() => {}}
+        isOpen
+        onToggleOpen={() => {}}
+        isMobile
+      />,
+    );
+    await screen.findByText("Old title");
+    const dialog = screen.getByRole("dialog", { name: "Session history" });
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    expect(focusable.length).toBeGreaterThan(0);
+    // Focus outside the drawer, then Tab: the trap pulls focus to the first
+    // drawer control instead of leaking to the dimmed background.
+    (document.activeElement as HTMLElement | null)?.blur();
+    fireEvent.keyDown(window, { key: "Tab" });
+    expect(dialog.contains(document.activeElement)).toBe(true);
+  });
 });
 

@@ -22,6 +22,7 @@ import ApprovalsInbox from "./components/ApprovalsInbox";
 import ChatView from "./components/ChatView";
 import LoginView from "./components/LoginView";
 import MemoryBrowser from "./components/MemoryBrowser";
+import MobileBottomNav from "./components/MobileBottomNav";
 import RunLogViewer from "./components/RunLogViewer";
 import SchedulerManager from "./components/SchedulerManager";
 import SettingsManager from "./components/SettingsManager";
@@ -249,6 +250,20 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
           {tab === "settings" ? <SettingsManager /> : null}
         </div>
       </main>
+
+      {/* Mobile bottom tab bar: five canonical tabs with unread badges. Both
+          tab surfaces stay mounted on every viewport while the stylesheet
+          owns visibility (max-width reveals the bar and hides the top links,
+          min-width does the inverse), so a missing or fail-closed viewport
+          probe can never leave a phone with zero tab surfaces. The bar keeps
+          its distinct mobile landmark so the two surfaces stay uniquely
+          named while both are in the DOM. */}
+      <MobileBottomNav
+        currentTab={tab}
+        onSelectTab={(selected) => handleSelectTab(selected)}
+        runsBadge={runsBadge}
+        approvalsBadge={approvalsBadge}
+      />
     </div>
   );
 }

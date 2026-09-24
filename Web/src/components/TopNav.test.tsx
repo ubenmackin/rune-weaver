@@ -1,7 +1,13 @@
-// Rune Weaver Dashboard — Component tests for TopNav SearXNG health surfacing.
+// Rune Weaver Dashboard — Component tests for TopNav health surfacing plus profile menu.
+//
+// Covers the SearXNG tri-state row and the profile contract: the top bar owns
+// section tabs while Settings stays inside the icon-only profile menu, so the
+// menu must preserve navigation, health detail, and badge behavior even when
+// the handheld stylesheet collapses the trigger to its glyph.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { ComponentProps } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import TopNav from "./TopNav";
 import {
@@ -373,5 +379,147 @@ describe("TopNav SearXNG row", () => {
       expect(error.textContent).toContain("scripts/searxng-up.sh");
       expect(error.textContent).not.toContain("container start");
     });
+  });
+});
+
+describe("TopNav profile menu", () => {
+  const HEALTH = {
+    status: "ok",
+    engine: "Rune Weaver",
+    version: "0.1.0",
+    model: "gemma-4-9b",
+    provider: "mlx",
+  };
+
+  function renderProfileNav(overrides: Record<string, unknown> = {}) {
+    const props = {
+      currentTab: "chat",
+      onSelectTab: () => {},
+      health: HEALTH,
+      runsBadge: 0,
+      approvalsBadge: 0,
+      notificationsEnabled: false,
+      onRequestNotifications: () => {},
+      ...overrides,
+    } as unknown as ComponentProps<typeof TopNav>;
+    return render(<TopNav {...props} />);
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps five section tabs with Settings reserved for the profile menu", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav();
+    // Desktop tabs mirror the bottom-bar order so breakpoints never drift.
+    const sections = screen.getByRole("navigation", { name: "Dashboard sections" });
+    const tabs = Array.from(sections.querySelectorAll("button")).map((tab) =>
+      tab.textContent?.replace(/[0-9+ ]*unread/g, "").trim(),
+    );
+    expect(tabs).toEqual(["Chat", "Approvals", "Memory", "Runs", "Schedules"]);
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+
+    // Opening the icon-only trigger reveals Settings inside the menu.
+    await openProfile(user);
+    expect(screen.getByRole("menuitem", { name: "Settings" })).toBeInTheDocument();
+  });
+
+  it("preserves the icon-only trigger semantics while the menu stays reachable", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav();
+    const trigger = screen.getByRole("button", { name: /Profile and Settings menu/i });
+    // The accessible name survives the handheld collapse to a 32px glyph so
+    // assistive tech keeps announcing the menu after the label hides.
+    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(trigger.querySelector(".profile-btn-label")).not.toBeNull();
+    await user.click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    await waitFor(() => {
+      expect(screen.getByRole("menu", { name: "Profile and Settings" })).toBeInTheDocument();
+    });
+    // Health detail travels with the menu so the trigger alone stays useful.
+    expect(screen.getByText("gemma-4-9b")).toBeInTheDocument();
+    expect(screen.getByTestId("searxng-status-text")).toBeInTheDocument();
+  });
+
+  it("routes Settings from the menu and closes it", async () => {
+    const user = userEvent.setup();
+    const onSelectTab = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav({ onSelectTab });
+    await openProfile(user);
+    await user.click(screen.getByRole("menuitem", { name: "Settings" }));
+    expect(onSelectTab).toHaveBeenCalledWith("settings");
+    await waitFor(() => {
+      expect(screen.queryByRole("menu", { name: "Profile and Settings" })).toBeNull();
+    });
+  });
+
+  it("marks the trigger when the settings section is active", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav({ currentTab: "settings" });
+    const trigger = screen.getByRole("button", { name: /Profile and Settings menu/i });
+    expect(trigger.className).toContain("settings-active");
+  });
+
+  it("closes the menu on Escape and returns focus to the trigger", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav();
+    await openProfile(user);
+    const trigger = screen.getByRole("button", { name: /Profile and Settings menu/i });
+    await user.keyboard("{Escape}");
+    await waitFor(() => {
+      expect(screen.queryByRole("menu", { name: "Profile and Settings" })).toBeNull();
+    });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("hides section badges at zero and caps triple-digit counts", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const { rerender } = renderProfileNav({ approvalsBadge: 0, runsBadge: 0 });
+    expect(document.querySelector(".nav-badge")).toBeNull();
+
+    rerender(
+      <TopNav
+        currentTab="chat"
+        onSelectTab={() => {}}
+        health={HEALTH as never}
+        runsBadge={100}
+        approvalsBadge={99}
+        notificationsEnabled={false}
+        onRequestNotifications={() => {}}
+      />,
+    );
+    const badges = Array.from(document.querySelectorAll(".nav-badge"));
+    expect(badges.map((badge) => badge.textContent)).toEqual(["99", "99+"]);
+    // Pills stay presentational while the owning tab buttons announce the
+    // honest unclamped counts.
+    expect(badges.map((badge) => badge.getAttribute("aria-hidden"))).toEqual([
+      "true",
+      "true",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "Approvals, 99 unread" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Runs, 100 unread" }),
+    ).toBeInTheDocument();
+  });
+
+  it("announces the bell count through the owning button while the pill stays presentational", () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    renderProfileNav({ warningsBadge: 3 });
+    const bell = screen.getByRole("button", {
+      name: "Browser notifications, 3 unread warnings",
+    });
+    expect(bell).toBeInTheDocument();
+    const pill = bell.querySelector(".nav-badge");
+    expect(pill?.textContent).toBe("3");
+    expect(pill?.getAttribute("aria-hidden")).toBe("true");
   });
 });

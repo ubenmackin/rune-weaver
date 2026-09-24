@@ -1,10 +1,13 @@
-// Rune Weaver Dashboard — Component tests for the App owner-auth gate.
+// Rune Weaver Dashboard — Component tests for the App owner-auth gate and mobile shell.
 //
 // The engine serves the dashboard bundle publicly, so the shell decides the
 // posture from the health shape: a full payload mounts the authenticated
 // dashboard (or the no-auth loopback surface), while the minimal liveness
 // object renders the in-bundle login gate. Child views are stubbed so these
-// tests exercise only the gate wiring, never a live socket or data poll.
+// tests exercise only the gate wiring, never a live socket or data poll. The
+// shell matrix additionally pins the mobile bottom bar: it mounts alongside
+// the content with clearance on handheld widths while standalone stays
+// chromeless.
 
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -12,6 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { clearAuthToken, getAuthToken, isSessionAuthenticated } from "./api";
 import { jsonResponse } from "./test-utils/http";
+import { installViewport } from "./test-utils/viewport";
 
 vi.mock("./components/ChatView", () => ({ default: () => null }));
 vi.mock("./components/TopNav", () => ({ default: () => <div data-testid="top-nav">TopNav</div> }));
@@ -132,5 +136,102 @@ describe("App owner-auth gate", () => {
 
     // Clean up URL
     window.history.pushState({}, "", "/");
+  });
+});
+
+describe("App mobile shell clearance", () => {
+  const FULL_HEALTH = { status: "ok", engine: "Rune Weaver", version: "0.1.0" };
+
+  function stubAuthenticatedHealth(): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(FULL_HEALTH)),
+    );
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    clearAuthToken();
+    window.sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+  });
+
+  afterEach(() => {
+    window.history.pushState({}, "", "/");
+    Reflect.deleteProperty(window as unknown as Record<string, unknown>, "matchMedia");
+  });
+
+  it("mounts the five-tab bottom bar with content clearance on a 375px phone", async () => {
+    installViewport(375);
+    stubAuthenticatedHealth();
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".app-root")).not.toBeNull();
+    });
+    // The mobile bar owns the canonical order with Settings reserved for
+    // profile; the distinct mobile landmark keeps it unique from desktop tabs.
+    const bar = screen.getByRole("navigation", { name: "Dashboard sections — mobile" });
+    const tabs = Array.from(bar.querySelectorAll("button")).map((tab) =>
+      tab.getAttribute("aria-label"),
+    );
+    expect(tabs).toEqual(["Chat", "Approvals", "Memory", "Runs", "Schedules"]);
+    expect(screen.queryByRole("button", { name: "Settings" })).toBeNull();
+    // Clearance sibling stays mounted so the fixed bar never covers content.
+    expect(document.querySelector(".app-main-content")).not.toBeNull();
+    expect(document.querySelector(".mobile-bottom-nav")).not.toBeNull();
+  });
+
+  it("keeps the bottom bar mounted on a 1024px desktop with visibility owned by CSS", async () => {
+    installViewport(1024);
+    stubAuthenticatedHealth();
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".app-root")).not.toBeNull();
+    });
+    // Both tab surfaces stay mounted on every viewport while the stylesheet
+    // owns visibility (min-width hides the bar, max-width hides the top
+    // links), so a fail-closed viewport probe never leaves zero tab surfaces.
+    expect(
+      screen.queryByRole("navigation", { name: "Dashboard sections — mobile" }),
+    ).not.toBeNull();
+    expect(document.querySelector(".mobile-bottom-nav")).not.toBeNull();
+    expect(document.querySelector(".app-main-content")).not.toBeNull();
+  });
+
+  it("hides badges when notification counts are zero", async () => {
+    installViewport(375);
+    stubAuthenticatedHealth();
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".app-root")).not.toBeNull();
+    });
+    // Zero counts from the notification hook leave the bar badge-free.
+    expect(document.querySelector(".mobile-bottom-tab-badge")).toBeNull();
+  });
+
+  it("keeps the login gate chromeless with no bar before authentication", async () => {
+    installViewport(375);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ status: "ok", version: "0.1.0" })),
+    );
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByLabelText("Access token")).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".app-root")).toBeNull();
+    expect(document.querySelector(".mobile-bottom-nav")).toBeNull();
+  });
+
+  it("omits the bottom bar in standalone settings mode", async () => {
+    installViewport(375);
+    stubAuthenticatedHealth();
+    window.history.pushState({}, "", "/?standalone=true#settings");
+    render(<App />);
+    await waitFor(() =>
+      expect(screen.getByTestId("settings-manager")).toBeInTheDocument(),
+    );
+    expect(document.querySelector(".mobile-bottom-nav")).toBeNull();
+    expect(document.querySelector(".standalone-settings")).not.toBeNull();
   });
 });

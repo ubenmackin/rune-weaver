@@ -1,12 +1,18 @@
-// Rune Weaver Dashboard — Component tests for ChatView sending turns and token display.
+// Rune Weaver Dashboard — Component tests for ChatView turns, history drawer, and status footer.
+//
+// Covers sending turns and token display plus the handheld matrix: the session
+// history drawer stays closed on narrow viewports and inline on wide ones,
+// dismissing via backdrop, Escape, or session select, while the footer
+// collapses to a glanceable line on mobile and expands to full metrics.
 
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView from "./ChatView";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
+import { installViewport } from "../test-utils/viewport";
 import {
   createMockWebSocket,
   createMockWebSocketCapture,
@@ -1785,6 +1791,436 @@ describe("Token metrics status bar", () => {
     expect(screen.getByText("150 tokens")).toBeInTheDocument();
     expect(screen.getByText("4,800 / 32,768 tokens (15%)")).toBeInTheDocument();
     expect(screen.getByText("130,000 tokens")).toBeInTheDocument();
+  });
+});
+
+describe("ChatView mobile history drawer", () => {
+  let originalMatchMedia: typeof window.matchMedia | undefined;
+
+  function stubEmptyFetch(): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({})),
+    );
+  }
+
+  function stubSessionsFetch(sessionID: string, title: string): void {
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionID,
+                title,
+                messageCount: 1,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title,
+            messages: [],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    originalMatchMedia = (window as unknown as { matchMedia?: typeof window.matchMedia })
+      .matchMedia;
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (originalMatchMedia === undefined) {
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, "matchMedia");
+    } else {
+      Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("starts with the drawer closed and no backdrop on a 375px phone", async () => {
+    installViewport(375);
+    stubEmptyFetch();
+    render(<ChatView />);
+    // Mount-pinned closed state keeps the conversation visible on handheld;
+    // the History trigger is the single entry point while closed.
+    expect(await screen.findByRole("button", { name: "History" })).toBeInTheDocument();
+    expect(screen.queryByTestId("sidebar-backdrop")).toBeNull();
+    expect(document.querySelector(".session-sidebar.collapsed")).not.toBeNull();
+  });
+
+  it("starts with the inline sidebar open and the backdrop mounted but CSS-hidden on a 1024px desktop", async () => {
+    installViewport(1024);
+    stubEmptyFetch();
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).toBeInTheDocument();
+    });
+    // Desktop keeps history inline with no trigger; the backdrop mounts
+    // whenever open while the wide query keeps it hidden, so visibility stays
+    // CSS-owned instead of hook-gated.
+    expect(screen.queryByRole("button", { name: "History" })).toBeNull();
+    expect(screen.getByTestId("sidebar-backdrop")).toBeInTheDocument();
+    expect(document.querySelector(".session-sidebar.open")).not.toBeNull();
+  });
+
+  it("opens on History and dismisses through the backdrop with focus return", async () => {
+    installViewport(375);
+    stubEmptyFetch();
+    const user = userEvent.setup();
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "History" }));
+    expect(await screen.findByTestId("sidebar-backdrop")).toBeInTheDocument();
+    await user.click(screen.getByTestId("sidebar-backdrop"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("sidebar-backdrop")).toBeNull();
+    });
+    // Close-only dismissal never reopens: the trigger returns for keyboard users.
+    const trigger = await screen.findByRole("button", { name: "History" });
+    expect(trigger).toBeInTheDocument();
+    await waitFor(() => {
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  it("closes the drawer on Escape without toggling it back open", async () => {
+    installViewport(375);
+    stubEmptyFetch();
+    const user = userEvent.setup();
+    render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "History" }));
+    expect(await screen.findByTestId("sidebar-backdrop")).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => {
+      expect(screen.queryByTestId("sidebar-backdrop")).toBeNull();
+    });
+    expect(await screen.findByRole("button", { name: "History" })).toBeInTheDocument();
+  });
+
+  it("closes on session select on mobile but keeps the sidebar open on desktop", async () => {
+    const sessionID = "drawer-session-0001";
+    // Mobile branch: selecting a row dismisses the fixed drawer.
+    installViewport(375);
+    stubSessionsFetch(sessionID, "Drawer Session");
+    localStorage.setItem("rw_active_session_id", "drawer-draft-mobile");
+    const user = userEvent.setup();
+    const { unmount } = render(<ChatView />);
+    await user.click(await screen.findByRole("button", { name: "History" }));
+    expect(await screen.findByTestId("sidebar-backdrop")).toBeInTheDocument();
+    const row = await screen.findByText("Drawer Session");
+    const clickable = row.closest(".session-item");
+    if (!clickable) throw new Error("Expected session row");
+    await user.click(clickable);
+    await waitFor(() => {
+      expect(screen.queryByTestId("sidebar-backdrop")).toBeNull();
+    });
+    unmount();
+
+    // Desktop branch: the static sidebar survives selection while the
+    // backdrop stays mounted but CSS-hidden on wide viewports.
+    installViewport(1024);
+    stubSessionsFetch(sessionID, "Drawer Session");
+    localStorage.setItem("rw_active_session_id", "drawer-draft-desktop");
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("Drawer Session")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("sidebar-backdrop")).toBeInTheDocument();
+    const desktopRow = screen.getByText("Drawer Session").closest(".session-item");
+    if (!desktopRow) throw new Error("Expected desktop session row");
+    await user.click(desktopRow);
+    expect(screen.getByTestId("sidebar-backdrop")).toBeInTheDocument();
+    expect(document.querySelector(".session-sidebar.open")).not.toBeNull();
+  });
+
+  it("ignores invalid session tokens in the URL instead of adopting them", async () => {
+    installViewport(1024);
+    stubEmptyFetch();
+    // Fail-closed routing accepts only canonical UUIDs; anything else must
+    // never become state or persist to the active session slot.
+    window.history.pushState({}, "", "/?session=not-a-valid-uuid");
+    localStorage.removeItem("rw_active_session_id");
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).toBeInTheDocument();
+    });
+    const stored = localStorage.getItem("rw_active_session_id");
+    expect(stored).toBeTruthy();
+    expect(stored).not.toBe("not-a-valid-uuid");
+    window.history.pushState({}, "", "/");
+  });
+
+  it("ignores invalid chat hash fragments instead of adopting them", async () => {
+    installViewport(1024);
+    stubEmptyFetch();
+    window.history.pushState({}, "", "/#chat/not-a-uuid!!!");
+    localStorage.removeItem("rw_active_session_id");
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).toBeInTheDocument();
+    });
+    const stored = localStorage.getItem("rw_active_session_id");
+    expect(stored).toBeTruthy();
+    expect(stored).not.toContain("not-a-uuid");
+    window.history.pushState({}, "", "/");
+  });
+});
+
+describe("ChatView mobile footer", () => {
+  let originalMatchMedia: typeof window.matchMedia | undefined;
+
+  const HEALTH_BASE = {
+    status: "ok",
+    engine: "Rune Weaver",
+    version: "0.1.0",
+    model: "footer-model-test",
+  };
+
+  async function renderWithDoneTokens(options: {
+    width: number;
+    contextTokens: number;
+    contextLength: number;
+    sessionTokens: number;
+    totalTokens: number;
+  }): Promise<void> {
+    installViewport(options.width);
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({})),
+    );
+    const user = userEvent.setup();
+    render(
+      <ChatView
+        health={{ ...HEALTH_BASE, contextLength: options.contextLength } as never}
+      />,
+    );
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await user.type(screen.getByLabelText("Chat input"), "hello footer");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string }).sessionID;
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "footer reply",
+      sessionID: turnSID,
+      toolActions: [],
+      totalTokens: options.totalTokens,
+      sessionTokens: options.sessionTokens,
+      contextTokens: options.contextTokens,
+      contextLength: options.contextLength,
+    });
+    await waitFor(() => {
+      expect(screen.getByText("footer reply")).toBeInTheDocument();
+    });
+  }
+
+  beforeEach(() => {
+    originalMatchMedia = (window as unknown as { matchMedia?: typeof window.matchMedia })
+      .matchMedia;
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    if (originalMatchMedia === undefined) {
+      Reflect.deleteProperty(window as unknown as Record<string, unknown>, "matchMedia");
+    } else {
+      Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        configurable: true,
+        value: originalMatchMedia,
+      });
+    }
+  });
+
+  it("collapses to the glanceable Ctx plus session line with a Details toggle on mobile", async () => {
+    installViewport(375);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({})),
+    );
+    render(<ChatView health={{ ...HEALTH_BASE, contextLength: 100 } as never} />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).toBeInTheDocument();
+    });
+    // Empty sessions degrade to zero instead of NaN so a fresh draft shows
+    // the collapsed baseline immediately.
+    expect(screen.getByText("Ctx 0%")).toBeInTheDocument();
+    expect(screen.getByText("0 sess")).toBeInTheDocument();
+    const toggle = screen.getByRole("button", { name: "Details" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    // Collapsed toggle omits the dangling reference until the detail mounts.
+    expect(toggle.getAttribute("aria-controls")).toBeNull();
+    // Both branches stay mounted while the stylesheet owns visibility: the
+    // desktop metrics sit in the DOM handheld with the wide query hiding the
+    // mobile summary on desktop and the handheld query hiding desktop metrics.
+    expect(screen.getByText("footer-model-test")).toBeInTheDocument();
+  });
+
+  it("expands the mobile footer to Turn plus full Context and Session usage", async () => {
+    await renderWithDoneTokens({
+      width: 375,
+      contextTokens: 15,
+      contextLength: 100,
+      sessionTokens: 500,
+      totalTokens: 150,
+    });
+    expect(screen.getByText("Ctx 15%")).toBeInTheDocument();
+    expect(screen.getByText("500 sess")).toBeInTheDocument();
+    const user = userEvent.setup();
+    const toggle = screen.getByRole("button", { name: "Details" });
+    // Collapsed toggle carries no controls reference while the detail is out.
+    expect(toggle.getAttribute("aria-controls")).toBeNull();
+    await user.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.getAttribute("aria-controls")).toBe("footer-detail");
+    // Both footer branches stay mounted while the stylesheet owns visibility,
+    // so the desktop metrics duplicate the Turn/Context values in the DOM
+    // handheld. Scope the mobile assertions to the expanded detail block.
+    const footerDetail = document.getElementById("footer-detail");
+    expect(footerDetail).not.toBeNull();
+    expect(within(footerDetail as HTMLElement).getByText("150 tokens")).toBeInTheDocument();
+    expect(
+      within(footerDetail as HTMLElement).getByText("15 / 100 tokens (15%)"),
+    ).toBeInTheDocument();
+    // The expanded handheld detail exposes the full locale-grouped session
+    // total so mobile readers can see the exact value without a desktop.
+    expect(
+      within(footerDetail as HTMLElement).getByText("500 tokens"),
+    ).toBeInTheDocument();
+    const desktopMetrics = document.querySelector(".status-bar-desktop-metrics");
+    expect(desktopMetrics).not.toBeNull();
+    expect(
+      within(desktopMetrics as HTMLElement).getByText("footer-model-test"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    { contextTokens: 0, label: "Ctx 0%", warned: false },
+    { contextTokens: 79, label: "Ctx 79%", warned: false },
+    { contextTokens: 80, label: "Ctx 80%", warned: true },
+    { contextTokens: 100, label: "Ctx 100%", warned: true },
+  ])(
+    "covers the $contextTokens pct edge with amber at 80 and above",
+    async ({ contextTokens, label, warned }) => {
+      await renderWithDoneTokens({
+        width: 375,
+        contextTokens,
+        contextLength: 100,
+        sessionTokens: 10,
+        totalTokens: 5,
+      });
+      const summary = screen.getByText(label);
+      if (warned) {
+        expect(summary.className).toContain("status-warning");
+      } else {
+        expect(summary.className).not.toContain("status-warning");
+      }
+    },
+  );
+
+  it("renders all four desktop metrics alongside the CSS-hidden mobile summary on wide viewports", async () => {
+    await renderWithDoneTokens({
+      width: 1024,
+      contextTokens: 4800,
+      contextLength: 32768,
+      sessionTokens: 130000,
+      totalTokens: 150,
+    });
+    expect(screen.getByText("footer-model-test")).toBeInTheDocument();
+    expect(screen.getByText("150 tokens")).toBeInTheDocument();
+    expect(screen.getByText("4,800 / 32,768 tokens (15%)")).toBeInTheDocument();
+    expect(screen.getByText("130,000 tokens")).toBeInTheDocument();
+    // The mobile summary stays mounted on desktop with the wide query hiding
+    // it; the collapsed toggle carries no controls reference until expanded.
+    const toggle = screen.getByRole("button", { name: "Details" });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle.getAttribute("aria-controls")).toBeNull();
+  });
+
+  it("flags the desktop context value amber once occupancy reaches 80 percent", async () => {
+    await renderWithDoneTokens({
+      width: 1024,
+      contextTokens: 80,
+      contextLength: 100,
+      sessionTokens: 10,
+      totalTokens: 5,
+    });
+    expect(screen.getByText("80 / 100 tokens (80%)").className).toContain("status-warning");
+  });
+
+  it("exposes the full session total in the expanded handheld detail for large values", async () => {
+    await renderWithDoneTokens({
+      width: 375,
+      contextTokens: 4800,
+      contextLength: 32768,
+      sessionTokens: 130000,
+      totalTokens: 150,
+    });
+    // Collapsed line stays compact while the expanded detail carries the
+    // exact locale-grouped total desktop readers see.
+    expect(screen.getByText("130k sess")).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    const footerDetail = document.getElementById("footer-detail");
+    expect(footerDetail).not.toBeNull();
+    expect(
+      within(footerDetail as HTMLElement).getByText("130,000 tokens"),
+    ).toBeInTheDocument();
+  });
+
+  it("promotes rounding-carried k values to M instead of rendering 1000k", async () => {
+    await renderWithDoneTokens({
+      width: 375,
+      contextTokens: 10,
+      contextLength: 100,
+      sessionTokens: 999999,
+      totalTokens: 5,
+    });
+    // 999999 / 1000 rounds to 1000.0k without the promotion; the compact
+    // line must read 1M like the mega branch.
+    expect(screen.getByText("1M sess")).toBeInTheDocument();
+    expect(screen.queryByText("1000k sess")).toBeNull();
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Details" }));
+    const footerDetail = document.getElementById("footer-detail");
+    expect(footerDetail).not.toBeNull();
+    expect(
+      within(footerDetail as HTMLElement).getByText("999,999 tokens"),
+    ).toBeInTheDocument();
   });
 });
 

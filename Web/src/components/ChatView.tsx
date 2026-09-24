@@ -43,6 +43,7 @@ import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
 import { AlertTriangleIcon, WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useIsMobile, isMobileViewport } from "../hooks/useIsMobile";
 import { useRunningRuns, type FrozenRunLogEntry } from "../hooks/useRunningRuns";
 import type {
   WSIncomingFrame,
@@ -679,6 +680,34 @@ function loadContextTokens(id: string): number {
   return loadTokens("context", id);
 }
 
+// Compact session total for the collapsed handheld summary line. A full
+// locale-grouped thousands value would push the single-line footer past a
+// narrow viewport, so large totals collapse to one-decimal k/M while small
+// totals keep locale grouping for readability. Invalid inputs degrade to zero
+// through the shared integer contract so a drifted cache never renders NaN.
+function formatSessionShort(value: number): string {
+  const safe = toNonNegativeInt(value) ?? 0;
+  if (safe >= 1_000_000) {
+    const compact = safe / 1_000_000;
+    const rounded = Math.round(compact * 10) / 10;
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : String(rounded)}M`;
+  }
+  if (safe >= 1000) {
+    const compact = safe / 1000;
+    const rounded = Math.round(compact * 10) / 10;
+    // One-decimal k rounding can carry 999950-999999 up to 1000k; promote
+    // across the boundary to 1M so the compact form never renders the
+    // five-character 1000k that defeats its own brevity.
+    if (rounded >= 1000) {
+      const megaCompact = safe / 1_000_000;
+      const megaRounded = Math.round(megaCompact * 10) / 10;
+      return `${Number.isInteger(megaRounded) ? megaRounded.toFixed(0) : String(megaRounded)}M`;
+    }
+    return `${Number.isInteger(rounded) ? rounded.toFixed(0) : String(rounded)}k`;
+  }
+  return safe.toLocaleString();
+}
+
 // Validates a tool result before it enters turn state: the engine always
 // emits the call identifier, content, and error flag together, so a partial
 // object must never render as a completed execution.
@@ -1177,9 +1206,36 @@ export default function ChatView({ health }: ChatViewProps) {
   const [contextLimit, setContextLimit] = useState<number>(
     () => health?.contextLength || 8192,
   );
+  // Collapsed handheld footer keeps one line on narrow viewports; expanding
+  // reveals the per-turn and full-window rows. Defaults closed so a fresh
+  // mount never pushes the input off a small screen.
+  const [footerExpanded, setFooterExpanded] = useState(false);
 
-  // Sidebar toggle
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  // Sidebar visibility starts from the viewport at mount only: handheld
+  // widths begin with the history drawer closed so the conversation keeps the
+  // screen, while desktop begins with the inline sidebar open. Later resizes
+  // never overwrite this state so an explicit user toggle survives rotation
+  // or window drags; the live breakpoint for layout decisions rides the
+  // `isMobile` hook below instead.
+  const [sidebarOpen, setSidebarOpen] = useState(() => !isMobileViewport());
+  // Live handheld flag for drawer versus inline rendering. Kept separate from
+  // `sidebarOpen` above so layout can follow the viewport while the toggle
+  // itself stays user-owned and mount-pinned.
+  const isMobile = useIsMobile();
+  // Trigger that opens the history drawer. Owned here so the sidebar can
+  // return focus to it after backdrop, Escape, or select dismissal on mobile.
+  const historyButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Closes the drawer without toggling, so backdrop and Escape callers cannot
+  // accidentally reopen a closed drawer by reusing the toggle handler.
+  const handleCloseSidebar = useCallback(() => {
+    setSidebarOpen(false);
+  }, []);
+  // Stable toggle with a functional update so rapid toggles before re-render
+  // never collapse on a stale closure and the sidebar's Escape subscription
+  // keeps one identity instead of re-subscribing every render.
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarOpen((previous) => !previous);
+  }, []);
   const [sessionRefreshKey, setSessionRefreshKey] = useState(0);
   const messageListEndRef = useRef<HTMLDivElement | null>(null);
   const messageListRef = useRef<HTMLDivElement | null>(null);
@@ -3725,10 +3781,27 @@ export default function ChatView({ health }: ChatViewProps) {
     };
   }, []);
 
-  const usedPercent =
-    contextLimit > 0
-      ? Math.round((contextTokens / contextLimit) * 100)
+  // Sanitized footer totals share the hub integer contract so a fractional,
+  // negative, or NaN payload renders as zero instead of NaN; the limit guards
+  // division. Turn stays nullable so a fresh session renders an em dash until
+  // its first terminal frame lands.
+  const safeContextTokens = toNonNegativeInt(contextTokens) ?? 0;
+  const safeSessionTokens = toNonNegativeInt(sessionTokens) ?? 0;
+  const safeContextLimit = toNonNegativeInt(contextLimit) ?? 0;
+  const safeTurnTokens =
+    lastTurnTokens == null ? null : (toNonNegativeInt(lastTurnTokens) ?? 0);
+  // Occupancy percent clamped to a valid range so an overfull window never
+  // reports past one hundred and a drifted value never reports below zero.
+  const pct =
+    safeContextLimit > 0
+      ? Math.min(
+          100,
+          Math.max(0, Math.round((safeContextTokens / safeContextLimit) * 100)),
+        )
       : 0;
+  // Compact session total for the collapsed handheld line; full locale
+  // grouping would overflow a narrow row while k/M keeps one glanceable token.
+  const sessionShort = formatSessionShort(safeSessionTokens);
   // Amber badge count for this session only; other sessions' approvals never
   // leak into this header.
   const sessionApprovals = approvalsForSession(pendingApprovals, sessionID);
@@ -3749,10 +3822,13 @@ export default function ChatView({ health }: ChatViewProps) {
         onSelectSession={handleSelectSession}
         onNewSession={handleNewSession}
         isOpen={sidebarOpen}
-        onToggleOpen={() => setSidebarOpen(!sidebarOpen)}
+        onToggleOpen={handleToggleSidebar}
         refreshTrigger={sessionRefreshKey}
         pendingApprovals={pendingApprovals}
         runningSessionIDs={backgroundRunningIDs}
+        isMobile={isMobile}
+        onClose={handleCloseSidebar}
+        historyButtonRef={historyButtonRef}
       />
 
       {/* Main Chat Area */}
@@ -3762,6 +3838,7 @@ export default function ChatView({ health }: ChatViewProps) {
             {!sidebarOpen && (
               <button
                 type="button"
+                ref={historyButtonRef}
                 className="open-sidebar-btn"
                 onClick={() => setSidebarOpen(true)}
                 title="Open session history"
@@ -4212,46 +4289,109 @@ export default function ChatView({ health }: ChatViewProps) {
             )}
           </div>
 
-          {/* Pinned Status Bar Attached Below Input */}
-          <div className="chat-status-bar" aria-label="Session metrics">
-            <div className="status-bar-item">
-              <span className="status-bullet green" />
-              <span className="status-bar-label">LLM:</span>
-              <span className="status-bar-value">{activeModel}</span>
-            </div>
-
-            <div className="status-bar-divider">•</div>
-
-            <div className="status-bar-item">
-              <span className="status-bar-label">Turn:</span>
-              <span className="status-bar-value">
-                {lastTurnTokens != null
-                  ? `${lastTurnTokens.toLocaleString()} tokens`
-                  : "—"}
-              </span>
-            </div>
-
-            <div className="status-bar-divider">•</div>
-
-            <div className="status-bar-item">
-              <span className="status-bar-label">Context:</span>
+          {/* Pinned Status Bar Attached Below Input: condensed handheld summary
+              with an expander plus full desktop metrics. Both branches stay
+              mounted while the stylesheet owns visibility: the handheld query
+              reveals the summary and hides the desktop metrics, and the wide
+              query does the inverse, so the viewport hook never drives layout
+              here and stays reserved for the sidebar drawer default. */}
+          <div
+            className={`chat-status-bar${footerExpanded ? " footer-expanded" : ""}`}
+            aria-label="Session metrics"
+          >
+            <div className="status-bar-mobile-summary">
               <span
-                className={`status-bar-value ${
-                  usedPercent >= 80 ? "status-warning" : ""
-                }`}
+                className={`status-bar-value${pct >= 80 ? " status-warning" : ""}`}
               >
-                {contextTokens.toLocaleString()} /{" "}
-                {contextLimit.toLocaleString()} tokens ({usedPercent}%)
+                Ctx {pct}%
               </span>
+              <span className="status-bar-divider" aria-hidden="true">
+                •
+              </span>
+              <span className="status-bar-value">{sessionShort} sess</span>
+              <button
+                type="button"
+                className="status-bar-details-toggle"
+                aria-expanded={footerExpanded}
+                aria-controls={footerExpanded ? "footer-detail" : undefined}
+                onClick={() =>
+                  setFooterExpanded((previous) => !previous)
+                }
+              >
+                Details
+              </button>
             </div>
+            {footerExpanded ? (
+              <div id="footer-detail" className="status-bar-detail">
+                <div className="status-bar-detail-row">
+                  <span className="status-bar-label">Turn:</span>
+                  <span className="status-bar-value">
+                    {safeTurnTokens != null
+                      ? `${safeTurnTokens.toLocaleString()} tokens`
+                      : "—"}
+                  </span>
+                </div>
+                <div className="status-bar-detail-row">
+                  <span className="status-bar-label">Context:</span>
+                  <span className="status-bar-value">
+                    {safeContextTokens.toLocaleString()} /{" "}
+                    {safeContextLimit.toLocaleString()} tokens ({pct}%)
+                  </span>
+                </div>
+                <div className="status-bar-detail-row">
+                  <span className="status-bar-label">Session:</span>
+                  <span className="status-bar-value">
+                    {safeSessionTokens.toLocaleString()} tokens
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            <div className="status-bar-desktop-metrics">
+              <div className="status-bar-item status-bar-item--model">
+                <span className="status-bullet green" />
+                <span className="status-bar-label">LLM:</span>
+                <span className="status-bar-value">{activeModel}</span>
+              </div>
 
-            <div className="status-bar-divider">•</div>
+              <div className="status-bar-divider" aria-hidden="true">
+                •
+              </div>
 
-            <div className="status-bar-item">
-              <span className="status-bar-label">Session:</span>
-              <span className="status-bar-value">
-                {sessionTokens.toLocaleString()} tokens
-              </span>
+              <div className="status-bar-item status-bar-item--turn">
+                <span className="status-bar-label">Turn:</span>
+                <span className="status-bar-value">
+                  {safeTurnTokens != null
+                    ? `${safeTurnTokens.toLocaleString()} tokens`
+                    : "—"}
+                </span>
+              </div>
+
+              <div className="status-bar-divider" aria-hidden="true">
+                •
+              </div>
+
+              <div className="status-bar-item status-bar-item--context">
+                <span className="status-bar-label">Context:</span>
+                <span
+                  className={`status-bar-value${
+                    pct >= 80 ? " status-warning" : ""
+                  }`}
+                >
+                  {safeContextTokens.toLocaleString()} /{" "}
+                  {safeContextLimit.toLocaleString()} tokens ({pct}%)
+                </span>
+              </div>
+
+              <div className="status-bar-divider" aria-hidden="true">
+                •
+              </div>
+
+              <div className="status-bar-item status-bar-item--session">
+                <span className="status-bar-label">Session:</span>
+                <span className="status-bar-value">
+                  {safeSessionTokens.toLocaleString()} tokens
+                </span>
+              </div>
             </div>
           </div>
         </div>
