@@ -209,20 +209,82 @@ final class ChatTurnAuditProgress: Sendable {
 /// token, so this guard cannot reintroduce it into logs.
 /// Validates whether an incoming HTTP Origin header is permitted to open a WebSocket connection.
 /// Browser clients connecting across origins must be restricted; non-browser clients (omitting Origin) pass.
+///
+/// Sole owner of the Origin decision: loopback plus the
+/// configured bind hostname plus exact parity with the request Host pass,
+/// everything else fails closed with no new config. A missing Origin is
+/// handled by `authorizeWebSocketUpgrade` (passes for non-browser clients);
+/// a malformed Origin fails closed here.
+///
+/// Middleware ordering assumption (security-critical): the Host-parity branch
+/// trusts the request Host only because `HostValidationMiddleware` already
+/// validated it upstream (`registerRuneWeaverRoutes` installs
+/// `GlobalSecurityHeadersMiddleware` then `HostValidationMiddleware` then the
+/// auth middleware before the `/ws` route). Parity alone passes any
+/// Host==Origin pair — including an attacker pair such as
+/// `rebind.attacker.com` — so an attacker Host==Origin is rejected end to end
+/// only by that upstream Host gate. Bypassing or misordering the middleware
+/// would leave parity fail-open; the retirement tests pin this ordering
+/// explicitly. Trailing-dot and empty hosts are rejected locally (not solely
+/// upstream) so `evil.com.` never rides parity under a stripped spelling.
+///
+/// Both sides compare under one normalization (`ServerEndpointConfig.normalizeHost`
+/// plus outer-bracket stripping): `URL.host` strips `[::1]` brackets while the
+/// normalized Host header keeps them, so a bare compare never matches a
+/// bracketed IPv6 proxy. Canonicalizing both to the bare form restores parity
+/// for `[::1]` without widening the gate.
 func isAllowedWebSocketOrigin(_ origin: String, request: Request) -> Bool {
-    guard let originURL = URL(string: origin), let originHost = originURL.host?.lowercased() else {
+    guard let originURL = URL(string: origin), let rawOriginHost = originURL.host, !rawOriginHost.isEmpty else {
+        return false
+    }
+    if rawOriginHost == "." || rawOriginHost.hasSuffix(".") {
+        return false
+    }
+    let originHost = canonicalWebSocketHost(rawOriginHost)
+    if originHost.isEmpty || originHost == "." || originHost.hasSuffix(".") {
         return false
     }
     // Loopback hosts are always permitted:
-    if originHost == "127.0.0.1" || originHost == "localhost" || originHost == "::1" || originHost == "[::1]" {
+    if originHost == "127.0.0.1" || originHost == "localhost" || originHost == "::1" {
         return true
     }
-    // Configured server hostname:
-    let serverHost = request.application.runeWeaver.config.hostname.lowercased()
-    if originHost == serverHost {
+    // Configured server hostname under the same normalization:
+    let serverHost = canonicalWebSocketHost(request.application.runeWeaver.config.hostname)
+    if !serverHost.isEmpty, serverHost != ".", !serverHost.hasSuffix("."), originHost == serverHost {
         return true
+    }
+    // Reverse-proxy parity: the request Host already passed
+    // HostValidationMiddleware, so an Origin matching that validated Host is
+    // the same site served under a proxy name rather than a cross-site page.
+    if let hostHeader = request.headers.first(name: .host) {
+        let rawRequestHost = HostValidationMiddleware.extractHost(from: hostHeader)
+        if rawRequestHost.isEmpty || rawRequestHost == "." || rawRequestHost.hasSuffix(".") {
+            return false
+        }
+        let requestHost = canonicalWebSocketHost(rawRequestHost)
+        if requestHost.isEmpty || requestHost == "." || requestHost.hasSuffix(".") {
+            return false
+        }
+        if requestHost == originHost {
+            return true
+        }
     }
     return false
+}
+
+/// Canonicalizes one host for WebSocket Origin comparison.
+///
+/// Single-sourced through `ServerEndpointConfig.normalizeHost` (trim,
+/// lowercase, port-strip) plus outer-bracket stripping so the normalized Host
+/// header (`[::1]`) and `URL.host` (`::1`) compare under identical semantics.
+/// - Parameter raw: Raw host text (URL host, Host header, or bind hostname).
+/// - Returns: Lowercased, port-stripped, unbracketed host.
+private func canonicalWebSocketHost(_ raw: String) -> String {
+    var normalized = ServerEndpointConfig.normalizeHost(raw)
+    if normalized.hasPrefix("["), normalized.hasSuffix("]"), normalized.count >= 2 {
+        normalized = String(normalized.dropFirst().dropLast())
+    }
+    return normalized
 }
 
 /// - Parameter request: Upgrade handshake request.

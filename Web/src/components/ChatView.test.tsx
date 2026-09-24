@@ -2224,3 +2224,249 @@ describe("ChatView mobile footer", () => {
   });
 });
 
+describe("Chat reconnecting banner", () => {
+  function makeCountingSocket(): {
+    capture: ReturnType<typeof createMockWebSocketCapture>;
+    instances: WebSocket[];
+    CountingSocket: new (url?: string) => WebSocket;
+  } {
+    const capture = createMockWebSocketCapture();
+    const BaseSocket = createMockWebSocket(capture) as unknown as new (
+      url?: string,
+    ) => WebSocket;
+    const instances: WebSocket[] = [];
+    class CountingSocket extends BaseSocket {
+      constructor(url?: string) {
+        super(url);
+        instances.push(this);
+      }
+    }
+    return { capture, instances, CountingSocket };
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    // Each case stubs WebSocket with its own capture closure, so drop the
+    // shared singleton's lingering handle; otherwise a later case would reuse
+    // the earlier socket and never attach its own close listener.
+    resetSharedSocket();
+    // Drop the shared poller's timer and cache for the same reason so one
+    // case's interval never leaks into the next.
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("shows the reconnecting banner when the shared socket closes", async () => {
+    // The header pill is the only signal that live updates paused while drafts
+    // stay usable, so a dropped socket must surface it without locking input.
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+    expect(screen.queryByTestId("chat-reconnecting")).not.toBeInTheDocument();
+
+    await act(async () => {
+      instances[0].close();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("chat-reconnect-retry")).toBeInTheDocument();
+    expect(screen.getByTestId("chat-reconnect-dismiss")).toBeInTheDocument();
+    expect(screen.getByLabelText("Chat input")).not.toBeDisabled();
+  });
+
+  it("retry forces an immediate redial and clears the banner on open", async () => {
+    // A visible retry must bypass the idle backoff so the view rejoins live
+    // without waiting out the scheduled timer, and recovery clears the pill
+    // on the socket open instead of leaving it stuck.
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+
+    await act(async () => {
+      instances[0].close();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
+    });
+
+    const dialedBeforeRetry = instances.length;
+    await user.click(screen.getByTestId("chat-reconnect-retry"));
+    // The redial lands synchronously on click, ahead of the new socket's
+    // async open, so the count proves the gesture dialed immediately.
+    expect(instances.length).toBe(dialedBeforeRetry + 1);
+
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-reconnecting")).not.toBeInTheDocument();
+    });
+  });
+
+  it("dismiss hides the banner until the next close", async () => {
+    // Dismiss is a per-outage snooze: it hides the pill for the current drop
+    // while the next close resets it, so a fresh outage never stays silent.
+    const user = userEvent.setup();
+    const { capture, instances, CountingSocket } = makeCountingSocket();
+    vi.stubGlobal("WebSocket", CountingSocket);
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+
+    render(<ChatView />);
+
+    await waitFor(() => expect(capture.onMessage).not.toBeNull());
+
+    await act(async () => {
+      instances[0].close();
+    });
+    // Wait for the pill to mount before dismissing so the click never races
+    // the close notification.
+    await screen.findByTestId("chat-reconnecting");
+    expect(screen.getByTestId("chat-reconnect-dismiss")).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("chat-reconnect-dismiss"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("chat-reconnecting")).not.toBeInTheDocument();
+    });
+
+    // A fresh drop resets the snooze, so the pill returns for the next outage.
+    await act(async () => {
+      instances[0].close();
+    });
+    await screen.findByTestId("chat-reconnecting");
+    expect(screen.getByTestId("chat-reconnecting")).toBeInTheDocument();
+  });
+});
+
+describe("Input history recall", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("Up on empty recalls last send and repeated Up walks older sends", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ text: "reply", sessionID: "s1", toolActions: [] }),
+      ),
+    );
+    render(<ChatView />);
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+
+    await user.type(inputEl, "first send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("first send")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    await user.type(inputEl, "second send");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("second send")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    expect(inputEl).toHaveValue("");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("second send");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("first send");
+  });
+
+  it("Up at first line recalls while Up at second line keeps native movement", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ text: "reply", sessionID: "s1", toolActions: [] }),
+      ),
+    );
+    render(<ChatView />);
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+
+    await user.type(inputEl, "history entry");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("history entry")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    fireEvent.change(inputEl, { target: { value: "line1\nline2" } });
+    expect(inputEl).toHaveValue("line1\nline2");
+
+    // Caret on the second line keeps native movement with no recall.
+    inputEl.selectionStart = 8;
+    inputEl.selectionEnd = 8;
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("line1\nline2");
+
+    // Caret on the first line recalls the last send.
+    inputEl.selectionStart = 2;
+    inputEl.selectionEnd = 2;
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("history entry");
+  });
+
+  it("Down walks newer and restores pre-recall draft", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        jsonResponse({ text: "reply", sessionID: "s1", toolActions: [] }),
+      ),
+    );
+    render(<ChatView />);
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+
+    await user.type(inputEl, "old msg");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("old msg")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    await user.type(inputEl, "new msg");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(screen.getByText("new msg")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+
+    await user.type(inputEl, "my draft");
+    expect(inputEl).toHaveValue("my draft");
+    inputEl.selectionStart = inputEl.value.length;
+    inputEl.selectionEnd = inputEl.value.length;
+
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("new msg");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("old msg");
+    fireEvent.keyDown(inputEl, { key: "ArrowDown" });
+    expect(inputEl).toHaveValue("new msg");
+    fireEvent.keyDown(inputEl, { key: "ArrowDown" });
+    expect(inputEl).toHaveValue("my draft");
+  });
+});
+
