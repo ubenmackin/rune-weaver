@@ -429,8 +429,13 @@ enum EpisodeStoreIO {
         /// - Returns: JSON string, or nil when empty.
         private static func encodeMetadata(_ metadata: [String: String]) -> String? {
             guard !metadata.isEmpty else { return nil }
-            guard let data = try? JSONEncoder().encode(metadata) else { return nil }
-            return String(data: data, encoding: .utf8)
+            do {
+                let data = try JSONEncoder().encode(metadata)
+                return String(data: data, encoding: .utf8)
+            } catch {
+                RuneWeaverLog.memory.error("EpisodeStore: failed to encode metadata: \(error.localizedDescription)")
+                return nil
+            }
         }
 
         /// Decodes a JSON metadata string back to a dictionary.
@@ -438,7 +443,12 @@ enum EpisodeStoreIO {
         /// - Returns: Decoded dictionary, or empty on any failure.
         private static func decodeMetadata(_ text: String?) -> [String: String] {
             guard let text, !text.isEmpty, let data = text.data(using: .utf8) else { return [:] }
-            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            do {
+                return try JSONDecoder().decode([String: String].self, from: data)
+            } catch {
+                RuneWeaverLog.memory.warning("EpisodeStore: failed to decode metadata: \(error.localizedDescription)")
+                return [:]
+            }
         }
 
         /// Column-text helper returning nil for NULL columns.

@@ -61,6 +61,8 @@ public extension IndexClosureStage {
                     keywordChunks: max(report.chunksWritten - report.vectorsWritten, 0),
                     skipped: report.filesSkipped + report.filesUnchanged,
                     errors: report.errors,
+                    retired: report.retiredCount,
+                    truncated: report.truncatedVectorDocuments,
                     didRun: report.didRun,
                     skippedReason: report.skippedReason,
                     warnings: report.warnings

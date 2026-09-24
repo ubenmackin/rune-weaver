@@ -53,7 +53,13 @@ public enum FileMemoryAuditLog {
 
     /// Appends an event as one JSON line, best-effort.
     public static func append(_ event: MemoryAuditEvent, to fileURL: URL? = nil) {
-        guard let data = try? JSONEncoder().encode(event) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(event)
+        } catch {
+            RuneWeaverLog.tools.error("FileMemoryAuditLog: failed to encode MemoryAuditEvent: \(error.localizedDescription)")
+            return
+        }
         var line = data
         line.append(0x0A)
         let url = fileURL ?? defaultLogURL()

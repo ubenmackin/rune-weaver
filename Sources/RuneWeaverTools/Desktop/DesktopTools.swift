@@ -351,10 +351,16 @@ public struct DesktopScreenshotEnvelope: Sendable, Codable, Equatable {
     public static func parse(_ content: String) -> DesktopScreenshotEnvelope? {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"),
-              let data = trimmed.data(using: .utf8),
-              let decoded = try? JSONDecoder().decode(DesktopScreenshotEnvelope.self, from: data),
-              !decoded.screenshotHash.isEmpty
+              let data = trimmed.data(using: .utf8)
         else { return nil }
+        let decoded: DesktopScreenshotEnvelope
+        do {
+            decoded = try JSONDecoder().decode(DesktopScreenshotEnvelope.self, from: data)
+        } catch {
+            RuneWeaverLog.tools.debug("DesktopScreenshotEnvelope.parse: decode failed or not desktop screenshot: \(error.localizedDescription)")
+            return nil
+        }
+        guard !decoded.screenshotHash.isEmpty else { return nil }
         return decoded
     }
 
@@ -365,10 +371,12 @@ public struct DesktopScreenshotEnvelope: Sendable, Codable, Equatable {
     /// gate so inline data URLs never reach disk. The live turn keeps the
     /// full data URL in memory.
     public static func redactedForPersistence(_ content: String) -> String {
-        if let envelope = parse(content),
-           let data = try? ToolEnvelopeEncoding.encode(envelope.strippedForPersistence())
-        {
-            return data
+        if let envelope = parse(content) {
+            do {
+                return try ToolEnvelopeEncoding.encode(envelope.strippedForPersistence())
+            } catch {
+                RuneWeaverLog.tools.error("DesktopScreenshotEnvelope.redactedForPersistence: failed to encode stripped envelope: \(error.localizedDescription)")
+            }
         }
         return VisionGate.strippedContent(content)
     }

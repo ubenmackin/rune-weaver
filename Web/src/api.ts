@@ -1548,6 +1548,29 @@ export interface IndexConfigData {
   describe_images_with_llm: boolean;
   nightly_budget: number;
   db_path: string;
+  // Indexing effort preset (`light`, `balanced`, `performance`, or `custom`).
+  // Optional for back-compat with older engines that predate the knob; absent
+  // degrades to the balanced default instead of failing.
+  effort?: string;
+  // Custom worker count used only when `effort` is `custom`. Canonical wire
+  // key is `workers`, mirroring the engine `IndexConfig.workers`; absent
+  // degrades to the default stepper value.
+  workers?: number;
+  // Whether the run backs off when the machine reports thermal pressure.
+  // Optional for back-compat; absent degrades to the default.
+  thermal_backoff?: boolean;
+  // Whether scheduled and on-demand runs pause while on battery power.
+  // Optional for back-compat; absent degrades to the default.
+  pause_on_battery?: boolean;
+  // Maximum vector chunks stored per document, bounding per-document
+  // embedding work; chunks beyond the cap stay keyword-only. Optional for
+  // back-compat; absent degrades to the engine default instead of failing.
+  max_vector_chunks_per_document?: number;
+  // Directory and file names the walker always skips, even when absent from
+  // `exclude`. Read-only: populated by the engine from the walker's prune list
+  // and ignored on write. Optional for back-compat with older engines that
+  // predate the field; absent degrades to an empty list instead of failing.
+  always_skipped?: string[];
 }
 
 // Partial index patch for `PUT /settings`, mirroring the engine
@@ -1567,6 +1590,11 @@ export interface IndexSettingsUpdate {
   describe_images_with_llm?: boolean;
   nightly_budget?: number;
   db_path?: string;
+  effort?: string;
+  workers?: number;
+  thermal_backoff?: boolean;
+  pause_on_battery?: boolean;
+  max_vector_chunks_per_document?: number;
 }
 
 // Native desktop vision and gated control policy mirroring the engine
@@ -1770,6 +1798,20 @@ export interface IndexLastRunStatus {
   // Optional for back-compat with older engines that predate the field; absent
   // degrades to no reason instead of failing.
   skippedReason?: string | null;
+  // Documents retired (deleted or superseded) by the run. Optional for
+  // back-compat with older engines that predate retirement tracking; absent
+  // degrades to no retired count instead of failing.
+  retiredCount?: number | null;
+  // Alias some engines emit for the same count. Read via
+  // `resolveIndexRetiredCount` so either spelling renders honestly.
+  retired?: number | null;
+  // Documents where chunks beyond the vector cap stayed keyword-only.
+  // Optional for back-compat with older engines that predate truncation
+  // tracking; absent degrades to no truncated count instead of failing.
+  truncatedCount?: number | null;
+  // Alias some engines emit for the same count. Read via
+  // `resolveIndexTruncatedCount` so either spelling renders honestly.
+  truncated?: number | null;
 }
 
 // Live snapshot of an in-flight index run on `GET /index/status`, mirroring
@@ -1789,6 +1831,16 @@ export interface IndexLiveStatus {
   rate?: number | null;
   elapsedMs: number;
   current: string | null;
+}
+
+// Resolved effort block on `GET /index/status`, mirroring the engine
+// `IndexEffortStatus`. Always present on current engines so the dashboard
+// renders workers without a second fetch; absent on older engines, which
+// degrade to the top-level aliases below or to no effort line.
+export interface IndexEffortStatus {
+  preset: string;
+  resolvedWorkers: number;
+  activeProcessors: number;
 }
 
 // Status snapshot for `GET /index/status`.
@@ -1818,6 +1870,23 @@ export interface IndexStatusResponse {
   // back-compat with older engines that predate live polling; absent degrades
   // to no live block instead of failing.
   live?: IndexLiveStatus | null;
+  // On-disk database file size in bytes, excluding the write-ahead log.
+  // Optional for back-compat; absent degrades to the content `bytes` total so
+  // older engines still render an honest size instead of failing.
+  dbFileBytes?: number | null;
+  // On-disk write-ahead log size in bytes. Optional for back-compat; absent
+  // degrades to zero when the file size is present, or to the content total
+  // when both are absent.
+  walBytes?: number | null;
+  // Storage breakdown for the on-disk figure: indexed text, vector, FTS, and
+  // free-space bytes. Each optional for back-compat; absent degrades to an
+  // omitted breakdown row instead of failing.
+  textBytes?: number | null;
+  vectorBytes?: number | null;
+  ftsBytes?: number | null;
+  freeBytes?: number | null;
+  // Resolved effort block, always present on current engines.
+  effort?: IndexEffortStatus | null;
 }
 
 // Outcome of `POST /index/run`.
@@ -1836,6 +1905,15 @@ export interface IndexRunResponse {
   finishedAt: string | number;
   indexAsOf?: string | number | null;
   skippedReason?: string | null;
+  // Documents retired (deleted or superseded) by the run. Optional for
+  // back-compat; absent degrades to no retired count instead of failing.
+  retiredCount?: number | null;
+  retired?: number | null;
+  // Documents where chunks beyond the vector cap stayed keyword-only.
+  // Optional for back-compat; absent degrades to no truncated count instead
+  // of failing.
+  truncatedCount?: number | null;
+  truncated?: number | null;
 }
 
 // Outcome of `POST /index/cancel`.
@@ -1856,6 +1934,50 @@ export interface IndexRunDescription {
   errors?: number | null;
   finishedAt?: string | number | null;
   skippedReason?: string | null;
+  retiredCount?: number | null;
+  truncatedCount?: number | null;
+}
+
+// Resolves the retired count from any run shape, accepting both `retiredCount`
+// and the `retired` alias some engines emit. Non-finite, negative, and
+// fractional payloads degrade to null so callers omit the count instead of
+// rendering a drifted figure.
+export function resolveIndexRetiredCount(
+  run:
+    | Pick<IndexLastRunStatus, "retiredCount" | "retired">
+    | Pick<IndexRunResponse, "retiredCount" | "retired">
+    | Pick<IndexRunDescription, "retiredCount">
+    | null
+    | undefined,
+): number | null {
+  if (!run || typeof run !== "object") return null;
+  const candidate =
+    (run as { retiredCount?: unknown }).retiredCount ??
+    (run as { retired?: unknown }).retired;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) return null;
+  if (candidate < 0) return null;
+  return Math.floor(candidate);
+}
+
+// Resolves the truncated count from any run shape, accepting both
+// `truncatedCount` and the `truncated` alias some engines emit. Non-finite,
+// negative, and fractional payloads degrade to null so callers omit the count
+// instead of rendering a drifted figure.
+export function resolveIndexTruncatedCount(
+  run:
+    | Pick<IndexLastRunStatus, "truncatedCount" | "truncated">
+    | Pick<IndexRunResponse, "truncatedCount" | "truncated">
+    | Pick<IndexRunDescription, "truncatedCount">
+    | null
+    | undefined,
+): number | null {
+  if (!run || typeof run !== "object") return null;
+  const candidate =
+    (run as { truncatedCount?: unknown }).truncatedCount ??
+    (run as { truncated?: unknown }).truncated;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) return null;
+  if (candidate < 0) return null;
+  return Math.floor(candidate);
 }
 
 // Normalizes the status strip shape into the shared run description. Null
@@ -1880,6 +2002,12 @@ export function indexRunDescriptionFromLastRun(
       typeof skippedReason === "string" && skippedReason.trim()
         ? skippedReason
         : null,
+    retiredCount: resolveIndexRetiredCount(
+      lastRun as Pick<IndexLastRunStatus, "retiredCount" | "retired">,
+    ),
+    truncatedCount: resolveIndexTruncatedCount(
+      lastRun as Pick<IndexLastRunStatus, "truncatedCount" | "truncated">,
+    ),
   };
 }
 
@@ -1900,6 +2028,8 @@ export function indexRunDescriptionFromSummary(
       typeof summary.skippedReason === "string" && summary.skippedReason.trim()
         ? summary.skippedReason
         : null,
+    retiredCount: resolveIndexRetiredCount(summary),
+    truncatedCount: resolveIndexTruncatedCount(summary),
   };
 }
 
@@ -1953,6 +2083,8 @@ export function describeIndexRun(
   const errors: unknown = normalized.errors;
   const finishedAt: unknown = normalized.finishedAt;
   const skippedReason: unknown = normalized.skippedReason;
+  const retiredCount: unknown = normalized.retiredCount;
+  const truncatedCount: unknown = normalized.truncatedCount;
   const normalizedStatus =
     typeof status === "string" && status.trim() ? status.trim() : "unknown";
   const head =
@@ -1968,6 +2100,20 @@ export function describeIndexRun(
   }
   if (typeof errors === "number" && Number.isFinite(errors)) {
     parts.push(`${errors} errors`);
+  }
+  if (
+    typeof retiredCount === "number" &&
+    Number.isFinite(retiredCount) &&
+    retiredCount > 0
+  ) {
+    parts.push(`${retiredCount} retired`);
+  }
+  if (
+    typeof truncatedCount === "number" &&
+    Number.isFinite(truncatedCount) &&
+    truncatedCount > 0
+  ) {
+    parts.push(`${truncatedCount} truncated`);
   }
   if (finishedAt != null) {
     const ageMs = indexWatermarkAgeMs(
@@ -2002,6 +2148,15 @@ export interface IndexResetResponse {
   reset: boolean;
 }
 
+// Outcome of `POST /index/reclaim`: compacts the index database and reports
+// the on-disk size before and after so the pane can show both figures. All
+// three counters are on-disk bytes (database file plus write-ahead log).
+export interface IndexReclaimResponse {
+  beforeBytes: number;
+  afterBytes: number;
+  reclaimedBytes: number;
+}
+
 // Closed set of valid `mail_vector_window` values, mirroring
 // IndexConfig.allowedMailVectorWindows; `all` disables the window.
 export const INDEX_MAIL_VECTOR_WINDOWS = ["30d", "6m", "1y", "2y", "all"];
@@ -2010,29 +2165,101 @@ export const INDEX_MAIL_VECTOR_WINDOWS = ["30d", "6m", "1y", "2y", "all"];
 // IndexConfig.allowedICloudEvictions.
 export const INDEX_ICLOUD_EVICTIONS = ["skip", "download"];
 
+// Closed set of valid `effort` preset ids, mirroring
+// IndexConfig.allowedEfforts without `custom`. `custom` carries an explicit
+// worker count in `workers`; the other three map onto the engine worker
+// derivation so the same preset scales from a laptop to a studio machine.
+export const INDEX_EFFORT_PRESETS = ["light", "balanced", "performance"] as const;
+
+// Display labels for the effort presets, plus the custom worker mode. Unknown
+// future presets fall back to their wire token so the control never renders
+// blank.
+export const INDEX_EFFORT_PRESET_LABELS: Record<string, string> = {
+  light: "Light",
+  balanced: "Balanced",
+  performance: "Performance",
+  custom: "Custom",
+};
+
+// Default effort preset: balanced work without saturating the machine.
+export const DEFAULT_INDEX_EFFORT = "balanced";
+// Default custom worker count used when `effort` is `custom` and no stored
+// value exists yet. This is the stepper fallback only; the wire default in
+// DEFAULT_INDEX_CONFIG.workers stays 0 (derive from the preset) mirroring
+// IndexConfig.defaultWorkers.
+export const DEFAULT_INDEX_WORKERS = 4;
+// Static ceiling for a `custom` worker count, mirroring
+// IndexConfig.maxAllowedWorkers. Validation accepts 1..64 on any machine;
+// resolution clamps to the live core count, so a value carried over from a
+// larger machine never oversubscribes the current hardware.
+export const INDEX_MAX_CUSTOM_WORKERS = 64;
+// Default exclude patterns, mirroring IndexConfig.defaultExcludePatterns
+// (Sources/RuneWeaverCore/IndexConfig.swift). Single-sourced here so the
+// fresh form before the first settings fetch and the back-compat fallback
+// cannot drift from the engine walker list.
+export const DEFAULT_INDEX_EXCLUDE_PATTERNS: string[] = [
+  ".build",
+  "*.app",
+  "*.log",
+  "*.tmp",
+  ".DS_Store",
+  ".bun",
+  ".cocoapods",
+  ".npm",
+  ".npm-packages",
+  ".nvm",
+  ".cache",
+  ".gradle",
+  ".swiftpm",
+  ".swiftly",
+  ".gem",
+  ".rvm",
+  ".cpan",
+  ".local",
+  ".docker",
+  ".ollama",
+  ".terraform.d",
+  ".ipynb_checkpoints",
+  ".ipython",
+  ".jupyter",
+  ".matplotlib",
+  ".vscode",
+  ".vscode-insiders",
+  ".zsh_sessions",
+  "gopath",
+  "go",
+  "nltk_data",
+];
+// Default per-document vector chunk cap, mirroring
+// IndexConfig.defaultMaxVectorChunksPerDocument.
+export const DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT = 128;
+// Default thermal-backoff toggle: back off when the machine reports pressure.
+export const DEFAULT_INDEX_THERMAL_BACKOFF = true;
+// Default pause-on-battery toggle: keep indexing on battery unless asked.
+export const DEFAULT_INDEX_PAUSE_ON_BATTERY = false;
+
 // Default index policy values mirroring IndexConfig so a fresh form matches the
-// boundary the engine enforces before the first settings fetch.
+// boundary the engine enforces before the first settings fetch. `workers` is
+// 0 (derive from the preset) mirroring IndexConfig.defaultWorkers; presets
+// require 0 and only `custom` carries an explicit 1..64 count.
 export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   enabled: false,
   files: true,
   mail: false,
   messages: false,
   roots: ["~"],
-  exclude: [
-    ".git",
-    "node_modules",
-    ".build",
-    "DerivedData",
-    "Library",
-    ".Trash",
-    "*.app",
-  ],
+  exclude: [...DEFAULT_INDEX_EXCLUDE_PATTERNS],
   max_file_mb: 20,
   mail_vector_window: "2y",
   icloud_evicted: "skip",
   describe_images_with_llm: false,
   nightly_budget: 0,
   db_path: "~/.runeweaver/index.db",
+  effort: DEFAULT_INDEX_EFFORT,
+  workers: 0,
+  thermal_backoff: DEFAULT_INDEX_THERMAL_BACKOFF,
+  pause_on_battery: DEFAULT_INDEX_PAUSE_ON_BATTERY,
+  max_vector_chunks_per_document: DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
 };
 
 export interface SettingsResponse {
@@ -2516,6 +2743,20 @@ export const DEFAULT_FILES_DENY_PATTERNS: string[] = [
   ".ssh/*",
   ".aws/*",
   ".runeweaver/memory/vectors/*",
+  ".git-credentials",
+  ".gitcookies",
+  ".rclone.conf",
+  ".npmrc",
+  ".pypirc",
+  ".Xauthority",
+  ".emulator_console_auth_token",
+  ".gnupg/*",
+  ".kube/*",
+  ".docker/*",
+  ".config/gcloud/*",
+  ".chia_keys/*",
+  "*_history",
+  ".zsh_sessions/*",
 ];
 
 // Manual mirror of FilesConfig.defaultAllowRoots (`~` = home); update by
@@ -2619,6 +2860,16 @@ export function pruneIndex(before: string | number): Promise<IndexPruneResponse>
 // Clears the index store; the route fails instead of claiming a partial clear.
 export function resetIndex(): Promise<IndexResetResponse> {
   return fetchJson<IndexResetResponse>("/index/reset", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+}
+
+// Compacts the index database and reports the on-disk size before and after
+// so the pane can show both figures. The counters are on-disk bytes
+// (database file plus write-ahead log) so the result reads within ~1% of `du`.
+export function reclaimIndex(): Promise<IndexReclaimResponse> {
+  return fetchJson<IndexReclaimResponse>("/index/reclaim", {
     method: "POST",
     body: JSON.stringify({}),
   });

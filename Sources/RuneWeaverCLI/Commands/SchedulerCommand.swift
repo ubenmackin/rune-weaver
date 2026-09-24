@@ -409,9 +409,14 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             context: ToolContext(conversationID: UUID())
         )
         guard !result.isError else { return .empty }
-        guard let data = result.content.data(using: .utf8),
-              let envelope = try? JSONDecoder().decode(EmailSearchEnvelope.self, from: data)
-        else { return .empty }
+        guard let data = result.content.data(using: .utf8) else { return .empty }
+        let envelope: EmailSearchEnvelope
+        do {
+            envelope = try JSONDecoder().decode(EmailSearchEnvelope.self, from: data)
+        } catch {
+            RuneWeaverLog.scheduler.warning("SchedulerCommand.pollCheck: failed to decode EmailSearchEnvelope: \(error.localizedDescription)")
+            return .empty
+        }
         return SchedulerPollCheck(ids: envelope.messages.map(\.id))
     }
 

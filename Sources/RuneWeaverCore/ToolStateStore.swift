@@ -112,7 +112,14 @@ private enum SQLiteToolStateStore {
 
     static func read(dbPath: String) -> [ToolState] {
         #if canImport(SQLite3)
-            guard let handle = try? open(dbPath: dbPath) else { return [] }
+            let handle: OpaquePointer?
+            do {
+                handle = try open(dbPath: dbPath)
+            } catch {
+                RuneWeaverLog.stores.error("ToolStateStore: could not open database at \(dbPath): \(error.localizedDescription)")
+                return []
+            }
+            guard let handle else { return [] }
             defer { sqlite3_close(handle) }
 
             let sql = """

@@ -472,7 +472,7 @@ archive_session_ttl_minutes = 10  # crash-orphan reclamation TTL (1-1440)
 max_concurrent_machines = 3  # concurrent detonation cap, enforced before spawn
 
 [files]
-deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*", ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc", ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*", ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"]
 allow_roots = ["~"]  # allowed roots for file reads (`~` expands to home)
 require_approval_on_deny = true  # deny hits escalate to approvals inbox (true) or fail closed (false)
 

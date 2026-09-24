@@ -144,7 +144,7 @@ public final class AppModel {
         // authorization prompt) so model construction stays side-effect
         // free; a retry after a failed boot re-runs it, which is idempotent.
         notificationManager.configure()
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             await self.bootServer()
         }
@@ -251,6 +251,7 @@ public final class AppModel {
                 RuneWeaverLog.server.info("SearXNG ready at \(browserConfig.searxngURL).")
             } catch is CancellationError {
                 // Best-effort warmup swallows cancel so quit stays silent.
+                RuneWeaverLog.server.debug("SearXNG warmup cancelled.")
             } catch {
                 RuneWeaverLog.server.warning("Search engine unavailable: \(error.localizedDescription)")
             }
@@ -735,7 +736,8 @@ public extension AppModel {
 
     func openSettings() {
         if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
-            Task { @MainActor in
+            Task { [weak self] in
+                guard let self else { return }
                 let sessionToken = try? await self.serverContext?.auth?.createSession()
                 await SettingsWindowController.shared.show(url: url, sessionToken: sessionToken)
             }
@@ -795,7 +797,7 @@ public extension AppModel {
         // the guard twice and persist competing credentials; the async mint
         // below only clears it.
         isGeneratingOwnerToken = true
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             await self.mintOwnerToken(replacing: false)
         }
@@ -811,7 +813,7 @@ public extension AppModel {
         // Same synchronous single-flight as generation: claim the flag on the
         // MainActor before spawning the mint Task.
         isGeneratingOwnerToken = true
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             await self.mintOwnerToken(replacing: true)
         }
@@ -822,7 +824,7 @@ public extension AppModel {
     /// dropped immediately after hashing; only the prefix and source label
     /// ever reach published state.
     func refreshOwnerTokenStatus() {
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             do {
                 let config = try RuneWeaverConfig.loadDefault()
@@ -873,7 +875,7 @@ public extension AppModel {
         // Claim synchronously on the MainActor before the Task hops so a
         // concurrent Retry double-click collapses to one shutdown+boot.
         isRestarting = true
-        Task { @MainActor [weak self] in
+        Task { [weak self] in
             guard let self else { return }
             await self.restartServer()
         }

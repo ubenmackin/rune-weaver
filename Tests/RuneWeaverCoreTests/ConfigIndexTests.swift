@@ -24,6 +24,35 @@ struct ConfigIndexTests {
     }
 
     @Test
+    func `Default excludes ship machine output and tool caches`() throws {
+        let defaults = IndexConfig.defaultExcludePatterns
+        for expected in [
+            ".build", "*.app", "*.log", "*.tmp", ".DS_Store", ".bun", ".cocoapods",
+            ".npm", ".npm-packages", ".nvm", ".cache", ".gradle", ".swiftpm", ".swiftly",
+            ".gem", ".rvm", ".cpan", ".local", ".docker", ".ollama", ".terraform.d",
+            ".ipynb_checkpoints", ".ipython", ".jupyter", ".matplotlib", ".vscode",
+            ".vscode-insiders", ".zsh_sessions", "gopath", "go", "nltk_data"
+        ] {
+            #expect(defaults.contains(expected), "Expected default excludes to include \(expected)")
+        }
+        for removed in [".git", "node_modules", "DerivedData", "Library", ".Trash"] {
+            #expect(!defaults.contains(removed), "Expected default excludes to omit walker built-in \(removed)")
+        }
+
+        let config = RuneWeaverConfig.default
+        #expect(config.index.exclude == defaults)
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index.exclude == defaults)
+        for expected in ["*.log", "*.tmp", ".DS_Store", ".nvm", ".cache", "gopath"] {
+            #expect(reparsed.index.exclude.contains(expected), "Expected round-trip to keep \(expected)")
+        }
+        try reparsed.validate()
+    }
+
+    @Test
     func `Absent index section decodes to defaults`() throws {
         let text = """
         [llm]
@@ -148,6 +177,268 @@ struct ConfigIndexTests {
     @Test
     func `Blank exclude pattern fails validation`() {
         expectIndexValidationFailure({ $0.exclude = [""] }, field: "index.exclude")
+    }
+
+    @Test
+    func `Index effort defaults to balanced with derived workers`() {
+        let config = IndexConfig()
+        #expect(config.effort == "balanced")
+        #expect(config.effort == IndexConfig.defaultEffort)
+        #expect(config.workers == 0)
+        #expect(config.thermalBackoff == true)
+        #expect(config.pauseOnBattery == false)
+    }
+
+    @Test
+    func `Index effort presets resolve deterministically`() {
+        var light = IndexConfig()
+        light.effort = "light"
+        #expect(light.resolvedWorkerCount(cores: 8) == 1)
+        #expect(light.resolvedWorkerCount(cores: 24) == 1)
+
+        var balanced = IndexConfig()
+        balanced.effort = "balanced"
+        #expect(balanced.resolvedWorkerCount(cores: 8) == 4)
+        #expect(balanced.resolvedWorkerCount(cores: 24) == 4)
+
+        var performance = IndexConfig()
+        performance.effort = "performance"
+        #expect(performance.resolvedWorkerCount(cores: 8) == 7)
+        #expect(performance.resolvedWorkerCount(cores: 24) == 23)
+
+        var custom = IndexConfig()
+        custom.effort = "custom"
+        custom.workers = 6
+        #expect(custom.resolvedWorkerCount(cores: 8) == 6)
+        #expect(custom.resolvedWorkerCount(cores: 24) == 6)
+        custom.workers = 100
+        #expect(custom.resolvedWorkerCount(cores: 8) == 8)
+        #expect(custom.resolvedWorkerCount(cores: 24) == 24)
+        // The static ceiling binds before the core clamp so a value carried
+        // from a larger machine never oversubscribes even a large host.
+        #expect(custom.resolvedWorkerCount(cores: 128) == IndexConfig.maxAllowedWorkers)
+
+        let liveCores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        #expect(balanced.resolvedWorkerCount() == balanced.resolvedWorkerCount(cores: liveCores))
+    }
+
+    @Test
+    func `Explicit effort keys decode`() throws {
+        let text = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
+
+        [index]
+        enabled = true
+        effort = "performance"
+        workers = 0
+        thermal_backoff = false
+        pause_on_battery = true
+        """
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.index.effort == "performance")
+        #expect(config.index.workers == 0)
+        #expect(config.index.thermalBackoff == false)
+        #expect(config.index.pauseOnBattery == true)
+        try config.validate()
+    }
+
+    @Test
+    func `Invalid effort fails validation`() {
+        expectIndexValidationFailure({ $0.effort = "turbo" }, field: "index.effort")
+        // Legacy frontend and example tokens never pass the closed set; they
+        // must arrive canonicalized instead of validating in place.
+        expectIndexValidationFailure({ $0.effort = "eco" }, field: "index.effort")
+        expectIndexValidationFailure({ $0.effort = "standard" }, field: "index.effort")
+    }
+
+    @Test
+    func `Workers decodes into the canonical field`() throws {
+        let payload = """
+        {"effort":"custom","workers":5}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(IndexConfig.self, from: payload)
+        #expect(decoded.workers == 5)
+        let encoded = try JSONEncoder().encode(IndexConfig(effort: "custom", workers: 2))
+        let object = try JSONSerialization.jsonObject(with: encoded) as? [String: Any] ?? [:]
+        #expect(object["workers"] as? Int == 2)
+    }
+
+    @Test
+    func `Custom workers out of range fails validation`() {
+        // The custom count validates against a static ceiling so the same
+        // file loads on any machine; the live core count only clamps at
+        // resolve time.
+        expectIndexValidationFailure({
+            $0.effort = "custom"
+            $0.workers = 0
+        }, field: "index.workers")
+        expectIndexValidationFailure({
+            $0.effort = "custom"
+            $0.workers = IndexConfig.maxAllowedWorkers + 1
+        }, field: "index.workers")
+        expectIndexValidationFailure({
+            $0.effort = "balanced"
+            $0.workers = 2
+        }, field: "index.workers")
+        // A large-but-valid count passes validation even on a small machine.
+        var config = RuneWeaverConfig.default
+        config.index.effort = "custom"
+        config.index.workers = IndexConfig.maxAllowedWorkers
+        do {
+            try config.validate()
+        } catch {
+            Issue.record("Expected custom workers at the static ceiling to validate, got \(error)")
+        }
+    }
+
+    @Test
+    func `Index effort round-trips through TOML`() throws {
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(
+            enabled: true,
+            files: true,
+            mail: false,
+            messages: false,
+            roots: ["~"],
+            exclude: [".git"],
+            maxFileMB: 20,
+            mailVectorWindow: "2y",
+            iCloudEvicted: "skip",
+            describeImagesWithLLM: false,
+            nightlyBudget: 0,
+            dbPath: "~/.runeweaver/index.db",
+            effort: "custom",
+            workers: 1,
+            thermalBackoff: false,
+            pauseOnBattery: true
+        )
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        #expect(rendered.contains("effort = \"custom\""))
+        #expect(rendered.contains("workers = 1"))
+        #expect(rendered.contains("thermal_backoff = false"))
+        #expect(rendered.contains("pause_on_battery = true"))
+
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index == config.index)
+        try reparsed.validate()
+    }
+
+    @Test
+    func `Max vector chunks defaults to a bounded cap`() {
+        let config = IndexConfig()
+        #expect(config.maxVectorChunksPerDocument == 128)
+        #expect(config.maxVectorChunksPerDocument == IndexConfig.defaultMaxVectorChunksPerDocument)
+        #expect(IndexConfig.maxAllowedVectorChunksPerDocument == 4096)
+    }
+
+    @Test
+    func `Explicit max_vector_chunks_per_document decodes`() throws {
+        let text = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
+
+        [index]
+        enabled = true
+        max_vector_chunks_per_document = 64
+        """
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.index.maxVectorChunksPerDocument == 64)
+        try config.validate()
+    }
+
+    @Test
+    func `Out of range max_vector_chunks_per_document fails validation`() {
+        expectIndexValidationFailure({ $0.maxVectorChunksPerDocument = 0 }, field: "index.max_vector_chunks_per_document")
+        expectIndexValidationFailure(
+            { $0.maxVectorChunksPerDocument = IndexConfig.maxAllowedVectorChunksPerDocument + 1 },
+            field: "index.max_vector_chunks_per_document"
+        )
+    }
+
+    @Test
+    func `Max vector chunks round-trips through TOML`() throws {
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(
+            enabled: true,
+            files: true,
+            mail: false,
+            messages: false,
+            roots: ["~"],
+            exclude: [".git"],
+            maxFileMB: 20,
+            mailVectorWindow: "2y",
+            iCloudEvicted: "skip",
+            describeImagesWithLLM: false,
+            nightlyBudget: 0,
+            dbPath: "~/.runeweaver/index.db",
+            effort: "balanced",
+            workers: 0,
+            thermalBackoff: true,
+            pauseOnBattery: false,
+            maxVectorChunksPerDocument: 64
+        )
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        #expect(rendered.contains("max_vector_chunks_per_document = 64"))
+
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index == config.index)
+        try reparsed.validate()
+    }
+
+    @Test
+    func `Files deny defaults include credential and history patterns`() {
+        let patterns = FilesConfig.defaultDenyPatterns
+        // Long-standing entries stay denied so the widened list never trades
+        // an old boundary for a new one.
+        for expected in [
+            ".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key",
+            "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"
+        ] {
+            #expect(patterns.contains(expected), "Expected default deny list to keep \(expected)")
+        }
+        // Newly protected credential files, cloud CLIs, and shell histories
+        // whose pasted tokens would otherwise ride index chunks to the model.
+        for expected in [
+            ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc",
+            ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*",
+            ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"
+        ] {
+            #expect(patterns.contains(expected), "Expected default deny list to include \(expected)")
+        }
+    }
+
+    @Test
+    func `Files deny patterns survive a TOML round-trip`() throws {
+        // The default file policy renders into the saved document and parses
+        // back byte-identical, so a restart never silently drops a boundary.
+        let config = RuneWeaverConfig.default
+        #expect(config.files.denyPatterns == FilesConfig.defaultDenyPatterns)
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        #expect(rendered.contains("[files]"))
+
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.files == config.files)
+        #expect(reparsed.files.denyPatterns == FilesConfig.defaultDenyPatterns)
+        try reparsed.validate()
     }
 }
 

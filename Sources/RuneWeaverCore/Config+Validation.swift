@@ -538,6 +538,40 @@ extension RuneWeaverConfig {
                 field: "index.db_path", message: "must not be empty"
             )
         }
+        // Closed effort set keeps worker derivation predictable; a typo would
+        // otherwise silently fall back to the balanced formula.
+        if !IndexConfig.allowedEfforts.contains(index.effort) {
+            throw ConfigError.validationError(
+                field: "index.effort",
+                message: "must be one of \(IndexConfig.allowedEfforts.joined(separator: ", ")) (got '\(index.effort)')"
+            )
+        }
+        // Custom carries an explicit count while presets derive it, so a
+        // preset with a stray count and a custom without one both fail here.
+        // The custom count validates against a static ceiling so the same
+        // file loads on any machine; resolution clamps to the live cores.
+        if index.effort == "custom" {
+            if index.workers < 1 || index.workers > IndexConfig.maxAllowedWorkers {
+                throw ConfigError.validationError(
+                    field: "index.workers",
+                    message: "must be between 1 and \(IndexConfig.maxAllowedWorkers) when effort is custom (got \(index.workers))"
+                )
+            }
+        } else if index.workers != 0 {
+            throw ConfigError.validationError(
+                field: "index.workers",
+                message: "must be 0 unless effort is custom (got \(index.workers))"
+            )
+        }
+        // The cap bounds per-document embedding work so one text-dense
+        // document cannot schedule a huge batch; a typo outside 1...4096
+        // fails at load instead of fanning thousands of embeddings.
+        if index.maxVectorChunksPerDocument < 1 || index.maxVectorChunksPerDocument > IndexConfig.maxAllowedVectorChunksPerDocument {
+            throw ConfigError.validationError(
+                field: "index.max_vector_chunks_per_document",
+                message: "must be between 1 and \(IndexConfig.maxAllowedVectorChunksPerDocument) (got \(index.maxVectorChunksPerDocument))"
+            )
+        }
     }
 
     private func validateBrowserSection() throws {

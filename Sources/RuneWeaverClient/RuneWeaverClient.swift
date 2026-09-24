@@ -272,6 +272,66 @@ public actor RuneWeaverClient {
         return .continued
     }
 
+    /// Handles a warning frame from the engine.
+    private static func handleWarningFrame(
+        _ replyData: Data,
+        liveWarnings: inout Set<String>,
+        continuation: AsyncStream<Message>.Continuation
+    ) {
+        // Degraded-tool notices stay informational but must not go silent for library
+        // consumers: surface each skip as a system message so fail-open turns stay honest.
+        guard let warning = try? JSONDecoder().decode(ClientWarningFrame.self, from: replyData) else { return }
+        let trimmed = warning.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        // One message per skipped tool even on retransmit: collapse live repeats by value.
+        if !trimmed.isEmpty, liveWarnings.insert(trimmed).inserted {
+            continuation.yield(Message(role: .system, content: trimmed))
+        }
+    }
+
+    /// Handles a terminal done frame from the engine.
+    private static func handleDoneFrame(
+        _ replyData: Data,
+        accumulated: String,
+        liveWarnings: inout Set<String>,
+        continuation: AsyncStream<Message>.Continuation
+    ) throws -> ChatFrameResult {
+        let done: ClientStreamDone
+        do {
+            done = try JSONDecoder().decode(ClientStreamDone.self, from: replyData)
+        } catch {
+            throw URLError(.cannotParseResponse, userInfo: [NSLocalizedDescriptionKey: "Failed to decode done frame: \(error.localizedDescription)"])
+        }
+        // Terminal warnings repeat mid-turn notices for polling clients; surface only lines
+        // not already streamed live so library turns carry one message per skipped tool.
+        if let warnings = done.warnings {
+            var emittedTerminal = Set<String>()
+            for line in warnings {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+                guard !liveWarnings.contains(trimmed) else { continue }
+                guard emittedTerminal.insert(trimmed).inserted else { continue }
+                liveWarnings.insert(trimmed)
+                continuation.yield(Message(role: .system, content: trimmed))
+            }
+        }
+        let content = done.text.isEmpty ? accumulated : done.text
+        continuation.yield(Message(role: .assistant, content: content))
+        continuation.finish()
+        return .finished
+    }
+
+    /// Handles an error frame from the engine.
+    private static func handleErrorFrame(_ replyData: Data) throws {
+        do {
+            let failure = try JSONDecoder().decode(ClientErrorFrame.self, from: replyData)
+            throw URLError(.cannotParseResponse, userInfo: [NSLocalizedDescriptionKey: failure.message])
+        } catch let urlError as URLError {
+            throw urlError
+        } catch {
+            throw URLError(.cannotParseResponse)
+        }
+    }
+
     /// Handles one discriminator-typed engine frame.
     private static func handleTypedFrame(
         _ type: String,
@@ -287,37 +347,15 @@ public actor RuneWeaverClient {
             }
             return .continued
         case "warning":
-            // Degraded-tool notices stay informational but must not go silent for library
-            // consumers: surface each skip as a system message so fail-open turns stay honest.
-            if let warning = try? JSONDecoder().decode(ClientWarningFrame.self, from: replyData) {
-                let trimmed = warning.message.trimmingCharacters(in: .whitespacesAndNewlines)
-                // One message per skipped tool even on retransmit: collapse live repeats by value.
-                if !trimmed.isEmpty, liveWarnings.insert(trimmed).inserted {
-                    continuation.yield(Message(role: .system, content: trimmed))
-                }
-            }
+            handleWarningFrame(replyData, liveWarnings: &liveWarnings, continuation: continuation)
             return .continued
         case "done":
-            guard let done = try? JSONDecoder().decode(ClientStreamDone.self, from: replyData) else {
-                return .continued
-            }
-            // Terminal warnings repeat mid-turn notices for polling clients; surface only lines
-            // not already streamed live so library turns carry one message per skipped tool.
-            if let warnings = done.warnings {
-                var emittedTerminal = Set<String>()
-                for line in warnings {
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { continue }
-                    guard !liveWarnings.contains(trimmed) else { continue }
-                    guard emittedTerminal.insert(trimmed).inserted else { continue }
-                    liveWarnings.insert(trimmed)
-                    continuation.yield(Message(role: .system, content: trimmed))
-                }
-            }
-            let content = done.text.isEmpty ? accumulated : done.text
-            continuation.yield(Message(role: .assistant, content: content))
-            continuation.finish()
-            return .finished
+            return try handleDoneFrame(
+                replyData,
+                accumulated: accumulated,
+                liveWarnings: &liveWarnings,
+                continuation: continuation
+            )
         case "approval":
             // Broadcast prompt arriving mid-turn; skip and keep streaming.
             return .continued
@@ -326,20 +364,26 @@ public actor RuneWeaverClient {
             // stream this client exposes, but it is still decoded so a malformed
             // payload is validated locally and dropped rather than surfacing. An
             // unknown future frame keeps taking the default branch below.
-            _ = try? JSONDecoder().decode(ClientToolProgressFrame.self, from: replyData)
+            do {
+                _ = try JSONDecoder().decode(ClientToolProgressFrame.self, from: replyData)
+            } catch {
+                RuneWeaverLog.tools.debug("RuneWeaverClient: dropped unparsable tool progress frame: \(error.localizedDescription)")
+            }
             return .continued
         case "tool_cancel_miss":
             // A per-tool cancel miss is non-terminal by contract: it reports that
             // a detached call stopped nothing, while the turn keeps streaming.
             // Decoding and discarding (instead of throwing like an `error` frame)
             // keeps library turns alive through a cancel that did not land.
-            _ = try? JSONDecoder().decode(ClientToolCancelMissFrame.self, from: replyData)
+            do {
+                _ = try JSONDecoder().decode(ClientToolCancelMissFrame.self, from: replyData)
+            } catch {
+                RuneWeaverLog.tools.debug("RuneWeaverClient: dropped unparsable tool cancel miss frame: \(error.localizedDescription)")
+            }
             return .continued
         case "error":
-            if let failure = try? JSONDecoder().decode(ClientErrorFrame.self, from: replyData) {
-                throw URLError(.cannotParseResponse, userInfo: [NSLocalizedDescriptionKey: failure.message])
-            }
-            throw URLError(.cannotParseResponse)
+            try handleErrorFrame(replyData)
+            return .continued
         default:
             return .continued
         }

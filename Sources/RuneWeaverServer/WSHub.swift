@@ -190,9 +190,15 @@ public actor WSHub {
 
     /// Broadcasts one approval prompt to every connected socket.
     public func broadcastApproval(_ request: PermissionRequest) async {
-        guard let data = try? JSONEncoder().encode(WSApprovalPrompt(request: request)),
-              let text = String(data: data, encoding: .utf8)
-        else { return }
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(WSApprovalPrompt(request: request))
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode approval prompt: \(error.localizedDescription)")
+            return
+        }
         await fanOut(text)
     }
 
@@ -207,9 +213,15 @@ public actor WSHub {
         // agree; the approvals badge carries the wait instead of double-badging
         // one blocked turn, matching the dashboard active-status filter.
         let eventType = run.status == "running" ? "run_started" : "run_completed"
-        guard let data = try? JSONEncoder().encode(WSRunEvent(type: eventType, run: run)),
-              let text = String(data: data, encoding: .utf8)
-        else { return }
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(WSRunEvent(type: eventType, run: run))
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode run event: \(error.localizedDescription)")
+            return
+        }
         await fanOut(text)
     }
 

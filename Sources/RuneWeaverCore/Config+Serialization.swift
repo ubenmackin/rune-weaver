@@ -191,6 +191,11 @@ extension RuneWeaverConfig {
             "describe_images_with_llm = \(index.describeImagesWithLLM ? "true" : "false")",
             "nightly_budget = \(index.nightlyBudget)",
             "db_path = \(Self.tomlQuoted(index.dbPath))",
+            "effort = \(Self.tomlQuoted(index.effort))",
+            "workers = \(index.workers)",
+            "thermal_backoff = \(index.thermalBackoff ? "true" : "false")",
+            "pause_on_battery = \(index.pauseOnBattery ? "true" : "false")",
+            "max_vector_chunks_per_document = \(index.maxVectorChunksPerDocument)",
             ""
         ]
     }

@@ -342,7 +342,12 @@ public actor VectorStore {
         guard let data = try? Data(contentsOf: url) else { return [] }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
-        return (try? decoder.decode([StoredFact].self, from: data)) ?? []
+        do {
+            return try decoder.decode([StoredFact].self, from: data)
+        } catch {
+            RuneWeaverLog.memory.warning("VectorStore: failed to decode facts from \(url.path): \(error.localizedDescription)")
+            return []
+        }
     }
 
     /// Loads persisted facts, throwing on corrupt data (used by `reindex`).

@@ -1124,7 +1124,13 @@ extension MemoryEngine {
     /// Writes the profile JSON without throwing (used after mutation).
     private func persistProfileBestEffort() {
         guard let profilePath else { return }
-        guard let data = try? JSONEncoder().encode(profileSnapshot()) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(profileSnapshot())
+        } catch {
+            RuneWeaverLog.memory.error("MemoryEngine: Failed to encode user profile snapshot: \(error.localizedDescription)")
+            return
+        }
         let expanded = (profilePath as NSString).expandingTildeInPath
         Self.profileWriteQueue.async {
             let directory = (expanded as NSString).deletingLastPathComponent
@@ -1156,7 +1162,12 @@ extension MemoryEngine {
         let expanded = (path as NSString).expandingTildeInPath
         guard FileManager.default.fileExists(atPath: expanded) else { return nil }
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return nil }
-        return try? JSONDecoder().decode(UserProfile.self, from: data)
+        do {
+            return try JSONDecoder().decode(UserProfile.self, from: data)
+        } catch {
+            RuneWeaverLog.memory.warning("MemoryEngine: Failed to decode user profile from '\(expanded)': \(error.localizedDescription)")
+            return nil
+        }
     }
 }
 

@@ -1,10 +1,12 @@
 // Rune Weaver Server — Local document index status and control routes.
 //
 // Thin HTTP adapters over the injected `IndexCoordinator` and `DocIndexStore`:
-// status reports aggregate counts, the last watermark, per-source enablement,
+// status reports aggregate counts, true on-disk and logical sizes, the
+// resolved effort block, the last watermark, per-source enablement,
 // recent failures, and live run state; run executes one on-demand pass; cancel
 // asks an in-flight pass to stop at its next safe point; prune removes
-// documents older than a cutoff; and reset clears the store. Live progress is
+// documents older than a cutoff; reset clears the store; and reclaim runs
+// `VACUUM` reporting before and after byte figures. Live progress is
 // poll-snapshot primary: the status probe carries the additive `live` snapshot
 // derived from the coordinator's `liveTotals` (null when idle) that the menu
 // and page poll about every 2s while a run is in flight; WebSocket
@@ -29,6 +31,7 @@ func registerIndexRoutes(_ app: Application) {
     registerIndexCancelRoute(app)
     registerIndexPruneRoute(app)
     registerIndexResetRoute(app)
+    registerIndexReclaimRoute(app)
 }
 
 /// Registers the status probe behind `GET /index/status`.
@@ -76,7 +79,12 @@ private func registerIndexStatusRoute(_ app: Application) {
             }
         }
         let lastRun = latestIndexRun(from: latestEntry)
-        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live)
+        // On-disk and logical sizes ride the store breakdown so the dashboard
+        // renders true file bytes instead of a logical estimate; a missing
+        // store reports zeros matching the zeroed counts above rather than
+        // failing the probe.
+        let storage = try await context.indexStore?.storageBreakdown()
+        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live, storage: storage)
     }
 }
 
@@ -168,6 +176,25 @@ private func registerIndexResetRoute(_ app: Application) {
     }
 }
 
+/// Registers the reclaim route behind `POST /index/reclaim`.
+///
+/// Runs `VACUUM` without touching documents or chunks and reports the on-disk
+/// total before and after plus the reclaimed delta. Progress keeps riding the
+/// existing status poll and WebSocket wake-up frames; reclaim itself is a
+/// short synchronous maintenance call with no new transport.
+private func registerIndexReclaimRoute(_ app: Application) {
+    let index = app.grouped(PathComponent.constant(ServerPaths.index))
+
+    index.post(PathComponent.constant(ServerPaths.indexReclaim)) { req async throws -> IndexReclaimResponse in
+        let context = req.application.runeWeaver
+        guard let store = context.indexStore else {
+            throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
+        }
+        let result = try await store.reclaim()
+        return IndexReclaimResponse(result)
+    }
+}
+
 /// Loads the active index policy, translating config failures into HTTP shapes.
 /// - Returns: The `[index]` section of the stored configuration.
 /// - Throws: `Abort(.badRequest)` for a rejected config and
@@ -180,6 +207,17 @@ private func loadedIndexConfiguration() throws -> IndexConfig {
     } catch {
         throw Abort(.internalServerError, reason: error.localizedDescription)
     }
+}
+
+/// Directory and file names the files walker always skips, even when absent
+/// from `exclude`.
+///
+/// Single-sourced from the walker's prune list so the index settings payload
+/// cannot drift from what the walker actually prunes. The `[files]` deny
+/// patterns stay out of this list and are described generically in the UI.
+/// - Returns: Walker prune names in walk order.
+func indexAlwaysSkippedPatterns() -> [String] {
+    FilesIndexer.alwaysSkippedPatterns
 }
 
 /// Maximum `index`-kind rows examined per status poll for failures.
@@ -235,6 +273,10 @@ private enum IndexRunCountPatterns {
     static let scanned: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+scanned", options: .caseInsensitive)
     /// Matches `<n> errors` in the summary line, compiled once.
     static let errors: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+errors", options: .caseInsensitive)
+    /// Matches `<n> retired` in the summary line, compiled once.
+    static let retired: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+retired", options: .caseInsensitive)
+    /// Matches `<n> truncated` in the summary line, compiled once.
+    static let truncated: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+truncated", options: .caseInsensitive)
 }
 
 /// Collects the most recent index run failures via a kind-filtered store lookup.
@@ -262,17 +304,21 @@ private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [Str
 ///
 /// Pure derivation over the kind-filtered store lookup in the status route.
 /// The coordinator's summary line
-/// (`Index run <status>: <n> indexed, ... <n> scanned, <n> errors`) carries the
-/// outcome counts, so the strip parses them back out of the durable text; each
-/// count falls back from the message to the response detail line (both carry
-/// the same summary first line), and a row whose wording drifted past both
-/// still reports its status and finish time with nil counts instead of
-/// disappearing. Cancelled runs persist the same way: the completion event
-/// carries partial counts with status `cancelled`, so the strip renders the
-/// work done so far rather than vanishing. The trigger token is parsed the same
-/// way: the start message carries `Index run started (<trigger>)` while the
-/// completion response carries a `Trigger: <trigger>` detail line, so either
-/// shape yields the machine-readable token the dashboard maps to display copy.
+/// (`Index run <status>: <n> indexed, ... <n> scanned, <n> errors, <n> retired, <n> truncated`)
+/// carries the outcome counts, so the strip parses them back out of the
+/// durable text; each count falls back from the message to the response detail
+/// line (both carry the same summary first line), and a row whose wording
+/// drifted past both still reports its status and finish time with nil counts
+/// instead of disappearing. Retired and truncated prefer the explicit
+/// `Retired:`/`Truncated:` detail lines (written by
+/// `IndexCoordinator.detailLine`) with the summary wording as fallback, so the
+/// strip stays honest even when the summary is pruned. Cancelled runs persist
+/// the same way: the completion event carries partial counts with status
+/// `cancelled`, so the strip renders the work done so far rather than
+/// vanishing. The trigger token is parsed the same way: the start message
+/// carries `Index run started (<trigger>)` while the completion response
+/// carries a `Trigger: <trigger>` detail line, so either shape yields the
+/// machine-readable token the dashboard maps to display copy.
 /// The skip reason follows the same detail-line contract: the completion
 /// response carries a `Skipped: <reason>` line (written by
 /// `IndexCoordinator.detailLine`), parsed like the trigger line and validated
@@ -286,6 +332,12 @@ private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
     let message = entry.message
     let fallback = entry.response ?? ""
     let skippedReason: String? = entry.response.flatMap { firstSkippedDetailToken(in: $0) }
+    let retired: Int? = entry.response.flatMap { firstCountDetailToken(prefix: "Retired:", in: $0) }
+        ?? firstRunCount(keyword: "retired", in: message)
+        ?? firstRunCount(keyword: "retired", in: fallback)
+    let truncated: Int? = entry.response.flatMap { firstCountDetailToken(prefix: "Truncated:", in: $0) }
+        ?? firstRunCount(keyword: "truncated", in: message)
+        ?? firstRunCount(keyword: "truncated", in: fallback)
     return IndexLastRunStatus(
         status: entry.status,
         indexed: firstRunCount(keyword: "indexed", in: message) ?? firstRunCount(keyword: "indexed", in: fallback),
@@ -293,7 +345,9 @@ private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
         errors: firstRunCount(keyword: "errors", in: message) ?? firstRunCount(keyword: "errors", in: fallback),
         finishedAt: entry.timestamp,
         trigger: indexRunTriggerToken(from: entry),
-        skippedReason: skippedReason
+        skippedReason: skippedReason,
+        retiredCount: retired,
+        truncatedCount: truncated
     )
 }
 
@@ -381,10 +435,9 @@ private func firstSkippedDetailToken(in response: String) -> String? {
 /// Extracts the first `<n> <keyword>` count from a run summary line.
 ///
 /// Uses the shared compiled patterns, so the status probe performs no
-/// per-request regex compilation. Only the three status keywords are
-/// recognized; any other keyword yields nil without compiling.
+/// per-request regex compilation.
 /// - Parameters:
-///   - keyword: Count label to find (`"indexed"`, `"scanned"`, `"errors"`).
+///   - keyword: Count label to find (`"indexed"`, `"scanned"`, `"errors"`, `"retired"`, `"truncated"`).
 ///   - message: Summary line carrying the counts.
 /// - Returns: The parsed count, or nil when the wording drifted.
 private func firstRunCount(keyword: String, in message: String) -> Int? {
@@ -397,6 +450,10 @@ private func firstRunCount(keyword: String, in message: String) -> Int? {
         cached = IndexRunCountPatterns.scanned
     case "errors":
         cached = IndexRunCountPatterns.errors
+    case "retired":
+        cached = IndexRunCountPatterns.retired
+    case "truncated":
+        cached = IndexRunCountPatterns.truncated
     default:
         return nil
     }
@@ -411,4 +468,28 @@ private func firstRunCount(keyword: String, in message: String) -> Int? {
         return nil
     }
     return Int(message[countRange])
+}
+
+/// Extracts a non-negative integer from a completion detail line.
+///
+/// Scans lines for the given prefix (case-insensitive) and returns the leading
+/// integer after it, so `Retired:` and `Truncated:` lines parse like the
+/// trigger and skip lines. A response without such a line, or with a
+/// non-numeric value, yields nil so the strip omits the count instead of
+/// inventing one.
+/// - Parameters:
+///   - prefix: Detail-line prefix including the colon (for example `"Retired:"`).
+///   - response: Completion detail text.
+/// - Returns: The parsed count, or nil.
+private func firstCountDetailToken(prefix: String, in response: String) -> Int? {
+    for line in response.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix(prefix.lowercased()) else { continue }
+        let after = trimmed.dropFirst(prefix.count).trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = after.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true).first.map(String.init)
+        if let token, let value = Int(token), value >= 0 {
+            return value
+        }
+    }
+    return nil
 }

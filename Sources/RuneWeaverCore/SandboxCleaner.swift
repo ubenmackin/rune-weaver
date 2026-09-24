@@ -68,7 +68,13 @@ public enum FileSandboxAuditLog {
         to fileURL: URL? = nil
     ) {
         let event = SandboxCleanupAuditEvent(summary: summary)
-        guard let data = try? JSONEncoder().encode(event) else { return }
+        let data: Data
+        do {
+            data = try JSONEncoder().encode(event)
+        } catch {
+            RuneWeaverLog.sandbox.error("SandboxCleanupAuditLog: failed to encode audit event: \(error.localizedDescription)")
+            return
+        }
         var line = data
         line.append(0x0A)
         let url = fileURL ?? defaultLogURL()

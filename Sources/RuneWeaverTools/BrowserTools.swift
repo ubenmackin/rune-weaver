@@ -400,7 +400,12 @@ public struct BrowserNavigateEnvelope: Sendable, Equatable, Codable {
         guard BrowserNavigateResult.parse(content) != nil else { return nil }
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(BrowserNavigateEnvelope.self, from: data)
+        do {
+            return try JSONDecoder().decode(BrowserNavigateEnvelope.self, from: data)
+        } catch {
+            RuneWeaverLog.tools.warning("BrowserNavigateEnvelope.parse: failed to decode envelope: \(error.localizedDescription)")
+            return nil
+        }
     }
 }
 

@@ -516,6 +516,20 @@ describe("dashboard api client", () => {
       ".ssh/*",
       ".aws/*",
       ".runeweaver/memory/vectors/*",
+      ".git-credentials",
+      ".gitcookies",
+      ".rclone.conf",
+      ".npmrc",
+      ".pypirc",
+      ".Xauthority",
+      ".emulator_console_auth_token",
+      ".gnupg/*",
+      ".kube/*",
+      ".docker/*",
+      ".config/gcloud/*",
+      ".chia_keys/*",
+      "*_history",
+      ".zsh_sessions/*",
     ]);
   });
 

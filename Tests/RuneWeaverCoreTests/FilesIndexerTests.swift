@@ -83,6 +83,42 @@ private struct FilesIndexerStubEmbedder: EmbeddingsBackend {
     }
 }
 
+/// Embeddings backend stamping each vector with its instance identifier so pool vending is observable.
+private struct FilesIndexerIDEmbedder: EmbeddingsBackend {
+    /// Instance identifier assigned by the pool factory.
+    let id: Int
+    /// Stable stub identifier for diagnostics.
+    let modelID = "id-embeddings"
+    /// Fixed stub width.
+    let dimension: Int? = 1
+
+    /// Returns one identifying vector per input.
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        texts.map { _ in [Float(id)] }
+    }
+}
+
+/// Extractor returning a fixed multi-chunk body so the per-document vector cap is proven.
+private struct FilesIndexerMultiChunkExtractor: DocumentTextExtracting {
+    /// Number of chunks to return for every file.
+    var chunkCount: Int = 5
+
+    /// Returns a fixed multi-chunk extraction regardless of file bytes.
+    func extract(data: Data, fileName _: String, contentType _: String?) -> DocumentExtraction {
+        let chunks = (0 ..< chunkCount).map { index in
+            DocumentChunk(index: index, text: "cap-chunk-\(index) body", estimatedTokens: 2)
+        }
+        return DocumentExtraction(
+            status: .extracted,
+            format: .plainText,
+            chunks: chunks,
+            reason: nil,
+            byteCount: data.count,
+            truncated: false
+        )
+    }
+}
+
 /// One-shot async signal so a progress report can cancel a run deterministically.
 private actor FilesIndexerCancelSignal {
     /// Whether the signal has already fired.
@@ -125,6 +161,51 @@ private final class FilesIndexerDownloadStarts: Sendable {
     }
 }
 
+/// Thread-safe counter for file-byte reads so the pre-read fast path is observable.
+private final class FilesIndexerCountingReads: Sendable {
+    /// Guarded read count.
+    private let countLock = OSAllocatedUnfairLock(initialState: 0)
+
+    /// Number of reads observed.
+    var count: Int {
+        countLock.withLock { $0 }
+    }
+
+    /// Reads file bytes while counting the call.
+    /// - Parameter url: File URL to read.
+    /// - Returns: File bytes.
+    func read(_ url: URL) throws -> Data {
+        countLock.withLock { $0 += 1 }
+        return try Data(contentsOf: url, options: [.mappedIfSafe])
+    }
+}
+
+/// Thread-safe in-flight tracker recording current and peak concurrency.
+private final class FilesIndexerInFlightTracker: Sendable {
+    /// Guarded concurrency state.
+    private let state = OSAllocatedUnfairLock(initialState: (current: 0, peak: 0))
+
+    /// Records one unit of work starting.
+    func enter() {
+        state.withLock { value in
+            value.current += 1
+            value.peak = max(value.peak, value.current)
+        }
+    }
+
+    /// Records one unit of work finishing.
+    func exit() {
+        state.withLock { value in
+            value.current -= 1
+        }
+    }
+
+    /// Highest concurrency observed so far.
+    var peak: Int {
+        state.withLock { $0.peak }
+    }
+}
+
 /// Creates an isolated temporary directory.
 /// - Returns: The created directory, canonicalized so walk and lookup keys agree.
 private func makeTemporaryDirectory() -> URL {
@@ -162,11 +243,17 @@ private func makeStore() -> (store: DocIndexStore, directory: URL) {
 ///   - accessGuard: Path policy stub.
 ///   - exclude: User-configured exclude patterns.
 ///   - embedder: Optional embeddings backend.
+///   - embeddingsPool: Optional pooled backends for parallel workers.
+///   - workerCountOverride: Files in flight when set; nil resolves from config.
+///   - thermalStateProvider: Thermal state source; nil observes the live state.
+///   - lowPowerModeProvider: Low Power Mode source; nil observes the live state.
 ///   - vectorPolicy: Vector policy for the run.
 ///   - nightlyBudget: Maximum newly written documents per run; 0 is unlimited.
 ///   - iCloudEvicted: Evicted-iCloud policy (`skip` or `download`).
 ///   - evictedCheck: Override resolving evicted files, or nil for the live check.
 ///   - downloadStarter: Download trigger for the `download` policy, or nil for `FileManager`.
+///   - fileReader: Override reading file bytes, or nil for memory-mapped reads.
+///   - maxVectorChunks: Per-document vector cap.
 ///   - progress: Advisory progress sink.
 /// - Returns: A configured indexer.
 private func makeIndexer(
@@ -175,17 +262,27 @@ private func makeIndexer(
     accessGuard: any FilesIndexAccessGuard,
     exclude: [String] = [],
     embedder: (any EmbeddingsBackend)? = nil,
+    embeddingsPool: EmbeddingsBackendPool? = nil,
+    workerCountOverride: Int? = nil,
+    thermalStateProvider: (@Sendable () -> ProcessInfo.ThermalState)? = nil,
+    lowPowerModeProvider: (@Sendable () -> Bool)? = nil,
     vectorPolicy: FilesVectorPolicy = FilesVectorPolicy(),
     nightlyBudget: Int = 0,
     iCloudEvicted: String = IndexConfig.defaultICloudEvicted,
     evictedCheck: (@Sendable (URL) -> Bool)? = nil,
     downloadStarter: (@Sendable (URL) -> Void)? = nil,
+    fileReader: (@Sendable (URL) throws -> Data)? = nil,
+    maxVectorChunks: Int = IndexConfig.defaultMaxVectorChunksPerDocument,
     progress: @escaping ToolProgressReporter = ToolContext.noProgress
 ) -> FilesIndexer {
     FilesIndexer(
         store: store,
         extractor: FilesIndexerStubExtractor(),
         embedder: embedder,
+        embeddingsPool: embeddingsPool,
+        workerCountOverride: workerCountOverride,
+        thermalStateProvider: thermalStateProvider,
+        lowPowerModeProvider: lowPowerModeProvider,
         accessGuard: accessGuard,
         vectorPolicy: vectorPolicy,
         config: IndexConfig(
@@ -194,11 +291,13 @@ private func makeIndexer(
             roots: [root.path],
             exclude: exclude,
             iCloudEvicted: iCloudEvicted,
-            nightlyBudget: nightlyBudget
+            nightlyBudget: nightlyBudget,
+            maxVectorChunksPerDocument: maxVectorChunks
         ),
         homeDirectoryURL: root,
         evictedCheck: evictedCheck,
         downloadStarter: downloadStarter,
+        fileReader: fileReader,
         progress: progress
     )
 }
@@ -240,6 +339,52 @@ struct FilesIndexerTests {
         let excluded = base.appendingPathComponent("Music/ignored.txt").path
         let storedExcluded = try await store.document(source: .files, externalID: excluded)
         #expect(storedExcluded == nil)
+    }
+
+    @Test
+    func `Default excludes skip machine output and tool caches`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+
+        let kept = base.appendingPathComponent("real.md")
+        writeFile("real document", at: kept)
+        let reportLog = base.appendingPathComponent("report.log")
+        writeFile("log line", at: reportLog)
+        let upperLog = base.appendingPathComponent("notes.LOG")
+        writeFile("upper log line", at: upperLog)
+        let scratchTmp = base.appendingPathComponent("scratch.tmp")
+        writeFile("tmp body", at: scratchTmp)
+        let finderSidecar = base.appendingPathComponent(".DS_Store")
+        writeFile("finder state", at: finderSidecar)
+        let cachedFile = base.appendingPathComponent(".nvm/versions/node/v20/cached.txt")
+        writeFile("cached body", at: cachedFile)
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            exclude: IndexConfig.defaultExcludePatterns
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.errors == 0)
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+        let storedKept = try await store.document(source: .files, externalID: kept.path)
+        #expect(storedKept != nil)
+        let storedReportLog = try await store.document(source: .files, externalID: reportLog.path)
+        #expect(storedReportLog == nil)
+        let storedUpperLog = try await store.document(source: .files, externalID: upperLog.path)
+        #expect(storedUpperLog == nil)
+        let storedTmp = try await store.document(source: .files, externalID: scratchTmp.path)
+        #expect(storedTmp == nil)
+        let storedSidecar = try await store.document(source: .files, externalID: finderSidecar.path)
+        #expect(storedSidecar == nil)
+        let storedCached = try await store.document(source: .files, externalID: cachedFile.path)
+        #expect(storedCached == nil)
     }
 
     @Test
@@ -506,5 +651,624 @@ struct FilesIndexerTests {
         #expect(SharedGlobMatching.matchesPath(pattern: "other/*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == false)
         #expect(SharedGlobMatching.containsDotDot("../escape"))
         #expect(SharedGlobMatching.containsDotDot("app/*.log") == false)
+    }
+
+    @Test
+    func `Vector cap stores N vectors and leaves k chunks keyword-only`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let file = base.appendingPathComponent("large.txt")
+        writeFile("large body", at: file)
+
+        let indexer = FilesIndexer(
+            store: store,
+            extractor: FilesIndexerMultiChunkExtractor(chunkCount: 5),
+            embedder: FilesIndexerStubEmbedder(),
+            accessGuard: FilesIndexerStubGuard(),
+            config: IndexConfig(
+                enabled: true,
+                files: true,
+                roots: [base.path],
+                maxVectorChunksPerDocument: 3
+            ),
+            homeDirectoryURL: base
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.chunksWritten == 5)
+        #expect(report.vectorsWritten == 3)
+        #expect(report.truncatedVectorDocuments == 1)
+        let stats = try await store.stats()
+        #expect(stats.chunks == 5)
+        #expect(stats.vectorChunks == 3)
+        #expect(stats.keywordChunks == 2)
+        // The tail chunks stay keyword-only but remain searchable.
+        let tail = try await store.searchKeyword(query: "cap-chunk-4", limit: 10)
+        #expect(tail.contains(where: { $0.text.contains("cap-chunk-4") && $0.embedding.isEmpty && !$0.isVector }))
+        let head = try await store.searchKeyword(query: "cap-chunk-0", limit: 10)
+        #expect(head.contains(where: { $0.text.contains("cap-chunk-0") && !$0.embedding.isEmpty && $0.isVector }))
+    }
+
+    @Test
+    func `Vector cap of one yields a single vector`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        writeFile("large body", at: base.appendingPathComponent("large.txt"))
+
+        let indexer = FilesIndexer(
+            store: store,
+            extractor: FilesIndexerMultiChunkExtractor(chunkCount: 4),
+            embedder: FilesIndexerStubEmbedder(),
+            accessGuard: FilesIndexerStubGuard(),
+            config: IndexConfig(
+                enabled: true,
+                files: true,
+                roots: [base.path],
+                maxVectorChunksPerDocument: 1
+            ),
+            homeDirectoryURL: base
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.chunksWritten == 4)
+        #expect(report.vectorsWritten == 1)
+        #expect(report.truncatedVectorDocuments == 1)
+        let stats = try await store.stats()
+        #expect(stats.vectorChunks == 1)
+        #expect(stats.keywordChunks == 3)
+    }
+
+    @Test
+    func `Unchanged files perform no reads on a second run`() async {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        writeFile("stable body", at: base.appendingPathComponent("note.txt"))
+        let reads = FilesIndexerCountingReads()
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            fileReader: { try reads.read($0) }
+        )
+        let first = await indexer.run()
+        #expect(first.filesIndexed == 1)
+        #expect(reads.count == 1)
+
+        let second = await indexer.run()
+        #expect(second.filesScanned == 1)
+        #expect(second.filesIndexed == 0)
+        #expect(second.filesUnchanged == 1)
+        // The fingerprint matched, so no bytes were read the second time.
+        #expect(reads.count == 1)
+    }
+
+    @Test
+    func `Size change forces a re-read even when mtime matches`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let file = base.appendingPathComponent("note.txt")
+        writeFile("short", at: file)
+        let reads = FilesIndexerCountingReads()
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            fileReader: { try reads.read($0) }
+        )
+        let first = await indexer.run()
+        #expect(first.filesIndexed == 1)
+        #expect(reads.count == 1)
+        let canonical = file.resolvingSymlinksInPath().standardizedFileURL.path
+        let fingerprint = try await store.storedFingerprint(source: .files, externalID: canonical)
+        #expect(fingerprint != nil)
+
+        // Grow the body but restore the stored mtime, isolating the size leg:
+        // a size-only change must still force a read.
+        writeFile("a much longer body with a different size", at: file)
+        if let storedMtime = fingerprint?.mtime {
+            try FileManager.default.setAttributes([.modificationDate: storedMtime], ofItemAtPath: file.path)
+        }
+
+        let second = await indexer.run()
+        #expect(second.filesIndexed == 1)
+        #expect(reads.count == 2)
+    }
+
+    @Test
+    func `Mtime drift beyond tolerance forces a re-read`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let file = base.appendingPathComponent("note.txt")
+        writeFile("stable body", at: file)
+        let reads = FilesIndexerCountingReads()
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            fileReader: { try reads.read($0) }
+        )
+        let first = await indexer.run()
+        #expect(first.filesIndexed == 1)
+        #expect(reads.count == 1)
+
+        let second = await indexer.run()
+        #expect(second.filesUnchanged == 1)
+        #expect(reads.count == 1)
+
+        // Same bytes, but the modification time moved well outside the
+        // one-second tolerance, so the fast path must miss and re-hash.
+        let canonical = file.resolvingSymlinksInPath().standardizedFileURL.path
+        let fingerprint = try await store.storedFingerprint(source: .files, externalID: canonical)
+        #expect(fingerprint?.mtime != nil)
+        if let storedMtime = fingerprint?.mtime {
+            try FileManager.default.setAttributes(
+                [.modificationDate: storedMtime.addingTimeInterval(10)],
+                ofItemAtPath: file.path
+            )
+        }
+
+        let third = await indexer.run()
+        #expect(third.filesScanned == 1)
+        #expect(reads.count == 2)
+        // The body hash is unchanged, so the hashed lookup still reports it
+        // as unchanged even though the bytes were re-read.
+        #expect(third.filesUnchanged == 1)
+        #expect(third.filesIndexed == 0)
+    }
+
+    @Test
+    func `Failed fingerprint always retries`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let file = base.appendingPathComponent("note.txt")
+        writeFile("retry body", at: file)
+        let canonical = file.resolvingSymlinksInPath().standardizedFileURL.path
+        let values = try file.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        let size = Int64(values.fileSize ?? 0)
+
+        // Seed a failed row with matching size and mtime: the fast path must
+        // not skip it even though the fingerprint otherwise matches.
+        _ = try await store.upsertDocument(IndexedDocument(
+            source: .files,
+            externalID: canonical,
+            displayName: "note.txt",
+            path: canonical,
+            mtime: values.contentModificationDate,
+            sizeBytes: size,
+            contentHash: "stale-hash",
+            extractStatus: .failed
+        ))
+        let seeded = try await store.storedFingerprint(source: .files, externalID: canonical)
+        #expect(seeded?.extractStatus == .failed)
+        #expect(seeded?.sizeBytes == size)
+
+        let reads = FilesIndexerCountingReads()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            fileReader: { try reads.read($0) }
+        )
+        let report = await indexer.run()
+        #expect(reads.count == 1)
+        #expect(report.filesIndexed == 1)
+        let stored = try await store.document(source: .files, externalID: canonical)
+        #expect(stored?.extractStatus != .failed)
+    }
+
+    @Test
+    func `Newly excluded documents are retired with their chunks`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let keep = base.appendingPathComponent("keep.txt")
+        let excluded = base.appendingPathComponent("old.log")
+        writeFile("keepmarker alpha body", at: keep)
+        writeFile("retiremarker beta body", at: excluded)
+
+        let first = makeIndexer(store: store, root: base, accessGuard: FilesIndexerStubGuard())
+        let firstReport = await first.run()
+        #expect(firstReport.filesIndexed == 2)
+        #expect(firstReport.retiredCount == 0)
+        let before = try await store.searchKeyword(query: "retiremarker", limit: 10)
+        #expect(!before.isEmpty)
+
+        // Excluding *.log after the first run must retire the already-indexed
+        // log on the next complete pass, including its chunks.
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            exclude: ["*.log"]
+        )
+        let secondReport = await second.run()
+        #expect(secondReport.errors == 0)
+        #expect(secondReport.retiredCount == 1)
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+        #expect(stats.chunks == 1)
+        let storedKeep = try await store.document(source: .files, externalID: keep.path)
+        #expect(storedKeep != nil)
+        let storedExcluded = try await store.document(source: .files, externalID: excluded.path)
+        #expect(storedExcluded == nil)
+        let after = try await store.searchKeyword(query: "retiremarker", limit: 10)
+        #expect(after.isEmpty)
+        let keepHits = try await store.searchKeyword(query: "keepmarker", limit: 10)
+        #expect(!keepHits.isEmpty)
+    }
+
+    @Test
+    func `Cancelled runs retire nothing`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let total = 6
+        for index in 0 ..< total {
+            writeFile("body \(index)", at: base.appendingPathComponent("note-\(index).txt"))
+        }
+        let first = makeIndexer(store: store, root: base, accessGuard: FilesIndexerStubGuard())
+        let firstReport = await first.run()
+        #expect(firstReport.filesIndexed == total)
+
+        // A partial walk must never delete: cancelling before every file is
+        // visited leaves the newly excluded row in place.
+        let signal = FilesIndexerCancelSignal()
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            exclude: ["note-5.txt"],
+            progress: { progress in
+                if progress.scanned >= 1 {
+                    await signal.fire()
+                }
+            }
+        )
+        let canceller = Task {
+            await signal.wait()
+            await second.cancel()
+        }
+        let secondReport = await second.run()
+        await canceller.value
+        #expect(secondReport.cancelled)
+        #expect(secondReport.retiredCount == 0)
+        let excludedPath = base.appendingPathComponent("note-5.txt").path
+        let storedExcluded = try await store.document(source: .files, externalID: excludedPath)
+        #expect(storedExcluded != nil)
+        let stats = try await store.stats()
+        #expect(stats.documents == total)
+    }
+
+    @Test
+    func `Budget-exhausted runs retire nothing`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let fileA = base.appendingPathComponent("a.txt")
+        let fileB = base.appendingPathComponent("b.txt")
+        writeFile("alpha body", at: fileA)
+        writeFile("beta body", at: fileB)
+        let first = makeIndexer(store: store, root: base, accessGuard: FilesIndexerStubGuard())
+        let firstReport = await first.run()
+        #expect(firstReport.filesIndexed == 2)
+
+        // Two brand-new files with a budget of one guarantees the walk stops
+        // with work still unvisited, so the newly excluded row must survive.
+        writeFile("gamma body", at: base.appendingPathComponent("c.txt"))
+        writeFile("delta body", at: base.appendingPathComponent("d.txt"))
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            exclude: ["b.txt"],
+            nightlyBudget: 1
+        )
+        let secondReport = await second.run()
+        #expect(secondReport.filesIndexed == 1)
+        #expect(secondReport.retiredCount == 0)
+        let storedExcluded = try await store.document(source: .files, externalID: fileB.path)
+        #expect(storedExcluded != nil)
+        let storedKept = try await store.document(source: .files, externalID: fileA.path)
+        #expect(storedKept != nil)
+    }
+
+    @Test
+    func `Errored but visited files are kept`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let keep = base.appendingPathComponent("keep.txt")
+        let flaky = base.appendingPathComponent("flaky.txt")
+        writeFile("keepmarker steady body", at: keep)
+        writeFile("original flakymarker body", at: flaky)
+        let first = makeIndexer(store: store, root: base, accessGuard: FilesIndexerStubGuard())
+        let firstReport = await first.run()
+        #expect(firstReport.filesIndexed == 2)
+
+        // Grow the body so the fingerprint misses and the run must read it;
+        // the read then fails, but the visit still stamps the prior row.
+        writeFile("changed flakymarker body with a much longer size to force a re-read", at: flaky)
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            fileReader: { url in
+                if url.lastPathComponent == "flaky.txt" {
+                    throw NSError(domain: "FilesIndexerTests", code: 1)
+                }
+                return try Data(contentsOf: url, options: [.mappedIfSafe])
+            }
+        )
+        let secondReport = await second.run()
+        #expect(secondReport.errors == 1)
+        #expect(secondReport.retiredCount == 0)
+        let storedFlaky = try await store.document(source: .files, externalID: flaky.path)
+        #expect(storedFlaky != nil)
+        let storedKeep = try await store.document(source: .files, externalID: keep.path)
+        #expect(storedKeep != nil)
+        // The prior chunks survive the failed re-read, so the old text stays searchable.
+        let hits = try await store.searchKeyword(query: "flakymarker", limit: 10)
+        #expect(!hits.isEmpty)
+    }
+
+    @Test
+    func `In-flight files never exceed the worker count`() async {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let total = 9
+        for index in 0 ..< total {
+            writeFile("parallel body \(index)", at: base.appendingPathComponent("note-\(index).txt"))
+        }
+        let tracker = FilesIndexerInFlightTracker()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            fileReader: { url in
+                tracker.enter()
+                defer { tracker.exit() }
+                // Widen the overlap window so all three workers are provably
+                // inside the read at once.
+                Thread.sleep(forTimeInterval: 0.05)
+                return try Data(contentsOf: url, options: [.mappedIfSafe])
+            }
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == total)
+        #expect(report.errors == 0)
+        #expect(tracker.peak == 3)
+    }
+
+    @Test
+    func `A single worker stays strictly sequential`() async {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let total = 4
+        for index in 0 ..< total {
+            writeFile("sequential body \(index)", at: base.appendingPathComponent("note-\(index).txt"))
+        }
+        let tracker = FilesIndexerInFlightTracker()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 1,
+            fileReader: { url in
+                tracker.enter()
+                defer { tracker.exit() }
+                Thread.sleep(forTimeInterval: 0.02)
+                return try Data(contentsOf: url, options: [.mappedIfSafe])
+            }
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == total)
+        #expect(tracker.peak == 1)
+    }
+
+    @Test
+    func `Parallel workers never exceed the nightly budget`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let total = 6
+        for index in 0 ..< total {
+            writeFile("budget body \(index)", at: base.appendingPathComponent("note-\(index).txt"))
+        }
+
+        let first = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            nightlyBudget: 2
+        )
+        let firstReport = await first.run()
+        #expect(firstReport.filesIndexed == 2)
+
+        // Unclaimed files retry on later runs until the whole tree lands.
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            nightlyBudget: 2
+        )
+        let secondReport = await second.run()
+        #expect(secondReport.filesIndexed == 2)
+
+        let third = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            nightlyBudget: 2
+        )
+        let thirdReport = await third.run()
+        #expect(thirdReport.filesIndexed == 2)
+
+        let stats = try await store.stats()
+        #expect(stats.documents == total)
+    }
+
+    @Test
+    func `Thermal critical halts new work`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        writeFile("hot body", at: base.appendingPathComponent("note.txt"))
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            thermalStateProvider: { .critical }
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 0)
+        #expect(report.filesScanned == 0)
+        #expect(report.retiredCount == 0)
+        #expect(report.warnings.contains(where: { $0.contains("thermal") }))
+        let stats = try await store.stats()
+        #expect(stats.documents == 0)
+    }
+
+    @Test
+    func `Cancellation stops parallel workers within one batch`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let total = 12
+        for index in 0 ..< total {
+            writeFile("cancel body \(index)", at: base.appendingPathComponent("note-\(index).txt"))
+        }
+
+        let signal = FilesIndexerCancelSignal()
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3,
+            fileReader: { url in
+                // Slow reads widen each batch so cancellation lands mid-flight
+                // instead of racing a microsecond run to completion.
+                Thread.sleep(forTimeInterval: 0.05)
+                return try Data(contentsOf: url, options: [.mappedIfSafe])
+            },
+            progress: { progress in
+                // Cancel only after at least one document landed, so the resume
+                // assertion below always has real committed work to skip.
+                if progress.matched >= 1 {
+                    await signal.fire()
+                }
+            }
+        )
+        let canceller = Task {
+            await signal.wait()
+            await indexer.cancel()
+        }
+        let first = await indexer.run()
+        await canceller.value
+
+        #expect(first.cancelled)
+        #expect(first.filesIndexed >= 1)
+        #expect(first.filesIndexed < total)
+        #expect(first.retiredCount == 0)
+
+        let second = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3
+        )
+        let secondReport = await second.run()
+        #expect(secondReport.cancelled == false)
+        #expect(first.filesIndexed + secondReport.filesIndexed == total)
+
+        let stats = try await store.stats()
+        #expect(stats.documents == total)
+    }
+
+    @Test
+    func `Embeddings pool vends one backend per worker`() async {
+        final class IDSource: Sendable {
+            private let lock = OSAllocatedUnfairLock(initialState: 0)
+
+            func next() -> Int {
+                lock.withLock { value in
+                    value += 1
+                    return value
+                }
+            }
+        }
+        final class SeenIDs: Sendable {
+            private let lock = OSAllocatedUnfairLock(initialState: [Int]())
+
+            func record(_ id: Int) {
+                lock.withLock { $0.append(id) }
+            }
+
+            var all: [Int] {
+                lock.withLock { $0 }
+            }
+        }
+        let source = IDSource()
+        let seen = SeenIDs()
+        let tracker = FilesIndexerInFlightTracker()
+        let pool = EmbeddingsBackendPool(count: 2) { FilesIndexerIDEmbedder(id: source.next()) }
+
+        await withTaskGroup(of: Int.self) { group in
+            for _ in 0 ..< 4 {
+                group.addTask {
+                    await (try? pool.withBackend { backend -> Int in
+                        tracker.enter()
+                        defer { tracker.exit() }
+                        try? await Task.sleep(nanoseconds: 20_000_000)
+                        return (backend as? FilesIndexerIDEmbedder)?.id ?? -1
+                    }) ?? -1
+                }
+            }
+            for await id in group {
+                seen.record(id)
+            }
+        }
+
+        // Both slots were exercised across the four checkouts, at most two at
+        // once, and every slot returned to the pool.
+        #expect(Set(seen.all) == [1, 2])
+        #expect(tracker.peak == 2)
+        #expect(await pool.availableCount == 2)
     }
 }

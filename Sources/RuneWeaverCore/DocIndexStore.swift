@@ -101,6 +101,38 @@ public actor DocIndexStore {
         }
     }
 
+    /// Reads the stored size, modification time, and extraction outcome.
+    ///
+    /// The fingerprint powers the pre-read fast path: callers compare it
+    /// against live filesystem metadata to skip unchanged sources without
+    /// reading or hashing any bytes.
+    /// - Parameters:
+    ///   - source: Origin corpus.
+    ///   - externalID: Source-scoped identifier.
+    /// - Returns: The stored fingerprint, or nil when absent.
+    public func storedFingerprint(source: IndexSource, externalID: String) async throws -> DocStoredFingerprint? {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.storedFingerprint(source: source, externalID: externalID, dbPath: dbPath)
+        }
+    }
+
+    /// Stamps one document as seen by the current run.
+    ///
+    /// Records `runID` in `last_seen_run` so a later reconcile can tell a live
+    /// document from one that no longer matches policy. Missing rows are a
+    /// no-op so stamping a brand-new path before its first upsert stays safe.
+    /// - Parameters:
+    ///   - source: Origin corpus.
+    ///   - externalID: Source-scoped identifier.
+    ///   - runID: Opaque identifier for the run in flight.
+    public func markSeen(source: IndexSource, externalID: String, runID: String) async throws {
+        let dbPath = self.dbPath
+        try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.markSeen(source: source, externalID: externalID, runID: runID, dbPath: dbPath)
+        }
+    }
+
     /// Full-text search over chunk text.
     /// - Parameters:
     ///   - query: Raw search text.
@@ -145,11 +177,55 @@ public actor DocIndexStore {
         }
     }
 
+    /// Deletes `files` documents not seen by the given run.
+    ///
+    /// Removes every `files` row whose `last_seen_run` differs from `runID`
+    /// (including rows never stamped) together with their chunks, so material
+    /// that left policy — deleted files, newly excluded trees, newly denied
+    /// paths — stops surfacing in recall. Mail and Messages rows are untouched.
+    /// The caller reclaims file space with `reclaim()` after a non-zero return.
+    /// - Parameter runID: Opaque identifier of the just-finished walk.
+    /// - Returns: Number of `files` documents removed.
+    @discardableResult
+    public func retireUnseenFiles(runID: String) async throws -> Int {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.retireUnseenFiles(runID: runID, dbPath: dbPath)
+        }
+    }
+
     /// Clears every document, chunk, and search-index entry.
     public func reset() async throws {
         let dbPath = self.dbPath
         try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
+        }
+    }
+
+    /// Current on-disk and logical size breakdown.
+    ///
+    /// File sizes are read from the filesystem so the caller reports what the
+    /// disk holds; logical bytes are aggregated from the content tables. A
+    /// missing database reports zeros rather than throwing so status probes
+    /// render an honest empty state.
+    /// - Returns: The storage breakdown.
+    public func storageBreakdown() async throws -> IndexStorageBreakdown {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.storageBreakdown(dbPath: dbPath)
+        }
+    }
+
+    /// Reclaims index file space with `VACUUM`.
+    ///
+    /// Measures the on-disk total before and after so the caller reports the
+    /// saved bytes without recomputing them. A missing database is a zeroed
+    /// no-op rather than a failure.
+    /// - Returns: The reclaim outcome.
+    public func reclaim() async throws -> IndexReclaimResult {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.reclaim(dbPath: dbPath)
         }
     }
 }
@@ -209,6 +285,24 @@ enum DocIndexStoreIO {
         #endif
     }
 
+    /// Reads the stored fingerprint for a source-scoped identifier.
+    static func storedFingerprint(source: IndexSource, externalID: String, dbPath: String) throws -> DocStoredFingerprint? {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.storedFingerprint(source: source, externalID: externalID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Stamps one document as seen by the current run.
+    static func markSeen(source: IndexSource, externalID: String, runID: String, dbPath: String) throws {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.markSeen(source: source, externalID: externalID, runID: runID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
     /// Full-text search over chunk text.
     static func searchKeyword(query: String, limit: Int, dbPath: String) throws -> [IndexedChunk] {
         #if canImport(SQLite3)
@@ -245,10 +339,37 @@ enum DocIndexStoreIO {
         #endif
     }
 
+    /// Deletes `files` documents not seen by the given run.
+    static func retireUnseenFiles(runID: String, dbPath: String) throws -> Int {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.retireUnseenFiles(runID: runID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
     /// Clears every document, chunk, and index entry.
     static func reset(dbPath: String) throws {
         #if canImport(SQLite3)
             try SQLiteDocIndexStore.reset(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads the on-disk and logical size breakdown.
+    static func storageBreakdown(dbPath: String) throws -> IndexStorageBreakdown {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.storageBreakdown(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Runs `VACUUM` and reports the reclaimed bytes.
+    static func reclaim(dbPath: String) throws -> IndexReclaimResult {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.reclaim(dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
@@ -263,7 +384,7 @@ enum DocIndexStoreIO {
     /// maintenance live in their own files under the same namespace.
     enum SQLiteDocIndexStore {
         /// Current on-disk schema revision.
-        static let schemaVersion = 1
+        static let schemaVersion = 2
 
         /// Maximum rows returned per read when a caller passes an oversized limit.
         static let maxResults = 1000
@@ -298,7 +419,8 @@ enum DocIndexStoreIO {
             mime TEXT,
             extract_status TEXT NOT NULL,
             indexed_at REAL NOT NULL,
-            metadata TEXT
+            metadata TEXT,
+            last_seen_run TEXT
         );
         CREATE TABLE IF NOT EXISTS indexed_chunks(
             id TEXT PRIMARY KEY,
@@ -309,7 +431,7 @@ enum DocIndexStoreIO {
             is_vector INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(document_id) REFERENCES indexed_documents(id) ON DELETE CASCADE
         );
-        CREATE VIRTUAL TABLE IF NOT EXISTS indexed_chunks_fts USING fts5(chunk_text, tokenize='porter');
+        CREATE VIRTUAL TABLE IF NOT EXISTS indexed_chunks_fts USING fts5(chunk_text, content='', contentless_delete=1, tokenize='porter');
         CREATE TRIGGER IF NOT EXISTS indexed_chunks_ai AFTER INSERT ON indexed_chunks BEGIN
             INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
         END;
@@ -328,13 +450,15 @@ enum DocIndexStoreIO {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_indexed_documents_source_external
             ON indexed_documents(source, external_id);
         CREATE INDEX IF NOT EXISTS idx_indexed_documents_indexed_at ON indexed_documents(indexed_at);
+        CREATE INDEX IF NOT EXISTS idx_indexed_documents_last_seen ON indexed_documents(last_seen_run);
         CREATE INDEX IF NOT EXISTS idx_indexed_chunks_document ON indexed_chunks(document_id);
         CREATE INDEX IF NOT EXISTS idx_indexed_chunks_vector ON indexed_chunks(is_vector);
         """
 
         /// Additive `indexed_documents` columns introduced after the first schema revision.
         private static let documentAdditions: [(name: String, sql: String)] = [
-            ("metadata", "ALTER TABLE indexed_documents ADD COLUMN metadata TEXT;")
+            ("metadata", "ALTER TABLE indexed_documents ADD COLUMN metadata TEXT;"),
+            ("last_seen_run", "ALTER TABLE indexed_documents ADD COLUMN last_seen_run TEXT;")
         ]
 
         /// Additive `indexed_chunks` columns introduced after the first schema revision.
@@ -363,7 +487,6 @@ enum DocIndexStoreIO {
                 try ensureColumns(handle: handle)
                 try exec(handle: handle, sql: indexesSQL)
                 try ensureSchemaVersion(handle: handle)
-                try migrateFTSTriggers(handle: handle)
                 try SQLiteHelpers.exec(
                     handle: handle,
                     sql: "PRAGMA foreign_keys = ON;",
@@ -419,28 +542,6 @@ enum DocIndexStoreIO {
                     )
                 }
             }
-        }
-
-        /// Drops and recreates the FTS5 sync triggers so they use direct
-        /// `DELETE FROM` instead of the FTS5 "delete" command (`INSERT INTO
-        /// fts(fts, ...) VALUES('delete', ...)`), which is broken on
-        /// SQLite ≥ 3.54.0 shipped with macOS Tahoe.
-        ///
-        /// The migration is idempotent: `DROP TRIGGER IF EXISTS` is a no-op
-        /// when the trigger is already gone, and the `CREATE TRIGGER` block
-        /// replaces the definition unconditionally.
-        private static func migrateFTSTriggers(handle: OpaquePointer?) throws {
-            try exec(handle: handle, sql: """
-            DROP TRIGGER IF EXISTS indexed_chunks_ad;
-            CREATE TRIGGER indexed_chunks_ad AFTER DELETE ON indexed_chunks BEGIN
-                DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
-            END;
-            DROP TRIGGER IF EXISTS indexed_chunks_au;
-            CREATE TRIGGER indexed_chunks_au AFTER UPDATE ON indexed_chunks BEGIN
-                DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
-                INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
-            END;
-            """)
         }
 
         /// Lists declared columns for a table, lowercased for case-tolerant probes.
@@ -505,8 +606,34 @@ enum DocIndexStoreIO {
 
         /// Applies stepwise migrations for databases older than ``schemaVersion``.
         ///
-        /// The first revision has no predecessors; future revisions branch on
-        /// `stored` and replay additive steps here.
-        private static func migrate(handle _: OpaquePointer?, from _: Int) throws {}
+        /// Revision 2 converts the chunk full-text index to a contentless
+        /// table so chunk text is stored once in `indexed_chunks`. Dropping
+        /// the virtual table removes its `fts_content`, `fts_data`,
+        /// `fts_idx`, and `fts_docsize` shadow tables; the rebuild then
+        /// repopulates the index from the content rows before reclaiming
+        /// space. Triggers stay as plain `INSERT` and `DELETE` by rowid,
+        /// avoiding the FTS5 delete command broken on recent macOS SQLite.
+        private static func migrate(handle: OpaquePointer?, from stored: Int) throws {
+            guard stored < 2 else { return }
+            try exec(handle: handle, sql: """
+            DROP TABLE IF EXISTS indexed_chunks_fts;
+            CREATE VIRTUAL TABLE indexed_chunks_fts USING fts5(chunk_text, content='', contentless_delete=1, tokenize='porter');
+            DROP TRIGGER IF EXISTS indexed_chunks_ai;
+            CREATE TRIGGER indexed_chunks_ai AFTER INSERT ON indexed_chunks BEGIN
+                INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+            END;
+            DROP TRIGGER IF EXISTS indexed_chunks_ad;
+            CREATE TRIGGER indexed_chunks_ad AFTER DELETE ON indexed_chunks BEGIN
+                DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+            END;
+            DROP TRIGGER IF EXISTS indexed_chunks_au;
+            CREATE TRIGGER indexed_chunks_au AFTER UPDATE ON indexed_chunks BEGIN
+                DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+                INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+            END;
+            INSERT INTO indexed_chunks_fts(rowid, chunk_text) SELECT rowid, chunk_text FROM indexed_chunks;
+            """)
+            try exec(handle: handle, sql: "VACUUM;")
+        }
     }
 #endif

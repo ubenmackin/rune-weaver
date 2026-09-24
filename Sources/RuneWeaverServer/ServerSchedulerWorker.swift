@@ -277,9 +277,16 @@ public actor ServerSchedulerWorker {
             context: ToolContext(conversationID: UUID())
         )
         guard !result.isError,
-              let contentData = result.content.data(using: .utf8),
-              let envelope = try? JSONDecoder().decode(EmailSearchResponseEnvelope.self, from: contentData)
+              let contentData = result.content.data(using: .utf8)
         else { return [] }
+
+        let envelope: EmailSearchResponseEnvelope
+        do {
+            envelope = try JSONDecoder().decode(EmailSearchResponseEnvelope.self, from: contentData)
+        } catch {
+            RuneWeaverLog.scheduler.warning("ServerSchedulerWorker: failed to decode EmailSearchResponseEnvelope: \(error.localizedDescription)")
+            return []
+        }
 
         return envelope.messages.map(\.id)
     }

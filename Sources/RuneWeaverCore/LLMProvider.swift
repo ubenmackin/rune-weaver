@@ -436,7 +436,13 @@ public struct BrowserNavigateResult: Sendable, Codable, Equatable {
     public static func parse(_ content: String) -> BrowserNavigateResult? {
         let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else { return nil }
-        guard let decoded = try? JSONDecoder().decode(BrowserNavigateResult.self, from: data) else { return nil }
+        let decoded: BrowserNavigateResult
+        do {
+            decoded = try JSONDecoder().decode(BrowserNavigateResult.self, from: data)
+        } catch {
+            RuneWeaverLog.tools.debug("BrowserNavigateResult.parse: not a BrowserNavigateResult or decode failed: \(error.localizedDescription)")
+            return nil
+        }
         guard decoded.finalUrl != nil || decoded.redirectChain != nil || decoded.redirectCount != nil
             || decoded.authRequired != nil || decoded.textSnapshot != nil
             || decoded.screenshotHash != nil || decoded.screenshotDataURL != nil else { return nil }

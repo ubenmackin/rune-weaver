@@ -95,6 +95,10 @@ public struct IndexSourceRunReport: Sendable, Equatable {
     public var skipped: Int
     /// Items that could not be processed.
     public var errors: Int
+    /// Documents retired (deleted as unseen) by the stage.
+    public var retired: Int
+    /// Documents where chunks beyond the vector cap stayed keyword-only.
+    public var truncated: Int
     /// Whether the stage actually ran.
     public var didRun: Bool
     /// Set when the stage did not execute because its source is disabled.
@@ -113,6 +117,8 @@ public struct IndexSourceRunReport: Sendable, Equatable {
     ///   - keywordChunks: Chunks written without an embedding.
     ///   - skipped: Items deliberately skipped.
     ///   - errors: Items that could not be processed.
+    ///   - retired: Documents retired by the stage.
+    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
     ///   - didRun: Whether the stage ran.
     ///   - skippedReason: Why a stage did not run.
     ///   - warnings: Non-fatal problems.
@@ -125,6 +131,8 @@ public struct IndexSourceRunReport: Sendable, Equatable {
         keywordChunks: Int = 0,
         skipped: Int = 0,
         errors: Int = 0,
+        retired: Int = 0,
+        truncated: Int = 0,
         didRun: Bool = true,
         skippedReason: String? = nil,
         warnings: [String] = [],
@@ -137,6 +145,8 @@ public struct IndexSourceRunReport: Sendable, Equatable {
         self.keywordChunks = keywordChunks
         self.skipped = skipped
         self.errors = errors
+        self.retired = retired
+        self.truncated = truncated
         self.didRun = didRun
         self.skippedReason = skippedReason
         self.warnings = warnings
@@ -164,6 +174,10 @@ public struct IndexRunSummary: Sendable, Equatable {
     public let skipped: Int
     /// Items that could not be processed.
     public let errors: Int
+    /// Documents retired (deleted as unseen) across every source.
+    public let retired: Int
+    /// Documents where chunks beyond the vector cap stayed keyword-only.
+    public let truncated: Int
     /// Non-fatal problems, without any content or secret.
     public let warnings: [String]
     /// Instant the run began.
@@ -186,6 +200,8 @@ public struct IndexRunSummary: Sendable, Equatable {
     ///   - scanned: Items examined.
     ///   - skipped: Items deliberately skipped.
     ///   - errors: Items that could not be processed.
+    ///   - retired: Documents retired across every source.
+    ///   - truncated: Documents where the vector cap left tail chunks keyword-only.
     ///   - warnings: Non-fatal problems.
     ///   - startedAt: Instant the run began.
     ///   - finishedAt: Instant the run finished.
@@ -201,6 +217,8 @@ public struct IndexRunSummary: Sendable, Equatable {
         scanned: Int,
         skipped: Int,
         errors: Int,
+        retired: Int = 0,
+        truncated: Int = 0,
         warnings: [String],
         startedAt: Date,
         finishedAt: Date,
@@ -216,6 +234,8 @@ public struct IndexRunSummary: Sendable, Equatable {
         self.scanned = scanned
         self.skipped = skipped
         self.errors = errors
+        self.retired = retired
+        self.truncated = truncated
         self.warnings = warnings
         self.startedAt = startedAt
         self.finishedAt = finishedAt
@@ -541,8 +561,10 @@ public actor IndexRunStateStore {
         loaded = true
         let expanded = (path as NSString).expandingTildeInPath
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return }
-        if let decoded = try? JSONDecoder().decode(IndexRunState.self, from: data) {
-            state = decoded
+        do {
+            state = try JSONDecoder().decode(IndexRunState.self, from: data)
+        } catch {
+            RuneWeaverLog.scheduler.warning("IndexRunStateStore: failed to decode index run state from '\(expanded)': \(error.localizedDescription)")
         }
     }
 
@@ -936,6 +958,8 @@ public actor IndexCoordinator {
             scanned: resolved.scanned,
             skipped: resolved.skipped,
             errors: resolved.errors,
+            retired: resolved.retired,
+            truncated: resolved.truncated,
             warnings: resolved.warnings,
             startedAt: startedAt,
             finishedAt: finishedAt,
@@ -1167,6 +1191,10 @@ private extension IndexCoordinator {
         var skipped = 0
         /// Items that could not be processed.
         var errors = 0
+        /// Documents retired (deleted as unseen).
+        var retired = 0
+        /// Documents where the vector cap left tail chunks keyword-only.
+        var truncated = 0
         /// Non-fatal problems.
         var warnings: [String] = []
         /// Last relative item reported by a stage.
@@ -1181,6 +1209,8 @@ private extension IndexCoordinator {
             keywordChunks += report.keywordChunks
             skipped += report.skipped
             errors += report.errors
+            retired += report.retired
+            truncated += report.truncated
             warnings.append(contentsOf: report.warnings)
             if let item = report.lastItem {
                 lastItem = item
@@ -1302,20 +1332,30 @@ private extension IndexCoordinator {
     }
 
     /// Single-line summary for the run event message.
+    ///
+    /// Carries retired and truncated counts inline so the durable message alone
+    /// lights the dashboard badges even when the detail response is pruned.
     /// - Parameter summary: Completed run summary.
     /// - Returns: A display-safe one-liner.
     static func summaryLine(_ summary: IndexRunSummary) -> String {
         "Index run \(summary.status.rawValue): \(summary.documentsIndexed) indexed, "
             + "\(summary.vectorChunks) vectors, \(summary.keywordChunks) keyword-only, "
-            + "\(summary.scanned) scanned, \(summary.errors) errors"
+            + "\(summary.scanned) scanned, \(summary.errors) errors, "
+            + "\(summary.retired) retired, \(summary.truncated) truncated"
     }
 
     /// Detailed outcome text for the completion event response.
+    ///
+    /// Repeats retired and truncated as `Retired:`/`Truncated:` detail lines so
+    /// the status probe parses them like the trigger and skip lines without
+    /// depending on summary wording.
     /// - Parameter summary: Completed run summary.
     /// - Returns: A multi-line, content-free summary.
     static func detailLine(_ summary: IndexRunSummary) -> String {
         var lines = [summaryLine(summary)]
         lines.append("Trigger: \(summary.trigger.rawValue)")
+        lines.append("Retired: \(summary.retired)")
+        lines.append("Truncated: \(summary.truncated)")
         if let indexAsOf = summary.indexAsOf {
             lines.append("Index as of: \(ISO8601DateFormatter().string(from: indexAsOf))")
         }
