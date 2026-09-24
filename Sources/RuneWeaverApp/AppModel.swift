@@ -735,7 +735,10 @@ public extension AppModel {
 
     func openSettings() {
         if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
-            SettingsWindowController.shared.show(url: url)
+            Task { @MainActor in
+                let sessionToken = try? await self.serverContext?.auth?.createSession()
+                await SettingsWindowController.shared.show(url: url, sessionToken: sessionToken)
+            }
         }
     }
 

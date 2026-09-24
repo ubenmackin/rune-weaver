@@ -3,6 +3,7 @@
 
 import AppKit
 import Foundation
+import RuneWeaverServer
 import WebKit
 
 @MainActor
@@ -18,17 +19,42 @@ public final class SettingsWindowController: NSObject {
     }
 
     /// Displays the native settings window, loading the standalone settings URL.
-    public func show(url: URL) {
+    /// If an ephemeral session token is provided, injects the `rw_session` cookie
+    /// into the WebKit cookie store prior to navigation so the settings view is
+    /// pre-authenticated without prompting for the owner bearer token.
+    public func show(url: URL, sessionToken: String? = nil) async {
         self.allowedBaseURL = url
         let win = getOrCreateWindow()
 
+        if let sessionToken, let webView = self.webView {
+            let cookieProps: [HTTPCookiePropertyKey: Any] = [
+                .domain: url.host ?? "127.0.0.1",
+                .path: "/",
+                .name: ServerAuthRequest.sessionCookieName,
+                .value: sessionToken,
+                .secure: url.scheme == "https" ? "TRUE" : "FALSE"
+            ]
+            if let cookie = HTTPCookie(properties: cookieProps) {
+                await webView.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
+            }
+        }
+
         if webView?.url != url {
             webView?.load(URLRequest(url: url))
+        } else if sessionToken != nil {
+            webView?.reload()
         }
 
         win.orderFrontRegardless()
         win.makeKeyAndOrderFront(nil)
         NSApp.activate()
+    }
+
+    /// Synchronous convenience overload that delegates to async `show`.
+    public func show(url: URL) {
+        Task { @MainActor in
+            await self.show(url: url, sessionToken: nil)
+        }
     }
 
     private func getOrCreateWindow() -> NSWindow {

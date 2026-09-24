@@ -4,9 +4,13 @@
 // status reports aggregate counts, the last watermark, per-source enablement,
 // recent failures, and live run state; run executes one on-demand pass; cancel
 // asks an in-flight pass to stop at its next safe point; prune removes
-// documents older than a cutoff; and reset clears the store. Run progress needs
-// no new transport: it already rides the shared `ToolProgress`/WebSocket path
-// and the `run_logs` audit stream the coordinator reports through.
+// documents older than a cutoff; and reset clears the store. Live progress is
+// poll-snapshot primary: the status probe carries the additive `live` snapshot
+// derived from the coordinator's `liveTotals` (null when idle) that the menu
+// and page poll about every 2s while a run is in flight; WebSocket
+// `tool_progress` plus `run_started`/`run_completed` frames are poll-now
+// wake-up triggers only, never the data carrier. Terminal outcomes persist in
+// the `run_logs` audit stream the coordinator reports through.
 //
 // Policy stays single-sourced: the coordinator owns sequencing, cancellation,
 // and the watermark; the store owns persistence; and config validation owns
@@ -40,11 +44,18 @@ private func registerIndexStatusRoute(_ app: Application) {
         // install still renders an honest empty state.
         let stats = try await context.indexStore?.stats()
         let running = await context.indexCoordinator?.isRunning ?? false
-        // One shared bounded fetch per poll: both derivations below read the
-        // same snapshot, so status performs a single store query with a fixed
-        // cap instead of two full-history scans that could race new rows.
-        let indexRuns = await recentIndexRuns(context: context)
-        var lastErrors = recentIndexErrors(from: indexRuns)
+        // Live snapshot rides the coordinator's cached counters, so polling
+        // never touches run state or the document store; nil when idle.
+        let live = await context.indexCoordinator?.liveTotals.map(IndexLiveStatus.init)
+        // Kind-filtered store lookup: the newest `index` rows come straight
+        // from the run log by kind, so a sparse index row survives interleaved
+        // chat traffic within the 500-row retention (newest-50 index-row window)
+        // instead of dropping past a newest-N overall window. One shared fetch
+        // feeds both the latest strip and the failure list so they agree on the
+        // same snapshot.
+        let kindRuns = await context.runs.list(limit: IndexStatusScan.errorCap, kind: ServerIndexRunReporter.kind)
+        let latestEntry = kindRuns.first
+        var lastErrors = recentIndexErrors(from: kindRuns)
         // Fail-closed pre-run hint: there is no prompt API for Full Disk
         // Access, so a fresh install that enabled Messages would otherwise
         // waste its first Rebuild before learning access is missing. The probe
@@ -64,8 +75,8 @@ private func registerIndexStatusRoute(_ app: Application) {
                 lastErrors.append(messagesFullDiskAccessWarning)
             }
         }
-        let lastRun = latestIndexRun(from: indexRuns)
-        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun)
+        let lastRun = latestIndexRun(from: latestEntry)
+        return makeIndexStatusResponse(config: config, stats: stats, running: running, lastErrors: lastErrors, lastRun: lastRun, live: live)
     }
 }
 
@@ -171,20 +182,17 @@ private func loadedIndexConfiguration() throws -> IndexConfig {
     }
 }
 
-/// Fixed newest-row scan window for the status probe.
+/// Maximum `index`-kind rows examined per status poll for failures.
 ///
 /// Bounds per-poll work independent of retained history size: the probe reads
-/// at most this many newest run rows and filters to the `index` kind in
-/// memory, instead of sizing the fetch from the live `count`. A larger window
-/// finds sparse index rows more often but costs more per poll; 100 sits above
-/// the 50-row window known to drop index rows under chat traffic while staying
-/// well below the 500-row store capacity. A kind-filtered store query would
-/// remove the window tradeoff entirely, but that needs a `RunLogStore` API
-/// change outside this route file.
-/// - Note: Single-sourced here so the shared fetch and its derivations agree.
+/// at most this many newest `index` rows via a kind-filtered store lookup, so
+/// sparse index rows survive interleaved chat traffic within the 500-row
+/// retention (newest-50 index-row window). Fifty index rows comfortably cover
+/// several failures while staying well below the 500-row store capacity.
+/// - Note: Single-sourced here so error derivation and its bound agree.
 private enum IndexStatusScan {
-    /// Maximum newest run rows examined per status poll.
-    static let cap = 100
+    /// Maximum newest `index`-kind rows examined for failures per poll.
+    static let errorCap = 50
 }
 
 /// Pre-run warning surfaced in `lastErrors` when Messages is enabled but the
@@ -229,28 +237,15 @@ private enum IndexRunCountPatterns {
     static let errors: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+errors", options: .caseInsensitive)
 }
 
-/// Fetches the recent `index`-kind run rows for the status probe.
+/// Collects the most recent index run failures via a kind-filtered store lookup.
 ///
-/// Single bounded query shared by `recentIndexErrors(from:)` and
-/// `latestIndexRun(from:)`: one `list(limit:)` with a fixed cap, filtered by
-/// kind, with no preceding count query so new rows cannot slip between a
-/// separate count and the list.
-/// - Parameter context: Server context owning the run log.
-/// - Returns: Newest `index`-kind rows within the scan window, newest first.
-private func recentIndexRuns(context: ServerContext) async -> [RunLogEntry] {
-    let recent = await context.runs.list(limit: IndexStatusScan.cap)
-    return recent.filter { $0.kind == ServerIndexRunReporter.kind }
-}
-
-/// Collects the most recent index run failures from a shared run snapshot.
-///
-/// Pure derivation over `recentIndexRuns(context:)` output: filters to error
-/// rows and renders detail strings, newest first. Only the `index`-kind rows
-/// already written by `ServerIndexRunReporter` are consulted, so the status
-/// shape reuses the durable run log instead of adding a second failure
-/// channel; rendering is bounded and carries no content.
+/// Pure derivation over the kind-filtered store lookup in the status route:
+/// filters to error rows and renders detail strings, newest first. Only the
+/// `index`-kind rows already written by `ServerIndexRunReporter` are consulted,
+/// so the status shape reuses the durable run log instead of adding a second
+/// failure channel; rendering is bounded and carries no content.
 /// - Parameters:
-///   - runs: Newest `index`-kind rows from `recentIndexRuns(context:)`.
+///   - runs: Newest `index`-kind rows from the kind-filtered lookup, newest first.
 ///   - limit: Maximum failures to return, newest first.
 /// - Returns: Failure detail strings, newest first.
 private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [String] {
@@ -265,31 +260,40 @@ private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [Str
 
 /// Distills the newest `index`-kind run row into the last-run strip.
 ///
-/// Pure derivation over `recentIndexRuns(context:)` output. The coordinator's
-/// summary line (`Index run <status>: <n> indexed, ... <n> scanned, <n>
-/// errors`) carries the outcome counts, so the strip parses them back out of
-/// the durable text; each count falls back from the message to the response
-/// detail line (both carry the same summary first line), and a row whose
-/// wording drifted past both still reports its status and finish time with
-/// nil counts instead of disappearing. The trigger token is parsed the same
+/// Pure derivation over the kind-filtered store lookup in the status route.
+/// The coordinator's summary line
+/// (`Index run <status>: <n> indexed, ... <n> scanned, <n> errors`) carries the
+/// outcome counts, so the strip parses them back out of the durable text; each
+/// count falls back from the message to the response detail line (both carry
+/// the same summary first line), and a row whose wording drifted past both
+/// still reports its status and finish time with nil counts instead of
+/// disappearing. Cancelled runs persist the same way: the completion event
+/// carries partial counts with status `cancelled`, so the strip renders the
+/// work done so far rather than vanishing. The trigger token is parsed the same
 /// way: the start message carries `Index run started (<trigger>)` while the
 /// completion response carries a `Trigger: <trigger>` detail line, so either
 /// shape yields the machine-readable token the dashboard maps to display copy.
-/// - Parameter runs: Newest `index`-kind rows from `recentIndexRuns(context:)`.
+/// The skip reason follows the same detail-line contract: the completion
+/// response carries a `Skipped: <reason>` line (written by
+/// `IndexCoordinator.detailLine`), parsed like the trigger line and validated
+/// non-empty so the strip renders the same reason the run notice shows.
+/// - Parameter entry: Newest `index`-kind row from the store lookup, or nil.
 /// - Returns: The latest run outcome, or nil when no run has been recorded.
-private func latestIndexRun(from runs: [RunLogEntry]) -> IndexLastRunStatus? {
-    guard let entry = runs.first else {
+private func latestIndexRun(from entry: RunLogEntry?) -> IndexLastRunStatus? {
+    guard let entry else {
         return nil
     }
     let message = entry.message
     let fallback = entry.response ?? ""
+    let skippedReason: String? = entry.response.flatMap { firstSkippedDetailToken(in: $0) }
     return IndexLastRunStatus(
         status: entry.status,
         indexed: firstRunCount(keyword: "indexed", in: message) ?? firstRunCount(keyword: "indexed", in: fallback),
         scanned: firstRunCount(keyword: "scanned", in: message) ?? firstRunCount(keyword: "scanned", in: fallback),
         errors: firstRunCount(keyword: "errors", in: message) ?? firstRunCount(keyword: "errors", in: fallback),
         finishedAt: entry.timestamp,
-        trigger: indexRunTriggerToken(from: entry)
+        trigger: indexRunTriggerToken(from: entry),
+        skippedReason: skippedReason
     )
 }
 
@@ -299,7 +303,7 @@ private func latestIndexRun(from runs: [RunLogEntry]) -> IndexLastRunStatus? {
 /// completion-response shape `Trigger: <trigger>` on its own detail line. A
 /// row carrying neither shape yields nil so older payloads degrade to an
 /// unlabeled strip instead of disappearing.
-/// - Parameter entry: Newest `index`-kind row from `recentIndexRuns(context:)`.
+/// - Parameter entry: Newest `index`-kind row from the kind-filtered store lookup.
 /// - Returns: The trigger token (`"nightly"`, `"catchUp"`, `"onDemand"`), or nil.
 private func indexRunTriggerToken(from entry: RunLogEntry) -> String? {
     if let started = firstParenthesizedToken(in: entry.message) {
@@ -350,6 +354,26 @@ private func firstTriggerDetailToken(in response: String) -> String? {
         if let token, IndexRunTrigger(rawValue: token) != nil {
             return token
         }
+    }
+    return nil
+}
+
+/// Extracts the skip reason from a completion detail line.
+///
+/// Scans lines for a `Skipped:` prefix (case-insensitive), mirroring
+/// `firstTriggerDetailToken`, and returns the remainder only when it is
+/// non-empty after trimming; a response without such a line, or with a blank
+/// reason, yields nil so the strip renders no reason instead of an empty one.
+/// - Parameter response: Completion detail text.
+/// - Returns: The validated skip reason, or nil.
+private func firstSkippedDetailToken(in response: String) -> String? {
+    for line in response.components(separatedBy: .newlines) {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        guard lower.hasPrefix("skipped:") else { continue }
+        let after = trimmed.dropFirst("Skipped:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !after.isEmpty else { continue }
+        return after
     }
     return nil
 }

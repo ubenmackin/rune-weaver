@@ -1240,12 +1240,14 @@ a {
   }
 }
 
-/* Index live strip: horizontal wrapping mini-cards replace the old vertical
- * phase list so five phases fit without scrolling. The base strip already
- * wraps, so narrow panes flow cards onto the next row instead of clipping
- * or scrolling sideways. */
+/* Index live block: single grep-style block under Run with a header line,
+ * one truncated current file, and an indeterminate activity bar reusing the
+ * ToolProgress shimmer (activity only, never percent). */
 .index-live-progress {
   margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
 .index-live-header {
@@ -1253,78 +1255,12 @@ a {
   color: var(--text-muted);
 }
 
-.index-live-strip {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  list-style: none;
-  margin: 8px 0 0;
-  padding: 0;
-}
-
-.index-mini-card {
-  flex: 1 1 140px;
-  min-width: 140px;
-  max-width: 220px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 10px 12px;
-  background: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  box-sizing: border-box;
-}
-
-.index-mini-card.pending {
-  opacity: 0.6;
-}
-
-.index-mini-card.active {
-  border-color: var(--accent-purple);
-  background: var(--accent-purple-glow);
-  opacity: 1;
-}
-
-.index-mini-card.done {
-  border-color: rgba(16, 185, 129, 0.45);
-  opacity: 1;
-}
-
-.index-mini-card-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.index-mini-card-icon {
-  display: inline-flex;
-  align-items: center;
-  color: var(--accent-purple);
-  flex-shrink: 0;
-}
-
-.index-mini-card.done .index-mini-card-icon {
-  color: var(--status-green);
-}
-
-.index-mini-card-label {
-  font-size: 13px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.index-mini-card-counts {
-  font-family: ui-monospace, monospace;
-  font-size: 10px;
-  color: var(--text-muted);
-}
-
-.index-mini-card-current {
+.index-live-current {
   max-width: 100%;
+}
+
+.index-live-activity {
+  margin-top: 2px;
 }
 
 /* Per-call cancel control. It sits beside the toggle in the pill header and

@@ -1,6 +1,7 @@
 // Typed client for the engine JSON API.
 
 import { isRecord } from "./typeGuards";
+import { formatRelativeAgo } from "./relativeTime";
 import { sanitizeWarnings } from "./warnings";
 
 export type TrustDuration =
@@ -1765,6 +1766,29 @@ export interface IndexLastRunStatus {
   errors?: number | null;
   finishedAt?: string | number | null;
   trigger?: string | null;
+  // Skip reason for a `skipped` outcome, mirroring `IndexRunResponse.skippedReason`.
+  // Optional for back-compat with older engines that predate the field; absent
+  // degrades to no reason instead of failing.
+  skippedReason?: string | null;
+}
+
+// Live snapshot of an in-flight index run on `GET /index/status`, mirroring
+// IndexLiveTotals on the engine. Null when idle; the dashboard renders the
+// live block only from this poll snapshot, never from WebSocket frame parsing.
+export interface IndexLiveStatus {
+  trigger: string;
+  phase: string | null;
+  stage: string | null;
+  scanned: number;
+  indexed: number;
+  skipped: number;
+  errors: number;
+  // Engine `live.rate` in docs/s. Optional and nullable for back-compat with
+  // older engines that omit the key; absent degrades to no rate instead of
+  // failing so callers read `live.rate` directly with a typeof guard.
+  rate?: number | null;
+  elapsedMs: number;
+  current: string | null;
 }
 
 // Status snapshot for `GET /index/status`.
@@ -1790,6 +1814,10 @@ export interface IndexStatusResponse {
   // Latest run outcome, or null when no run has been recorded. Optional for
   // back-compat with older engines that predate the strip.
   lastRun?: IndexLastRunStatus | null;
+  // Live snapshot of the run in flight, or null when idle. Optional for
+  // back-compat with older engines that predate live polling; absent degrades
+  // to no live block instead of failing.
+  live?: IndexLiveStatus | null;
 }
 
 // Outcome of `POST /index/run`.
@@ -1813,6 +1841,154 @@ export interface IndexRunResponse {
 // Outcome of `POST /index/cancel`.
 export interface IndexCancelResponse {
   cancelled: boolean;
+}
+
+// Normalized run description shared by the top run notice and the last-run
+// strip. Both surfaces render one identical line — status plus the trigger
+// display label, outcome counts, and finish age — so a completed run can never
+// read differently in the two places. The terminal summary (`IndexRunResponse`)
+// and the status strip (`IndexLastRunStatus`) both normalize into this shape.
+export interface IndexRunDescription {
+  status: string;
+  trigger?: string | null;
+  indexed?: number | null;
+  scanned?: number | null;
+  errors?: number | null;
+  finishedAt?: string | number | null;
+  skippedReason?: string | null;
+}
+
+// Normalizes the status strip shape into the shared run description. Null
+// degrades to null so callers render the never-ran copy instead of guessing.
+export function indexRunDescriptionFromLastRun(
+  lastRun:
+    | IndexLastRunStatus
+    | IndexRunDescription
+    | null
+    | undefined,
+): IndexRunDescription | null {
+  if (!lastRun) return null;
+  const skippedReason = lastRun.skippedReason ?? null;
+  return {
+    status: lastRun.status,
+    trigger: lastRun.trigger ?? null,
+    indexed: lastRun.indexed ?? null,
+    scanned: lastRun.scanned ?? null,
+    errors: lastRun.errors ?? null,
+    finishedAt: lastRun.finishedAt ?? null,
+    skippedReason:
+      typeof skippedReason === "string" && skippedReason.trim()
+        ? skippedReason
+        : null,
+  };
+}
+
+// Normalizes the terminal run summary into the shared run description. Null
+// degrades to null so callers render the never-ran copy instead of guessing.
+export function indexRunDescriptionFromSummary(
+  summary: IndexRunResponse | null | undefined,
+): IndexRunDescription | null {
+  if (!summary) return null;
+  return {
+    status: summary.status,
+    trigger: summary.trigger ?? null,
+    indexed: summary.documentsIndexed ?? null,
+    scanned: summary.scanned ?? null,
+    errors: summary.errors ?? null,
+    finishedAt: summary.finishedAt ?? null,
+    skippedReason:
+      typeof summary.skippedReason === "string" && summary.skippedReason.trim()
+        ? summary.skippedReason
+        : null,
+  };
+}
+
+// Explicit type-guard distinguishing the terminal run summary from the
+// status strip and shared description shapes. Checks the summary's own
+// `documentsIndexed` plus `vectorChunks` pair so a future strip field
+// addition cannot silently flip the branch the way a bare `in` check would.
+export function isIndexRunResponse(
+  run: IndexRunDescription | IndexLastRunStatus | IndexRunResponse,
+): run is IndexRunResponse {
+  if (typeof run !== "object" || run === null) return false;
+  const candidate = run as unknown as Record<string, unknown>;
+  return (
+    typeof candidate.documentsIndexed === "number" &&
+    typeof candidate.vectorChunks === "number"
+  );
+}
+
+// One-line human summary of an index run shared by the top notice and the
+// last-run strip: status plus the trigger display label, outcome counts, and
+// finish age, omitting any count the payload did not carry so a drifted
+// payload still renders its status and time. The trigger label stays
+// parenthesized after the status so the `Last run <status>` prefix survives
+// verbatim. A cancelled run appends the kept-work copy because committed
+// batches survive the stop and the next run resumes from there. A skipped run
+// appends its reason so a skip never reads as a silent no-op. Null renders
+// the honest never-ran copy so a fresh store never reads as an empty history.
+export function describeIndexRun(
+  run:
+    | IndexRunDescription
+    | IndexLastRunStatus
+    | IndexRunResponse
+    | null
+    | undefined,
+): string {
+  if (!run) return "No runs yet";
+  // Single normalization path: the terminal summary and the status strip both
+  // flow through the shared normalizers above instead of branching inline.
+  const normalized = isIndexRunResponse(
+    run as IndexRunDescription | IndexLastRunStatus | IndexRunResponse,
+  )
+    ? indexRunDescriptionFromSummary(run as IndexRunResponse)
+    : indexRunDescriptionFromLastRun(
+        run as IndexRunDescription | IndexLastRunStatus,
+      );
+  if (!normalized) return "No runs yet";
+  const status: unknown = normalized.status;
+  const trigger: unknown = normalized.trigger;
+  const indexed: unknown = normalized.indexed;
+  const scanned: unknown = normalized.scanned;
+  const errors: unknown = normalized.errors;
+  const finishedAt: unknown = normalized.finishedAt;
+  const skippedReason: unknown = normalized.skippedReason;
+  const normalizedStatus =
+    typeof status === "string" && status.trim() ? status.trim() : "unknown";
+  const head =
+    typeof trigger === "string" && trigger.trim()
+      ? `Last run ${normalizedStatus} (${indexRunTriggerLabel(trigger)})`
+      : `Last run ${normalizedStatus}`;
+  const parts: string[] = [head];
+  if (typeof indexed === "number" && Number.isFinite(indexed)) {
+    parts.push(`${indexed} indexed`);
+  }
+  if (typeof scanned === "number" && Number.isFinite(scanned)) {
+    parts.push(`${scanned} scanned`);
+  }
+  if (typeof errors === "number" && Number.isFinite(errors)) {
+    parts.push(`${errors} errors`);
+  }
+  if (finishedAt != null) {
+    const ageMs = indexWatermarkAgeMs(
+      finishedAt as string | number | null | undefined,
+    );
+    if (ageMs != null) {
+      parts.push(`finished ${formatRelativeAgo(ageMs)}`);
+    }
+  }
+  let text = parts.join(" · ");
+  if (normalizedStatus === "cancelled") {
+    text += " · Committed work is kept and the next run resumes from there.";
+  }
+  if (
+    normalizedStatus === "skipped" &&
+    typeof skippedReason === "string" &&
+    skippedReason.trim()
+  ) {
+    text += ` — Index run skipped: ${skippedReason.trim()}`;
+  }
+  return text;
 }
 
 // Outcome of `POST /index/prune`.

@@ -6,8 +6,9 @@
 // owns the enable/sources/excludes/caps fields with its own Save, so neither
 // surface duplicates the other's control set. Status freshness comes from the
 // shared WebSocket run broadcasts — there is no manual Refresh button — and
-// live progress rides the `tool_progress` frames, so the panel never invents a
-// completion fraction the engine cannot supply.
+// live progress renders one grep-style block from the polled status live
+// snapshot, so the panel never invents a completion fraction the engine cannot
+// supply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -16,6 +17,7 @@ import {
   INDEX_ICLOUD_EVICTIONS,
   INDEX_MAIL_VECTOR_WINDOWS,
   cancelIndex,
+  describeIndexRun,
   formatToolProgressElapsedMs,
   getIndexStatus,
   getSettings,
@@ -31,7 +33,7 @@ import {
   type IndexConfigData,
   type IndexExtractStatusCounts,
   type IndexLastRunStatus,
-  type IndexRunResponse,
+  type IndexLiveStatus,
   type IndexSourceCounts,
   type IndexStatusResponse,
 } from "../api";
@@ -44,11 +46,6 @@ import type {
 import { formatRelativeAgo } from "../relativeTime";
 import {
   AlertTriangleIcon,
-  IndexCommitIcon,
-  IndexDiscoverIcon,
-  IndexReadingIcon,
-  IndexVectorIcon,
-  IndexVisionIcon,
   StopIcon,
   TrashIcon,
 } from "./icons";
@@ -166,114 +163,40 @@ export function hashIndexError(detail: string): string {
   return (hash >>> 0).toString(16);
 }
 
-// Ordered index phases, mirroring IndexPhase on the engine. The live progress
-// line names the current step by matching the phase token in the frame message.
-const INDEX_PHASES = ["discovering", "extracting", "embedding", "committing"] as const;
-
-// Ordered index stages, mirroring IndexSourceKind on the engine. The live
-// header names the active corpus by matching the stage token in the frame
-// message ("Indexing extracting files: …"); discovering and committing frames
-// carry no stage so the header falls back to the phase copy there.
-export const INDEX_STAGES = ["files", "mail", "messages", "vision"] as const;
-
 // Tool identity the engine stamps on index progress frames. Progress is only
-// adopted while a run is in flight and either carries this name or, on older
-// engines that omit it, arrives during any run in flight.
+// adopted while a run is in flight and carrying this name.
 export const INDEX_PROGRESS_TOOL_NAME = "index";
 
-// User copy per phase so the step list renders plain language rather than the
-// engine's wire token.
-const INDEX_PHASE_COPY: Record<string, string> = {
-  discovering: "Discovering",
-  extracting: "Reading",
-  embedding: "Vectorizing",
-  committing: "Committing",
-};
+// Elapsed floor before the live rate reads honestly: under half a second one
+// document over a few milliseconds renders a triple-digit spike, so the line
+// omits the rate until the window is wide enough to mean something. Mirrors
+// the engine liveTotals floor that reports 0 below this window.
+export const INDEX_MIN_HONEST_RATE_ELAPSED_MS = 500;
 
-// Explained phase steps for the live list, in display order. Vision is its own
-// step even though the engine reports it as a stage token: it stays active
-// whenever the stage is vision, regardless of the phase token in the message.
-// Labels reuse the phase copy so the wire-token wording stays in one place.
-export const INDEX_STEPS: Array<{ id: string; label: string; title: string }> = [
-  { id: "discovering", label: INDEX_PHASE_COPY.discovering, title: "Finding candidates to index" },
-  { id: "extracting", label: INDEX_PHASE_COPY.extracting, title: "Extracting text from documents" },
-  { id: "embedding", label: INDEX_PHASE_COPY.embedding, title: "Building embeddings for search" },
-  { id: "vision", label: "Describing images", title: "Describing images with LLM" },
-  { id: "committing", label: INDEX_PHASE_COPY.committing, title: "Saving to the index" },
-];
+// Ceiling above which a rate cannot be real work: guards a handcrafted or
+// drifted payload the same way the non-finite check does, so the line omits
+// the rate instead of rendering an absurd figure.
+export const INDEX_MAX_HONEST_RATE = 1000000;
 
-// Maps a live frame's phase and stage tokens onto one explained step. Vision
-// wins over any phase token so image description never reads as vectorizing.
-export function resolveIndexStep(
-  phase: string | null | undefined,
-  stage: string | null | undefined,
+// Documents-per-second for the live block: the engine `live.rate` (indexed
+// documents over elapsed time), labeled explicitly as docs work. Returns null
+// when the rate cannot read honestly — absent, non-finite, non-positive,
+// absurdly huge, or measured under the honest elapsed floor — so the line
+// omits it instead of rendering a jittering zero or an early-run spike.
+export function formatIndexRate(
+  rate: number | null | undefined,
+  elapsedMs?: number | null,
 ): string | null {
-  if (stage === "vision") return "vision";
+  if (typeof rate !== "number" || !Number.isFinite(rate)) return null;
+  if (rate <= 0 || rate > INDEX_MAX_HONEST_RATE) return null;
   if (
-    typeof phase === "string" &&
-    (INDEX_PHASES as readonly string[]).includes(phase)
-  ) {
-    return phase;
-  }
-  return null;
-}
-
-// Step ids a single frame marks as visited. A vision frame marks both its
-// phase and the vision step so vectorizing reads done while describing stays
-// active; any other frame marks only its phase step.
-export function indexStepsForFrame(
-  phase: string | null | undefined,
-  stage: string | null | undefined,
-): string[] {
-  const steps: string[] = [];
-  if (
-    typeof phase === "string" &&
-    (INDEX_PHASES as readonly string[]).includes(phase)
-  ) {
-    steps.push(phase);
-  }
-  if (stage === "vision" && !steps.includes("vision")) {
-    steps.push("vision");
-  }
-  return steps;
-}
-
-// Done/active/pending state for one explained step: the live step stays
-// active, every other visited step reads done, and the rest stay pending.
-// The strip only mounts while a run is in flight, so the rule doubles as the
-// live intra-run state without any post-run persistence.
-export function resolveIndexStepStatus(
-  stepID: string,
-  activeStep: string | null | undefined,
-  visited: Set<string> | string[] | null | undefined,
-): "done" | "active" | "pending" {
-  if (activeStep != null && stepID === activeStep) return "active";
-  const has =
-    visited instanceof Set ? visited.has(stepID) : Array.isArray(visited) ? visited.includes(stepID) : false;
-  return has ? "done" : "pending";
-}
-
-// Per-step glyph for the horizontal live strip. Icons stay in the shared set
-// so chat and index surfaces reuse one stroke style with no extra dependency.
-export const INDEX_STEP_ICONS: Record<string, typeof IndexDiscoverIcon> = {
-  discovering: IndexDiscoverIcon,
-  extracting: IndexReadingIcon,
-  embedding: IndexVectorIcon,
-  vision: IndexVisionIcon,
-  committing: IndexCommitIcon,
-};
-
-// Scanned items-per-second for the active mini-card: scanned work over elapsed
-// time, labeled explicitly so the active card never reads as indexed work.
-// Returns null when the rate cannot read honestly (no time or no work yet) so
-// the card omits it instead of rendering a jittering zero.
-export function formatIndexRate(scanned: number, elapsedMs: number): string | null {
-  if (!Number.isFinite(scanned) || !Number.isFinite(elapsedMs)) return null;
-  if (scanned <= 0 || elapsedMs <= 0) return null;
-  const perSecond = scanned / (elapsedMs / 1000);
-  if (!Number.isFinite(perSecond) || perSecond <= 0) return null;
-  const rounded = perSecond >= 10 ? Math.round(perSecond) : Math.round(perSecond * 10) / 10;
-  return `${rounded} scanned/s`;
+    typeof elapsedMs === "number" &&
+    Number.isFinite(elapsedMs) &&
+    elapsedMs < INDEX_MIN_HONEST_RATE_ELAPSED_MS
+  )
+    return null;
+  const rounded = rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10;
+  return `${rounded} docs/s`;
 }
 
 // Chart palette drawn from the dashboard theme tokens: the vector segment uses
@@ -428,64 +351,23 @@ export function extractStatusLabel(status: string): string {
   return status && status.trim() ? status.trim() : "unknown";
 }
 
-// One-line human summary of the last index run for the strip: status plus the
-// trigger label, outcome counts, and finish time, omitting any count the
-// summary line did not carry so a drifted payload still renders its status
-// and time. The trigger label stays parenthesized after the status so the
-// `Last run <status>` prefix survives verbatim for older assertions.
-export function describeIndexLastRun(lastRun: IndexLastRunStatus | null | undefined): string {
-  if (!lastRun) return "No runs yet";
-  const head =
-    typeof lastRun.trigger === "string" && lastRun.trigger.trim()
-      ? `Last run ${lastRun.status} (${indexRunTriggerLabel(lastRun.trigger)})`
-      : `Last run ${lastRun.status}`;
-  const parts: string[] = [head];
-  if (typeof lastRun.indexed === "number" && Number.isFinite(lastRun.indexed)) {
-    parts.push(`${lastRun.indexed} indexed`);
-  }
-  if (typeof lastRun.scanned === "number" && Number.isFinite(lastRun.scanned)) {
-    parts.push(`${lastRun.scanned} scanned`);
-  }
-  if (typeof lastRun.errors === "number" && Number.isFinite(lastRun.errors)) {
-    parts.push(`${lastRun.errors} errors`);
-  }
-  if (lastRun.finishedAt != null) {
-    const age = formatIndexAge(lastRun.finishedAt);
-    if (age !== "Never indexed") {
-      parts.push(`finished ${age}`);
-    }
-  }
-  return parts.join(" · ");
-}
-
-// Extracts the phase token from a live progress frame message
-// ("Indexing extracting: …" or "Indexing extracting files: …"), degrading to
-// null when the engine changes the wording so the step list simply holds its
-// previous position.
-export function resolveIndexPhase(message: string | null | undefined): string | null {
-  if (typeof message !== "string") return null;
-  const match = /Indexing\s+(\w+)/.exec(message);
-  if (!match) return null;
-  const phase = match[1].toLowerCase();
-  return INDEX_PHASES.includes(phase as (typeof INDEX_PHASES)[number]) ? phase : null;
-}
-
-// Extracts the stage token from a live progress frame message
-// ("Indexing extracting files: …"), degrading to null when the frame carries
-// no stage (discovering and committing frames) or the engine changes the
-// wording so the header falls back to the phase copy.
-export function resolveIndexStage(message: string | null | undefined): string | null {
-  if (typeof message !== "string") return null;
-  const match = /Indexing\s+\w+\s+(\w+)/.exec(message);
-  if (!match) return null;
-  const stage = match[1].toLowerCase();
-  return (INDEX_STAGES as readonly string[]).includes(stage) ? stage : null;
+// Last-run strip copy with the never-empty history contract: a fresh store
+// with no run ever recorded reads as an honest empty state, a first pass in
+// flight names itself instead of reading as empty history, and any completed
+// or cancelled run always renders its entry. The active flag covers every
+// in-flight signal so the two empty copies can never contradict each other.
+export function resolveIndexLastRunText(
+  lastRun: IndexLastRunStatus | null | undefined,
+  isActive: boolean,
+): string {
+  if (lastRun == null && isActive) return "First run in progress…";
+  return describeIndexRun(lastRun);
 }
 
 // Stage-aware header copy for the live progress line. Vision always describes
 // images, embedding vectorizes, extracting reads the named corpus, and the
-// phase-only frames keep their plain copy; anything unrecognized degrades to
-// the generic running copy so the header never sticks on a wire token.
+// phase-only snapshots keep their plain copy; anything unrecognized degrades
+// to the generic running copy so the header never sticks on a wire token.
 export function resolveIndexLiveTitle(
   phase: string | null | undefined,
   stage: string | null | undefined,
@@ -507,29 +389,70 @@ export function resolveIndexLiveTitle(
 }
 
 // Reports whether a live progress frame belongs to an index run. The frame is
-// adopted only while a run is in flight — either carrying the index tool name
-// or, on older engines that omit it, arriving during any run — so a delayed
-// frame after the run settles never resurrects cleared progress.
+// adopted only while a run is in flight and carrying the index tool name, so
+// a delayed frame after the run settles never resurrects cleared progress and
+// a concurrent tool with an omitted name never triggers a poll storm.
 export function isIndexProgressFrame(
   frame: Pick<WSToolProgressFrame, "toolName">,
   runActive: boolean,
 ): boolean {
   const name = typeof frame.toolName === "string" ? frame.toolName.trim().toLowerCase() : "";
-  if (name === INDEX_PROGRESS_TOOL_NAME) return runActive;
-  if (name.length > 0) return false;
-  return runActive;
+  return name === INDEX_PROGRESS_TOOL_NAME && runActive;
 }
 
-// Live progress distilled from one frame so the panel renders a stable shape
-// regardless of which counters the engine populates.
-export interface IndexLiveProgress {
-  phase: string | null;
-  stage: string | null;
-  message: string;
-  scanned: number;
-  indexed: number;
-  elapsedMs: number;
-  current: string | null;
+// Stage title for the grep-style live line. Reuses the polled snapshot copy
+// but never returns the generic running fallback so the live block never
+// duplicates the Status pill's Running text.
+export function resolveIndexLiveStageTitle(
+  phase: string | null | undefined,
+  stage: string | null | undefined,
+): string {
+  const title = resolveIndexLiveTitle(phase, stage);
+  return title === "Running…" ? "Indexing…" : title;
+}
+
+// One-line header for the polled live snapshot: trigger label plus stage title
+// with cumulative counts, skipped/errors when non-zero, engine rate, and
+// elapsed. The trigger label already carries its Run noun, so the em dash
+// separates it from the stage without repeating the word. Rate reads the wire
+// `live.rate` (docs/s) with the honest elapsed floor and omits itself when
+// absent so the line never jitters on zero or spikes early. Returns null
+// without live so callers render nothing.
+export function formatIndexLiveHeader(
+  live: IndexLiveStatus | null | undefined,
+): string | null {
+  if (!live) return null;
+  const scanned =
+    typeof live.scanned === "number" && Number.isFinite(live.scanned) && live.scanned > 0
+      ? Math.floor(live.scanned)
+      : 0;
+  const indexed =
+    typeof live.indexed === "number" && Number.isFinite(live.indexed) && live.indexed > 0
+      ? Math.floor(live.indexed)
+      : 0;
+  const skipped =
+    typeof live.skipped === "number" && Number.isFinite(live.skipped) && live.skipped > 0
+      ? Math.floor(live.skipped)
+      : 0;
+  const errors =
+    typeof live.errors === "number" && Number.isFinite(live.errors) && live.errors > 0
+      ? Math.floor(live.errors)
+      : 0;
+  const elapsedMs =
+    typeof live.elapsedMs === "number" && Number.isFinite(live.elapsedMs) && live.elapsedMs >= 0
+      ? live.elapsedMs
+      : 0;
+  const label = indexRunTriggerLabel(live.trigger);
+  const stageTitle = resolveIndexLiveStageTitle(live.phase, live.stage);
+  const rate = formatIndexRate(
+    typeof live.rate === "number" ? live.rate : null,
+    elapsedMs,
+  );
+  const elapsed = formatToolProgressElapsedMs(elapsedMs);
+  const skippedPart = skipped > 0 ? ` · ${skipped} skipped` : "";
+  const errorsPart = errors > 0 ? ` · ${errors} errors` : "";
+  const ratePart = rate ? ` · ${rate}` : "";
+  return `${label} — ${stageTitle} · ${scanned} scanned · ${indexed} indexed${skippedPart}${errorsPart}${ratePart} · ${elapsed}`;
 }
 
 // Embedded callers (the Memory tab) render their own inner header above the
@@ -553,13 +476,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [action, setAction] = useState<"run" | "prune" | "reset" | null>(null);
   const actionBusy = action !== null;
   const [cancelBusy, setCancelBusy] = useState(false);
-  const [liveProgress, setLiveProgress] = useState<IndexLiveProgress | null>(null);
-  // Client-side visited steps for the live strip. Marked as frames arrive and
-  // cleared when the run settles, so the strip mounts only while a run is in
-  // flight and never persists as a post-run summary.
-  const [visitedSteps, setVisitedSteps] = useState<Set<string>>(
-    () => new Set<string>(),
-  );
   // Synchronous guard for the run flight: state commits asynchronously, so a
   // double-click before re-render would otherwise start two runs. The ref flips
   // immediately and the state mirrors it for rendering.
@@ -627,9 +543,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   }, []);
 
   // True whenever the engine reports a run in flight or this panel started one,
-  // so progress frames are only adopted during a real run. The Status pill
-  // below stays the authoritative running source; this flag only gates frame
-  // adoption and the live block.
+  // so the in-run poll stays active and Run stays disabled during a real run.
+  // The Status pill below stays the authoritative running source; this flag
+  // only gates polling and buttons, never the live block.
   const progressActive = runActive || status?.running === true;
   const indexingEnabled = status?.enabled === true;
   // Mirrors the engine running flag for the broadcast consumer without
@@ -638,18 +554,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   useEffect(() => {
     statusRunningRef.current = status?.running === true;
   }, [status?.running]);
-  // Fallback so a run with no frame never freezes on "Starting…": well under
-  // two seconds without live progress the header reads "Running…" until a
-  // frame arrives or the run settles.
-  const [staleRunning, setStaleRunning] = useState(false);
-  useEffect(() => {
-    if (!progressActive || liveProgress || cancelling) {
-      setStaleRunning(false);
-      return;
-    }
-    const timer = setTimeout(() => setStaleRunning(true), 1500);
-    return () => clearTimeout(timer);
-  }, [progressActive, liveProgress, cancelling]);
+  // Polled live snapshot for the grep-style block. Null when idle; the block
+  // mounts only from this, never from frame parsing, and unmounts on settle
+  // when the engine clears it. The Status pill owns the Running indicator.
+  const live: IndexLiveStatus | null = status?.live ?? null;
+  // Sanitized relative tail for the single file line. Defense-in-depth mirrors
+  // the ToolProgress contract so a handcrafted payload can never render an
+  // absolute path the engine keeps private.
+  const liveCurrent = live ? relativeProgressCurrent(live.current) : null;
 
   const vectorChunks = status?.vectorChunks ?? 0;
   const keywordChunks = status?.keywordChunks ?? 0;
@@ -673,10 +585,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     try {
       const response = await getIndexStatus();
       setStatus(response);
+      return response;
     } catch (failure) {
       setError(
         failure instanceof ApiError ? failure.message : "Failed to load index status",
       );
+      return null;
     }
   }, []);
 
@@ -684,18 +598,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     void loadStatus();
   }, [loadStatus]);
 
-  // Live progress consumer: adopts `tool_progress` frames whenever a run is in
-  // flight (engine status or local flight), distilling the phase and stage
-  // tokens plus counters and the relative current item. The tail is
-  // relative-only server-side, so the panel never renders a filesystem path
-  // even though the frame could not carry one. Each frame also marks its
-  // explained step visited so earlier phases read done while the live step
-  // stays active. The terminal broadcast clears both the live counts and the
-  // visited set, so the strip unmounts on settle with no persistence. Any run
-  // broadcast — a pass starting elsewhere or reaching its terminal summary —
-  // reloads status so the cards stay fresh without a manual Refresh control.
-  // A launch-triggered nightly or catch-up pass this panel did not start also
-  // raises an auto-start notice naming the trigger display label explicitly.
+  // Live broadcast consumer: run broadcasts reload status so the cards stay
+  // fresh without a manual Refresh control, while `tool_progress` frames only
+  // trigger a poll-now reload — numbers always come from the polled status
+  // live snapshot, never from frame parsing. A launch-triggered nightly or
+  // catch-up pass this panel did not start also raises an auto-start notice
+  // naming the trigger display label explicitly.
   const handleIndexBroadcast = useCallback(
     (frame: WSIncomingFrame) => {
       const frameType = (frame as WSGenericFrame).type;
@@ -706,10 +614,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         const isIndexKind =
           typeof nested?.kind === "string" && nested.kind === "index";
         if (frameType === "run_started" && isIndexKind) {
-          // The next run starts fresh: drop the previous summary and any stale
-          // live line so the steps rebuild from the incoming frames.
-          setVisitedSteps(new Set<string>());
-          setLiveProgress(null);
           if (!runActiveRef.current && !cancellingRef.current) {
             const notice = describeAutoStartNotice({
               message: nested.message,
@@ -721,27 +625,34 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           }
         }
         if (frameType === "run_completed" && isIndexKind) {
-          // The pass settled: drop the live counts and the visited steps so
-          // the strip unmounts instead of persisting as a summary.
-          setLiveProgress(null);
-          setVisitedSteps(new Set<string>());
           if (cancellingRef.current) {
             // The cancelling window ends on the terminal broadcast. A run this
             // panel started still resolves through its awaiting run request with
-            // full counts, so only a remote run needs the generic kept-work
-            // notice here; the status reload below settles the pill either way.
-            if (!runActiveRef.current) {
-              setNotice(
-                "Index run cancelled: committed work is kept and the next run resumes from there.",
-              );
-            }
+            // full counts, so only a remote run refreshes its kept-work notice
+            // from the reloaded strip entry; the status reload below settles
+            // the pill either way and unmounts the live block on settle.
+            const wasLocal = runActiveRef.current;
             cancellingRef.current = false;
             setCancelling(false);
+            if (!wasLocal) {
+              void loadStatus().then((fresh) => {
+                if (fresh?.lastRun) {
+                  setNotice(describeIndexRun(fresh.lastRun));
+                } else {
+                  setNotice(
+                    "Last run cancelled · Committed work is kept and the next run resumes from there.",
+                  );
+                }
+              });
+              return;
+            }
           }
+          void loadStatus();
+          return;
         }
         // A completed index pass started elsewhere still refreshes the
         // last-run strip through the status reload; the strip itself carries
-        // the trigger label via describeIndexLastRun.
+        // the trigger label via the shared run formatter.
         if (isIndexKind) {
           void loadStatus();
         }
@@ -756,33 +667,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         )
       )
         return;
-      const phase = resolveIndexPhase(progress.message);
-      const stage = resolveIndexStage(progress.message);
-      setLiveProgress({
-        phase,
-        stage,
-        message: typeof progress.message === "string" ? progress.message : "",
-        scanned: progress.scanned,
-        indexed: progress.matched,
-        elapsedMs: progress.elapsedMs,
-        current: relativeProgressCurrent(progress.current),
-      });
-      const frameSteps = indexStepsForFrame(phase, stage);
-      if (frameSteps.length > 0) {
-        setVisitedSteps((previous) => {
-          let changed = false;
-          for (const step of frameSteps) {
-            if (!previous.has(step)) {
-              changed = true;
-              break;
-            }
-          }
-          if (!changed) return previous;
-          const next = new Set(previous);
-          for (const step of frameSteps) next.add(step);
-          return next;
-        });
-      }
+      // Poll-now trigger only: the live numbers render from status live, so a
+      // frame simply re-reads status instead of distilling counters locally.
+      void loadStatus();
     },
     [loadStatus],
   );
@@ -792,41 +679,42 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Clears the local run flight once the engine reports no run in flight, so a
   // run started from another tab still settles the panel's busy state. The
   // cancelling window settles the same way when the broadcast is missed: the
-  // status probe is authoritative, so a remote cancel still reaches its kept-
-  // work notice and re-enables Run without a separate Stopped variant. The
-  // live strip unmounts here as well, so a missed broadcast never strands
-  // stale steps on screen. A locally started run keeps its live line until
-  // its awaiting request settles, so the probe never wipes an active flight.
+  // status probe is authoritative, so a remote cancel still reaches its shared
+  // kept-work notice from the strip entry and re-enables Run without a
+  // separate Stopped variant. The live block unmounts through the cleared
+  // status live snapshot, so a missed broadcast never strands stale content
+  // on screen.
   useEffect(() => {
     if (status?.running !== false) return;
     // Capture locality before clearing: a run this panel started resolves
     // through its awaiting request with full counts, so only a remote run
-    // needs the generic kept-work notice here.
+    // refreshes its notice here from the shared strip entry.
     const wasLocalRun = runActiveRef.current;
     if (wasLocalRun) {
       runActiveRef.current = false;
       setRunActive(false);
-    } else {
-      setLiveProgress(null);
-      setVisitedSteps(new Set<string>());
     }
     if (!cancellingRef.current) return;
     if (!wasLocalRun) {
-      setNotice(
-        "Index run cancelled: committed work is kept and the next run resumes from there.",
-      );
+      if (status?.lastRun) {
+        setNotice(describeIndexRun(status.lastRun));
+      } else {
+        setNotice(
+          "Last run cancelled · Committed work is kept and the next run resumes from there.",
+        );
+      }
     }
     cancellingRef.current = false;
     setCancelling(false);
-  }, [status?.running]);
+  }, [status?.running, status?.lastRun]);
 
   // Committed-growth poll while a run is in flight: polls status about every
   // two seconds while progress is active or the cancelling window is open, so
-  // the cards track committed batches between frames with no idle polling.
-  // Pauses while the tab is hidden and clears on settle through the effect
-  // deps. Mount, broadcast, and after-action loads stay untouched; the
-  // frame-driven live line remains the in-flight source while this poll covers
-  // committed growth, and a missed broadcast still settles promptly.
+  // the cards track committed batches and the live block tracks the polled
+  // live snapshot with no idle polling. Pauses while the tab is hidden and
+  // clears on settle through the effect deps. Mount, broadcast, and
+  // after-action loads stay untouched, and a missed broadcast still settles
+  // promptly.
   useEffect(() => {
     if (!progressActive && !cancelling) return;
     const timer = setInterval(() => {
@@ -887,13 +775,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     flashTimersRef.current.push(timer);
   }, [status, progressActive, cancelling]);
 
-  // Starts an on-demand run and awaits its terminal summary. Progress frames
-  // keep the live line honest while the request is in flight; the summary fills
-  // the notice so a skipped run explains why instead of appearing silent.
-  // A locally cancelled run settles here with its full counts, clearing the
-  // cancelling window without overwriting the detailed summary. The visited
-  // set clears at both ends so the strip mounts fresh and unmounts on settle
-  // with no persistence.
+  // Starts an on-demand run and awaits its terminal summary. The polled live
+  // snapshot keeps the live block honest while the request is in flight; the
+  // summary fills the notice through the shared run formatter so the notice
+  // and the reloaded strip read identically. A locally cancelled run settles
+  // here with its full counts, clearing the cancelling window without
+  // overwriting the detailed summary. The live block unmounts on settle when
+  // the engine clears the snapshot, with no persistence.
   const handleRun = async () => {
     if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
     runActiveRef.current = true;
@@ -901,11 +789,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     setAction("run");
     setError(null);
     setNotice(null);
-    setLiveProgress(null);
-    setVisitedSteps(new Set<string>());
     try {
       const summary = await runIndex();
-      setNotice(describeRunSummary(summary));
+      setNotice(describeIndexRun(summary));
       // The run reached its terminal summary, so any cancelling window opened
       // by a concurrent cancel request is over; the detailed summary above
       // already carries the kept-work copy for the cancelled case.
@@ -920,8 +806,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       runActiveRef.current = false;
       setRunActive(false);
       setAction(null);
-      setLiveProgress(null);
-      setVisitedSteps(new Set<string>());
     }
   };
 
@@ -1027,10 +911,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     try {
       await resetIndex();
       setNotice("Index cleared. Run Rebuild to re-index from scratch.");
-      // The store is empty again, so the previous summary has nothing to
-      // describe and the live line has nothing to continue.
-      setVisitedSteps(new Set<string>());
-      setLiveProgress(null);
       await loadStatus();
     } catch (failure) {
       setError(failure instanceof ApiError ? failure.message : "Failed to reset the index");
@@ -1039,38 +919,36 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     }
   };
 
-  // Explained step active right now, or null without live progress. Visited
-  // steps mark earlier phases done while the run is in flight; both clear on
-  // settle so the strip never persists idle.
-  const activeStep = liveProgress
-    ? resolveIndexStep(liveProgress.phase, liveProgress.stage)
+  // The grep-style live block mounts only from the polled live snapshot — or
+  // during the cancelling window — and unmounts fully on settle with no
+  // persistence. Without live data it renders nothing; the Status pill below
+  // owns the Running indicator so the block never duplicates it.
+  const showLiveBlock = live != null || cancelling;
+  // Line 1 without any pill: trigger label plus stage-aware title with counts,
+  // rate, and elapsed while the snapshot is present, and Cancelling… during
+  // the stop window. Never renders a Running fallback.
+  // Honest rate for the cancelling branch, shared with the live header so both
+  // surfaces omit early-run spikes and absurd wire values identically.
+  const cancellingRate = live
+    ? formatIndexRate(
+        typeof live.rate === "number" ? live.rate : null,
+        typeof live.elapsedMs === "number" ? live.elapsedMs : 0,
+      )
     : null;
-  // The live strip mounts only while a run is in flight — engine status, local
-  // flight, cancelling window, or live counts — and unmounts on settle with no
-  // persistence. The Status pill below stays the single running indicator.
-  // One flag drives both the outer block and the shimmer so the two can never
-  // disagree about liveness.
-  const showProgressBlock =
-    progressActive || liveProgress != null || cancelling;
-  // Live header text without any pill: stage-aware title plus counts while
-  // frames arrive, Cancelling… during the stop window, and the Running…
-  // fallback when a run stays without frames.
+  const cancellingRatePart = cancellingRate ? ` · ${cancellingRate}` : "";
   const liveHeaderText = cancelling
-    ? liveProgress
-      ? `Cancelling… ${liveProgress.scanned} scanned · ${liveProgress.indexed} indexed · ${formatToolProgressElapsedMs(liveProgress.elapsedMs)}`
+    ? live
+      ? `Cancelling… ${typeof live.scanned === "number" ? live.scanned : 0} scanned · ${typeof live.indexed === "number" ? live.indexed : 0} indexed${cancellingRatePart} · ${formatToolProgressElapsedMs(typeof live.elapsedMs === "number" ? live.elapsedMs : 0)}`
       : "Cancelling…"
-    : liveProgress
-      ? `${resolveIndexLiveTitle(liveProgress.phase, liveProgress.stage)} ${liveProgress.scanned} scanned · ${liveProgress.indexed} indexed · ${formatToolProgressElapsedMs(liveProgress.elapsedMs)}`
-      : staleRunning
-        ? "Running…"
-        : "Starting…";
+    : (formatIndexLiveHeader(live) ?? "");
   // Fresh stores have no last run yet: while the first pass is in flight the
-  // strip header already proves liveness, so the last-run line names it
-  // instead of reading as an empty history.
-  const lastRunText =
-    status?.lastRun == null && showProgressBlock
-      ? "First run in progress…"
-      : describeIndexLastRun(status?.lastRun ?? null);
+  // live block already proves liveness, so the last-run line names it instead
+  // of reading as an empty history. The shared resolver keeps the two empty
+  // copies from ever contradicting each other.
+  const lastRunText = resolveIndexLastRunText(
+    status?.lastRun ?? null,
+    progressActive || showLiveBlock || cancelling,
+  );
   // Last-errors card projection: deduped lines with the raw Full Disk Access
   // bullet suppressed whenever the guided onboarding renders, since the
   // guidance is the formatted form of that failure. The guidance flag reads
@@ -1189,13 +1067,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         ) : null}
       </div>
 
-      {/* Live strip while a run is in flight: the engine publishes no fraction,
-          so an animated shimmer proves liveness. The header is live text only
-          — stage-aware title plus counts — falling back to Running… well under
-          two seconds so it never freezes on Starting…. The Status pill below
-          stays the single running indicator. The strip unmounts on settle with
-          no persistence. */}
-      {showProgressBlock && (
+      {/* Grep-style live block under Run while the polled snapshot is present:
+          line 1 trigger plus stage-aware counts, line 2 single truncated
+          relative file with full-path title, line 3 indeterminate activity bar
+          reusing the ToolProgress activity style (activity only, never
+          percent). Unmounts fully on settle; without live data it renders
+          nothing and the Status pill owns Running. */}
+      {showLiveBlock && (
         <div className="index-live-progress" data-testid="index-live-progress">
           <div
             className="index-live-header muted text-xs"
@@ -1203,77 +1081,22 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
           >
             {liveHeaderText}
           </div>
-          {/* Horizontal wrapping mini-cards in run order: the live step stays
-              active with its counts, visited steps read done, and the rest stay
-              pending. The active card also carries elapsed, rate, and the
-              truncated current file. Unknown wording holds the previous
-              position. */}
-          <ol
-            className="index-live-strip"
-            data-testid="index-live-strip"
-          >
-            {INDEX_STEPS.map((step) => {
-              const stepStatus = resolveIndexStepStatus(step.id, activeStep, visitedSteps);
-              const isActiveStep = stepStatus === "active";
-              const isDoneStep = stepStatus === "done";
-              const StepIcon = INDEX_STEP_ICONS[step.id] ?? IndexDiscoverIcon;
-              const rate =
-                isActiveStep && liveProgress
-                  ? formatIndexRate(liveProgress.scanned, liveProgress.elapsedMs)
-                  : null;
-              return (
-                <li
-                  key={step.id}
-                  className={`index-mini-card ${stepStatus}`}
-                  title={step.title}
-                  data-testid={`index-mini-card-${step.id}`}
-                  aria-label={`${step.label}: ${stepStatus}`}
-                  aria-current={isActiveStep ? "step" : undefined}
-                >
-                  <span className="index-mini-card-top">
-                    <span className="index-mini-card-icon" aria-hidden="true">
-                      <StepIcon size={16} />
-                    </span>
-                    <span className="index-mini-card-label">{step.label}</span>
-                    {isDoneStep ? <span aria-hidden="true">✓</span> : null}
-                  </span>
-                  {isActiveStep && liveProgress ? (
-                    <>
-                      <span
-                        className="index-mini-card-counts"
-                        data-testid={`index-step-counts-${step.id}`}
-                      >
-                        {liveProgress.scanned} scanned · {liveProgress.indexed} indexed ·{" "}
-                        {formatToolProgressElapsedMs(liveProgress.elapsedMs)}
-                        {rate ? ` · ${rate}` : null}
-                      </span>
-                      {liveProgress.current ? (
-                        <span
-                          className="tool-progress-current index-mini-card-current"
-                          data-testid={`index-step-current-${step.id}`}
-                          title={liveProgress.current}
-                        >
-                          {liveProgress.current}
-                        </span>
-                      ) : null}
-                    </>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ol>
-          {liveProgress?.message ? (
-            <div className="index-live-message muted text-xs">{liveProgress.message}</div>
-          ) : null}
-          {showProgressBlock ? (
+          {liveCurrent ? (
             <div
-              className="tool-progress-shimmer"
-              data-testid="index-progress-shimmer"
-              role="progressbar"
-              aria-label="Index run in progress"
-              aria-valuetext="In progress"
-            />
+              className="tool-progress-current index-live-current"
+              data-testid="index-live-current"
+              title={liveCurrent}
+            >
+              {liveCurrent}
+            </div>
           ) : null}
+          <div
+            className="tool-progress-shimmer index-live-activity"
+            data-testid="index-live-activity"
+            role="progressbar"
+            aria-label="Index run in progress"
+            aria-valuetext="In progress"
+          />
         </div>
       )}
 
@@ -2127,24 +1950,6 @@ export function IndexPolicyPanel() {
       </div>
     </section>
   );
-}
-
-// One-line human summary of a completed run, naming why a skipped run did
-// nothing so the notice never reads as a silent no-op. The trigger display
-// label prefixes the machine-readable summary so the `Index run <status>`
-// wording survives verbatim while the notice still names Manual, Nightly,
-// and Catch-Up runs explicitly.
-export function describeRunSummary(summary: IndexRunResponse): string {
-  const label = indexRunTriggerLabel(summary.trigger);
-  if (summary.status === "skipped") {
-    return summary.skippedReason
-      ? `${label} — Index run skipped: ${summary.skippedReason}`
-      : `${label} — Index run skipped.`;
-  }
-  if (summary.status === "cancelled") {
-    return `${label} — Index run cancelled: ${summary.documentsIndexed} indexed, ${summary.scanned} scanned. Committed work is kept and the next run resumes from there.`;
-  }
-  return `${label} — Index run ${summary.status}: ${summary.documentsIndexed} indexed, ${summary.vectorChunks} vectors, ${summary.keywordChunks} keyword-only, ${summary.scanned} scanned, ${summary.errors} errors.`;
 }
 
 // Auto-start notice for a run broadcast that this panel did not initiate:
