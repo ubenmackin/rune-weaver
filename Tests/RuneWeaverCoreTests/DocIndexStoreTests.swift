@@ -103,6 +103,241 @@ private func createLegacyIndex(atPath path: String) throws {
     #endif
 }
 
+/// Creates a database with the v1 full-text schema to exercise the
+/// contentless migration: a porter-tokenized FTS table that stores a second
+/// copy of every chunk plus plain rowid triggers.
+/// - Parameter path: Database file path.
+/// - Returns: Seeded document and chunk identifiers.
+private func createV1Index(atPath path: String) throws -> (documentID: UUID, chunkIDs: [UUID]) {
+    let documentID = UUID()
+    let firstChunkID = UUID()
+    let secondChunkID = UUID()
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open v1 database")
+        }
+        defer { sqlite3_close(handle) }
+        let schema = """
+        CREATE TABLE IF NOT EXISTS schema_meta(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS indexed_documents(
+            id TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            external_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            path TEXT,
+            message_id TEXT,
+            mailbox TEXT,
+            mtime REAL,
+            size_bytes INTEGER,
+            content_hash TEXT NOT NULL,
+            mime TEXT,
+            extract_status TEXT NOT NULL,
+            indexed_at REAL NOT NULL,
+            metadata TEXT
+        );
+        CREATE TABLE IF NOT EXISTS indexed_chunks(
+            id TEXT PRIMARY KEY,
+            document_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL,
+            chunk_text TEXT NOT NULL,
+            embedding BLOB,
+            is_vector INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(document_id) REFERENCES indexed_documents(id) ON DELETE CASCADE
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS indexed_chunks_fts USING fts5(chunk_text, tokenize='porter');
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ai AFTER INSERT ON indexed_chunks BEGIN
+            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ad AFTER DELETE ON indexed_chunks BEGIN
+            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_au AFTER UPDATE ON indexed_chunks BEGIN
+            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+        END;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_indexed_documents_source_external
+            ON indexed_documents(source, external_id);
+        """
+        var message: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(handle, schema, nil, nil, &message) == SQLITE_OK else {
+            let detail = message.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(message)
+            throw LegacyIndexError.failed(detail)
+        }
+        let seed = """
+        INSERT INTO schema_meta(key, value) VALUES('schema_version', '1');
+        INSERT INTO indexed_documents(id, source, external_id, display_name, content_hash, extract_status, indexed_at)
+            VALUES('\(documentID.uuidString)', 'files', 'v1-notes', 'Sample', 'hash-v1', 'extracted', 1000);
+        INSERT INTO indexed_chunks(id, document_id, ordinal, chunk_text, is_vector)
+            VALUES('\(firstChunkID.uuidString)', '\(documentID.uuidString)', 0, 'The biscuit recipe uses butter', 0);
+        INSERT INTO indexed_chunks(id, document_id, ordinal, chunk_text, is_vector)
+            VALUES('\(secondChunkID.uuidString)', '\(documentID.uuidString)', 1, 'Sourdough starter needs feeding', 0);
+        """
+        var seedMessage: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(handle, seed, nil, nil, &seedMessage) == SQLITE_OK else {
+            let detail = seedMessage.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(seedMessage)
+            throw LegacyIndexError.failed(detail)
+        }
+    #endif
+    return (documentID, [firstChunkID, secondChunkID])
+}
+
+/// Reads the recorded schema revision for a raw index database.
+/// - Parameter path: Database file path.
+/// - Returns: Stored revision, or nil when absent.
+private func readIndexSchemaVersion(atPath path: String) throws -> Int? {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT value FROM schema_meta WHERE key = 'schema_version';", -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare schema version read")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        guard let text = sqlite3_column_text(statement, 0).map({ String(cString: $0) }) else { return nil }
+        return Int(text)
+    #else
+        return nil
+    #endif
+}
+
+/// Reports whether a table exists in a raw index database.
+/// - Parameters:
+///   - path: Database file path.
+///   - name: Table name to probe.
+/// - Returns: True when a table with that name exists.
+private func indexTableExists(atPath path: String, name: String) throws -> Bool {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        let escaped = name.replacingOccurrences(of: "'", with: "''")
+        let sql = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '\(escaped)';"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare table probe")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return false }
+        return sqlite3_column_int(statement, 0) > 0
+    #else
+        return false
+    #endif
+}
+
+/// Reads the stored `CREATE` statement for the chunk full-text table.
+/// - Parameter path: Database file path.
+/// - Returns: The `sqlite_master` definition, or nil when absent.
+private func indexFTSDefinition(atPath path: String) throws -> String? {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        let sql = "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'indexed_chunks_fts';"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare FTS definition read")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+        return sqlite3_column_text(statement, 0).map { String(cString: $0) }
+    #else
+        return nil
+    #endif
+}
+
+/// Counts direct FTS matches, bypassing the LIKE fallback so trigger sync is
+/// observable instead of being masked by the content-table scan.
+/// - Parameters:
+///   - path: Database file path.
+///   - query: Bare FTS query text without surrounding quotes.
+/// - Returns: Number of FTS rows matching the query.
+private func ftsMatchCount(atPath path: String, query: String) throws -> Int {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        let escaped = query.replacingOccurrences(of: "'", with: "''")
+        let sql = "SELECT COUNT(*) FROM indexed_chunks_fts WHERE indexed_chunks_fts MATCH '\(escaped)';"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare FTS count")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(statement, 0))
+    #else
+        return 0
+    #endif
+}
+
+/// Fetches FTS rank values in `ORDER BY rank` order for a query.
+/// - Parameters:
+///   - path: Database file path.
+///   - query: Bare FTS query text without surrounding quotes.
+/// - Returns: Rank values in the order SQLite returned them.
+private func ftsRanks(atPath path: String, query: String) throws -> [Double] {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        let escaped = query.replacingOccurrences(of: "'", with: "''")
+        let sql = "SELECT rank FROM indexed_chunks_fts WHERE indexed_chunks_fts MATCH '\(escaped)' ORDER BY rank;"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare rank read")
+        }
+        defer { sqlite3_finalize(statement) }
+        var ranks: [Double] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            ranks.append(sqlite3_column_double(statement, 0))
+        }
+        return ranks
+    #else
+        return []
+    #endif
+}
+
+/// Rewrites a chunk body through raw SQL so the `AFTER UPDATE` trigger fires.
+/// - Parameters:
+///   - path: Database file path.
+///   - chunkID: Chunk row to rewrite.
+///   - text: Replacement body without single quotes.
+private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: String) throws {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        let escaped = text.replacingOccurrences(of: "'", with: "''")
+        let sql = "UPDATE indexed_chunks SET chunk_text = '\(escaped)' WHERE id = '\(chunkID.uuidString)';"
+        var message: UnsafeMutablePointer<CChar>?
+        guard sqlite3_exec(handle, sql, nil, nil, &message) == SQLITE_OK else {
+            let detail = message.map { String(cString: $0) } ?? "unknown"
+            sqlite3_free(message)
+            throw LegacyIndexError.failed(detail)
+        }
+    #endif
+}
+
 @Suite("Document Index Store")
 struct DocIndexStoreTests {
     @Test
@@ -546,5 +781,151 @@ struct DocIndexStoreTests {
         #expect(loaded?.mime == "message/rfc822")
         #expect(loaded?.extractStatus == .partial)
         #expect(loaded?.metadata["account"] == "icloud")
+    }
+
+    @Test
+    func `V1 database migrates to contentless FTS with preserved hits`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (documentID, _) = try createV1Index(atPath: path)
+
+        // A v1 index stores chunk text twice: once in the content table and
+        // once in the FTS shadow content table.
+        #expect(try indexTableExists(atPath: path, name: "indexed_chunks_fts_content") == true)
+
+        // Opening migrates to v2 before the first read.
+        let store = DocIndexStore(dbPath: path)
+        let hits = try await store.searchKeyword(query: "biscuit", limit: 10)
+        #expect(hits.count == 1)
+        #expect(hits.first?.documentID == documentID)
+        #expect(hits.first?.text.contains("biscuit") == true)
+
+        let second = try await store.searchKeyword(query: "sourdough", limit: 10)
+        #expect(second.count == 1)
+        #expect(second.first?.documentID == documentID)
+
+        // The migration records v2, drops the shadow content table while
+        // keeping the live index, and rebuilds the definition contentless.
+        #expect(try readIndexSchemaVersion(atPath: path) == 2)
+        #expect(try indexTableExists(atPath: path, name: "indexed_chunks_fts_content") == false)
+        let definition = try indexFTSDefinition(atPath: path)
+        #expect(definition?.contains("contentless_delete") == true)
+    }
+
+    @Test
+    func `Chunk triggers stay in sync on insert delete and update`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = try await store.upsertDocument(makeDocument(externalID: "trigger-doc", contentHash: "hash-trigger"))
+        let chunkID = UUID()
+        _ = try await store.upsertChunks(
+            documentID: document.id,
+            chunks: [IndexedChunk(id: chunkID, documentID: document.id, ordinal: 0, text: "trigger sync biscuit alpha")]
+        )
+
+        // The insert trigger mirrors the content row into FTS directly, so
+        // the count probes FTS instead of the LIKE fallback.
+        #expect(try ftsMatchCount(atPath: path, query: "alpha") == 1)
+        let inserted = try await store.searchKeyword(query: "alpha", limit: 10)
+        #expect(inserted.count == 1)
+
+        // The update trigger swaps the FTS entry by rowid without the delete command.
+        try updateIndexedChunkText(atPath: path, chunkID: chunkID, text: "trigger sync biscuit beta")
+        #expect(try ftsMatchCount(atPath: path, query: "beta") == 1)
+        #expect(try ftsMatchCount(atPath: path, query: "alpha") == 0)
+
+        // The delete trigger removes the FTS entry alongside the content row.
+        let removed = try await store.deleteDocument(id: document.id)
+        #expect(removed == true)
+        #expect(try ftsMatchCount(atPath: path, query: "beta") == 0)
+        let afterDelete = try await store.searchKeyword(query: "beta", limit: 10)
+        #expect(afterDelete.isEmpty)
+    }
+
+    @Test
+    func `Contentless FTS keeps rank ordering monotonic`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = try await store.upsertDocument(makeDocument(externalID: "rank-doc", contentHash: "hash-rank"))
+        _ = try await store.upsertChunks(documentID: document.id, chunks: [
+            IndexedChunk(documentID: document.id, ordinal: 0, text: "biscuit"),
+            IndexedChunk(documentID: document.id, ordinal: 1, text: "biscuit biscuit biscuit"),
+            IndexedChunk(documentID: document.id, ordinal: 2, text: "biscuit recipe with butter and honey and jam for breakfast table")
+        ])
+
+        // Rank still orders contentless matches: numeric rank arrives in
+        // ascending order (non-decreasing) so relevance is non-increasing.
+        let ranks = try ftsRanks(atPath: path, query: "biscuit")
+        #expect(ranks.count == 3)
+        for index in 1 ..< ranks.count {
+            #expect(ranks[index] >= ranks[index - 1])
+        }
+
+        let hits = try await store.searchKeyword(query: "biscuit", limit: 10)
+        #expect(hits.count == 3)
+    }
+
+    @Test
+    func `Stats reports true on-disk size`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = try await store.upsertDocument(makeDocument(externalID: "sized-doc", contentHash: "hash-sized"))
+        _ = try await store.upsertChunks(documentID: document.id, chunks: [
+            IndexedChunk(documentID: document.id, ordinal: 0, text: "sized vector chunk", embedding: [0.1, 0.2, 0.3]),
+            IndexedChunk(documentID: document.id, ordinal: 1, text: "sized keyword chunk")
+        ])
+
+        // File bytes ride the shared on-disk helper so the status surface tracks
+        // the database file instead of the logical text total. Content is text
+        // plus vectors through the single shared definition.
+        let stats = try await store.stats()
+        #expect(stats.dbFileBytes > 0)
+        #expect(stats.freeBytes >= 0)
+        #expect(stats.walBytes >= 0)
+        #expect(stats.dbFileBytes >= stats.contentBytes)
+        #expect(stats.contentBytes == IndexContentBytes.contentBytes(textBytes: stats.bytes, vectorBytes: stats.vectorBytes ?? 0))
+        #expect(stats.bytes > 0)
+        #if canImport(SQLite3)
+            #expect(stats.textBytes != nil)
+            #expect(stats.vectorBytes != nil)
+            #expect(stats.ftsBytes != nil)
+            let split = (stats.textBytes ?? 0) + (stats.vectorBytes ?? 0) + (stats.ftsBytes ?? 0)
+            #expect(split <= stats.dbFileBytes)
+        #endif
+    }
+
+    @Test
+    func `Stats still reports file size when dbstat is unavailable`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = try await store.upsertDocument(makeDocument(externalID: "nodstat-doc", contentHash: "hash-nodbstat"))
+        _ = try await store.upsertChunks(
+            documentID: document.id,
+            chunks: [IndexedChunk(documentID: document.id, ordinal: 0, text: "durable chunk")]
+        )
+
+        // A missing size table degrades to file sizes with a null split
+        // instead of failing the probe. The probe is injected directly so
+        // parallel tests never share global size state.
+        #if canImport(SQLite3)
+            let stats = try SQLiteDocIndexStore.stats(dbPath: path, dbstatProbe: { _ in nil })
+            #expect(stats.dbFileBytes > 0)
+            #expect(stats.freeBytes >= 0)
+            #expect(stats.dbFileBytes >= stats.contentBytes)
+            #expect(stats.textBytes == nil)
+            #expect(stats.vectorBytes == nil)
+            #expect(stats.ftsBytes == nil)
+            let breakdown = try SQLiteDocIndexStore.storageBreakdown(dbPath: path, dbstatProbe: { _ in nil })
+            #expect(breakdown.dbFileBytes > 0)
+        #else
+            let stats = try await store.stats()
+            #expect(stats.dbFileBytes > 0)
+            #expect(stats.freeBytes >= 0)
+            #expect(stats.dbFileBytes >= stats.contentBytes)
+        #endif
     }
 }

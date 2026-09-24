@@ -105,10 +105,13 @@ public func resumeNarratedApproval(
 
     // Decision broadcasts use the shared `WSApprovalDecidedFrame` wire shape so
     // REST, WebSocket, and dashboard inbox views stay in sync on one encoding.
-    if let data = try? JSONEncoder().encode(WSApprovalDecidedFrame(id: id, approved: approved, sessionID: targetSessionID)),
-       let text = String(data: data, encoding: .utf8)
-    {
-        await context.hub.broadcast(text: text)
+    do {
+        let data = try JSONEncoder().encode(WSApprovalDecidedFrame(id: id, approved: approved, sessionID: targetSessionID))
+        if let text = String(data: data, encoding: .utf8) {
+            await context.hub.broadcast(text: text)
+        }
+    } catch {
+        RuneWeaverLog.server.error("ServerSchedulerRoutes: failed to encode WSApprovalDecidedFrame: \(error.localizedDescription)")
     }
 
     let resumed: OrchestratorResponse?
@@ -140,8 +143,13 @@ public func resumeNarratedApproval(
     // releases the consumed ones answered here.
     var done = WSStreamDone(from: resumed)
     done.retainedSteerCount = await context.steeringQueue.pendingCount(for: resumed.sessionID)
-    if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
-        await context.hub.broadcast(text: frame)
+    do {
+        let data = try JSONEncoder().encode(done)
+        if let frame = String(data: data, encoding: .utf8) {
+            await context.hub.broadcast(text: frame)
+        }
+    } catch {
+        RuneWeaverLog.server.error("ServerSchedulerRoutes: failed to encode WSStreamDone frame: \(error.localizedDescription)")
     }
     await recordResumedRun(
         resumed: resumed,

@@ -150,17 +150,22 @@ messages = false  # opt in to index Apple Messages (needs Full Disk Access)
 
 The remaining `[index]` keys bound what a run touches:
 
-- `roots` and `exclude` define the file walk. Excluded directories are pruned without being walked, and symlinks are never followed.
+- `roots` and `exclude` define the file walk. Excluded directories are pruned without being walked, and symlinks are never followed. `exclude` ships with `.build`, `*.app`, `*.log`, `*.tmp`, `.DS_Store`, `.bun`, `.cocoapods`, `.npm`, `.npm-packages`, `.nvm`, `.cache`, `.gradle`, `.swiftpm`, `.swiftly`, `.gem`, `.rvm`, `.cpan`, `.local`, `.docker`, `.ollama`, `.terraform.d`, `.ipynb_checkpoints`, `.ipython`, `.jupyter`, `.matplotlib`, `.vscode`, `.vscode-insiders`, `.zsh_sessions`, `gopath`, `go`, and `nltk_data` — ordinary editable globs that seed the Index Policy "Exclude patterns" editor. Matching is case-insensitive, so an uppercase `.LOG` is covered, and bare directory names match at any depth. A stored `exclude` array keeps its existing contents, so an existing install adds the new globs once in the editor rather than having `config.toml` rewritten underneath it.
 - `max_file_mb` (default `20`) caps the size of any one file the indexer reads.
 - `mail_vector_window` (default `2y`) sets how far back mail is vectorized; older mail is still indexed and searchable by keyword.
 - `icloud_evicted` (default `skip`) leaves iCloud files whose bytes are evicted out of the index; set `download` to fetch them first.
 - `describe_images_with_llm` (default `false`) describes images and scanned PDFs with the configured model.
 - `nightly_budget` (default `0`, unlimited) caps the items processed per run.
+- `max_vector_chunks_per_document` (default `128`) caps how many chunks per document carry vectors; extra chunks stay keyword-searchable.
+- `effort` (default `balanced`) sets how much CPU a run uses: `light` resolves to 1 worker, `balanced` to half the cores up to 4 workers, `performance` to all but one core, and `custom` to the explicit `workers` count. The count resolves once at run start; thermal pressure can back a run off below it.
+- `workers` (default `0`, derive from `effort`) carries the explicit worker count used only when `effort` is `custom` (1-64, clamped to the core count at run start).
+- `thermal_backoff` (default `true`) backs a run off when the system reports thermal pressure.
+- `pause_on_battery` (default `false`) pauses a run while on battery power and resumes it on AC power.
 - `db_path` sets where the index database lives.
 
-In addition to your `exclude` patterns, the walk always skips media libraries (`Music`, `Pictures`, `Movies`), `Library`, `.Trash`, the app's own `.runeweaver` state, and common VCS, dependency, build, and cache directories.
+In addition to your `exclude` patterns, the walk always skips media libraries (`Music`, `Pictures`, `Movies`), `Library`, `.Trash`, the app's own `.runeweaver` state, and VCS, dependency, build, and cache trees (`Music`, `Pictures`, `Movies`, `Library`, `.Trash`, `.runeweaver`, `.git`, `node_modules`, `DerivedData`, `__pycache__`, `.venv`). These built-ins cannot be removed by configuration; they appear in the Index Policy scope copy rather than duplicated in the editable `exclude` list. The shipped `exclude` defaults above cover machine-output files (`*.log`, `*.tmp`, `.DS_Store`) and package-manager, build, model, and agent caches holding machine output rather than documents. They churn constantly and carry almost no recall signal — a measured backfill had 2,120 `.log` files accounting for 67% of chunks, 69% of text, and 42% of vectors — so they stay out by default but remain ordinary globs you can read, change, or opt back in.
 
-A typical home index lands between about 500 MB and 2 GB, depending on how much you index. Each chunk stores its text plus, when vectorized, one embedding; text is chunked at roughly 512 tokens with 64 tokens of overlap, so the index scales with the volume of text it holds.
+Chunk text is stored once: the `indexed_chunks` table holds the text and the FTS5 index is contentless, so keyword search adds index overhead without a second copy of the text. A typical home index lands between about 200 MB and 1 GB, depending on how much text you index and how much of it carries vectors. Text is chunked at roughly 512 tokens with 64 tokens of overlap, so the store scales with the volume of text it holds; each vectorized chunk adds one embedding on top of its stored text, bounded per document by `max_vector_chunks_per_document`.
 
 ### What gets indexed
 
@@ -179,9 +184,14 @@ A typical home index lands between about 500 MB and 2 GB, depending on how much 
 | Email attachments | Attachment text | Yes, inside `mail_vector_window` | Fetched read-only, staged in confined temp, extracted, then deleted; oversize attachments are skipped. |
 | Apple Messages | Message text, tapbacks, and attachment text | No (keyword only) | Reads an isolated snapshot of `chat.db`; needs Full Disk Access. |
 | Images, audio, video | None | No | Not indexed; images can be described when `describe_images_with_llm` is on. |
+| Machine output (`*.log`, `*.tmp`, `.DS_Store`) and tool caches | None by default | No | Skipped by the shipped `exclude` defaults; editable, can be opted back in. |
 | Evicted iCloud files | None by default | No | `icloud_evicted = "skip"` (default) leaves them out; `"download"` fetches them first. |
 
-Files are vectorized only when extraction is clean and the document is under 2 MB. Partial or oversized documents stay keyword-only, and mail older than the vector window can gain vectors later through backfill.
+Files are vectorized only when extraction is clean and the document is under 2 MB. Partial or oversized documents stay keyword-only, and mail older than the vector window can gain vectors later through backfill. Long documents vectorize at most `max_vector_chunks_per_document` chunks (default `128`, first chunks in document order); the remaining chunks stay keyword-searchable, so a capped document is still fully findable by keyword.
+
+### Run effort, thermal backoff, and battery
+
+`effort` sets the CPU budget for a run: `light` resolves to 1 worker, `balanced` to half the cores up to 4 workers, `performance` to all but one core, and `custom` to the explicit `workers` count (1-64, clamped to the core count). The count resolves once at run start and stays fixed for that run; an on-demand run uses the same mapping as the nightly run. When macOS reports thermal pressure, a run backs off below its resolved workers (pausing embedding batches first) and resumes when pressure clears, so a long run never fights the cooling system. When `pause_on_battery` is on, a run pauses on battery power and resumes on AC power; a paused run keeps committed batches and continues where it left off. The dashboard Index Policy form edits the preset, the custom worker count, the thermal and battery toggles, and the per-document vector cap, and `GET /index/status` reports the resolved preset plus worker and core counts so the status line renders without a second fetch.
 
 ### Privacy and permissions
 
@@ -196,7 +206,11 @@ The engine never bypasses TCC. Without the grant, a Messages run reports a permi
 
 ### Managing the index
 
-The Memory → Index Status pane in the dashboard starts a run, cancels a run in flight, prunes entries older than a cutoff, and resets the index. Prune deletes older indexed documents and their chunks; reset clears the whole index. Turning `enabled` back off, or deleting `~/.runeweaver/index.db`, leaves recall with episodic and semantic memory only.
+The Memory → Index Status pane in the dashboard starts a run, cancels a run in flight, prunes entries older than a cutoff, resets the index, and reclaims file space. Prune deletes older indexed documents and their chunks; reset clears the whole index; Reclaim keeps every document and compacts the database file so freed pages return to the OS. The pane reports both the logical size (chunk-text bytes) and the on-disk file size of `index.db`: the two differ because freed pages, the FTS index, and vectors all live in the file until a prune, reset, or Reclaim compacts it. Turning `enabled` back off, or deleting `~/.runeweaver/index.db`, leaves recall with episodic and semantic memory only.
+
+Narrowing policy never deletes immediately. Files that fall out of policy — a root removed, a new `exclude` pattern, or the files source toggled off — are retired on the next complete, uncancelled, unbudgeted run. Retirement covers files only: mail and Messages rows are never retired by policy narrowing, and `mail_vector_window` bounds vectorization rather than retention. A cancelled run or a `nightly_budget`-capped run never retires anything, so a partial pass cannot delete documents it never examined.
+
+Unchanged files take a fast path: a file whose size and modification time match the stored row is skipped without re-hashing. The tradeoff is a 1-second granularity window — a same-size edit made within the same 1-second modification-time window is not detected until the next size or mtime change.
 
 ## Releasing
 

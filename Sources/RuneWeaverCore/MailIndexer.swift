@@ -403,8 +403,10 @@ public actor MailIndexCheckpointStore {
         loaded = true
         let expanded = (path as NSString).expandingTildeInPath
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return }
-        if let decoded = try? JSONDecoder().decode(MailIndexCheckpoint.self, from: data) {
-            checkpoint = decoded
+        do {
+            checkpoint = try JSONDecoder().decode(MailIndexCheckpoint.self, from: data)
+        } catch {
+            RuneWeaverLog.stores.warning("MailIndexCheckpointStore: failed to decode checkpoint from '\(expanded)': \(error.localizedDescription)")
         }
     }
 
@@ -1010,7 +1012,9 @@ private extension MailIndexer {
     /// Embedding failure degrades the affected chunks to keyword-only, matching
     /// the shared fallback contract; cancellation still propagates. The probe
     /// runs before the batch so a cancel observed between messages never starts
-    /// another embedding batch, bounding overrun to one message.
+    /// another embedding batch, bounding overrun to one message. Only the first
+    /// `max_vector_chunks_per_document` chunks are sent for embedding; the
+    /// remainder keep an empty embedding so they stay fully keyword-searchable.
     /// - Parameters:
     ///   - chunks: Chunks to embed.
     ///   - eligible: Whether the message falls inside the vector window.
@@ -1022,11 +1026,19 @@ private extension MailIndexer {
         }
         try Task.checkCancellation()
         do {
-            let vectors = try await embedder.embed(chunks.map(\.text))
-            guard vectors.count == chunks.count else {
+            let texts = FilesVectorPolicy.cappedEmbeddingTexts(
+                chunks.map(\.text),
+                cap: indexConfig.maxVectorChunksPerDocument
+            )
+            let vectors = try await embedder.embed(texts)
+            guard vectors.count == texts.count else {
                 return Array(repeating: [], count: chunks.count)
             }
-            return vectors.map { $0.isEmpty ? [] : $0 }
+            var expanded: [[Float]] = Array(repeating: [], count: chunks.count)
+            for position in vectors.indices {
+                expanded[position] = vectors[position].isEmpty ? [] : vectors[position]
+            }
+            return expanded
         } catch let cancel as CancellationError {
             throw cancel
         } catch {

@@ -18,9 +18,15 @@ public extension WSHub {
         // that could drift from the pruned store contents. Routes through the
         // shared broadcast path so ordering and best-effort delivery stay
         // single-sourced with every other hub event.
-        guard let data = try? JSONEncoder().encode(WSTrustGrantsChanged()),
-              let text = String(data: data, encoding: .utf8)
-        else { return }
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(WSTrustGrantsChanged())
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode trust grants changed frame: \(error.localizedDescription)")
+            return
+        }
         await broadcast(text: text)
     }
 }

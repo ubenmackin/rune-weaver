@@ -896,29 +896,44 @@ public extension WSInboundKind {
     /// - Returns: The inbound kind, or `unknown` when no shape decodes.
     static func classify(_ text: String) -> WSInboundKind {
         guard let data = text.data(using: .utf8) else { return .unknown }
-        let peek = try? JSONDecoder().decode(WSCancelFramePeek.self, from: data)
+        let peek: WSCancelFramePeek? = {
+            do {
+                return try JSONDecoder().decode(WSCancelFramePeek.self, from: data)
+            } catch {
+                return nil
+            }
+        }()
         let hasText = !(peek?.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         // A decision is identified by its required `id` plus `approved` pair and
         // is classified before chat content sniffing: a payload can carry both
         // a stray text field and an approval decision, and preferring chat
         // would drop the decision so the request stays pending forever.
-        if let decision = try? JSONDecoder().decode(WSDecisionMessage.self, from: data) {
+        do {
+            let decision = try JSONDecoder().decode(WSDecisionMessage.self, from: data)
             return .decision(decision)
+        } catch {
+            RuneWeaverLog.server.debug("WSInboundKind.classify: not a decision message: \(error.localizedDescription)")
         }
         // A per-tool cancel carries an explicit discriminator plus a call
         // identifier, so it is matched before chat sniffing: its optional
         // `reason` never masquerades as chat text, and a malformed frame falls
         // through to unknown instead of aborting a whole turn.
         if peek?.type == "tool_cancel" {
-            guard let toolCancel = try? JSONDecoder().decode(WSToolCancelMessage.self, from: data) else {
+            do {
+                let toolCancel = try JSONDecoder().decode(WSToolCancelMessage.self, from: data)
+                return .toolCancel(toolCancel)
+            } catch {
+                RuneWeaverLog.server.warning("WSInboundKind.classify: failed to decode WSToolCancelMessage: \(error.localizedDescription)")
                 return .unknown
             }
-            return .toolCancel(toolCancel)
         }
-        if let chat = try? JSONDecoder().decode(WSChatMessage.self, from: data),
-           !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return .chat(chat)
+        do {
+            let chat = try JSONDecoder().decode(WSChatMessage.self, from: data)
+            if !chat.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return .chat(chat)
+            }
+        } catch {
+            RuneWeaverLog.server.debug("WSInboundKind.classify: not a chat message: \(error.localizedDescription)")
         }
         // A cancel frame is only honored without text: chat sniffing already ran
         // above, so text surviving to here is either a stray field on a cancel

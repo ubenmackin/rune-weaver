@@ -98,6 +98,13 @@ public struct IndexLastRunStatus: Content, Equatable {
     /// `Skipped:` detail line. Nil for executed runs and for rows whose
     /// wording predates skip-reason tracking so older engines still decode.
     public let skippedReason: String?
+    /// Documents retired by the run. Optional for back-compat; absent degrades
+    /// to no retired count instead of failing.
+    public let retiredCount: Int?
+    /// Documents where the vector cap left tail chunks keyword-only. Optional
+    /// for back-compat; absent degrades to no truncated count instead of
+    /// failing.
+    public let truncatedCount: Int?
 
     /// Creates a last-run row.
     /// - Parameters:
@@ -108,7 +115,19 @@ public struct IndexLastRunStatus: Content, Equatable {
     ///   - finishedAt: Instant the run finished.
     ///   - trigger: What caused the run, when known.
     ///   - skippedReason: Why the run did not execute, when known.
-    public init(status: String, indexed: Int? = nil, scanned: Int? = nil, errors: Int? = nil, finishedAt: Date? = nil, trigger: String? = nil, skippedReason: String? = nil) {
+    ///   - retiredCount: Documents retired, when known.
+    ///   - truncatedCount: Documents truncated by the vector cap, when known.
+    public init(
+        status: String,
+        indexed: Int? = nil,
+        scanned: Int? = nil,
+        errors: Int? = nil,
+        finishedAt: Date? = nil,
+        trigger: String? = nil,
+        skippedReason: String? = nil,
+        retiredCount: Int? = nil,
+        truncatedCount: Int? = nil
+    ) {
         self.status = status
         self.indexed = indexed
         self.scanned = scanned
@@ -116,6 +135,8 @@ public struct IndexLastRunStatus: Content, Equatable {
         self.finishedAt = finishedAt
         self.trigger = trigger
         self.skippedReason = skippedReason
+        self.retiredCount = retiredCount
+        self.truncatedCount = truncatedCount
     }
 
     /// Coding keys for the version-tolerant last-run contract.
@@ -127,10 +148,16 @@ public struct IndexLastRunStatus: Content, Equatable {
         case finishedAt
         case trigger
         case skippedReason
+        case retiredCount
+        case retired
+        case truncatedCount
+        case truncated
     }
 
     /// Decodes a last-run row, defaulting absent counts and the skip reason to
-    /// nil so payloads built against an older engine still decode.
+    /// nil so payloads built against an older engine still decode. Accepts the
+    /// `retired`/`truncated` aliases some engines emit; the canonical
+    /// `retiredCount`/`truncatedCount` keys win when both are present.
     /// - Parameter decoder: Decoder carrying the row.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -141,9 +168,17 @@ public struct IndexLastRunStatus: Content, Equatable {
         finishedAt = try container.decodeIfPresent(Date.self, forKey: .finishedAt)
         trigger = try container.decodeIfPresent(String.self, forKey: .trigger)
         skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+        let canonicalRetired = try container.decodeIfPresent(Int.self, forKey: .retiredCount)
+        let aliasRetired = try container.decodeIfPresent(Int.self, forKey: .retired)
+        retiredCount = canonicalRetired ?? aliasRetired
+        let canonicalTruncated = try container.decodeIfPresent(Int.self, forKey: .truncatedCount)
+        let aliasTruncated = try container.decodeIfPresent(Int.self, forKey: .truncated)
+        truncatedCount = canonicalTruncated ?? aliasTruncated
     }
 
     /// Encodes a last-run row, omitting absent counts and the skip reason.
+    /// retired and truncated counts ride the canonical keys so current
+    /// dashboards render from one fetch; the aliases are not re-emitted.
     /// - Parameter encoder: Encoder receiving the row.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -154,6 +189,8 @@ public struct IndexLastRunStatus: Content, Equatable {
         try container.encodeIfPresent(finishedAt, forKey: .finishedAt)
         try container.encodeIfPresent(trigger, forKey: .trigger)
         try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
+        try container.encodeIfPresent(retiredCount, forKey: .retiredCount)
+        try container.encodeIfPresent(truncatedCount, forKey: .truncatedCount)
     }
 }
 
@@ -234,6 +271,28 @@ public struct IndexLiveStatus: Content, Equatable {
     }
 }
 
+/// Effort block on `GET /index/status`, resolving the stored preset to the
+/// worker count the next run will use on this machine.
+public struct IndexEffortStatus: Content, Equatable {
+    /// Stored effort preset (`"light"`, `"balanced"`, `"performance"`, `"custom"`).
+    public let preset: String
+    /// Worker count resolved from the preset on this machine.
+    public let resolvedWorkers: Int
+    /// Logical core count observed when the snapshot was built.
+    public let activeProcessors: Int
+
+    /// Creates an effort row.
+    /// - Parameters:
+    ///   - preset: Stored effort preset.
+    ///   - resolvedWorkers: Worker count the next run will use.
+    ///   - activeProcessors: Logical core count observed.
+    public init(preset: String, resolvedWorkers: Int, activeProcessors: Int) {
+        self.preset = preset
+        self.resolvedWorkers = resolvedWorkers
+        self.activeProcessors = activeProcessors
+    }
+}
+
 /// Status snapshot for `GET /index/status`.
 public struct IndexStatusResponse: Content, Equatable {
     /// Whether the background indexer runs at all.
@@ -250,6 +309,20 @@ public struct IndexStatusResponse: Content, Equatable {
     public let keywordChunks: Int
     /// Total chunk text bytes held by the index.
     public let bytes: Int64
+    /// Main SQLite file size in bytes, read from the filesystem.
+    public let dbFileBytes: Int64
+    /// Write-ahead log size in bytes, zero when checkpointed.
+    public let walBytes: Int64
+    /// Total chunk text bytes held by the index.
+    public let textBytes: Int64
+    /// Total embedding BLOB bytes held by vector chunks.
+    public let vectorBytes: Int64
+    /// Full-text index bytes, zero when the size probe is unavailable.
+    public let ftsBytes: Int64
+    /// Unused freelist bytes reclaimable by `POST /index/reclaim`.
+    public let freeBytes: Int64
+    /// Logical content bytes (`textBytes` plus `vectorBytes`).
+    public let contentBytes: Int64
     /// Watermark of the last successful snapshot, nil when never indexed.
     public let indexAsOf: Date?
     /// Per-source enablement rows in canonical run order.
@@ -265,6 +338,10 @@ public struct IndexStatusResponse: Content, Equatable {
     /// Live in-flight snapshot, or nil when idle. Additive and optional so
     /// payloads built against an older engine still decode.
     public let live: IndexLiveStatus?
+    /// Resolved effort block, always present so the dashboard renders workers
+    /// without a second fetch. Additive so older payloads decode to the stock
+    /// preset.
+    public let effort: IndexEffortStatus?
 
     /// Creates an index status snapshot.
     /// - Parameters:
@@ -275,6 +352,13 @@ public struct IndexStatusResponse: Content, Equatable {
     ///   - vectorChunks: Chunks carrying an embedding.
     ///   - keywordChunks: Keyword-only chunks.
     ///   - bytes: Total chunk text bytes.
+    ///   - dbFileBytes: Main file size.
+    ///   - walBytes: Write-ahead log size.
+    ///   - textBytes: Chunk text bytes.
+    ///   - vectorBytes: Embedding bytes.
+    ///   - ftsBytes: Full-text index bytes.
+    ///   - freeBytes: Freelist bytes.
+    ///   - contentBytes: Logical content bytes.
     ///   - indexAsOf: Last successful watermark, or nil.
     ///   - sources: Per-source enablement rows.
     ///   - lastErrors: Recent run failures, newest first.
@@ -282,6 +366,7 @@ public struct IndexStatusResponse: Content, Equatable {
     ///   - byExtractStatus: Extraction-outcome breakdown.
     ///   - lastRun: Latest run outcome, or nil.
     ///   - live: Live in-flight snapshot, or nil when idle.
+    ///   - effort: Resolved effort block, or nil for payloads predating it.
     public init(
         enabled: Bool = false,
         running: Bool = false,
@@ -290,13 +375,21 @@ public struct IndexStatusResponse: Content, Equatable {
         vectorChunks: Int = 0,
         keywordChunks: Int = 0,
         bytes: Int64 = 0,
+        dbFileBytes: Int64 = 0,
+        walBytes: Int64 = 0,
+        textBytes: Int64 = 0,
+        vectorBytes: Int64 = 0,
+        ftsBytes: Int64 = 0,
+        freeBytes: Int64 = 0,
+        contentBytes: Int64 = 0,
         indexAsOf: Date? = nil,
         sources: [IndexSourceStatus] = [],
         lastErrors: [String] = [],
         bySource: [IndexSourceCounts] = [],
         byExtractStatus: [IndexExtractStatusCounts] = [],
         lastRun: IndexLastRunStatus? = nil,
-        live: IndexLiveStatus? = nil
+        live: IndexLiveStatus? = nil,
+        effort: IndexEffortStatus? = nil
     ) {
         self.enabled = enabled
         self.running = running
@@ -305,6 +398,13 @@ public struct IndexStatusResponse: Content, Equatable {
         self.vectorChunks = vectorChunks
         self.keywordChunks = keywordChunks
         self.bytes = bytes
+        self.dbFileBytes = dbFileBytes
+        self.walBytes = walBytes
+        self.textBytes = textBytes
+        self.vectorBytes = vectorBytes
+        self.ftsBytes = ftsBytes
+        self.freeBytes = freeBytes
+        self.contentBytes = contentBytes
         self.indexAsOf = indexAsOf
         self.sources = sources
         self.lastErrors = lastErrors
@@ -312,6 +412,90 @@ public struct IndexStatusResponse: Content, Equatable {
         self.byExtractStatus = byExtractStatus
         self.lastRun = lastRun
         self.live = live
+        self.effort = effort
+    }
+
+    /// Coding keys for the version-tolerant status contract.
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case running
+        case documents
+        case chunks
+        case vectorChunks
+        case keywordChunks
+        case bytes
+        case dbFileBytes
+        case walBytes
+        case textBytes
+        case vectorBytes
+        case ftsBytes
+        case freeBytes
+        case contentBytes
+        case indexAsOf
+        case sources
+        case lastErrors
+        case bySource
+        case byExtractStatus
+        case lastRun
+        case live
+        case effort
+    }
+
+    /// Decodes a status snapshot, defaulting additive size and effort fields
+    /// so payloads built against an older engine still decode.
+    /// - Parameter decoder: Decoder carrying the snapshot.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+        running = try container.decodeIfPresent(Bool.self, forKey: .running) ?? false
+        documents = try container.decodeIfPresent(Int.self, forKey: .documents) ?? 0
+        chunks = try container.decodeIfPresent(Int.self, forKey: .chunks) ?? 0
+        vectorChunks = try container.decodeIfPresent(Int.self, forKey: .vectorChunks) ?? 0
+        keywordChunks = try container.decodeIfPresent(Int.self, forKey: .keywordChunks) ?? 0
+        bytes = try container.decodeIfPresent(Int64.self, forKey: .bytes) ?? 0
+        dbFileBytes = try container.decodeIfPresent(Int64.self, forKey: .dbFileBytes) ?? 0
+        walBytes = try container.decodeIfPresent(Int64.self, forKey: .walBytes) ?? 0
+        textBytes = try container.decodeIfPresent(Int64.self, forKey: .textBytes) ?? 0
+        vectorBytes = try container.decodeIfPresent(Int64.self, forKey: .vectorBytes) ?? 0
+        ftsBytes = try container.decodeIfPresent(Int64.self, forKey: .ftsBytes) ?? 0
+        freeBytes = try container.decodeIfPresent(Int64.self, forKey: .freeBytes) ?? 0
+        contentBytes = try container.decodeIfPresent(Int64.self, forKey: .contentBytes) ?? 0
+        indexAsOf = try container.decodeIfPresent(Date.self, forKey: .indexAsOf)
+        sources = try container.decodeIfPresent([IndexSourceStatus].self, forKey: .sources) ?? []
+        lastErrors = try container.decodeIfPresent([String].self, forKey: .lastErrors) ?? []
+        bySource = try container.decodeIfPresent([IndexSourceCounts].self, forKey: .bySource) ?? []
+        byExtractStatus = try container.decodeIfPresent([IndexExtractStatusCounts].self, forKey: .byExtractStatus) ?? []
+        lastRun = try container.decodeIfPresent(IndexLastRunStatus.self, forKey: .lastRun)
+        live = try container.decodeIfPresent(IndexLiveStatus.self, forKey: .live)
+        effort = try container.decodeIfPresent(IndexEffortStatus.self, forKey: .effort)
+    }
+
+    /// Encodes a status snapshot including the additive size and nested effort.
+    /// - Parameter encoder: Encoder receiving the snapshot.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(running, forKey: .running)
+        try container.encode(documents, forKey: .documents)
+        try container.encode(chunks, forKey: .chunks)
+        try container.encode(vectorChunks, forKey: .vectorChunks)
+        try container.encode(keywordChunks, forKey: .keywordChunks)
+        try container.encode(bytes, forKey: .bytes)
+        try container.encode(dbFileBytes, forKey: .dbFileBytes)
+        try container.encode(walBytes, forKey: .walBytes)
+        try container.encode(textBytes, forKey: .textBytes)
+        try container.encode(vectorBytes, forKey: .vectorBytes)
+        try container.encode(ftsBytes, forKey: .ftsBytes)
+        try container.encode(freeBytes, forKey: .freeBytes)
+        try container.encode(contentBytes, forKey: .contentBytes)
+        try container.encodeIfPresent(indexAsOf, forKey: .indexAsOf)
+        try container.encode(sources, forKey: .sources)
+        try container.encode(lastErrors, forKey: .lastErrors)
+        try container.encode(bySource, forKey: .bySource)
+        try container.encode(byExtractStatus, forKey: .byExtractStatus)
+        try container.encodeIfPresent(lastRun, forKey: .lastRun)
+        try container.encodeIfPresent(live, forKey: .live)
+        try container.encodeIfPresent(effort, forKey: .effort)
     }
 }
 
@@ -323,15 +507,20 @@ public struct IndexStatusResponse: Content, Equatable {
 /// store or coordinator report an honest empty/stopped snapshot instead of
 /// failing. The `live` snapshot is additive: existing callers omit it and
 /// report an idle strip, while the route passes the coordinator's live totals
-/// through when a run is in flight.
+/// through when a run is in flight. Sizes ride the optional `storage`
+/// breakdown so file probes stay with the route while the shape stays pure;
+/// a nil breakdown reports zeros matching the zeroed counts. Effort resolves
+/// from the stored preset on this machine so the dashboard renders workers
+/// without a second fetch.
 ///
 /// - Parameters:
-///   - config: Active index policy driving enablement.
+///   - config: Active index policy driving enablement and effort.
 ///   - stats: Aggregate store stats, or nil when no store is wired.
 ///   - running: Whether a run is in flight.
 ///   - lastErrors: Recent run failures, newest first.
 ///   - lastRun: Latest run outcome, or nil when no run has been recorded.
 ///   - live: Live in-flight snapshot, or nil when idle.
+///   - storage: On-disk and logical size breakdown, or nil for zeros.
 /// - Returns: The status snapshot.
 func makeIndexStatusResponse(
     config: IndexConfig,
@@ -339,7 +528,8 @@ func makeIndexStatusResponse(
     running: Bool,
     lastErrors: [String],
     lastRun: IndexLastRunStatus? = nil,
-    live: IndexLiveStatus? = nil
+    live: IndexLiveStatus? = nil,
+    storage: IndexStorageBreakdown? = nil
 ) -> IndexStatusResponse {
     let sources = [
         IndexSourceStatus(kind: IndexSourceKind.files.rawValue, enabled: config.enabled && config.files),
@@ -352,6 +542,13 @@ func makeIndexStatusResponse(
     let byExtractStatus = (stats?.byExtractStatus ?? []).map { row in
         IndexExtractStatusCounts(status: row.status.rawValue, documents: row.documents)
     }
+    let breakdown = storage ?? IndexStorageBreakdown()
+    let activeProcessors = max(1, ProcessInfo.processInfo.activeProcessorCount)
+    let effort = IndexEffortStatus(
+        preset: config.effort,
+        resolvedWorkers: config.resolvedWorkerCount(cores: activeProcessors),
+        activeProcessors: activeProcessors
+    )
     return IndexStatusResponse(
         enabled: config.enabled,
         running: running,
@@ -360,13 +557,21 @@ func makeIndexStatusResponse(
         vectorChunks: stats?.vectorChunks ?? 0,
         keywordChunks: stats?.keywordChunks ?? 0,
         bytes: stats?.bytes ?? 0,
+        dbFileBytes: breakdown.dbFileBytes,
+        walBytes: breakdown.walBytes,
+        textBytes: breakdown.textBytes,
+        vectorBytes: breakdown.vectorBytes,
+        ftsBytes: breakdown.ftsBytes,
+        freeBytes: breakdown.freeBytes,
+        contentBytes: breakdown.contentBytes,
         indexAsOf: stats?.indexAsOf,
         sources: sources,
         lastErrors: lastErrors,
         bySource: bySource,
         byExtractStatus: byExtractStatus,
         lastRun: lastRun,
-        live: live
+        live: live,
+        effort: effort
     )
 }
 
@@ -390,6 +595,10 @@ public struct IndexRunResponse: Content, Equatable {
     public let skipped: Int
     /// Items that could not be processed.
     public let errors: Int
+    /// Documents retired (deleted as unseen) across every source.
+    public let retiredCount: Int
+    /// Documents where the vector cap left tail chunks keyword-only.
+    public let truncatedCount: Int
     /// Non-fatal problems, without any content or secret.
     public let warnings: [String]
     /// Instant the run began.
@@ -400,6 +609,28 @@ public struct IndexRunResponse: Content, Equatable {
     public let indexAsOf: Date?
     /// Why the run did not execute, when it was skipped.
     public let skippedReason: String?
+
+    /// Coding keys for the version-tolerant run contract.
+    private enum CodingKeys: String, CodingKey {
+        case sessionID
+        case trigger
+        case status
+        case documentsIndexed
+        case vectorChunks
+        case keywordChunks
+        case scanned
+        case skipped
+        case errors
+        case retiredCount
+        case retired
+        case truncatedCount
+        case truncated
+        case warnings
+        case startedAt
+        case finishedAt
+        case indexAsOf
+        case skippedReason
+    }
 
     /// Maps a coordinator summary onto the wire shape.
     /// - Parameter summary: Completed run summary.
@@ -413,11 +644,65 @@ public struct IndexRunResponse: Content, Equatable {
         self.scanned = summary.scanned
         self.skipped = summary.skipped
         self.errors = summary.errors
+        self.retiredCount = summary.retired
+        self.truncatedCount = summary.truncated
         self.warnings = summary.warnings
         self.startedAt = summary.startedAt
         self.finishedAt = summary.finishedAt
         self.indexAsOf = summary.indexAsOf
         self.skippedReason = summary.skippedReason
+    }
+
+    /// Decodes a run response, defaulting retired and truncated counts to zero
+    /// so payloads built against an older engine still decode. Accepts the
+    /// `retired`/`truncated` aliases; the canonical keys win when both are
+    /// present.
+    /// - Parameter decoder: Decoder carrying the response.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sessionID = try container.decode(UUID.self, forKey: .sessionID)
+        trigger = try container.decode(String.self, forKey: .trigger)
+        status = try container.decode(String.self, forKey: .status)
+        documentsIndexed = try container.decode(Int.self, forKey: .documentsIndexed)
+        vectorChunks = try container.decode(Int.self, forKey: .vectorChunks)
+        keywordChunks = try container.decode(Int.self, forKey: .keywordChunks)
+        scanned = try container.decode(Int.self, forKey: .scanned)
+        skipped = try container.decode(Int.self, forKey: .skipped)
+        errors = try container.decode(Int.self, forKey: .errors)
+        let canonicalRetired = try container.decodeIfPresent(Int.self, forKey: .retiredCount)
+        let aliasRetired = try container.decodeIfPresent(Int.self, forKey: .retired)
+        retiredCount = canonicalRetired ?? aliasRetired ?? 0
+        let canonicalTruncated = try container.decodeIfPresent(Int.self, forKey: .truncatedCount)
+        let aliasTruncated = try container.decodeIfPresent(Int.self, forKey: .truncated)
+        truncatedCount = canonicalTruncated ?? aliasTruncated ?? 0
+        warnings = try container.decodeIfPresent([String].self, forKey: .warnings) ?? []
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        finishedAt = try container.decode(Date.self, forKey: .finishedAt)
+        indexAsOf = try container.decodeIfPresent(Date.self, forKey: .indexAsOf)
+        skippedReason = try container.decodeIfPresent(String.self, forKey: .skippedReason)
+    }
+
+    /// Encodes a run response on the canonical keys so current dashboards
+    /// render from one fetch; the aliases are not re-emitted.
+    /// - Parameter encoder: Encoder receiving the response.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sessionID, forKey: .sessionID)
+        try container.encode(trigger, forKey: .trigger)
+        try container.encode(status, forKey: .status)
+        try container.encode(documentsIndexed, forKey: .documentsIndexed)
+        try container.encode(vectorChunks, forKey: .vectorChunks)
+        try container.encode(keywordChunks, forKey: .keywordChunks)
+        try container.encode(scanned, forKey: .scanned)
+        try container.encode(skipped, forKey: .skipped)
+        try container.encode(errors, forKey: .errors)
+        try container.encode(retiredCount, forKey: .retiredCount)
+        try container.encode(truncatedCount, forKey: .truncatedCount)
+        try container.encode(warnings, forKey: .warnings)
+        try container.encode(startedAt, forKey: .startedAt)
+        try container.encode(finishedAt, forKey: .finishedAt)
+        try container.encodeIfPresent(indexAsOf, forKey: .indexAsOf)
+        try container.encodeIfPresent(skippedReason, forKey: .skippedReason)
     }
 }
 
@@ -475,6 +760,38 @@ public struct IndexResetResponse: Content, Equatable {
     }
 }
 
+/// Outcome of `POST /index/reclaim`.
+///
+/// Carries the on-disk total before and after `VACUUM` plus the reclaimed
+/// delta so the dashboard renders the saved bytes without recomputing them.
+public struct IndexReclaimResponse: Content, Equatable {
+    /// On-disk total before `VACUUM`, in bytes.
+    public let beforeBytes: Int64
+    /// On-disk total after `VACUUM`, in bytes.
+    public let afterBytes: Int64
+    /// Bytes reclaimed (`beforeBytes` minus `afterBytes`, floored at zero).
+    public let reclaimedBytes: Int64
+
+    /// Creates a reclaim response.
+    /// - Parameters:
+    ///   - beforeBytes: On-disk total before.
+    ///   - afterBytes: On-disk total after.
+    ///   - reclaimedBytes: Bytes reclaimed.
+    public init(beforeBytes: Int64, afterBytes: Int64, reclaimedBytes: Int64) {
+        self.beforeBytes = beforeBytes
+        self.afterBytes = afterBytes
+        self.reclaimedBytes = reclaimedBytes
+    }
+
+    /// Maps a store reclaim outcome onto the wire shape.
+    /// - Parameter result: Store reclaim outcome.
+    public init(_ result: IndexReclaimResult) {
+        self.beforeBytes = result.beforeBytes
+        self.afterBytes = result.afterBytes
+        self.reclaimedBytes = result.reclaimedBytes
+    }
+}
+
 /// Partial index patch for `PUT /settings`.
 ///
 /// Every field is optional so a request carrying only one key leaves the rest
@@ -507,6 +824,23 @@ public struct IndexSettingsUpdate: Content, Equatable {
     public var nightlyBudget: Int?
     /// SQLite path for the index database.
     public var dbPath: String?
+    /// Indexing effort preset (`light`, `balanced`, `performance`, `custom`).
+    public var effort: String?
+    /// Explicit worker count for the `custom` preset; `0` means derive.
+    public var workers: Int?
+    /// Whether indexing backs off under thermal pressure.
+    public var thermalBackoff: Bool?
+    /// Whether indexing pauses while on battery power.
+    public var pauseOnBattery: Bool?
+    /// Maximum vector chunks stored per document, bounding per-document
+    /// embedding work; chunks beyond the cap stay keyword-only.
+    public var maxVectorChunksPerDocument: Int?
+    /// Directory and file names the walker always skips, even when absent from
+    /// `exclude`. Read-only: populated from the walker's prune list when a patch
+    /// is built from a snapshot and ignored when a patch is applied, so the
+    /// dashboard copy cannot drift. The `[files]` deny patterns stay out of this
+    /// list and are described generically in the UI.
+    public var alwaysSkipped: [String]?
 
     /// Creates a partial index patch.
     /// - Parameters:
@@ -522,6 +856,12 @@ public struct IndexSettingsUpdate: Content, Equatable {
     ///   - describeImagesWithLLM: Image description toggle.
     ///   - nightlyBudget: Nightly item budget.
     ///   - dbPath: Index database path.
+    ///   - effort: Effort preset.
+    ///   - workers: Explicit worker count for `custom`.
+    ///   - thermalBackoff: Thermal backoff toggle.
+    ///   - pauseOnBattery: Pause-on-battery toggle.
+    ///   - maxVectorChunksPerDocument: Per-document vector chunk cap.
+    ///   - alwaysSkipped: Read-only walker prune names, ignored on apply.
     public init(
         enabled: Bool? = nil,
         files: Bool? = nil,
@@ -534,7 +874,13 @@ public struct IndexSettingsUpdate: Content, Equatable {
         iCloudEvicted: String? = nil,
         describeImagesWithLLM: Bool? = nil,
         nightlyBudget: Int? = nil,
-        dbPath: String? = nil
+        dbPath: String? = nil,
+        effort: String? = nil,
+        workers: Int? = nil,
+        thermalBackoff: Bool? = nil,
+        pauseOnBattery: Bool? = nil,
+        maxVectorChunksPerDocument: Int? = nil,
+        alwaysSkipped: [String]? = nil
     ) {
         self.enabled = enabled
         self.files = files
@@ -548,6 +894,12 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.describeImagesWithLLM = describeImagesWithLLM
         self.nightlyBudget = nightlyBudget
         self.dbPath = dbPath
+        self.effort = effort
+        self.workers = workers
+        self.thermalBackoff = thermalBackoff
+        self.pauseOnBattery = pauseOnBattery
+        self.maxVectorChunksPerDocument = maxVectorChunksPerDocument
+        self.alwaysSkipped = alwaysSkipped
     }
 
     /// Populates a patch from a full snapshot so programmatic callers holding a
@@ -566,6 +918,12 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.describeImagesWithLLM = config.describeImagesWithLLM
         self.nightlyBudget = config.nightlyBudget
         self.dbPath = config.dbPath
+        self.effort = config.effort
+        self.workers = config.workers
+        self.thermalBackoff = config.thermalBackoff
+        self.pauseOnBattery = config.pauseOnBattery
+        self.maxVectorChunksPerDocument = config.maxVectorChunksPerDocument
+        self.alwaysSkipped = indexAlwaysSkippedPatterns()
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -581,6 +939,60 @@ public struct IndexSettingsUpdate: Content, Equatable {
         case describeImagesWithLLM = "describe_images_with_llm"
         case nightlyBudget = "nightly_budget"
         case dbPath = "db_path"
+        case effort
+        case workers
+        case thermalBackoff = "thermal_backoff"
+        case pauseOnBattery = "pause_on_battery"
+        case maxVectorChunksPerDocument = "max_vector_chunks_per_document"
+        case alwaysSkipped = "always_skipped"
+    }
+
+    /// Decodes a partial patch.
+    /// - Parameter decoder: Decoder carrying the patch.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        files = try container.decodeIfPresent(Bool.self, forKey: .files)
+        mail = try container.decodeIfPresent(Bool.self, forKey: .mail)
+        messages = try container.decodeIfPresent(Bool.self, forKey: .messages)
+        roots = try container.decodeIfPresent([String].self, forKey: .roots)
+        exclude = try container.decodeIfPresent([String].self, forKey: .exclude)
+        maxFileMB = try container.decodeIfPresent(Int.self, forKey: .maxFileMB)
+        mailVectorWindow = try container.decodeIfPresent(String.self, forKey: .mailVectorWindow)
+        iCloudEvicted = try container.decodeIfPresent(String.self, forKey: .iCloudEvicted)
+        describeImagesWithLLM = try container.decodeIfPresent(Bool.self, forKey: .describeImagesWithLLM)
+        nightlyBudget = try container.decodeIfPresent(Int.self, forKey: .nightlyBudget)
+        dbPath = try container.decodeIfPresent(String.self, forKey: .dbPath)
+        effort = try container.decodeIfPresent(String.self, forKey: .effort)
+        workers = try container.decodeIfPresent(Int.self, forKey: .workers)
+        thermalBackoff = try container.decodeIfPresent(Bool.self, forKey: .thermalBackoff)
+        pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery)
+        maxVectorChunksPerDocument = try container.decodeIfPresent(Int.self, forKey: .maxVectorChunksPerDocument)
+        alwaysSkipped = try container.decodeIfPresent([String].self, forKey: .alwaysSkipped)
+    }
+
+    /// Encodes a partial patch using the canonical `workers` key.
+    /// - Parameter encoder: Encoder receiving the patch.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(enabled, forKey: .enabled)
+        try container.encodeIfPresent(files, forKey: .files)
+        try container.encodeIfPresent(mail, forKey: .mail)
+        try container.encodeIfPresent(messages, forKey: .messages)
+        try container.encodeIfPresent(roots, forKey: .roots)
+        try container.encodeIfPresent(exclude, forKey: .exclude)
+        try container.encodeIfPresent(maxFileMB, forKey: .maxFileMB)
+        try container.encodeIfPresent(mailVectorWindow, forKey: .mailVectorWindow)
+        try container.encodeIfPresent(iCloudEvicted, forKey: .iCloudEvicted)
+        try container.encodeIfPresent(describeImagesWithLLM, forKey: .describeImagesWithLLM)
+        try container.encodeIfPresent(nightlyBudget, forKey: .nightlyBudget)
+        try container.encodeIfPresent(dbPath, forKey: .dbPath)
+        try container.encodeIfPresent(effort, forKey: .effort)
+        try container.encodeIfPresent(workers, forKey: .workers)
+        try container.encodeIfPresent(thermalBackoff, forKey: .thermalBackoff)
+        try container.encodeIfPresent(pauseOnBattery, forKey: .pauseOnBattery)
+        try container.encodeIfPresent(maxVectorChunksPerDocument, forKey: .maxVectorChunksPerDocument)
+        try container.encodeIfPresent(alwaysSkipped, forKey: .alwaysSkipped)
     }
 }
 
@@ -608,6 +1020,8 @@ public extension ServerPaths {
     static let indexPrune = "prune"
     /// Index reset subpath under `/index`.
     static let indexReset = "reset"
+    /// Index reclaim subpath under `/index`.
+    static let indexReclaim = "reclaim"
 }
 
 // MARK: - Index Settings Merge
@@ -659,5 +1073,22 @@ extension UpdateSettingsRequest {
         if let dbPath = update.dbPath {
             index.dbPath = dbPath
         }
+        if let effort = update.effort {
+            index.effort = effort
+        }
+        if let workers = update.workers {
+            index.workers = workers
+        }
+        if let thermalBackoff = update.thermalBackoff {
+            index.thermalBackoff = thermalBackoff
+        }
+        if let pauseOnBattery = update.pauseOnBattery {
+            index.pauseOnBattery = pauseOnBattery
+        }
+        if let maxVectorChunksPerDocument = update.maxVectorChunksPerDocument {
+            index.maxVectorChunksPerDocument = maxVectorChunksPerDocument
+        }
+        // Read-only: `always_skipped` is never merged so a client echo cannot
+        // drift the stored policy; the walker list stays single-sourced.
     }
 }

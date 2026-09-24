@@ -1,19 +1,27 @@
 // Rune Weaver Dashboard — Local index status dashboard and policy form.
 //
-// The status dashboard (Memory → Index Status) owns Run/Cancel/Prune/Reset,
-// the stat cards, the last-run strip, and frontend-only SVG/CSS charts computed
-// from the GET /index/status fields; the policy form (Settings → Indexing)
-// owns the enable/sources/excludes/caps fields with its own Save, so neither
-// surface duplicates the other's control set. Status freshness comes from the
-// shared WebSocket run broadcasts — there is no manual Refresh button — and
-// live progress renders one grep-style block from the polled status live
-// snapshot, so the panel never invents a completion fraction the engine cannot
-// supply.
+// The status dashboard (Memory → Index Status) owns Run/Cancel/Prune/Reclaim/
+// Reset, the honest on-disk size with its storage breakdown, the last-run
+// strip with retired and truncated counts, and frontend-only SVG/CSS charts computed from
+// the GET /index/status fields; the policy form (Settings → Indexing) owns
+// the enable/sources/excludes/caps/effort fields with its own Save, so
+// neither surface duplicates the other's control set. Status freshness comes
+// from the shared WebSocket run broadcasts — there is no manual Refresh
+// button — and live progress renders one grep-style block from the polled
+// status live snapshot, so the panel never invents a completion fraction the
+// engine cannot supply.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   DEFAULT_INDEX_CONFIG,
+  DEFAULT_INDEX_EFFORT,
+  DEFAULT_INDEX_WORKERS,
+  DEFAULT_INDEX_PAUSE_ON_BATTERY,
+  DEFAULT_INDEX_THERMAL_BACKOFF,
+  INDEX_MAX_CUSTOM_WORKERS,
+  INDEX_EFFORT_PRESETS,
+  INDEX_EFFORT_PRESET_LABELS,
   INDEX_ICLOUD_EVICTIONS,
   INDEX_MAIL_VECTOR_WINDOWS,
   cancelIndex,
@@ -26,14 +34,18 @@ import {
   parseIndexRunTrigger,
   parseRunTimestamp,
   pruneIndex,
+  reclaimIndex,
   relativeProgressCurrent,
   resetIndex,
+  resolveIndexRetiredCount,
+  resolveIndexTruncatedCount,
   runIndex,
   updateSettings,
   type IndexConfigData,
   type IndexExtractStatusCounts,
   type IndexLastRunStatus,
   type IndexLiveStatus,
+  type IndexReclaimResponse,
   type IndexSourceCounts,
   type IndexStatusResponse,
 } from "../api";
@@ -274,6 +286,396 @@ export function floorPositive(value: unknown): number {
     : 0;
 }
 
+// On-disk storage breakdown for the honest size figure. The primary figure
+// sums the database file plus the write-ahead log so it reads within ~1% of
+// `du`; the text/vector/FTS/free rows explain where those bytes live, and the
+// content total stays as a secondary detail. Every field degrades to zero so
+// a drifted payload never renders NaN, and older engines without the file
+// sizes fall back to the content total instead of failing.
+export interface IndexStorageBreakdown {
+  onDisk: number;
+  dbFile: number;
+  wal: number;
+  text: number;
+  vector: number;
+  fts: number;
+  free: number;
+  content: number;
+  hasOnDisk: boolean;
+  hasBreakdown: boolean;
+}
+
+// Sanitized on-disk total: the database file plus the write-ahead log when
+// either is present, otherwise the content total so older engines without the
+// file sizes still render an honest size instead of zero.
+export function resolveIndexOnDiskBytes(
+  status: Pick<
+    IndexStatusResponse,
+    "bytes" | "dbFileBytes" | "walBytes"
+  > | null | undefined,
+): number {
+  if (!status) return 0;
+  const dbFile = floorPositive(
+    (status as { dbFileBytes?: unknown }).dbFileBytes,
+  );
+  const wal = floorPositive((status as { walBytes?: unknown }).walBytes);
+  if (dbFile > 0 || wal > 0) return dbFile + wal;
+  return floorPositive(status.bytes);
+}
+
+// Full breakdown for the size card: on-disk primary plus the four storage
+// rows and the content secondary. `hasOnDisk` reports whether the file sizes
+// were present; `hasBreakdown` reports whether any storage row was present,
+// so the card omits the breakdown row for older engines instead of rendering
+// a row of zeros.
+export function resolveIndexStorageBreakdown(
+  status: Pick<
+    IndexStatusResponse,
+    | "bytes"
+    | "dbFileBytes"
+    | "walBytes"
+    | "textBytes"
+    | "vectorBytes"
+    | "ftsBytes"
+    | "freeBytes"
+  > | null | undefined,
+): IndexStorageBreakdown {
+  const content = floorPositive(status?.bytes);
+  const dbFile = floorPositive(
+    (status as { dbFileBytes?: unknown } | null | undefined)?.dbFileBytes,
+  );
+  const wal = floorPositive(
+    (status as { walBytes?: unknown } | null | undefined)?.walBytes,
+  );
+  const text = floorPositive(
+    (status as { textBytes?: unknown } | null | undefined)?.textBytes,
+  );
+  const vector = floorPositive(
+    (status as { vectorBytes?: unknown } | null | undefined)?.vectorBytes,
+  );
+  const fts = floorPositive(
+    (status as { ftsBytes?: unknown } | null | undefined)?.ftsBytes,
+  );
+  const free = floorPositive(
+    (status as { freeBytes?: unknown } | null | undefined)?.freeBytes,
+  );
+  const hasOnDisk = dbFile > 0 || wal > 0;
+  const hasBreakdown = text > 0 || vector > 0 || fts > 0 || free > 0;
+  return {
+    onDisk: hasOnDisk ? dbFile + wal : content,
+    dbFile,
+    wal,
+    text,
+    vector,
+    fts,
+    free,
+    content,
+    hasOnDisk,
+    hasBreakdown,
+  };
+}
+
+// Effort preset ids in display order: the three scaling presets plus the
+// custom worker mode. The scaling presets mirror the engine worker
+// derivation; custom carries an explicit worker count from the stepper.
+export const INDEX_EFFORT_OPTIONS: Array<{ id: string; label: string }> = [
+  ...INDEX_EFFORT_PRESETS.map((id) => ({
+    id,
+    label: INDEX_EFFORT_PRESET_LABELS[id] ?? id,
+  })),
+  { id: "custom", label: INDEX_EFFORT_PRESET_LABELS.custom ?? "Custom" },
+];
+
+// Normalizes a stored effort token to the canonical preset id, mirroring
+// IndexConfig.allowedEfforts (`light`, `balanced`, `performance`, `custom`).
+// Legacy tokens from older dashboards and example files (`eco`/`low` for
+// light, `standard` for balanced, `fast`/`high`/`max` for performance) map
+// onto their canonical successor so an upgraded install keeps its intent
+// instead of falling back; unknown, blank, or non-string payloads degrade to
+// the balanced default so the control never renders blank.
+export function normalizeIndexEffortPreset(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_INDEX_EFFORT;
+  const token = value.trim().toLowerCase();
+  if (
+    token === "light" ||
+    token === "balanced" ||
+    token === "performance" ||
+    token === "custom"
+  )
+    return token;
+  if (token === "eco" || token === "low") return "light";
+  if (token === "standard") return "balanced";
+  if (token === "fast" || token === "high" || token === "max")
+    return "performance";
+  return DEFAULT_INDEX_EFFORT;
+}
+
+// Display label for an effort preset, falling back to the wire token so an
+// unknown future preset still renders honestly.
+export function indexEffortLabel(preset: string): string {
+  const token = typeof preset === "string" ? preset.trim().toLowerCase() : "";
+  if (!token) return INDEX_EFFORT_PRESET_LABELS.balanced ?? "Balanced";
+  return INDEX_EFFORT_PRESET_LABELS[token] ?? preset;
+}
+
+// Machine core count for the effort mapping: the engine `coreCount` when it
+// carries a positive finite value, otherwise the browser
+// `hardwareConcurrency`, otherwise null so callers omit the of-N-cores suffix
+// instead of guessing.
+export function resolveMachineCores(
+  statusCores?: number | null | undefined,
+): number | null {
+  if (
+    typeof statusCores === "number" &&
+    Number.isFinite(statusCores) &&
+    statusCores > 0
+  )
+    return Math.floor(statusCores);
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.hardwareConcurrency === "number" &&
+    Number.isFinite(navigator.hardwareConcurrency) &&
+    navigator.hardwareConcurrency > 0
+  )
+    return Math.floor(navigator.hardwareConcurrency);
+  return null;
+}
+
+// Resolved worker count for one effort preset against a core count, mirroring
+// IndexConfig.resolvedWorkerCount: `light` pins one worker, `balanced` takes
+// half the cores up to four, `performance` takes all but one core, and
+// `custom` clamps the stepper value into 1..64 and then to the available
+// cores. Unknown core counts mirror safeCores=max(1,cores) so every preset
+// resolves to 1 instead of guessing, and an invalid custom value falls back
+// to the balanced mapping so the line never blanks.
+export function resolveEffortWorkers(
+  preset: string | null | undefined,
+  coreCount: number | null | undefined,
+  customWorkers?: number | null | undefined,
+): number {
+  const normalized = normalizeIndexEffortPreset(preset);
+  const cores =
+    typeof coreCount === "number" &&
+    Number.isFinite(coreCount) &&
+    coreCount > 0
+      ? Math.floor(coreCount)
+      : 0;
+  const custom =
+    typeof customWorkers === "number" &&
+    Number.isFinite(customWorkers) &&
+    customWorkers >= 1
+      ? Math.min(INDEX_MAX_CUSTOM_WORKERS, Math.floor(customWorkers))
+      : null;
+  if (cores <= 0) {
+    if (normalized === "custom")
+      return Math.min(
+        INDEX_MAX_CUSTOM_WORKERS,
+        custom ?? DEFAULT_INDEX_WORKERS,
+      );
+    // Unknown cores mirror safeCores=max(1,cores): light pins 1, balanced
+    // takes half of one clamped to 1, performance takes all but one clamped
+    // to 1, so every preset resolves to 1.
+    return 1;
+  }
+  if (normalized === "light") return 1;
+  if (normalized === "balanced") return Math.max(1, Math.min(4, Math.floor(cores / 2)));
+  if (normalized === "performance") return Math.max(1, cores - 1);
+  // Custom clamps the stepper into the static ceiling and the machine so a
+  // stale value from a larger machine never asks for more workers than exist
+  // here.
+  const fallback = Math.max(1, Math.min(4, Math.floor(cores / 2)));
+  const wanted = custom ?? fallback;
+  return Math.min(cores, Math.min(INDEX_MAX_CUSTOM_WORKERS, Math.max(1, wanted)));
+}
+
+// Reads the custom worker count from an index payload. Non-finite or
+// out-of-range values degrade to null so callers apply their own default
+// instead of guessing.
+export function resolveIndexWorkersValue(
+  data: { workers?: unknown } | null | undefined,
+): number | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate =
+    typeof data.workers === "number" && Number.isFinite(data.workers)
+      ? data.workers
+      : null;
+  if (candidate == null || candidate < 1) return null;
+  return Math.floor(candidate);
+}
+
+// Reads the per-document vector chunk cap from an index payload. Non-finite
+// or out-of-range values degrade to null so callers apply the engine default
+// instead of rendering a drifted figure.
+export function resolveIndexVectorCapValue(
+  data: { max_vector_chunks_per_document?: unknown } | null | undefined,
+): number | null {
+  if (!data || typeof data !== "object") return null;
+  const candidate = (data as { max_vector_chunks_per_document?: unknown })
+    .max_vector_chunks_per_document;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) return null;
+  if (candidate < 1) return null;
+  return Math.floor(candidate);
+}
+
+// Resolved effort signal from a status payload, reading the canonical nested
+// `effort` block (`preset`/`resolvedWorkers`/`activeProcessors`). Null fields
+// mean the engine predates the signal so the pane omits the line instead of
+// inventing a preset.
+export function resolveStatusEffort(status: unknown): {
+  preset: string | null;
+  resolvedWorkers: number | null;
+  coreCount: number | null;
+} {
+  if (!status || typeof status !== "object") {
+    return { preset: null, resolvedWorkers: null, coreCount: null };
+  }
+  const record = status as {
+    effort?: unknown;
+  };
+  const nested =
+    record.effort && typeof record.effort === "object"
+      ? (record.effort as {
+          preset?: unknown;
+          resolvedWorkers?: unknown;
+          activeProcessors?: unknown;
+        })
+      : null;
+  const rawPreset =
+    typeof nested?.preset === "string" && nested.preset.trim()
+      ? nested.preset.trim()
+      : null;
+  // Preserve unknown future presets verbatim while mapping legacy aliases
+  // onto canonical ids so an upgraded engine still renders honestly.
+  let preset: string | null = null;
+  if (rawPreset != null) {
+    const lowered = rawPreset.toLowerCase();
+    if (
+      lowered === "light" ||
+      lowered === "balanced" ||
+      lowered === "performance" ||
+      lowered === "custom"
+    ) {
+      preset = lowered;
+    } else if (lowered === "eco" || lowered === "low") {
+      preset = "light";
+    } else if (lowered === "standard") {
+      preset = "balanced";
+    } else if (lowered === "fast" || lowered === "high" || lowered === "max") {
+      preset = "performance";
+    } else {
+      preset = lowered;
+    }
+  }
+  const nestedResolved =
+    typeof nested?.resolvedWorkers === "number" &&
+    Number.isFinite(nested.resolvedWorkers) &&
+    (nested.resolvedWorkers as number) > 0
+      ? Math.floor(nested.resolvedWorkers as number)
+      : null;
+  const nestedCores =
+    typeof nested?.activeProcessors === "number" &&
+    Number.isFinite(nested.activeProcessors) &&
+    (nested.activeProcessors as number) > 0
+      ? Math.floor(nested.activeProcessors as number)
+      : null;
+  return {
+    preset,
+    resolvedWorkers: nestedResolved,
+    coreCount: nestedCores,
+  };
+}
+
+// Resolved-reality copy for the effort control: preset label plus the worker
+// resolution against the machine (`Balanced - using 4 of 10 cores`). Without
+// a core count the line names the worker count alone so it never invents a
+// denominator the machine did not report.
+export function describeEffortReality(
+  preset: string | null | undefined,
+  resolvedWorkers: number | null | undefined,
+  coreCount: number | null | undefined,
+): string {
+  const label = indexEffortLabel(normalizeIndexEffortPreset(preset));
+  const resolved =
+    typeof resolvedWorkers === "number" &&
+    Number.isFinite(resolvedWorkers) &&
+    resolvedWorkers > 0
+      ? Math.floor(resolvedWorkers)
+      : null;
+  const cores =
+    typeof coreCount === "number" &&
+    Number.isFinite(coreCount) &&
+    coreCount > 0
+      ? Math.floor(coreCount)
+      : null;
+  if (resolved != null && cores != null) {
+    const coreNoun = cores === 1 ? "core" : "cores";
+    return `${label} - using ${resolved} of ${cores} ${coreNoun}`;
+  }
+  if (resolved != null) {
+    const workerNoun = resolved === 1 ? "worker" : "workers";
+    return `${label} - using ${resolved} ${workerNoun}`;
+  }
+  return label;
+}
+
+// Display string for the configured file roots: the home shorthand gains its
+// parenthetical so a stock `~` reads as the home directory instead of a bare
+// sigil, while custom roots join verbatim so the subtitle names exactly what
+// the walker covers. Non-array or empty payloads degrade to honest fallbacks
+// instead of rendering a blank scope.
+export function formatIndexScopeRoots(roots: unknown): string {
+  if (!Array.isArray(roots)) return "~ (your home directory)";
+  const cleaned = roots
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (cleaned.length === 0) return "no configured roots";
+  return cleaned
+    .map((root) => (root === "~" ? "~ (your home directory)" : root))
+    .join(", ");
+}
+
+// Root-scoped coverage subtitle for the Index Policy panel: names the
+// configured roots and states that nothing outside them is ever scanned, so
+// the owner sees the walk boundary without opening the config file.
+export function describeIndexScope(roots: unknown): string {
+  return `Builds a local search index of ${formatIndexScopeRoots(roots)}. Nothing outside the configured roots is ever scanned.`;
+}
+
+// Always-skipped names from the index settings payload: the engine's
+// `always_skipped` array populated from the walker's prune list. Non-string
+// entries degrade to skipped so a drifted payload never renders a blank row,
+// and a missing field degrades to empty so older engines without the field
+// render generic copy without inventing names.
+export function resolveAlwaysSkipped(index: unknown): string[] {
+  if (!index || typeof index !== "object") return [];
+  const raw = (index as { always_skipped?: unknown }).always_skipped;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(
+    (entry): entry is string =>
+      typeof entry === "string" && entry.trim().length > 0,
+  );
+}
+
+// Human summary of a reclaim pass for the notice and the result block: the
+// reclaimed delta plus the before and after on-disk figures so both ends of
+// the compaction read without reopening the size card.
+export function formatIndexReclaimResult(
+  result: Pick<
+    IndexReclaimResponse,
+    "beforeBytes" | "afterBytes" | "reclaimedBytes"
+  > | null | undefined,
+): string | null {
+  if (!result) return null;
+  const before = floorPositive(result.beforeBytes);
+  const after = floorPositive(result.afterBytes);
+  let reclaimed = floorPositive(result.reclaimedBytes);
+  if (before > 0 && after >= 0 && reclaimed <= 0 && before >= after) {
+    reclaimed = before - after;
+  }
+  return `Reclaimed ${formatIndexBytes(reclaimed)} (before ${formatIndexBytes(before)} → after ${formatIndexBytes(after)})`;
+}
+
 // Per-source content row joining enablement with real totals: enablement comes
 // from the status sources list while documents/chunks/bytes come from the
 // additive bySource aggregates. A source missing from either side degrades to
@@ -469,13 +871,17 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const [status, setStatus] = useState<IndexStatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  // One in-flight slot names the action so Run, Prune, and Reset stay
+  // One in-flight slot names the action so Run, Prune, Reset, and Reclaim stay
   // mutually exclusive while a request is pending. Cancel rides a separate
   // flag so it can run concurrent with Run: a local run holds `action="run"`
   // for the whole pass, and Cancel must still reach the engine during it.
-  const [action, setAction] = useState<"run" | "prune" | "reset" | null>(null);
+  const [action, setAction] = useState<"run" | "prune" | "reset" | "reclaim" | null>(null);
   const actionBusy = action !== null;
   const [cancelBusy, setCancelBusy] = useState(false);
+  // Last reclaim outcome for the before/after block. Kept separate from the
+  // top notice so both figures stay visible after the status reload replaces
+  // the size card, instead of scrolling away with the transient notice.
+  const [reclaimResult, setReclaimResult] = useState<IndexReclaimResponse | null>(null);
   // Synchronous guard for the run flight: state commits asynchronously, so a
   // double-click before re-render would otherwise start two runs. The ref flips
   // immediately and the state mirrors it for rendering.
@@ -520,7 +926,9 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   });
   // Previous committed totals for the flash comparison. Null until the first
   // snapshot so the initial mount never flashes; every later snapshot diffs
-  // against this ref before it is replaced.
+  // against this ref before it is replaced. Size tracks the honest on-disk
+  // total (database file plus write-ahead log) so the accent follows the
+  // primary figure instead of the secondary content bytes.
   const prevTotalsRef = useRef<{
     bytes: number;
     documents: number;
@@ -579,6 +987,45 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     .map((row) => ({ ...row, documents: floorPositive(row.documents) }))
     .sort((left, right) => right.documents - left.documents);
   const maxExtractDocuments = Math.max(0, ...extractRows.map((row) => row.documents));
+  // Honest on-disk storage: the database file plus the write-ahead log as the
+  // primary figure, the text/vector/FTS/free rows as the breakdown, and the
+  // content total as the secondary detail. Older engines without the file
+  // sizes fall back to the content total with no breakdown row.
+  const storage = resolveIndexStorageBreakdown(status);
+  // Retired documents from the last run, accepting both wire spellings.
+  // Null when the engine predates retirement tracking so the strip omits it
+  // instead of rendering a zero.
+  const lastRunRetired = resolveIndexRetiredCount(status?.lastRun ?? null);
+  // Truncated documents from the last run, accepting both wire spellings.
+  // Null when the engine predates truncation tracking so the strip omits it
+  // instead of rendering a zero.
+  const lastRunTruncated = resolveIndexTruncatedCount(status?.lastRun ?? null);
+  // Resolved effort reality for the status pane: the canonical nested `effort`
+  // block when present, otherwise the local mapping against the machine cores so the
+  // line still reflects the hardware. Hidden for older engines without any
+  // effort signal so the pane never invents a preset.
+  const statusEffort = resolveStatusEffort(status);
+  const statusEffortPreset = statusEffort.preset;
+  const statusCoreCount = resolveMachineCores(statusEffort.coreCount);
+  const statusResolvedWorkers =
+    statusEffort.resolvedWorkers ??
+    (statusEffortPreset && statusCoreCount != null
+      ? resolveEffortWorkers(statusEffortPreset, statusCoreCount, null)
+      : null);
+  const hasStatusEffort =
+    statusEffortPreset != null ||
+    statusEffort.resolvedWorkers != null ||
+    statusEffort.coreCount != null;
+  const statusEffortReality = hasStatusEffort
+    ? describeEffortReality(
+        statusEffortPreset ?? DEFAULT_INDEX_EFFORT,
+        statusResolvedWorkers,
+        statusCoreCount,
+      )
+    : null;
+  // Reclaim result copy for the dedicated before/after block, kept beside the
+  // transient notice so both figures survive the post-reclaim status reload.
+  const reclaimSummary = formatIndexReclaimResult(reclaimResult);
 
   const loadStatus = useCallback(async () => {
     setError(null);
@@ -728,12 +1175,14 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // latest mid-run snapshot, then clears the accent after a brief window. The
   // first snapshot seeds the baseline with no flash. Only committed growth
   // while a run is in flight flashes: idle reloads update the baseline
-  // silently, and decreases (prune/reset shrinkage) never flash, so the
-  // accent stays a committed-growth signal instead of firing on any delta.
+  // silently, and decreases (prune/reset/reclaim shrinkage) never flash, so
+  // the accent stays a committed-growth signal instead of firing on any delta.
+  // Size follows the honest on-disk total so the accent tracks the primary
+  // figure.
   useEffect(() => {
     if (!status) return;
     const next = {
-      bytes: status.bytes,
+      bytes: resolveIndexOnDiskBytes(status),
       documents: status.documents,
       chunks: status.chunks,
     };
@@ -816,7 +1265,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // run concurrent with Run instead of multiplexing one shared action slot.
   const handleCancel = async () => {
     if (cancelBusy || cancellingRef.current) return;
-    if (action === "prune" || action === "reset") return;
+    if (action === "prune" || action === "reset" || action === "reclaim") return;
     setCancelBusy(true);
     setError(null);
     try {
@@ -837,6 +1286,28 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       );
     } finally {
       setCancelBusy(false);
+    }
+  };
+
+  // Compacts the index database, then shows the before and after on-disk
+  // figures so the reclaimed delta reads without reopening the size card.
+  // Blocked while a run is in flight like prune and reset, since compaction
+  // races the writer.
+  const handleReclaim = async () => {
+    if (actionBusy || cancelBusy || cancellingRef.current || runActiveRef.current || statusRunningRef.current) return;
+    setAction("reclaim");
+    setError(null);
+    setNotice(null);
+    try {
+      const response = await reclaimIndex();
+      setReclaimResult(response);
+      const summary = formatIndexReclaimResult(response);
+      if (summary) setNotice(summary);
+      await loadStatus();
+    } catch (failure) {
+      setError(failure instanceof ApiError ? failure.message : "Failed to reclaim index space");
+    } finally {
+      setAction(null);
     }
   };
 
@@ -999,9 +1470,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
       {error ? <p className="error">{error}</p> : null}
       {notice ? <p className="muted text-sm">{notice}</p> : null}
 
-      {/* Run controls top: start, stop, prune, and reset sit above the numbers
-          they act on. Each destructive action opens its own modal carrying the
-          description, so no helper text repeats under the row. */}
+      {/* Run controls top: start, stop, prune, reclaim, and reset sit above
+          the numbers they act on. Each destructive action opens its own modal
+          carrying the description, so no helper text repeats under the row.
+          Reclaim compacts without deleting content, so it needs no modal. */}
       <div className="index-actions-section">
         <h3>Run</h3>
         <div className="row">
@@ -1025,7 +1497,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             type="button"
             className="ghost icon-text-btn"
             onClick={() => void handleCancel()}
-            disabled={cancelBusy || cancelling || !progressActive || action === "prune" || action === "reset"}
+            disabled={cancelBusy || cancelling || !progressActive || action === "prune" || action === "reset" || action === "reclaim"}
           >
             <StopIcon size={14} />
             <span>{cancelBusy || cancelling ? "Cancelling…" : "Cancel"}</span>
@@ -1047,6 +1519,16 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
 
           <button
             type="button"
+            className="ghost icon-text-btn"
+            onClick={() => void handleReclaim()}
+            disabled={actionBusy || cancelBusy || progressActive || cancelling}
+            title="Compact the index database to reclaim free space"
+          >
+            <span>{action === "reclaim" ? "Reclaiming…" : "Reclaim space"}</span>
+          </button>
+
+          <button
+            type="button"
             className="danger icon-text-btn"
             onClick={() => {
               setResetError(null);
@@ -1058,11 +1540,23 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             <span>{action === "reset" ? "Clearing…" : "Reset Index"}</span>
           </button>
         </div>
-        {/* Disabled-index hint under the Run row; prune/reset stay independent
-            of the enabled flag. */}
+        {/* Disabled-index hint under the Run row; prune/reclaim/reset stay
+            independent of the enabled flag. */}
         {status?.enabled === false ? (
           <p className="muted text-sm">
             Indexing is off — turn it on in Settings → Indexing to run a pass.
+          </p>
+        ) : null}
+        {/* Reclaim outcome keeps both on-disk figures visible after the size
+            card reloads, so the compaction delta never scrolls away with the
+            transient notice. */}
+        {reclaimSummary ? (
+          <p
+            className="muted text-sm"
+            data-testid="index-reclaim-result"
+            style={{ marginTop: 8 }}
+          >
+            {reclaimSummary}
           </p>
         ) : null}
       </div>
@@ -1120,16 +1614,51 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
         {status ? (
           <>
             {/* Last-run strip distilled from the newest index-kind run log row:
-                status plus indexed/scanned/errors and the finish time, so the
-                latest outcome reads without opening run history. A first run
-                in flight names itself instead of reading as empty history. */}
+                status plus indexed/scanned/errors/retired/truncated and the
+                finish time, so the latest outcome reads without opening run
+                history. A first run in flight names itself instead of reading
+                as empty history. The retired and truncated badges mirror the
+                shared formatter so the counts read identically in the notice
+                and the strip. */}
             <div
               className="index-last-run"
               data-testid="index-last-run"
               style={{ marginTop: 12 }}
             >
               <span className="muted text-sm">{lastRunText}</span>
+              {lastRunRetired != null && lastRunRetired > 0 ? (
+                <span
+                  className="muted text-sm"
+                  data-testid="index-last-run-retired"
+                  style={{ marginLeft: 8 }}
+                >
+                  {lastRunRetired} retired
+                </span>
+              ) : null}
+              {lastRunTruncated != null && lastRunTruncated > 0 ? (
+                <span
+                  className="muted text-sm"
+                  data-testid="index-last-run-truncated"
+                  style={{ marginLeft: 8 }}
+                >
+                  {lastRunTruncated} truncated
+                </span>
+              ) : null}
             </div>
+            {/* Resolved effort reality for the status pane: the engine preset
+                plus the worker resolution against the machine cores. Rendered
+                only when the engine carries an effort signal so older engines
+                never invent a preset. The editable control lives in Settings →
+                Indexing; this line is the read-only mirror. */}
+            {statusEffortReality ? (
+              <p
+                className="muted text-sm"
+                data-testid="index-effort-status"
+                style={{ marginTop: 8, marginBottom: 0 }}
+              >
+                {statusEffortReality}
+              </p>
+            ) : null}
             <div
               className="index-stat-cards"
               style={{
@@ -1140,13 +1669,62 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               }}
             >
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
-                <div className="muted text-xs">Size</div>
+                <div className="muted text-xs">Size on disk</div>
                 <div
                   className={flashedStats.size ? "index-stat-value index-stat-value-flash" : "index-stat-value"}
                   data-testid="index-stat-size-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {formatIndexBytes(status.bytes)}
+                  {formatIndexBytes(storage.onDisk)}
+                </div>
+                {/* Breakdown row for the on-disk figure: text, vectors, FTS,
+                    and free space. Omitted for older engines without the
+                    storage rows so the card never renders a row of zeros. */}
+                {storage.hasBreakdown ? (
+                  <div
+                    className="muted text-xs"
+                    data-testid="index-size-breakdown"
+                    style={{ marginTop: 4 }}
+                  >
+                    <span data-testid="index-size-text">
+                      Text {formatIndexBytes(storage.text)}
+                    </span>
+                    {" · "}
+                    <span data-testid="index-size-vectors">
+                      Vectors {formatIndexBytes(storage.vector)}
+                    </span>
+                    {" · "}
+                    <span data-testid="index-size-fts">
+                      FTS {formatIndexBytes(storage.fts)}
+                    </span>
+                    {" · "}
+                    <span data-testid="index-size-free">
+                      Free {formatIndexBytes(storage.free)}
+                    </span>
+                  </div>
+                ) : null}
+                {/* On-disk file detail: database file plus write-ahead log, the
+                    two addends behind the primary figure. Omitted for older
+                    engines without the file sizes. */}
+                {storage.hasOnDisk ? (
+                  <div
+                    className="muted text-xs"
+                    data-testid="index-size-files"
+                    style={{ marginTop: 2 }}
+                  >
+                    DB {formatIndexBytes(storage.dbFile)} · WAL{" "}
+                    {formatIndexBytes(storage.wal)}
+                  </div>
+                ) : null}
+                {/* Content bytes stay as the secondary detail so the pane never
+                    loses the pre-existing figure while the primary moves to
+                    the honest on-disk total. */}
+                <div
+                  className="muted text-xs"
+                  data-testid="index-size-content"
+                  style={{ marginTop: 2 }}
+                >
+                  Content {formatIndexBytes(storage.content)}
                 </div>
               </div>
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
@@ -1694,16 +2272,20 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
 }
 
 // Index policy form for the Settings → Indexing tab: master enablement,
-// per-source toggles, exclude globs, caps, and the vision describe toggle,
-// persisted only through this form's own Save. Status cards, charts, and run
-// controls stay on the Memory tab so one surface never duplicates the other's
-// control set.
+// per-source toggles, exclude globs, caps, effort presets with thermal and
+// power toggles, and the vision describe toggle, persisted only through this
+// form's own Save. Status cards, charts, and run controls stay on the Memory
+// tab so one surface never duplicates the other's control set.
 export function IndexPolicyPanel() {
   const [config, setConfig] = useState<IndexConfigData>(DEFAULT_INDEX_CONFIG);
   const [excludeText, setExcludeText] = useState<string>(
     DEFAULT_INDEX_CONFIG.exclude.join("\n"),
   );
   const [saving, setSaving] = useState(false);
+  // Engine core count from GET /index/status for the effort reality line.
+  // Null until the status fetch settles so resolveMachineCores falls back to
+  // the browser hardwareConcurrency instead of guessing.
+  const [policyCoreCount, setPolicyCoreCount] = useState<number | null>(null);
   // Transient save feedback in a top-right stack so the confirmation never
   // blocks the form. Distinct notices stack with independent timers; an
   // identical copy replaces its sibling so repeat saves refresh one notice
@@ -1713,7 +2295,9 @@ export function IndexPolicyPanel() {
 
   // Loads the [index] section through the shared settings read so the editable
   // form starts from the stored policy. An older engine without the section
-  // leaves the local defaults in place instead of blanking the form.
+  // leaves the local defaults in place instead of blanking the form. Effort
+  // knobs degrade to their defaults when the engine predates them so the
+  // control never renders blank.
   const loadConfig = useCallback(async () => {
     try {
       const settings = await getSettings();
@@ -1726,6 +2310,34 @@ export function IndexPolicyPanel() {
           exclude: Array.isArray(index.exclude)
             ? index.exclude
             : DEFAULT_INDEX_CONFIG.exclude,
+          // Read-only walker list: kept when the engine sends an array so the
+          // detail block names exactly what the next run will skip, otherwise
+          // left absent so older engines render generic copy without names.
+          always_skipped: Array.isArray(
+            (index as IndexConfigData).always_skipped,
+          )
+            ? (index as IndexConfigData).always_skipped
+            : undefined,
+          effort: normalizeIndexEffortPreset(
+            (index as IndexConfigData).effort ?? DEFAULT_INDEX_CONFIG.effort,
+          ),
+          // Worker count with fallback to DEFAULT_INDEX_WORKERS (not the 0 wire
+          // default) so a custom preset with no stored value still opens on a
+          // valid stepper count; preset saves send 0 regardless.
+          workers:
+            resolveIndexWorkersValue(index as IndexConfigData) ??
+            DEFAULT_INDEX_WORKERS,
+          thermal_backoff:
+            typeof (index as IndexConfigData).thermal_backoff === "boolean"
+              ? (index as IndexConfigData).thermal_backoff
+              : DEFAULT_INDEX_CONFIG.thermal_backoff,
+          pause_on_battery:
+            typeof (index as IndexConfigData).pause_on_battery === "boolean"
+              ? (index as IndexConfigData).pause_on_battery
+              : DEFAULT_INDEX_CONFIG.pause_on_battery,
+          max_vector_chunks_per_document:
+            resolveIndexVectorCapValue(index as IndexConfigData) ??
+            (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number),
         };
         setConfig(merged);
         setExcludeText(merged.exclude.join("\n"));
@@ -1733,6 +2345,16 @@ export function IndexPolicyPanel() {
     } catch {
       // A settings read failure leaves the local defaults; the save path
       // surfaces transport errors so the form stays usable.
+    }
+    // Engine core count for the effort reality line: prefer the status
+    // effort.activeProcessors so a remote dashboard resolves against the
+    // engine hardware instead of the browser hardwareConcurrency. A status
+    // failure leaves the browser fallback in place.
+    try {
+      const status = await getIndexStatus();
+      setPolicyCoreCount(resolveStatusEffort(status).coreCount);
+    } catch {
+      // Keep the browser fallback; the reality line still renders.
     }
   }, []);
 
@@ -1745,6 +2367,17 @@ export function IndexPolicyPanel() {
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+    const effort = normalizeIndexEffortPreset(config.effort);
+    // Presets derive workers on the engine so they must save 0; only custom
+    // carries an explicit 1..64 count. The stepper fallback stays
+    // DEFAULT_INDEX_WORKERS (not the 0 wire default) so a custom preset with
+    // no stored value still saves a valid count.
+    const customWorkers =
+      resolveIndexWorkersValue(config) ?? DEFAULT_INDEX_WORKERS;
+    const workers = effort === "custom" ? customWorkers : 0;
+    const vectorCap =
+      resolveIndexVectorCapValue(config) ??
+      (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number);
     const saved = await updateSettings({
       index: {
         enabled: config.enabled,
@@ -1759,6 +2392,12 @@ export function IndexPolicyPanel() {
         describe_images_with_llm: config.describe_images_with_llm,
         nightly_budget: config.nightly_budget,
         db_path: config.db_path.trim(),
+        effort,
+        workers,
+        thermal_backoff: config.thermal_backoff ?? DEFAULT_INDEX_THERMAL_BACKOFF,
+        pause_on_battery:
+          config.pause_on_battery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY,
+        max_vector_chunks_per_document: vectorCap,
       },
     });
     const index = saved?.index;
@@ -1770,6 +2409,11 @@ export function IndexPolicyPanel() {
         exclude: Array.isArray(index.exclude)
           ? index.exclude
           : DEFAULT_INDEX_CONFIG.exclude,
+        always_skipped: Array.isArray(
+          (index as IndexConfigData).always_skipped,
+        )
+          ? (index as IndexConfigData).always_skipped
+          : undefined,
       };
       setConfig(merged);
       setExcludeText(merged.exclude.join("\n"));
@@ -1801,15 +2445,91 @@ export function IndexPolicyPanel() {
     setConfig((previous) => ({ ...previous, ...patch }));
   };
 
+  // Effort control state: the preset plus the custom stepper and the two
+  // thermal/power toggles. The resolved reality below maps the preset onto
+  // the machine's core count so the same preset scales from a laptop to a
+  // studio machine without inventing a worker count the hardware cannot meet.
+  // The engine core count from GET /index/status wins when present so a
+  // remote dashboard (phone browser vs Mac engine) resolves against the
+  // engine hardware; otherwise the browser hardwareConcurrency applies.
+  const effortPreset = normalizeIndexEffortPreset(config.effort);
+  const machineCores = resolveMachineCores(policyCoreCount);
+  // Stepper fallback stays DEFAULT_INDEX_WORKERS (not the 0 wire default)
+  // so custom opens on a valid count before the first fetch.
+  const customWorkers =
+    resolveIndexWorkersValue(config) ?? DEFAULT_INDEX_WORKERS;
+  const resolvedEffortWorkers = resolveEffortWorkers(
+    effortPreset,
+    machineCores,
+    customWorkers,
+  );
+  const effortReality = describeEffortReality(
+    effortPreset,
+    resolvedEffortWorkers,
+    machineCores,
+  );
+  // Static ceiling shared with the engine validation bound; the live core
+  // count narrows it further so the stepper never offers more workers than
+  // the machine can meet.
+  const customMax =
+    machineCores != null && machineCores > 0
+      ? Math.min(machineCores, INDEX_MAX_CUSTOM_WORKERS)
+      : INDEX_MAX_CUSTOM_WORKERS;
+  // Per-document vector chunk cap: bounds embedding work so one text-dense
+  // document cannot fan an outsized batch; chunks beyond the cap stay
+  // keyword-only. Clamped into the engine 1..4096 range so a hand-typed value
+  // never fails the save.
+  const vectorCap =
+    resolveIndexVectorCapValue(config) ??
+    (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number);
+  const vectorCapMax = 4096;
+  // Root-scoped coverage plus the walker prune list, both read from the loaded
+  // [index] payload so the copy names exactly what the next run will cover and
+  // skip with no hardcoded names. The credential deny list stays out of the
+  // rendered names and is described generically in the detail block.
+  const scopeSubtitle = describeIndexScope(config.roots);
+  const alwaysSkipped = resolveAlwaysSkipped(config);
+
   return (
     <section className="panel indexing-panel" aria-label="Index Policy">
       <div className="panel-header-row">
         <div>
           <h2>Index Policy</h2>
-          <p className="muted text-sm">
-            Choose what the local file, mail, and Messages index covers and how
-            it stores content.
+          <p className="muted text-sm" data-testid="index-scope-subtitle">
+            {scopeSubtitle}
           </p>
+          <div
+            className="muted text-xs"
+            data-testid="index-always-skipped-block"
+          >
+            {/* Walker prune list renders solely from the `always_skipped`
+                payload so the copy cannot drift from
+                FilesIndexer.alwaysSkippedPatterns. The file-access deny list
+                stays generic and never enumerates patterns here. */}
+            {alwaysSkipped.length > 0 ? (
+              <>
+                <p style={{ marginTop: 4, marginBottom: 0 }}>
+                  Always skipped, even when they are not in the Exclude
+                  patterns list:
+                </p>
+                <p
+                  data-testid="index-always-skipped"
+                  style={{ marginTop: 4, marginBottom: 0 }}
+                >
+                  {alwaysSkipped.join(", ")}
+                </p>
+              </>
+            ) : (
+              <p style={{ marginTop: 4, marginBottom: 0 }}>
+                The walker also skips its built-in prune list, even when
+                entries are not in the Exclude patterns list.
+              </p>
+            )}
+            <p style={{ marginTop: 4, marginBottom: 0 }}>
+              Credential and key files blocked by your file access rules are
+              never indexed either.
+            </p>
+          </div>
         </div>
       </div>
 
@@ -1865,6 +2585,169 @@ export function IndexPolicyPanel() {
             );
           })}
         </fieldset>
+
+        {/* Effort control: the three scaling presets plus a custom worker
+            stepper, with the resolved reality against the machine's core count
+            on top and the thermal/power toggles below. Persisted only on Save
+            like every other policy knob. */}
+        <fieldset className="index-effort-fieldset">
+          <legend>Effort</legend>
+          <p
+            className="muted text-sm"
+            data-testid="index-effort-reality"
+            style={{ marginTop: 0 }}
+          >
+            {effortReality}
+          </p>
+          <div role="radiogroup" aria-label="Indexing effort">
+            {INDEX_EFFORT_OPTIONS.map((option) => (
+              <label key={option.id} className="toggle-label">
+                <input
+                  type="radio"
+                  name="index-effort"
+                  value={option.id}
+                  checked={effortPreset === option.id}
+                  onChange={() => updateConfig({ effort: option.id })}
+                />
+                <span>{option.label}</span>
+              </label>
+            ))}
+          </div>
+          {effortPreset === "custom" ? (
+            <div className="form-group" style={{ marginTop: 8 }}>
+              <label htmlFor="index-custom-workers">Custom workers</label>
+              <div className="row">
+                <button
+                  type="button"
+                  className="ghost"
+                  aria-label="Decrease workers"
+                  disabled={customWorkers <= 1}
+                  onClick={() =>
+                    updateConfig({ workers: Math.max(1, customWorkers - 1) })
+                  }
+                >
+                  <span aria-hidden="true">−</span>
+                </button>
+                <input
+                  id="index-custom-workers"
+                  type="number"
+                  className="input-field"
+                  min={1}
+                  max={customMax}
+                  value={customWorkers}
+                  onChange={(event) => {
+                    const parsed = Number(event.target.value);
+                    if (!Number.isFinite(parsed)) return;
+                    updateConfig({
+                      workers: Math.min(
+                        customMax,
+                        Math.max(1, Math.floor(parsed)),
+                      ),
+                    });
+                  }}
+                />
+                <button
+                  type="button"
+                  className="ghost"
+                  aria-label="Increase workers"
+                  disabled={customWorkers >= customMax}
+                  onClick={() =>
+                    updateConfig({
+                      workers: Math.min(customMax, customWorkers + 1),
+                    })
+                  }
+                >
+                  <span aria-hidden="true">+</span>
+                </button>
+              </div>
+              <p className="muted text-xs">
+                Workers used when the Custom preset is selected.
+              </p>
+            </div>
+          ) : null}
+          <label className="toggle-label">
+            <input
+              type="checkbox"
+              checked={config.thermal_backoff ?? DEFAULT_INDEX_THERMAL_BACKOFF}
+              onChange={(event) =>
+                updateConfig({ thermal_backoff: event.target.checked })
+              }
+            />
+            <span>Thermal backoff</span>
+          </label>
+          <label className="toggle-label">
+            <input
+              type="checkbox"
+              checked={config.pause_on_battery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY}
+              onChange={(event) =>
+                updateConfig({ pause_on_battery: event.target.checked })
+              }
+            />
+            <span>Pause on battery</span>
+          </label>
+        </fieldset>
+
+        {/* Per-document vector chunk cap: bounds embedding work so one
+            text-dense document cannot fan an outsized batch. Chunks beyond the
+            cap stay keyword-searchable, so a capped document is still fully
+            findable by keyword. Persisted only on Save like every other knob. */}
+        <div className="form-group" style={{ marginTop: 12 }}>
+          <label htmlFor="index-vector-cap">
+            Max vector chunks per document
+          </label>
+          <div className="row">
+            <button
+              type="button"
+              className="ghost"
+              aria-label="Decrease vector cap"
+              disabled={vectorCap <= 1}
+              onClick={() =>
+                updateConfig({
+                  max_vector_chunks_per_document: Math.max(1, vectorCap - 1),
+                })
+              }
+            >
+              <span aria-hidden="true">−</span>
+            </button>
+            <input
+              id="index-vector-cap"
+              type="number"
+              className="input-field"
+              min={1}
+              max={vectorCapMax}
+              value={vectorCap}
+              onChange={(event) => {
+                const parsed = Number(event.target.value);
+                if (!Number.isFinite(parsed)) return;
+                updateConfig({
+                  max_vector_chunks_per_document: Math.min(
+                    vectorCapMax,
+                    Math.max(1, Math.floor(parsed)),
+                  ),
+                });
+              }}
+            />
+            <button
+              type="button"
+              className="ghost"
+              aria-label="Increase vector cap"
+              disabled={vectorCap >= vectorCapMax}
+              onClick={() =>
+                updateConfig({
+                  max_vector_chunks_per_document: Math.min(
+                    vectorCapMax,
+                    vectorCap + 1,
+                  ),
+                })
+              }
+            >
+              <span aria-hidden="true">+</span>
+            </button>
+          </div>
+          <p className="muted text-xs">
+            Chunks beyond the cap stay keyword-only (1–4096).
+          </p>
+        </div>
 
         <div className="form-group">
           <label htmlFor="index-excludes">Exclude patterns (one glob per line)</label>
@@ -1937,14 +2820,14 @@ export function IndexPolicyPanel() {
           generate a description. Leave this off to keep images on-device.
         </p>
 
-        <div className="row">
+        <div className="settings-footer">
           <button
             type="button"
-            className="primary icon-text-btn"
+            className="primary-button save-button"
             onClick={() => void handleSave()}
             disabled={saving}
           >
-            <span>{saving ? "Saving…" : "Save Index Settings"}</span>
+            {saving ? "Saving…" : "Save Index Settings"}
           </button>
         </div>
       </div>

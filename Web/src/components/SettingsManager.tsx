@@ -2589,11 +2589,12 @@ export default function SettingsManager() {
         </nav>
 
         <div className="settings-content">
-          {/* The indexing pane hosts the index policy form, which owns its own
-              save path (it patches only the [index] section), so it renders
-              outside the shared settings form and its own controls never
-              submit the unrelated config values. Status cards, charts, and run
-              controls live on the Memory → Index Status tab instead. */}
+          {/* The indexing pane hosts the index policy form, which uses the
+              shared save control (settings-footer with a primary-button
+              save-button) while still patching only the [index] section, so it
+              renders outside the shared settings form and its own controls
+              never submit the unrelated config values. Status cards, charts,
+              and run controls live on the Memory → Index Status tab instead. */}
           {activeTab === "indexing" ? <IndexPolicyPanel /> : null}
           {activeTab !== "indexing" ? (
           <form onSubmit={handleSave} className="settings-form">

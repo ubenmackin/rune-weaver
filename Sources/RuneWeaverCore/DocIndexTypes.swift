@@ -99,6 +99,32 @@ public struct IndexedDocument: Sendable, Codable, Equatable, Identifiable {
     }
 }
 
+/// Stored size, modification time, and extraction outcome for one indexed document.
+///
+/// The fingerprint answers whether a source can be skipped without reading
+/// its bytes: a matching size plus a modification time within tolerance and a
+/// non-failed extraction means the body is current. It carries only the
+/// columns the fast path needs so the check never loads full document rows.
+public struct DocStoredFingerprint: Sendable, Codable, Equatable {
+    /// Last modification time of the source at index time, when known.
+    public let mtime: Date?
+    /// Source size in bytes at index time, when known.
+    public let sizeBytes: Int64?
+    /// How completely the body was extracted.
+    public let extractStatus: ExtractStatus
+
+    /// Creates a stored fingerprint.
+    /// - Parameters:
+    ///   - mtime: Last modification time at index time, when known.
+    ///   - sizeBytes: Source size in bytes at index time, when known.
+    ///   - extractStatus: How completely the body was extracted.
+    public init(mtime: Date? = nil, sizeBytes: Int64? = nil, extractStatus: ExtractStatus) {
+        self.mtime = mtime
+        self.sizeBytes = sizeBytes
+        self.extractStatus = extractStatus
+    }
+}
+
 /// One text chunk of an indexed document, optionally carrying a vector.
 public struct IndexedChunk: Sendable, Codable, Equatable, Identifiable {
     /// Stable chunk identifier.
@@ -130,6 +156,22 @@ public struct IndexedChunk: Sendable, Codable, Equatable, Identifiable {
         self.text = text
         self.embedding = embedding
         self.isVector = isVector ?? !embedding.isEmpty
+    }
+}
+
+/// Single definition of logical content bytes for the local document index.
+///
+/// Content is chunk text plus embedding bytes so keyword and vector payloads
+/// share one total; both `IndexStats` and `IndexStorageBreakdown` derive from
+/// here instead of each defining content differently.
+public enum IndexContentBytes {
+    /// Sums text and vector bytes into one logical content total.
+    /// - Parameters:
+    ///   - textBytes: Chunk text bytes.
+    ///   - vectorBytes: Embedding BLOB bytes.
+    /// - Returns: Logical content bytes.
+    public static func contentBytes(textBytes: Int64, vectorBytes: Int64) -> Int64 {
+        max(textBytes, 0) + max(vectorBytes, 0)
     }
 }
 
@@ -185,6 +227,24 @@ public struct IndexStats: Sendable, Codable, Equatable {
     public let bySource: [IndexSourceStats]
     /// Document counts grouped by extraction outcome.
     public let byExtractStatus: [IndexExtractStatusStats]
+    /// On-disk database file size in bytes (`page_count` times `page_size`).
+    public let dbFileBytes: Int64
+    /// Write-ahead log size in bytes (`dbPath` plus `-wal` when present).
+    public let walBytes: Int64
+    /// Logical chunk text bytes (`SUM(LENGTH(chunk_text))`), reported when the
+    /// `dbstat` probe is available and nil otherwise; not on-disk page bytes.
+    public let textBytes: Int64?
+    /// Logical embedding bytes (`SUM(LENGTH(embedding))` over vector chunks),
+    /// reported when the `dbstat` probe is available and nil otherwise; not
+    /// on-disk page bytes.
+    public let vectorBytes: Int64?
+    /// Full-text index bytes as on-disk page bytes summed via the grouped
+    /// `dbstat` split, nil when unavailable.
+    public let ftsBytes: Int64?
+    /// Unused freelist bytes reclaimable by `VACUUM` (`freelist_count` times `page_size`).
+    public let freeBytes: Int64
+    /// Logical content bytes (chunk text plus embedding bytes via `IndexContentBytes`).
+    public let contentBytes: Int64
 
     /// Coding keys for the statistics snapshot.
     private enum CodingKeys: String, CodingKey {
@@ -196,9 +256,32 @@ public struct IndexStats: Sendable, Codable, Equatable {
         case indexAsOf
         case bySource
         case byExtractStatus
+        case dbFileBytes
+        case walBytes
+        case textBytes
+        case vectorBytes
+        case ftsBytes
+        case freeBytes
+        case contentBytes
     }
 
     /// Creates an index statistics snapshot.
+    /// - Parameters:
+    ///   - documents: Indexed document count.
+    ///   - chunks: Stored chunk count.
+    ///   - vectorChunks: Chunks carrying an embedding.
+    ///   - keywordChunks: Keyword-only chunks.
+    ///   - bytes: Total chunk text bytes.
+    ///   - indexAsOf: When this snapshot was taken.
+    ///   - bySource: Per-source aggregates.
+    ///   - byExtractStatus: Extraction-outcome aggregates.
+    ///   - dbFileBytes: On-disk file size.
+    ///   - walBytes: Write-ahead log size.
+    ///   - textBytes: Logical chunk text bytes, or nil when the size probe is unavailable.
+    ///   - vectorBytes: Logical embedding bytes, or nil when the size probe is unavailable.
+    ///   - ftsBytes: On-disk full-text index page bytes, or nil when the size probe is unavailable.
+    ///   - freeBytes: Freelist bytes.
+    ///   - contentBytes: Logical content bytes (text plus vector), defaulting to `bytes` for compatibility.
     public init(
         documents: Int,
         chunks: Int,
@@ -207,7 +290,14 @@ public struct IndexStats: Sendable, Codable, Equatable {
         bytes: Int64,
         indexAsOf: Date,
         bySource: [IndexSourceStats] = [],
-        byExtractStatus: [IndexExtractStatusStats] = []
+        byExtractStatus: [IndexExtractStatusStats] = [],
+        dbFileBytes: Int64 = 0,
+        walBytes: Int64 = 0,
+        textBytes: Int64? = nil,
+        vectorBytes: Int64? = nil,
+        ftsBytes: Int64? = nil,
+        freeBytes: Int64 = 0,
+        contentBytes: Int64? = nil
     ) {
         self.documents = documents
         self.chunks = chunks
@@ -217,6 +307,13 @@ public struct IndexStats: Sendable, Codable, Equatable {
         self.indexAsOf = indexAsOf
         self.bySource = bySource
         self.byExtractStatus = byExtractStatus
+        self.dbFileBytes = dbFileBytes
+        self.walBytes = walBytes
+        self.textBytes = textBytes
+        self.vectorBytes = vectorBytes
+        self.ftsBytes = ftsBytes
+        self.freeBytes = freeBytes
+        self.contentBytes = contentBytes ?? bytes
     }
 
     /// Decodes a snapshot, defaulting additive aggregates to empty so payloads
@@ -232,6 +329,13 @@ public struct IndexStats: Sendable, Codable, Equatable {
         self.indexAsOf = try container.decode(Date.self, forKey: .indexAsOf)
         self.bySource = try container.decodeIfPresent([IndexSourceStats].self, forKey: .bySource) ?? []
         self.byExtractStatus = try container.decodeIfPresent([IndexExtractStatusStats].self, forKey: .byExtractStatus) ?? []
+        self.dbFileBytes = try container.decodeIfPresent(Int64.self, forKey: .dbFileBytes) ?? 0
+        self.walBytes = try container.decodeIfPresent(Int64.self, forKey: .walBytes) ?? 0
+        self.textBytes = try container.decodeIfPresent(Int64.self, forKey: .textBytes)
+        self.vectorBytes = try container.decodeIfPresent(Int64.self, forKey: .vectorBytes)
+        self.ftsBytes = try container.decodeIfPresent(Int64.self, forKey: .ftsBytes)
+        self.freeBytes = try container.decodeIfPresent(Int64.self, forKey: .freeBytes) ?? 0
+        self.contentBytes = try container.decodeIfPresent(Int64.self, forKey: .contentBytes) ?? bytes
     }
 
     /// Encodes a snapshot including the additive aggregates.
@@ -246,6 +350,89 @@ public struct IndexStats: Sendable, Codable, Equatable {
         try container.encode(indexAsOf, forKey: .indexAsOf)
         try container.encode(bySource, forKey: .bySource)
         try container.encode(byExtractStatus, forKey: .byExtractStatus)
+        try container.encode(dbFileBytes, forKey: .dbFileBytes)
+        try container.encode(walBytes, forKey: .walBytes)
+        try container.encodeIfPresent(textBytes, forKey: .textBytes)
+        try container.encodeIfPresent(vectorBytes, forKey: .vectorBytes)
+        try container.encodeIfPresent(ftsBytes, forKey: .ftsBytes)
+        try container.encode(freeBytes, forKey: .freeBytes)
+        try container.encode(contentBytes, forKey: .contentBytes)
+    }
+}
+
+/// On-disk and logical size breakdown for the local document index.
+///
+/// File sizes come from the filesystem so the status surface reports what the
+/// disk holds rather than a logical estimate; logical bytes come from the
+/// content tables so the dashboard can tell content from overhead. A missing
+/// database reports zeros rather than failing so a stock install renders an
+/// honest empty state.
+public struct IndexStorageBreakdown: Sendable, Codable, Equatable {
+    /// Main SQLite file size in bytes (`index.db`).
+    public let dbFileBytes: Int64
+    /// Write-ahead log size in bytes (`index.db-wal`), zero when checkpointed.
+    public let walBytes: Int64
+    /// Total chunk text bytes held by the index.
+    public let textBytes: Int64
+    /// Total embedding BLOB bytes held by vector chunks.
+    public let vectorBytes: Int64
+    /// Full-text index bytes (`indexed_chunks_fts`), zero when unavailable.
+    public let ftsBytes: Int64
+    /// Unused freelist bytes reclaimable by `VACUUM`.
+    public let freeBytes: Int64
+    /// Logical content bytes (`textBytes` plus `vectorBytes`).
+    public let contentBytes: Int64
+
+    /// Creates a storage breakdown.
+    /// - Parameters:
+    ///   - dbFileBytes: Main file size.
+    ///   - walBytes: Write-ahead log size.
+    ///   - textBytes: Chunk text bytes.
+    ///   - vectorBytes: Embedding bytes.
+    ///   - ftsBytes: Full-text index bytes.
+    ///   - freeBytes: Freelist bytes.
+    ///   - contentBytes: Logical content bytes.
+    public init(
+        dbFileBytes: Int64 = 0,
+        walBytes: Int64 = 0,
+        textBytes: Int64 = 0,
+        vectorBytes: Int64 = 0,
+        ftsBytes: Int64 = 0,
+        freeBytes: Int64 = 0,
+        contentBytes: Int64 = 0
+    ) {
+        self.dbFileBytes = dbFileBytes
+        self.walBytes = walBytes
+        self.textBytes = textBytes
+        self.vectorBytes = vectorBytes
+        self.ftsBytes = ftsBytes
+        self.freeBytes = freeBytes
+        self.contentBytes = contentBytes
+    }
+}
+
+/// Outcome of reclaiming index file space with `VACUUM`.
+///
+/// Carries the on-disk total before and after plus the reclaimed delta so the
+/// caller renders the saved bytes without recomputing them. Totals cover the
+/// main file plus the write-ahead log so a checkpointed WAL cannot hide space.
+public struct IndexReclaimResult: Sendable, Codable, Equatable {
+    /// On-disk total before `VACUUM`, in bytes.
+    public let beforeBytes: Int64
+    /// On-disk total after `VACUUM`, in bytes.
+    public let afterBytes: Int64
+    /// Bytes reclaimed (`beforeBytes` minus `afterBytes`, floored at zero).
+    public let reclaimedBytes: Int64
+
+    /// Creates a reclaim outcome.
+    /// - Parameters:
+    ///   - beforeBytes: On-disk total before.
+    ///   - afterBytes: On-disk total after.
+    ///   - reclaimedBytes: Bytes reclaimed.
+    public init(beforeBytes: Int64, afterBytes: Int64, reclaimedBytes: Int64) {
+        self.beforeBytes = beforeBytes
+        self.afterBytes = afterBytes
+        self.reclaimedBytes = reclaimedBytes
     }
 }
 

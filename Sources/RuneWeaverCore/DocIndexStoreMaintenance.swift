@@ -6,14 +6,36 @@
 // statement helpers behind them. Document and chunk rows live beside it.
 
 import Foundation
+import os
 
 #if canImport(SQLite3)
     import SQLite3
 #endif
 
 #if canImport(SQLite3)
+    /// Per-object page-byte reader for the document index size split.
+    ///
+    /// Maps `dbstat` object names to summed `pgsize` bytes so the caller
+    /// attributes file pages to content and search structures. Returning nil
+    /// simulates a SQLite build without the `dbstat` virtual table so the
+    /// size probe degrades to file sizes with a null breakdown.
+    public typealias DocIndexDbstatProbe = @Sendable (OpaquePointer?) -> [String: Int64]?
+
+    /// Lock guarding the injectable size probe so test overrides stay race-free.
+    private let docIndexDbstatProbeLock = OSAllocatedUnfairLock(initialState: DocIndexDbstatProbe?.none)
+
     /// Deletion, aggregation, and reset for the document index.
     extension SQLiteDocIndexStore {
+        /// Injectable `dbstat` probe overriding the grouped page-byte read.
+        ///
+        /// Nil uses the live `dbstat` virtual table; a probe returning nil
+        /// simulates a SQLite build without `dbstat` so the statistics path
+        /// still reports file sizes with a null breakdown instead of failing.
+        public static var dbstatProbeOverride: DocIndexDbstatProbe? {
+            get { docIndexDbstatProbeLock.withLock { $0 } }
+            set { docIndexDbstatProbeLock.withLock { $0 = newValue } }
+        }
+
         /// Deletes a document and its chunks.
         static func deleteDocument(id: UUID, dbPath: String) throws -> Bool {
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -42,24 +64,90 @@ import Foundation
             }
         }
 
+        /// Stamps one document as seen by the current run.
+        ///
+        /// Records `runID` in `last_seen_run` so the end-of-run reconcile can
+        /// tell a live document from one that left policy. Missing rows are a
+        /// no-op so stamping a brand-new path before its first upsert stays
+        /// safe; opening the database first runs the additive migration, so a
+        /// legacy file without the column gains it before the update.
+        static func markSeen(source: IndexSource, externalID: String, runID: String, dbPath: String) throws {
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(
+                handle: handle,
+                sql: "UPDATE indexed_documents SET last_seen_run = ? WHERE source = ? AND external_id = ?;",
+                parameters: [.text(runID), .text(source.rawValue), .text(externalID)]
+            )
+        }
+
+        /// Deletes `files` documents not seen by the given run.
+        ///
+        /// Removes every `files` row whose `last_seen_run` differs from `runID`
+        /// (including rows never stamped) together with their chunks, so chunk
+        /// deletes fire the FTS triggers and retired text stops surfacing in
+        /// keyword search. Mail and Messages rows are untouched. Space reclaim
+        /// stays with the caller, which vacuums only on a non-zero return.
+        static func retireUnseenFiles(runID: String, dbPath: String) throws -> Int {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return 0 }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            let removed: Int
+            do {
+                try exec(
+                    handle: handle,
+                    sql: "DELETE FROM indexed_chunks WHERE document_id IN "
+                        + "(SELECT id FROM indexed_documents WHERE source = ? "
+                        + "AND (last_seen_run IS NULL OR last_seen_run != ?));",
+                    parameters: [.text(IndexSource.files.rawValue), .text(runID)]
+                )
+                try exec(
+                    handle: handle,
+                    sql: "DELETE FROM indexed_documents WHERE source = ? "
+                        + "AND (last_seen_run IS NULL OR last_seen_run != ?);",
+                    parameters: [.text(IndexSource.files.rawValue), .text(runID)]
+                )
+                removed = Int(sqlite3_changes(handle))
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+            return removed
+        }
+
         /// Aggregates current index statistics.
+        ///
         /// The watermark is the newest `indexed_at` in the store, so recall
         /// and status surfaces report the last write rather than the read
-        /// time; an empty or missing store reports the epoch.
+        /// time; an empty or missing store reports the epoch. On-disk sizes
+        /// ride the shared `resolvedDbFileBytes` helper (filesystem size with
+        /// a page-counter fallback) so stats and the breakdown agree, while
+        /// text/vector report logical content bytes (`SUM(LENGTH(chunk_text))`
+        /// and `SUM(LENGTH(embedding))`) and only the FTS leg rides the grouped
+        /// `dbstat` query for on-disk page bytes. `dbstat` availability gates
+        /// whether the split is reported at all. A SQLite build without `dbstat`
+        /// still reports file sizes with a null breakdown instead of failing.
         static func stats(dbPath: String) throws -> IndexStats {
+            try stats(dbPath: dbPath, dbstatProbe: dbstatProbeOverride)
+        }
+
+        /// Aggregates current index statistics with an injectable size probe.
+        ///
+        /// Mirrors ``stats(dbPath:)`` while letting tests simulate a SQLite
+        /// build without the `dbstat` virtual table by passing a probe that
+        /// returns nil. A nil probe result still reports file sizes with a
+        /// null breakdown instead of failing. Opening creates an empty store
+        /// when absent so a fresh path reports zero counts with true file
+        /// sizes instead of missing-file zeros.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
+        /// - Returns: An index statistics snapshot with true on-disk sizes.
+        static func stats(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> IndexStats {
             let expanded = (dbPath as NSString).expandingTildeInPath
-            guard FileManager.default.fileExists(atPath: expanded) else {
-                return IndexStats(
-                    documents: 0,
-                    chunks: 0,
-                    vectorChunks: 0,
-                    keywordChunks: 0,
-                    bytes: 0,
-                    indexAsOf: Date(timeIntervalSince1970: 0),
-                    bySource: [],
-                    byExtractStatus: []
-                )
-            }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             let documents = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_documents;")
@@ -75,6 +163,36 @@ import Foundation
             let indexAsOf = try scalarMaxIndexedAt(handle: handle)
             let bySource = try sourceAggregates(handle: handle)
             let byExtractStatus = try extractStatusAggregates(handle: handle)
+            let pageCount = try scalarInt(handle: handle, sql: "PRAGMA page_count;")
+            let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
+            let freelistCount = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
+            let pageSizeBytes = Int64(max(pageSize, 0))
+            let dbFileBytes = resolvedDbFileBytes(
+                pageCount: pageCount,
+                pageSizeBytes: pageSizeBytes,
+                expandedPath: expanded
+            )
+            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
+            let walBytes = onDiskBytes(at: expanded + "-wal")
+            let vectorLogical = try scalarInt64(
+                handle: handle,
+                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
+            )
+            let grouped = try? dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
+            let textBytes: Int64?
+            let vectorBytes: Int64?
+            let ftsBytes: Int64?
+            if let grouped {
+                // Logical content bytes, not page bytes: only the FTS leg is
+                // attributed via the grouped `dbstat` split.
+                textBytes = bytes
+                vectorBytes = vectorLogical
+                ftsBytes = ftsPageBytes(from: grouped)
+            } else {
+                textBytes = nil
+                vectorBytes = nil
+                ftsBytes = nil
+            }
             return IndexStats(
                 documents: documents,
                 chunks: chunks,
@@ -83,8 +201,195 @@ import Foundation
                 bytes: bytes,
                 indexAsOf: indexAsOf,
                 bySource: bySource,
-                byExtractStatus: byExtractStatus
+                byExtractStatus: byExtractStatus,
+                dbFileBytes: dbFileBytes,
+                walBytes: walBytes,
+                textBytes: textBytes,
+                vectorBytes: vectorBytes,
+                ftsBytes: ftsBytes,
+                freeBytes: freeBytes,
+                contentBytes: IndexContentBytes.contentBytes(textBytes: bytes, vectorBytes: vectorLogical)
             )
+        }
+
+        /// Reads the on-disk and logical size breakdown.
+        ///
+        /// File sizes ride the shared `resolvedDbFileBytes` helper (filesystem
+        /// size with a page-counter fallback) so the breakdown matches what
+        /// callers observe with file attributes and agrees with stats;
+        /// logical bytes aggregate the content tables via `IndexContentBytes`.
+        /// A missing database reports zeros so status probes stay honest
+        /// without failing. The grouped `dbstat` lookup degrades to zero when
+        /// the virtual table is unavailable rather than failing the probe.
+        static func storageBreakdown(dbPath: String) throws -> IndexStorageBreakdown {
+            try storageBreakdown(dbPath: dbPath, dbstatProbe: dbstatProbeOverride)
+        }
+
+        /// Reads the on-disk and logical size breakdown with an injectable size probe.
+        ///
+        /// Mirrors ``storageBreakdown(dbPath:)`` while letting tests simulate
+        /// a SQLite build without the `dbstat` virtual table by passing a
+        /// probe that returns nil. A nil probe result degrades the full-text
+        /// leg to zero instead of failing the probe. Opening creates an empty
+        /// store when absent so a fresh path reports true file sizes instead
+        /// of missing-file zeros.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
+        /// - Returns: The storage breakdown.
+        static func storageBreakdown(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> IndexStorageBreakdown {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let textBytes = try scalarInt64(
+                handle: handle,
+                sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
+            )
+            let vectorBytes = try scalarInt64(
+                handle: handle,
+                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
+            )
+            let ftsBytes: Int64 = (try? ftsPageBytes(from: dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe))) ?? 0
+            let freelistPages = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
+            let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
+            let pageSizeBytes = Int64(max(pageSize, 0))
+            let pageCount = (try? scalarInt(handle: handle, sql: "PRAGMA page_count;")) ?? 0
+            let dbFileBytes = resolvedDbFileBytes(
+                pageCount: pageCount,
+                pageSizeBytes: pageSizeBytes,
+                expandedPath: expanded
+            )
+            let freeBytes = Int64(max(freelistPages, 0)) * pageSizeBytes
+            return IndexStorageBreakdown(
+                dbFileBytes: dbFileBytes,
+                walBytes: onDiskBytes(at: expanded + "-wal"),
+                textBytes: textBytes,
+                vectorBytes: vectorBytes,
+                ftsBytes: ftsBytes,
+                freeBytes: freeBytes,
+                contentBytes: IndexContentBytes.contentBytes(textBytes: textBytes, vectorBytes: vectorBytes)
+            )
+        }
+
+        /// Reads per-object page bytes via one grouped `dbstat` query.
+        ///
+        /// Groups `SUM(pgsize)` by object name so the caller attributes file
+        /// pages to content and search structures without one query per table.
+        /// An injected test probe overrides the live table; a nil probe result
+        /// or a failed prepare reports unavailability instead of an empty map.
+        private static func dbstatGroupedPageBytes(handle: OpaquePointer?) throws -> [String: Int64] {
+            try dbstatGroupedPageBytes(handle: handle, probe: dbstatProbeOverride)
+        }
+
+        /// Reads per-object page bytes via one grouped `dbstat` query with an injectable probe.
+        ///
+        /// Groups `SUM(pgsize)` by object name so the caller attributes file
+        /// pages to content and search structures without one query per table.
+        /// A nil probe result or a failed prepare reports unavailability
+        /// instead of an empty map.
+        /// - Parameters:
+        ///   - handle: Open database handle.
+        ///   - probe: Per-object page-byte reader, or nil for the live table.
+        /// - Returns: Mapping from object name to page bytes.
+        private static func dbstatGroupedPageBytes(handle: OpaquePointer?, probe: DocIndexDbstatProbe?) throws -> [String: Int64] {
+            if let probe {
+                guard let mapping = probe(handle) else {
+                    throw DocIndexError.persistenceFailed("dbstat is unavailable")
+                }
+                return mapping
+            }
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name;", -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare dbstat probe")
+            }
+            defer { sqlite3_finalize(statement) }
+            var values: [String: Int64] = [:]
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let name = SQLiteHelpers.columnText(statement, index: 0) else { continue }
+                values[name] = sqlite3_column_int64(statement, 1)
+            }
+            return values
+        }
+
+        /// Sums full-text page bytes across the `dbstat` split.
+        ///
+        /// Adds every object whose name carries the chunk FTS prefix so the
+        /// contentless shadow tables (`_data`, `_idx`, and siblings) count
+        /// alongside the virtual table instead of reporting only the empty
+        /// outer name.
+        private static func ftsPageBytes(from grouped: [String: Int64]) -> Int64 {
+            var total: Int64 = 0
+            for (name, bytes) in grouped where name.hasPrefix("indexed_chunks_fts") {
+                total += max(bytes, 0)
+            }
+            return max(total, 0)
+        }
+
+        /// Runs `VACUUM` and reports the reclaimed bytes.
+        ///
+        /// Totals cover the main file plus the write-ahead log so a
+        /// checkpointed WAL cannot hide space. A missing database is created
+        /// as an empty store first so the probe reports true file sizes
+        /// instead of missing-file zeros. `VACUUM` runs outside any
+        /// transaction on its own handle which is closed before the
+        /// after-measurement so the rewritten size is visible.
+        static func reclaim(dbPath: String) throws -> IndexReclaimResult {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            if !FileManager.default.fileExists(atPath: expanded) {
+                let created = try open(dbPath: dbPath)
+                sqlite3_close(created)
+            }
+            let beforeBytes = onDiskBytes(at: expanded) + onDiskBytes(at: expanded + "-wal")
+            let handle = try open(dbPath: dbPath)
+            do {
+                try exec(handle: handle, sql: "VACUUM;")
+            } catch {
+                sqlite3_close(handle)
+                throw error
+            }
+            sqlite3_close(handle)
+            let afterBytes = onDiskBytes(at: expanded) + onDiskBytes(at: expanded + "-wal")
+            return IndexReclaimResult(
+                beforeBytes: beforeBytes,
+                afterBytes: afterBytes,
+                reclaimedBytes: max(beforeBytes - afterBytes, 0)
+            )
+        }
+
+        /// Reads one file's size, reporting zero when absent or unreadable.
+        ///
+        /// Keeps the breakdown and reclaim probes honest without throwing: a
+        /// transiently missing WAL reads as zero rather than failing the poll.
+        private static func onDiskBytes(at path: String) -> Int64 {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+                  let size = attributes[.size] as? NSNumber
+            else {
+                return 0
+            }
+            return max(size.int64Value, 0)
+        }
+
+        /// Resolves the on-disk database size shared by stats and the breakdown.
+        ///
+        /// Prefers the filesystem size so the figure matches what callers
+        /// observe with file attributes; falls back to page counters when the
+        /// file probe reads zero. Single-sourced so both aggregates report the
+        /// same `dbFileBytes` instead of each deriving it differently.
+        /// - Parameters:
+        ///   - pageCount: `PRAGMA page_count` value.
+        ///   - pageSizeBytes: `PRAGMA page_size` value in bytes.
+        ///   - expandedPath: Expanded database file path.
+        /// - Returns: On-disk file size in bytes.
+        static func resolvedDbFileBytes(pageCount: Int, pageSizeBytes: Int64, expandedPath: String) -> Int64 {
+            let pageDerivedBytes = Int64(max(pageCount, 0)) * max(pageSizeBytes, 0)
+            let fileObservedBytes = onDiskBytes(at: expandedPath)
+            if fileObservedBytes > 0 {
+                return fileObservedBytes
+            }
+            if pageDerivedBytes > 0 {
+                return pageDerivedBytes
+            }
+            return onDiskBytes(at: expandedPath)
         }
 
         /// Aggregates per-source document, chunk, and byte counts.

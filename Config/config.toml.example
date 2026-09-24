@@ -144,7 +144,7 @@ max_concurrent_machines = 3
 # Sensitive-path deny list for file tools, mirroring the engine guard.
 # Glob-like: `*` matches within a name, `dir/*` guards a subtree.
 # Changes need a restart to take effect.
-deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*"]
+deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*", ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc", ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*", ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"]
 # Allowed roots for file reads (`~` expands to home); outside-home paths
 # escalate to approval.
 allow_roots = ["~"]
@@ -164,11 +164,19 @@ mail = false
 messages = false
 # Root directories scanned for files (`~` expands to home).
 roots = ["~"]
-# Glob patterns skipped during a file scan (VCS directories, build output,
-# caches) so the walk never descends into material it should not index.
-# Media libraries (Music, Pictures, Movies), Library, .Trash, and the app's
-# own .runeweaver state are always skipped in addition to these.
-exclude = [".git", "node_modules", ".build", "DerivedData", "Library", ".Trash", "*.app"]
+# Glob patterns skipped during a file scan (build output, machine-output files,
+# and package-manager, model, and agent tool caches) so the walk never descends
+# into material it should not index. These are ordinary editable globs that seed
+# the Index Policy "Exclude patterns" editor: read and change them there, where
+# they persist into [index].exclude. Matching is case-insensitive, so an
+# uppercase .LOG is covered, and bare directory names match at any depth.
+# Media libraries (Music, Pictures, Movies), Library, .Trash, the app's own
+# .runeweaver state, and VCS, dependency, build, and cache trees (Music,
+# Pictures, Movies, Library, .Trash, .runeweaver, .git, node_modules,
+# DerivedData, __pycache__, .venv) are always skipped in addition to these and
+# cannot be removed by configuration; they appear in the Index Policy scope copy
+# rather than duplicated here.
+exclude = [".build", "*.app", "*.log", "*.tmp", ".DS_Store", ".bun", ".cocoapods", ".npm", ".npm-packages", ".nvm", ".cache", ".gradle", ".swiftpm", ".swiftly", ".gem", ".rvm", ".cpan", ".local", ".docker", ".ollama", ".terraform.d", ".ipynb_checkpoints", ".ipython", ".jupyter", ".matplotlib", ".vscode", ".vscode-insiders", ".zsh_sessions", "gopath", "go", "nltk_data"]
 # Largest file the indexer will read, in megabytes (1-10240).
 max_file_mb = 20
 # How far back mail is vectorized: 30d | 6m | 1y | 2y | all ("all" disables the window).
@@ -183,6 +191,23 @@ icloud_evicted = "skip"
 describe_images_with_llm = false
 # Maximum items processed per nightly run; 0 means unlimited (0-100000).
 nightly_budget = 0
+# Maximum chunks per document that carry vectors (1-4096, default 128). Longer
+# documents keep every chunk keyword-searchable and vectorize only the first
+# N chunks in document order, so a capped document stays fully findable by
+# keyword.
+max_vector_chunks_per_document = 128
+# Run effort: "light" (1 worker) | "balanced" (half the cores, up to 4) |
+# "performance" (all but one core) | "custom" (explicit `workers` count).
+# Resolved once at run start; thermal pressure can back the run off below it.
+effort = "balanced"
+# Explicit worker count for `effort = "custom"` (1-64, clamped to the core
+# count at run start). Leave at 0 for the scaling presets, which derive the
+# count from the preset.
+# workers = 0
+# Whether indexing backs off when the system reports thermal pressure.
+thermal_backoff = true
+# Pause runs while on battery power and resume on AC. Committed batches are kept.
+pause_on_battery = false
 # SQLite path for the index database.
 db_path = "~/.runeweaver/index.db"
 

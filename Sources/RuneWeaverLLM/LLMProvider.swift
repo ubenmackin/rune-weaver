@@ -1063,9 +1063,14 @@ enum OpenAISSEPump {
                 if payload == "[DONE]" {
                     break
                 }
-                guard let data = payload.data(using: .utf8),
-                      let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
-                else { continue }
+                guard let data = payload.data(using: .utf8) else { continue }
+                let chunk: OpenAIStreamChunkDTO
+                do {
+                    chunk = try JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
+                } catch {
+                    RuneWeaverLog.tools.debug("OpenAIStream: failed to decode chunk: \(error.localizedDescription)")
+                    continue
+                }
                 if let text = ingestChatChunk(
                     chunk,
                     lastModel: &lastModel,
@@ -1077,17 +1082,21 @@ enum OpenAISSEPump {
                 }
             }
             if !sawSSE, !bufferedJSON.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-               let data = bufferedJSON.data(using: .utf8),
-               let chunk = try? JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
+               let data = bufferedJSON.data(using: .utf8)
             {
-                if let text = ingestChatChunk(
-                    chunk,
-                    lastModel: &lastModel,
-                    lastUsage: &lastUsage,
-                    lastFinishReason: &lastFinishReason,
-                    toolAccumulator: &accumulator
-                ) {
-                    continuation.yield(.textDelta(text))
+                do {
+                    let chunk = try JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
+                    if let text = ingestChatChunk(
+                        chunk,
+                        lastModel: &lastModel,
+                        lastUsage: &lastUsage,
+                        lastFinishReason: &lastFinishReason,
+                        toolAccumulator: &accumulator
+                    ) {
+                        continuation.yield(.textDelta(text))
+                    }
+                } catch {
+                    RuneWeaverLog.tools.debug("OpenAIStream: failed to decode buffered JSON chunk: \(error.localizedDescription)")
                 }
             }
         } catch is CancellationError {
@@ -1215,9 +1224,14 @@ enum OpenAISSEPump {
                 if payload == "[DONE]" {
                     break
                 }
-                guard let data = payload.data(using: .utf8),
-                      let event = try? JSONDecoder().decode(OpenAIResponsesStreamEventDTO.self, from: data)
-                else { continue }
+                guard let data = payload.data(using: .utf8) else { continue }
+                let event: OpenAIResponsesStreamEventDTO
+                do {
+                    event = try JSONDecoder().decode(OpenAIResponsesStreamEventDTO.self, from: data)
+                } catch {
+                    RuneWeaverLog.tools.debug("OpenAIResponsesStream: failed to decode event: \(error.localizedDescription)")
+                    continue
+                }
                 let nextIndex = accumulator.count
                 accumulator.ingest(event, nextIndex: nextIndex)
                 switch effect(for: event, nextIndex: nextIndex) {

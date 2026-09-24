@@ -221,7 +221,11 @@ public actor GoalEngine {
         }
         // replacePlan only swaps pending rows, so in-flight and finished work
         // survives a replan while the creation placeholder disappears.
-        try? await store.replacePlan(goalID: goal.id, steps: steps)
+        do {
+            try await store.replacePlan(goalID: goal.id, steps: steps)
+        } catch {
+            RuneWeaverLog.scheduler.error("GoalEngine: failed to persist plan for goal \(goal.id): \(error.localizedDescription)")
+        }
     }
 
     /// Decomposes one goal looked up by identifier.
@@ -486,12 +490,16 @@ public actor GoalEngine {
             notes: "Planning fallback"
         )
         // Best-effort fallback persistence: failures leave the placeholder for
-        // a later retry, so results are intentionally discarded.
-        _ = try? await store.replacePlan(goalID: goal.id, steps: [step])
-        _ = try? await store.appendEvent(
-            goalID: goal.id,
-            kind: .note,
-            message: "Planning fell back to a single step after unusable model output."
-        )
+        // a later retry, so results are logged on error.
+        do {
+            _ = try await store.replacePlan(goalID: goal.id, steps: [step])
+            _ = try await store.appendEvent(
+                goalID: goal.id,
+                kind: .note,
+                message: "Planning fell back to a single step after unusable model output."
+            )
+        } catch {
+            RuneWeaverLog.scheduler.warning("GoalEngine: failed to persist fallback plan for goal \(goal.id): \(error.localizedDescription)")
+        }
     }
 }

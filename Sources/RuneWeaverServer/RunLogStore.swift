@@ -593,9 +593,15 @@ enum SQLiteOpenHelper {
                 let timestamp = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 6))
                 let response = SQLiteHelpers.columnText(statement, index: 7)
                 let toolActionsText = SQLiteHelpers.columnText(statement, index: 8)
-                let toolActions = toolActionsText.flatMap { raw in
-                    raw.data(using: .utf8).flatMap { try? JSONDecoder().decode([ToolAction].self, from: $0) }
-                } ?? []
+                let toolActions: [ToolAction] = {
+                    guard let raw = toolActionsText, let data = raw.data(using: .utf8) else { return [] }
+                    do {
+                        return try JSONDecoder().decode([ToolAction].self, from: data)
+                    } catch {
+                        RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed to decode tool actions for run \(id): \(error.localizedDescription)")
+                        return []
+                    }
+                }()
                 let totalTokens = SQLiteHelpers.columnInt64(statement, index: 9).map { Int($0) }
                 let durationMs = SQLiteHelpers.columnInt64(statement, index: 10).map { Int($0) }
                 // A missing column (pre-migration table) or malformed link text
@@ -657,7 +663,15 @@ enum SQLiteOpenHelper {
             SQLiteHelpers.bindText(statement, index: 7, value: entry.message)
             SQLiteHelpers.bindDouble(statement, index: 8, value: entry.timestamp.timeIntervalSince1970)
             SQLiteHelpers.bindText(statement, index: 9, value: entry.response)
-            let toolActionsJSON = (try? JSONEncoder().encode(entry.toolActions)).flatMap { String(data: $0, encoding: .utf8) }
+            let toolActionsJSON: String? = {
+                do {
+                    let data = try JSONEncoder().encode(entry.toolActions)
+                    return String(data: data, encoding: .utf8)
+                } catch {
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed to encode tool actions for run \(entry.id): \(error.localizedDescription)")
+                    return nil
+                }
+            }()
             SQLiteHelpers.bindText(statement, index: 10, value: toolActionsJSON)
             SQLiteHelpers.bindInt64(statement, index: 11, value: entry.totalTokens.map { Int64($0) })
             SQLiteHelpers.bindInt64(statement, index: 12, value: entry.durationMs.map { Int64($0) })

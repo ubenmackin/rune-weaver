@@ -731,10 +731,13 @@ public enum WSTurnAlive: Sendable {
     /// - Parameter sessionID: Owning session.
     /// - Returns: Wire text, or nil when encoding fails.
     public static func frameText(sessionID: UUID) -> String? {
-        guard let data = try? JSONEncoder().encode(WSTurnAliveFrame(sessionID: sessionID)),
-              let text = String(data: data, encoding: .utf8)
-        else { return nil }
-        return text
+        do {
+            let data = try JSONEncoder().encode(WSTurnAliveFrame(sessionID: sessionID))
+            return String(data: data, encoding: .utf8)
+        } catch {
+            RuneWeaverLog.server.error("WSTurnAlive: failed to encode turn alive frame: \(error.localizedDescription)")
+            return nil
+        }
     }
 }
 

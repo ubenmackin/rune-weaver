@@ -844,7 +844,12 @@ public actor MessagesIndexer {
     private func readWatermark() throws -> Int64 {
         guard FileManager.default.fileExists(atPath: stateURL.path) else { return 0 }
         let data = try Data(contentsOf: stateURL)
-        return (try? JSONDecoder().decode(MessagesIndexState.self, from: data))?.lastRowID ?? 0
+        do {
+            return try JSONDecoder().decode(MessagesIndexState.self, from: data).lastRowID
+        } catch {
+            RuneWeaverLog.stores.warning("MessagesIndexer: failed to decode watermark from '\(stateURL.path)': \(error.localizedDescription)")
+            return 0
+        }
     }
 
     /// Persists the watermark atomically.

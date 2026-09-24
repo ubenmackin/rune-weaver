@@ -52,8 +52,8 @@ public final class SettingsWindowController: NSObject {
 
     /// Synchronous convenience overload that delegates to async `show`.
     public func show(url: URL) {
-        Task { @MainActor in
-            await self.show(url: url, sessionToken: nil)
+        Task { [weak self] in
+            await self?.show(url: url, sessionToken: nil)
         }
     }
 

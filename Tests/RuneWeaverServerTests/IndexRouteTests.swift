@@ -172,7 +172,8 @@ struct IndexRouteAuthTests {
                 (.POST, "/index/run"),
                 (.POST, "/index/cancel"),
                 (.POST, "/index/prune"),
-                (.POST, "/index/reset")
+                (.POST, "/index/reset"),
+                (.POST, "/index/reclaim")
             ]
             for (method, path) in probes {
                 let response = try await indexRequest(app: app, method: method, path: path)
@@ -289,10 +290,43 @@ struct IndexControlRouteTests {
             app.runeWeaver = makeIndexTestContext()
             registerRuneWeaverRoutes(app)
 
-            for path in ["/index/run", "/index/cancel", "/index/prune", "/index/reset"] {
+            for path in ["/index/run", "/index/cancel", "/index/prune", "/index/reset", "/index/reclaim"] {
                 let response = try await indexRequest(app: app, method: .POST, path: path)
                 #expect(response.status == .serviceUnavailable, "\(path) must fail closed without a coordinator")
             }
+        }
+    }
+
+    @Test
+    func `Reclaim reports before and after byte figures`() async throws {
+        let (coordinator, store, directory) = try makeIndexComponents()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Persist one document so the database file exists on disk and the
+        // route reports true filesystem figures for the reclaim window.
+        let seed = IndexedDocument(
+            source: .files,
+            externalID: "reclaim-probe",
+            displayName: "Reclaim Probe",
+            contentHash: "hash-reclaim-probe"
+        )
+        let persisted = try await store.upsertDocument(seed)
+        _ = try await store.upsertChunks(
+            documentID: persisted.id,
+            chunks: [IndexedChunk(documentID: persisted.id, ordinal: 0, text: "reclaim probe body")]
+        )
+        _ = try await store.stats()
+
+        try await withIndexTestApp { app in
+            app.runeWeaver = makeIndexTestContext(coordinator: coordinator, store: store)
+            registerRuneWeaverRoutes(app)
+
+            let response = try await indexRequest(app: app, method: .POST, path: "/index/reclaim")
+            #expect(response.status == .ok)
+            let reclaim = try response.content.decode(IndexReclaimResponse.self)
+            #expect(reclaim.beforeBytes > 0)
+            #expect(reclaim.afterBytes > 0)
+            #expect(reclaim.afterBytes <= reclaim.beforeBytes)
+            #expect(reclaim.reclaimedBytes == reclaim.beforeBytes - reclaim.afterBytes)
         }
     }
 }
@@ -313,12 +347,22 @@ struct IndexStatusDTOTests {
             bytes: 4096,
             indexAsOf: snapshot
         )
+        let storage = IndexStorageBreakdown(
+            dbFileBytes: 8192,
+            walBytes: 512,
+            textBytes: 4096,
+            vectorBytes: 1024,
+            ftsBytes: 2048,
+            freeBytes: 256,
+            contentBytes: 5120
+        )
 
         let response = makeIndexStatusResponse(
             config: config,
             stats: stats,
             running: true,
-            lastErrors: ["mail: gateway timeout"]
+            lastErrors: ["mail: gateway timeout"],
+            storage: storage
         )
 
         #expect(response.enabled == true)
@@ -328,6 +372,13 @@ struct IndexStatusDTOTests {
         #expect(response.vectorChunks == 14)
         #expect(response.keywordChunks == 7)
         #expect(response.bytes == 4096)
+        #expect(response.dbFileBytes == 8192)
+        #expect(response.walBytes == 512)
+        #expect(response.textBytes == 4096)
+        #expect(response.vectorBytes == 1024)
+        #expect(response.ftsBytes == 2048)
+        #expect(response.freeBytes == 256)
+        #expect(response.contentBytes == 5120)
         #expect(response.indexAsOf == snapshot)
         #expect(response.sources == [
             IndexSourceStatus(kind: "files", enabled: true),
@@ -335,6 +386,71 @@ struct IndexStatusDTOTests {
             IndexSourceStatus(kind: "messages", enabled: true)
         ])
         #expect(response.lastErrors == ["mail: gateway timeout"])
+        // Effort resolves from the stored preset on this machine.
+        #expect(response.effort?.preset == "balanced")
+        #expect((response.effort?.resolvedWorkers ?? 0) >= 1)
+        #expect((response.effort?.activeProcessors ?? 0) >= 1)
+    }
+
+    @Test
+    func `Status reports true on-disk size from the store`() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("index.db").path
+        let store = DocIndexStore(dbPath: dbPath)
+        // Persist one document so the database file exists on disk with
+        // content the breakdown can attribute to text bytes.
+        let seed = IndexedDocument(
+            source: .files,
+            externalID: "status-size-probe",
+            displayName: "Status Size Probe",
+            contentHash: "hash-status-size-probe"
+        )
+        let persisted = try await store.upsertDocument(seed)
+        _ = try await store.upsertChunks(
+            documentID: persisted.id,
+            chunks: [IndexedChunk(documentID: persisted.id, ordinal: 0, text: "status size probe body")]
+        )
+        _ = try await store.stats()
+        let breakdown = try await store.storageBreakdown()
+        let attributes = try FileManager.default.attributesOfItem(atPath: dbPath)
+        let fileSize = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+        #expect(breakdown.dbFileBytes == fileSize)
+        #expect(breakdown.dbFileBytes > 0)
+        #expect(breakdown.walBytes >= 0)
+        #expect(breakdown.contentBytes == breakdown.textBytes + breakdown.vectorBytes)
+
+        let config = IndexConfig(enabled: true, files: true, dbPath: dbPath)
+        let stats = try await store.stats()
+        let response = makeIndexStatusResponse(
+            config: config,
+            stats: stats,
+            running: false,
+            lastErrors: [],
+            storage: breakdown
+        )
+        #expect(response.dbFileBytes == fileSize)
+        #expect(response.textBytes == stats.bytes)
+    }
+
+    @Test
+    func `Status decodes payloads predating sizes and effort`() throws {
+        // Older engines never wrote the size breakdown or the effort block,
+        // so the status contract stays version-tolerant instead of failing.
+        let payload = """
+        {"enabled":true,"running":false,"documents":7,"chunks":21,"vectorChunks":14,"keywordChunks":7,"bytes":4096,"sources":[],"lastErrors":[],"bySource":[],"byExtractStatus":[]}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(IndexStatusResponse.self, from: payload)
+        #expect(decoded.documents == 7)
+        #expect(decoded.dbFileBytes == 0)
+        #expect(decoded.walBytes == 0)
+        #expect(decoded.textBytes == 0)
+        #expect(decoded.vectorBytes == 0)
+        #expect(decoded.ftsBytes == 0)
+        #expect(decoded.freeBytes == 0)
+        #expect(decoded.contentBytes == 0)
+        #expect(decoded.effort == nil)
     }
 
     @Test
@@ -345,11 +461,20 @@ struct IndexStatusDTOTests {
         #expect(response.documents == 0)
         #expect(response.chunks == 0)
         #expect(response.bytes == 0)
+        #expect(response.dbFileBytes == 0)
+        #expect(response.walBytes == 0)
+        #expect(response.textBytes == 0)
+        #expect(response.vectorBytes == 0)
+        #expect(response.ftsBytes == 0)
+        #expect(response.freeBytes == 0)
+        #expect(response.contentBytes == 0)
         #expect(response.indexAsOf == nil)
         // A globally disabled indexer gates every source, so the dashboard never
         // shows one as live while nothing can run.
         #expect(response.sources.allSatisfy { $0.enabled == false })
         #expect(response.lastErrors.isEmpty)
+        // Effort still resolves so the dashboard renders workers on an empty store.
+        #expect(response.effort?.preset == IndexConfig.defaultEffort)
     }
 }
 
@@ -372,14 +497,23 @@ struct IndexSettingsDTOTests {
             iCloudEvicted: "skip",
             describeImagesWithLLM: false,
             nightlyBudget: 0,
-            dbPath: "~/.runeweaver/index.db"
+            dbPath: "~/.runeweaver/index.db",
+            effort: "balanced",
+            workers: 0,
+            thermalBackoff: true,
+            pauseOnBattery: false,
+            maxVectorChunksPerDocument: 0
         )
 
         let update = UpdateSettingsRequest(index: IndexSettingsUpdate(
             enabled: false,
             mail: true,
             exclude: ["*.tmp"],
-            maxFileMB: 50
+            maxFileMB: 50,
+            effort: "light",
+            thermalBackoff: false,
+            pauseOnBattery: true,
+            maxVectorChunksPerDocument: 120
         ))
         try update.apply(to: &config)
 
@@ -387,6 +521,10 @@ struct IndexSettingsDTOTests {
         #expect(config.index.mail == true)
         #expect(config.index.exclude == ["*.tmp"])
         #expect(config.index.maxFileMB == 50)
+        #expect(config.index.effort == "light")
+        #expect(config.index.thermalBackoff == false)
+        #expect(config.index.pauseOnBattery == true)
+        #expect(config.index.maxVectorChunksPerDocument == 120)
         // Every omitted field keeps its stored value.
         #expect(config.index.files == true)
         #expect(config.index.messages == false)
@@ -396,6 +534,24 @@ struct IndexSettingsDTOTests {
         #expect(config.index.describeImagesWithLLM == false)
         #expect(config.index.nightlyBudget == 0)
         #expect(config.index.dbPath == "~/.runeweaver/index.db")
+        #expect(config.index.workers == 0)
+    }
+
+    @Test
+    func `Custom effort patch carries its worker count`() throws {
+        var config = RuneWeaverConfig.default
+        config.index.effort = "balanced"
+        config.index.workers = 0
+
+        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let update = UpdateSettingsRequest(index: IndexSettingsUpdate(
+            effort: "custom",
+            workers: cores
+        ))
+        try update.apply(to: &config)
+
+        #expect(config.index.effort == "custom")
+        #expect(config.index.workers == cores)
     }
 
     @Test
@@ -413,7 +569,12 @@ struct IndexSettingsDTOTests {
             iCloudEvicted: "download",
             describeImagesWithLLM: true,
             nightlyBudget: 500,
-            dbPath: "~/.runeweaver/index.db"
+            dbPath: "~/.runeweaver/index.db",
+            effort: "performance",
+            workers: 0,
+            thermalBackoff: false,
+            pauseOnBattery: true,
+            maxVectorChunksPerDocument: 80
         )
 
         let update = UpdateSettingsRequest(index: IndexSettingsUpdate(source.index))
@@ -437,7 +598,12 @@ struct IndexSettingsDTOTests {
             maxFileMB: 50,
             mailVectorWindow: "all",
             iCloudEvicted: "download",
-            describeImagesWithLLM: true
+            describeImagesWithLLM: true,
+            effort: "custom",
+            workers: 2,
+            thermalBackoff: false,
+            pauseOnBattery: true,
+            maxVectorChunksPerDocument: 120
         )
         let data = try JSONEncoder().encode(update)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
@@ -445,6 +611,60 @@ struct IndexSettingsDTOTests {
         #expect(object["mail_vector_window"] as? String == "all")
         #expect(object["icloud_evicted"] as? String == "download")
         #expect(object["describe_images_with_llm"] as? Bool == true)
+        #expect(object["effort"] as? String == "custom")
+        #expect(object["workers"] as? Int == 2)
+        #expect(object["thermal_backoff"] as? Bool == false)
+        #expect(object["pause_on_battery"] as? Bool == true)
+        #expect(object["max_vector_chunks_per_document"] as? Int == 120)
+    }
+
+    @Test
+    func `Index patch decodes the workers field`() throws {
+        let payload = """
+        {"effort":"custom","workers":5}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(IndexSettingsUpdate.self, from: payload)
+        #expect(decoded.workers == 5)
+    }
+
+    @Test
+    func `Settings response carries the walker always-skipped list`() throws {
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(enabled: true, files: true, roots: ["~"])
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        // Single-sourced from the walker's prune list so the dashboard copy
+        // cannot drift from what the next run actually skips.
+        #expect(response.index.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
+        #expect(response.index.alwaysSkipped.contains("Music"))
+        #expect(response.index.alwaysSkipped.contains(".git"))
+        // The wire payload carries the read-only array under snake_case.
+        let data = try JSONEncoder().encode(response.index)
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let wire = object["always_skipped"] as? [String]
+        #expect(wire == FilesIndexer.alwaysSkippedPatterns)
+    }
+
+    @Test
+    func `Index patch ignores always-skipped on write`() throws {
+        var config = RuneWeaverConfig.default
+        config.index = IndexConfig(enabled: true, files: true, roots: ["~"], exclude: [".git"])
+        let before = config.index.alwaysSkipped
+        // A client echo carrying a stale list must not drift the stored policy.
+        let update = UpdateSettingsRequest(index: IndexSettingsUpdate(
+            enabled: false,
+            alwaysSkipped: ["SentinelSkipAlpha", "SentinelSkipBeta"]
+        ))
+        try update.apply(to: &config)
+        #expect(config.index.enabled == false)
+        #expect(config.index.alwaysSkipped == before)
+        #expect(config.index.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
+        #expect(!config.index.alwaysSkipped.contains("SentinelSkipAlpha"))
+        // Decoding a payload that carries the key also discards it.
+        let payload = """
+        {"enabled":true,"always_skipped":["SentinelSkipAlpha"]}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(IndexConfig.self, from: payload)
+        #expect(decoded.alwaysSkipped == FilesIndexer.alwaysSkippedPatterns)
     }
 }
 

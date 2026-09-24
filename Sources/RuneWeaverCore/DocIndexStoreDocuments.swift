@@ -239,17 +239,55 @@ import Foundation
             return row.extractStatus == .failed
         }
 
+        /// Reads the stored size, modification time, and extraction outcome.
+        static func storedFingerprint(
+            source: IndexSource,
+            externalID: String,
+            dbPath: String
+        ) throws -> DocStoredFingerprint? {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return nil }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var statement: OpaquePointer?
+            let sql = "SELECT mtime, size_bytes, extract_status FROM indexed_documents "
+                + "WHERE source = ? AND external_id = ?;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare fingerprint read")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: source.rawValue)
+            SQLiteHelpers.bindText(statement, index: 2, value: externalID)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            let mtime = optionalDouble(statement, index: 0).map { Date(timeIntervalSince1970: $0) }
+            let sizeBytes = SQLiteHelpers.columnInt64(statement, index: 1)
+            guard let statusText = SQLiteHelpers.columnText(statement, index: 2),
+                  let extractStatus = ExtractStatus(rawValue: statusText)
+            else { return nil }
+            return DocStoredFingerprint(mtime: mtime, sizeBytes: sizeBytes, extractStatus: extractStatus)
+        }
+
         /// Encodes metadata as a JSON object string.
         private static func encodeMetadata(_ metadata: [String: String]) -> String? {
             guard !metadata.isEmpty else { return nil }
-            guard let data = try? JSONEncoder().encode(metadata) else { return nil }
-            return String(data: data, encoding: .utf8)
+            do {
+                let data = try JSONEncoder().encode(metadata)
+                return String(data: data, encoding: .utf8)
+            } catch {
+                RuneWeaverLog.stores.error("DocIndexStore: failed to encode metadata: \(error.localizedDescription)")
+                return nil
+            }
         }
 
         /// Decodes a JSON metadata string back to a dictionary.
         private static func decodeMetadata(_ text: String?) -> [String: String] {
             guard let text, !text.isEmpty, let data = text.data(using: .utf8) else { return [:] }
-            return (try? JSONDecoder().decode([String: String].self, from: data)) ?? [:]
+            do {
+                return try JSONDecoder().decode([String: String].self, from: data)
+            } catch {
+                RuneWeaverLog.stores.warning("DocIndexStore: failed to decode metadata: \(error.localizedDescription)")
+                return [:]
+            }
         }
 
         /// Binds an optional double, mapping nil to NULL.

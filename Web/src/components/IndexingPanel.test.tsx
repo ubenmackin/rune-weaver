@@ -6,33 +6,51 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import IndexingPanel, {
+  INDEX_EFFORT_OPTIONS,
   INDEX_LAST_ERRORS_COLLAPSED_COUNT,
   INDEX_LAST_ERROR_PREVIEW_CHARS,
   IndexPolicyPanel,
   dedupeIndexErrors,
   describeAutoStartNotice,
+  describeEffortReality,
+  describeIndexScope,
   formatIndexAge,
   formatIndexAsOf,
   formatIndexBytes,
   formatIndexLiveHeader,
   formatIndexRate,
+  formatIndexReclaimResult,
+  formatIndexScopeRoots,
   indexDonutArcs,
   indexSourceBarPercent,
   indexSourceBarWidth,
   isIndexProgressFrame,
   isLongIndexError,
+  normalizeIndexEffortPreset,
+  resolveAlwaysSkipped,
   resolveDisplayIndexErrors,
+  resolveEffortWorkers,
   resolveIndexLastRunText,
   resolveIndexLiveStageTitle,
   resolveIndexLiveTitle,
+  resolveIndexOnDiskBytes,
   resolveIndexSourceContent,
+  resolveIndexStorageBreakdown,
+  resolveIndexVectorCapValue,
+  resolveIndexWorkersValue,
+  resolveStatusEffort,
   truncateIndexError,
 } from "./IndexingPanel";
 import {
+  DEFAULT_INDEX_CONFIG,
+  DEFAULT_INDEX_EXCLUDE_PATTERNS,
+  DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
+  DEFAULT_INDEX_WORKERS,
   describeIndexRun,
   indexRunLabelForRun,
   indexRunTriggerLabel,
   parseIndexRunTrigger,
+  resolveIndexRetiredCount,
 } from "../api";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { jsonResponse } from "../test-utils/http";
@@ -97,7 +115,12 @@ function appearsBefore(a: Element, b: Element): boolean {
 }
 
 function stubFetch(
-  overrides: { status?: unknown; settings?: unknown; capture?: (url: string) => Response | null } = {},
+  overrides: {
+    status?: unknown;
+    settings?: unknown;
+    reclaim?: unknown;
+    capture?: (url: string) => Response | null;
+  } = {},
 ) {
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
   const fetchMock = vi.fn(async (input: string, init?: RequestInit) => {
@@ -146,6 +169,11 @@ function stubFetch(
     }
     if (url === "/index/reset") {
       return jsonResponse({ reset: true });
+    }
+    if (url === "/index/reclaim") {
+      return jsonResponse(
+        overrides.reclaim ?? { beforeBytes: 2048, afterBytes: 1024, reclaimedBytes: 1024 },
+      );
     }
     // GET /settings and PUT /settings share the full settings shape.
     return jsonResponse({
@@ -702,9 +730,61 @@ describe("IndexingPanel", () => {
 
     // Master enable unlocks the source toggles; enabling Mail then saving must
     // persist a partial [index] patch carrying the toggle.
+    // The save control matches every other Settings tab: a shared
+    // settings-footer wrapping a primary-button save-button.
+    const saveButton = screen.getByRole("button", {
+      name: "Save Index Settings",
+    });
+    expect(saveButton).toHaveClass("primary-button");
+    expect(saveButton).toHaveClass("save-button");
+    expect(saveButton.closest(".settings-footer")).not.toBeNull();
     await user.click(screen.getByLabelText("Enable background indexing"));
     await user.click(screen.getByLabelText("Index Mail"));
-    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(screen.getByText("Index settings saved.")).toBeInTheDocument();
+    });
+
+    const put = calls.find((call) => call.url === "/settings" && call.method === "PUT");
+    expect(put).toBeDefined();
+    expect(Object.keys((put?.body as Record<string, unknown>) ?? {})).toEqual([
+      "index",
+    ]);
+    const patch = (put?.body as { index?: Record<string, unknown> })?.index;
+    expect(patch?.enabled).toBe(true);
+    expect(patch?.mail).toBe(true);
+    expect(patch?.exclude).toEqual([".git", "node_modules"]);
+    expect(patch?.mail_vector_window).toBe("2y");
+    // Presets derive workers on the engine so they must save 0; only custom
+    // carries an explicit count, otherwise the engine rejects with 400.
+    expect(patch?.effort).toBe("balanced");
+    expect(patch?.workers).toBe(0);
+    // The capped vector path stays configurable: the save carries the
+    // per-document cap (fixture omits it so it degrades to the engine
+    // default) alongside the [index]-only patch.
+    expect(patch?.max_vector_chunks_per_document).toBe(
+      DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
+    );
+  });
+
+  it("sends the custom worker count only for the custom preset", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      settings: { ...indexConfig, effort: "custom", workers: 6 },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Custom workers")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Custom workers")).toHaveValue(6);
+
+    await user.click(
+      screen.getByRole("button", { name: "Save Index Settings" }),
+    );
 
     await waitFor(() => {
       expect(screen.getByText("Index settings saved.")).toBeInTheDocument();
@@ -713,10 +793,76 @@ describe("IndexingPanel", () => {
     const put = calls.find((call) => call.url === "/settings" && call.method === "PUT");
     expect(put).toBeDefined();
     const patch = (put?.body as { index?: Record<string, unknown> })?.index;
-    expect(patch?.enabled).toBe(true);
-    expect(patch?.mail).toBe(true);
-    expect(patch?.exclude).toEqual([".git", "node_modules"]);
-    expect(patch?.mail_vector_window).toBe("2y");
+    expect(patch?.effort).toBe("custom");
+    expect(patch?.workers).toBe(6);
+  });
+
+  it("mirrors the engine index defaults for a fresh form", () => {
+    // The wire default derives workers from the preset (0), while the
+    // stepper fallback for a custom preset with no stored value stays
+    // DEFAULT_INDEX_WORKERS so it still opens on a valid count.
+    expect(DEFAULT_INDEX_CONFIG.workers).toBe(0);
+    expect(DEFAULT_INDEX_CONFIG.effort).toBe("balanced");
+    expect(DEFAULT_INDEX_WORKERS).toBe(4);
+    // The exclude list is single-sourced from the engine
+    // IndexConfig.defaultExcludePatterns so the fresh form cannot drift.
+    expect(DEFAULT_INDEX_CONFIG.exclude).toEqual(DEFAULT_INDEX_EXCLUDE_PATTERNS);
+    for (const pattern of [
+      ".build",
+      "*.app",
+      "*.log",
+      "*.tmp",
+      ".DS_Store",
+      "gopath",
+      "nltk_data",
+    ]) {
+      expect(DEFAULT_INDEX_CONFIG.exclude).toContain(pattern);
+    }
+  });
+
+  it("prefers the engine core count for the policy reality line", async () => {
+    // A remote dashboard (phone browser vs Mac engine) must resolve the
+    // preset against the engine activeProcessors, not the browser
+    // hardwareConcurrency.
+    const hardwareConcurrency = Object.getOwnPropertyDescriptor(
+      window.navigator,
+      "hardwareConcurrency",
+    );
+    Object.defineProperty(window.navigator, "hardwareConcurrency", {
+      value: 2,
+      configurable: true,
+    });
+    try {
+      const { fetchMock } = stubFetch({
+        settings: { ...indexConfig, effort: "balanced" },
+        status: {
+          ...statusPayload,
+          effort: {
+            preset: "balanced",
+            resolvedWorkers: 4,
+            activeProcessors: 10,
+          },
+        },
+      });
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<IndexPolicyPanel />);
+
+      await waitFor(() => {
+        expect(screen.getByTestId("index-effort-reality")).toBeInTheDocument();
+      });
+      expect(screen.getByTestId("index-effort-reality")).toHaveTextContent(
+        "Balanced - using 4 of 10 cores",
+      );
+    } finally {
+      if (hardwareConcurrency) {
+        Object.defineProperty(
+          window.navigator,
+          "hardwareConcurrency",
+          hardwareConcurrency,
+        );
+      }
+    }
   });
 
   it("runs an on-demand pass and reports the terminal summary", async () => {
@@ -1906,5 +2052,423 @@ describe("IndexingPanel last errors card", () => {
     });
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
     expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
+  });
+});
+
+describe("IndexingPanel honest size", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("sums the database file and WAL for the on-disk total", () => {
+    expect(resolveIndexOnDiskBytes({ bytes: 2048, dbFileBytes: 2048, walBytes: 1024 })).toBe(3072);
+    expect(resolveIndexOnDiskBytes({ bytes: 2048, dbFileBytes: 2048, walBytes: null })).toBe(2048);
+    // Older engines without the file sizes fall back to the content total.
+    expect(resolveIndexOnDiskBytes({ bytes: 2048 })).toBe(2048);
+    expect(resolveIndexOnDiskBytes(null)).toBe(0);
+    expect(
+      resolveIndexOnDiskBytes({
+        bytes: Number.NaN,
+        dbFileBytes: -5,
+        walBytes: "x",
+      } as unknown as Parameters<typeof resolveIndexOnDiskBytes>[0]),
+    ).toBe(0);
+  });
+
+  it("resolves the storage breakdown with presence flags", () => {
+    const full = resolveIndexStorageBreakdown({
+      bytes: 2048,
+      dbFileBytes: 2048,
+      walBytes: 1024,
+      textBytes: 1024,
+      vectorBytes: 1024,
+      ftsBytes: 512,
+      freeBytes: 512,
+    });
+    expect(full.onDisk).toBe(3072);
+    expect(full.content).toBe(2048);
+    expect(full.hasOnDisk).toBe(true);
+    expect(full.hasBreakdown).toBe(true);
+    // Older engines degrade to content-only with no breakdown row.
+    const legacy = resolveIndexStorageBreakdown({ bytes: 2048 });
+    expect(legacy.onDisk).toBe(2048);
+    expect(legacy.hasOnDisk).toBe(false);
+    expect(legacy.hasBreakdown).toBe(false);
+  });
+
+  it("renders the on-disk primary with the breakdown and content secondary", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bytes: 2048,
+        dbFileBytes: 2048,
+        walBytes: 1024,
+        textBytes: 1024,
+        vectorBytes: 1024,
+        ftsBytes: 512,
+        freeBytes: 512,
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-size-value")).toBeInTheDocument();
+    });
+    // Primary is the honest on-disk sum (2048 + 1024 = 3072 → 3 KB).
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("3 KB");
+    // Breakdown row names each storage kind with its formatted bytes.
+    expect(screen.getByTestId("index-size-breakdown")).toBeInTheDocument();
+    expect(screen.getByTestId("index-size-text")).toHaveTextContent("1 KB");
+    expect(screen.getByTestId("index-size-vectors")).toHaveTextContent("1 KB");
+    expect(screen.getByTestId("index-size-fts")).toHaveTextContent("512 B");
+    expect(screen.getByTestId("index-size-free")).toHaveTextContent("512 B");
+    // File detail shows the two addends behind the primary.
+    expect(screen.getByTestId("index-size-files")).toHaveTextContent("DB");
+    expect(screen.getByTestId("index-size-files")).toHaveTextContent("WAL");
+    // Content bytes stay as the secondary detail.
+    expect(screen.getByTestId("index-size-content")).toHaveTextContent("2 KB");
+  });
+
+  it("omits the breakdown row for older engines without storage rows", async () => {
+    const { fetchMock } = stubFetch({ status: { ...statusPayload, bytes: 2048 } });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-size-value")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-stat-size-value")).toHaveTextContent("2 KB");
+    expect(screen.queryByTestId("index-size-breakdown")).toBeNull();
+    expect(screen.getByTestId("index-size-content")).toHaveTextContent("2 KB");
+  });
+});
+
+describe("IndexingPanel effort control", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("maps presets onto worker counts against the core count", () => {
+    // Balanced on 10 cores resolves to half the cores up to four; light pins
+    // one worker and performance takes all but one, mirroring the engine.
+    expect(resolveEffortWorkers("balanced", 10)).toBe(4);
+    expect(resolveEffortWorkers("light", 10)).toBe(1);
+    expect(resolveEffortWorkers("performance", 10)).toBe(9);
+    expect(resolveEffortWorkers("custom", 10, 6)).toBe(6);
+    // Custom clamps into the static ceiling and the machine so a stale large
+    // value never overshoots.
+    expect(resolveEffortWorkers("custom", 10, 99)).toBe(10);
+    expect(resolveEffortWorkers("custom", 128, 99)).toBe(64);
+    expect(resolveEffortWorkers("custom", null, 99)).toBe(64);
+    expect(resolveEffortWorkers("custom", 10, 0)).toBe(4);
+    // Unknown core counts mirror safeCores=max(1,cores): every preset
+    // resolves to 1 like the engine instead of guessing 2/4.
+    expect(resolveEffortWorkers("light", null)).toBe(1);
+    expect(resolveEffortWorkers("balanced", null)).toBe(1);
+    expect(resolveEffortWorkers("performance", null)).toBe(1);
+    expect(resolveEffortWorkers("balanced", 0)).toBe(1);
+    expect(resolveEffortWorkers("performance", 0)).toBe(1);
+    // Unknown presets degrade to the balanced mapping.
+    expect(resolveEffortWorkers("unknown", 10)).toBe(4);
+    expect(resolveEffortWorkers("unknown", null)).toBe(1);
+    // Legacy tokens map onto their canonical successor instead of falling back.
+    expect(normalizeIndexEffortPreset("eco")).toBe("light");
+    expect(normalizeIndexEffortPreset("fast")).toBe("performance");
+    expect(normalizeIndexEffortPreset("max")).toBe("performance");
+    expect(normalizeIndexEffortPreset("standard")).toBe("balanced");
+    expect(normalizeIndexEffortPreset("BALANCED")).toBe("balanced");
+    expect(normalizeIndexEffortPreset("unknown")).toBe("balanced");
+    expect(normalizeIndexEffortPreset(null)).toBe("balanced");
+  });
+
+  it("describes the resolved reality with the machine core count", () => {
+    expect(describeEffortReality("balanced", 4, 10)).toBe(
+      "Balanced - using 4 of 10 cores",
+    );
+    expect(describeEffortReality("light", 1, 10)).toContain("Light");
+    expect(describeEffortReality("light", 1, 10)).toContain("1 of 10 cores");
+    expect(describeEffortReality("performance", 9, 10)).toContain("Performance");
+    // Without a core count the line names workers alone instead of guessing.
+    expect(describeEffortReality("balanced", 4, null)).toBe(
+      "Balanced - using 4 workers",
+    );
+  });
+
+  it("reflects the machine core count in the status pane", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        effort: {
+          preset: "balanced",
+          resolvedWorkers: 4,
+          activeProcessors: 10,
+        },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-effort-status")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-effort-status")).toHaveTextContent(
+      "Balanced - using 4 of 10 cores",
+    );
+  });
+
+  it("exposes three presets plus custom with a worker stepper and toggles", async () => {
+    const user = userEvent.setup();
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-effort-reality")).toBeInTheDocument();
+    });
+    // Three scaling presets plus the custom mode share one radio group.
+    expect(INDEX_EFFORT_OPTIONS.map((option) => option.id)).toEqual([
+      "light",
+      "balanced",
+      "performance",
+      "custom",
+    ]);
+    for (const label of ["Light", "Balanced", "Performance", "Custom"]) {
+      expect(screen.getByRole("radio", { name: label })).toBeInTheDocument();
+    }
+    // Toggles for thermal backoff and pause on battery persist on Save.
+    expect(screen.getByRole("checkbox", { name: "Thermal backoff" })).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Pause on battery" })).toBeInTheDocument();
+    // Custom reveals the stepper with bounded increment and decrement.
+    await user.click(screen.getByRole("radio", { name: "Custom" }));
+    expect(screen.getByLabelText("Custom workers")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Decrease workers" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Increase workers" })).toBeInTheDocument();
+    // Reality names the newly selected preset.
+    expect(screen.getByTestId("index-effort-reality")).toHaveTextContent("Custom");
+    // Per-document vector cap is configurable from the same form, bounded to
+    // the engine 1..4096 range with the 128 default.
+    const capInput = screen.getByLabelText("Max vector chunks per document");
+    expect(capInput).toBeInTheDocument();
+    expect(capInput).toHaveAttribute("min", "1");
+    expect(capInput).toHaveAttribute("max", "4096");
+    // The fixture omits the cap so the form degrades to the engine default
+    // instead of rendering blank.
+    expect(capInput).toHaveValue(DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT);
+    expect(screen.getByRole("button", { name: "Decrease vector cap" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Increase vector cap" })).toBeInTheDocument();
+  });
+
+  it("reads canonical workers", () => {
+    expect(resolveIndexWorkersValue({ workers: 6 })).toBe(6);
+    expect(resolveIndexWorkersValue({})).toBeNull();
+    expect(resolveIndexWorkersValue(null)).toBeNull();
+    expect(resolveIndexVectorCapValue({ max_vector_chunks_per_document: 64 })).toBe(64);
+    expect(resolveIndexVectorCapValue({})).toBeNull();
+  });
+
+  it("resolves status effort from the nested effort block", () => {
+    expect(
+      resolveStatusEffort({
+        effort: { preset: "performance", resolvedWorkers: 9, activeProcessors: 10 },
+      }),
+    ).toEqual({ preset: "performance", resolvedWorkers: 9, coreCount: 10 });
+    expect(resolveStatusEffort(null)).toEqual({
+      preset: null,
+      resolvedWorkers: null,
+      coreCount: null,
+    });
+  });
+});
+
+describe("IndexingPanel reclaim action", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("formats the reclaim result with before and after figures", () => {
+    expect(
+      formatIndexReclaimResult({ beforeBytes: 2048, afterBytes: 1024, reclaimedBytes: 1024 }),
+    ).toBe("Reclaimed 1 KB (before 2 KB → after 1 KB)");
+    expect(formatIndexReclaimResult(null)).toBeNull();
+  });
+
+  it("calls POST /index/reclaim and shows the before/after display", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+      settings: { ...indexConfig, enabled: true },
+      reclaim: { beforeBytes: 3072, afterBytes: 2048, reclaimedBytes: 1024 },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Reclaim space" })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Reclaim space" }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-reclaim-result")).toBeInTheDocument();
+    });
+    expect(calls.some((call) => call.url === "/index/reclaim")).toBe(true);
+    // Both on-disk figures read in the result block.
+    expect(screen.getByTestId("index-reclaim-result")).toHaveTextContent("3 KB");
+    expect(screen.getByTestId("index-reclaim-result")).toHaveTextContent("2 KB");
+    expect(screen.getByTestId("index-reclaim-result")).toHaveTextContent("1 KB");
+  });
+
+  it("surfaces the retired count from the last run", async () => {
+    expect(resolveIndexRetiredCount({ retiredCount: 7 })).toBe(7);
+    expect(resolveIndexRetiredCount({ retired: 5 })).toBe(5);
+    expect(resolveIndexRetiredCount({})).toBeNull();
+    expect(resolveIndexRetiredCount(null)).toBeNull();
+    expect(
+      describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, retiredCount: 7 }),
+    ).toContain("7 retired");
+
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        lastRun: { status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1, retiredCount: 7 },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-run")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("7 retired");
+    expect(screen.getByTestId("index-last-run-retired")).toHaveTextContent("7 retired");
+  });
+});
+
+describe("IndexPolicyPanel index scope", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("formats the root-scoped coverage subtitle from the configured roots", () => {
+    // Default home root gains its parenthetical so a stock install reads as
+    // the home directory instead of a bare sigil.
+    expect(describeIndexScope(["~"])).toBe(
+      "Builds a local search index of ~ (your home directory). Nothing outside the configured roots is ever scanned.",
+    );
+    expect(formatIndexScopeRoots(["~"])).toBe("~ (your home directory)");
+    // Custom roots join verbatim so the subtitle names exactly what the walker
+    // covers, and non-array payloads degrade honestly instead of blanking.
+    expect(describeIndexScope(["~/Documents", "~/Code"])).toContain("~/Documents");
+    expect(describeIndexScope(["~/Documents", "~/Code"])).toContain("~/Code");
+    expect(describeIndexScope(["~/Documents", "~/Code"])).toContain(
+      "Nothing outside the configured roots is ever scanned.",
+    );
+    expect(formatIndexScopeRoots([])).toBe("no configured roots");
+    expect(resolveAlwaysSkipped({ always_skipped: ["Music", ".git"] })).toEqual([
+      "Music",
+      ".git",
+    ]);
+    expect(resolveAlwaysSkipped({})).toEqual([]);
+    expect(resolveAlwaysSkipped(null)).toEqual([]);
+  });
+
+  it("states the root-scoped coverage naming the configured roots", async () => {
+    const { fetchMock } = stubFetch({
+      settings: {
+        ...indexConfig,
+        roots: ["~/Documents", "~/Code"],
+        always_skipped: ["Music", "Pictures", ".git"],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-scope-subtitle")).toBeInTheDocument();
+    });
+    // The subtitle interpolates the configured roots instead of a generic
+    // chooser line, and states the walk never leaves them.
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent("~/Documents");
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent("~/Code");
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+      "Nothing outside the configured roots is ever scanned.",
+    );
+  });
+
+  it("names the home directory for the default root", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, roots: ["~"], always_skipped: ["Music", ".git"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-scope-subtitle")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+      "Builds a local search index of ~ (your home directory).",
+    );
+  });
+
+  it("renders the always-skipped names from the payload rather than a literal", async () => {
+    // Sentinel names prove the list renders from `always_skipped` data, while
+    // the outer block carries no hardcoded walker names so the copy cannot
+    // drift from FilesIndexer.alwaysSkippedPatterns.
+    const { fetchMock } = stubFetch({
+      settings: {
+        ...indexConfig,
+        roots: ["~"],
+        always_skipped: ["SentinelSkipAlpha", "SentinelSkipBeta"],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-always-skipped")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-always-skipped")).toHaveTextContent(
+      "SentinelSkipAlpha",
+    );
+    expect(screen.getByTestId("index-always-skipped")).toHaveTextContent(
+      "SentinelSkipBeta",
+    );
+    // The data-driven element carries only the payload names: a hard-coded
+    // literal would still read the walker defaults here instead.
+    expect(screen.getByTestId("index-always-skipped")).not.toHaveTextContent("Music");
+    // The outer block renders solely from the payload with no hardcoded
+    // walker names alongside the dynamic list.
+    const skippedBlock = screen.getByTestId("index-always-skipped-block");
+    for (const banned of [
+      "Music",
+      "Pictures",
+      "Movies",
+      "Library",
+      "Trash",
+      ".git",
+      "node_modules",
+      "DerivedData",
+    ]) {
+      expect(skippedBlock).not.toHaveTextContent(banned);
+    }
+    // The block keeps the generic credential sentence without listing deny
+    // patterns.
+    expect(screen.getByTestId("index-always-skipped-block")).toHaveTextContent(
+      /Credential and key files blocked by your file access rules are never indexed either/,
+    );
   });
 });

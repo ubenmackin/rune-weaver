@@ -257,66 +257,65 @@ func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerCont
     }
 }
 
+/// Encodes an Encodable payload to JSON UTF-8 text, logging any failure.
+private func encodeWSFrame<T: Encodable>(_ value: T) -> String? {
+    do {
+        let data = try JSONEncoder().encode(value)
+        return String(data: data, encoding: .utf8)
+    } catch {
+        RuneWeaverLog.server.error("RuneWeaverServerWebSocket: failed to encode \(T.self): \(error.localizedDescription)")
+        return nil
+    }
+}
+
 /// Encodes an orchestrator event to its shared WebSocket wire text, if any.
 func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
     switch event {
     case let .toolStarted(toolName, callID, argumentsJSON, roundIndex):
-        try? String(
-            data: JSONEncoder().encode(
-                WSToolStartFrame(
-                    toolName: toolName,
-                    callID: callID,
-                    argumentsJSON: argumentsJSON,
-                    sessionID: sessionID,
-                    roundIndex: roundIndex
-                )
-            ),
-            encoding: .utf8
+        encodeWSFrame(
+            WSToolStartFrame(
+                toolName: toolName,
+                callID: callID,
+                argumentsJSON: argumentsJSON,
+                sessionID: sessionID,
+                roundIndex: roundIndex
+            )
         )
     case let .toolCompleted(toolName, callID, result, roundIndex):
-        try? String(
-            data: JSONEncoder().encode(
-                WSToolEndFrame(
-                    toolName: toolName,
-                    callID: callID,
-                    result: result,
-                    sessionID: sessionID,
-                    roundIndex: roundIndex
-                )
-            ),
-            encoding: .utf8
+        encodeWSFrame(
+            WSToolEndFrame(
+                toolName: toolName,
+                callID: callID,
+                result: result,
+                sessionID: sessionID,
+                roundIndex: roundIndex
+            )
         )
     case let .textDelta(delta):
-        try? String(data: JSONEncoder().encode(WSStreamDelta(delta: delta, sessionID: sessionID)), encoding: .utf8)
+        encodeWSFrame(WSStreamDelta(delta: delta, sessionID: sessionID))
     case let .warning(message):
         // Degraded-tool notices stream as warning frames so clients surface skips
         // mid-turn without failing the turn; the terminal done frame repeats them.
-        try? String(data: JSONEncoder().encode(WSWarningFrame(message: message, sessionID: sessionID)), encoding: .utf8)
+        encodeWSFrame(WSWarningFrame(message: message, sessionID: sessionID))
     case let .turnTokens(roundIndex, roundTokens, turnTotalTokens, contextTokens):
         // Per-round usage progress for the live footer: session-tagged so multiplexed
         // views only apply their own turn and older clients drop the unknown type.
         // The terminal done frame stays authoritative for reconciliation.
-        try? String(
-            data: JSONEncoder().encode(
-                WSTurnTokensFrame(
-                    sessionID: sessionID,
-                    roundIndex: roundIndex,
-                    roundTokens: roundTokens,
-                    turnTotalTokens: turnTotalTokens,
-                    contextTokens: contextTokens
-                )
-            ),
-            encoding: .utf8
+        encodeWSFrame(
+            WSTurnTokensFrame(
+                sessionID: sessionID,
+                roundIndex: roundIndex,
+                roundTokens: roundTokens,
+                turnTotalTokens: turnTotalTokens,
+                contextTokens: contextTokens
+            )
         )
     case let .toolProgress(progress):
         // Generic indeterminate progress from a running tool: session-tagged so
         // multiplexed views only apply their own turn and older clients drop the
         // unknown type. Advisory only, so the terminal tool result stays the
         // authoritative record.
-        try? String(
-            data: JSONEncoder().encode(WSToolProgressFrame(progress, sessionID: sessionID)),
-            encoding: .utf8
-        )
+        encodeWSFrame(WSToolProgressFrame(progress, sessionID: sessionID))
     case .approval:
         nil
     }
@@ -564,7 +563,7 @@ private func finishWebSocketSuccessfulTurn(
     await context.hub.broadcastRun(entry)
     var done = WSStreamDone(from: response)
     done.retainedSteerCount = await context.steeringQueue.pendingCount(for: params.sessionID)
-    if let data = try? JSONEncoder().encode(done), let frame = String(data: data, encoding: .utf8) {
+    if let frame = encodeWSFrame(done) {
         await context.hub.send(id: params.connectionID, text: frame)
     }
     await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
@@ -626,7 +625,7 @@ private func handleWebSocketTurnCancellation(
     ) ?? initialEntry
     await context.hub.broadcastRun(entry)
     let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
-    if let data = try? JSONEncoder().encode(cancelledFrame), let frame = String(data: data, encoding: .utf8) {
+    if let frame = encodeWSFrame(cancelledFrame) {
         await context.hub.send(id: connectionID, text: frame)
     }
     await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
@@ -660,9 +659,7 @@ func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, conte
         await context.steeringQueue.clear(for: sid)
     }
     let cancelledFrame = WSCancelledFrame(sessionID: message.sessionID, cancelled: cancelled)
-    if let data = try? JSONEncoder().encode(cancelledFrame),
-       let frame = String(data: data, encoding: .utf8)
-    {
+    if let frame = encodeWSFrame(cancelledFrame) {
         await context.hub.send(id: connectionID, text: frame)
     }
 }
@@ -775,9 +772,7 @@ func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, 
     if Task.isCancelled {
         return
     }
-    guard let data = try? JSONEncoder().encode(WSErrorFrame(message: message, sessionID: sessionID)),
-          let frame = String(data: data, encoding: .utf8)
-    else { return }
+    guard let frame = encodeWSFrame(WSErrorFrame(message: message, sessionID: sessionID)) else { return }
     await context.hub.send(id: connectionID, text: frame)
 }
 
@@ -805,8 +800,6 @@ func sendToolCancelMiss(
         return
     }
     let miss = WSToolCancelMissFrame(sessionID: sessionID, callID: callID, message: message)
-    guard let data = try? JSONEncoder().encode(miss),
-          let frame = String(data: data, encoding: .utf8)
-    else { return }
+    guard let frame = encodeWSFrame(miss) else { return }
     await context.hub.send(id: connectionID, text: frame)
 }

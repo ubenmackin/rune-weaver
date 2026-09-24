@@ -630,6 +630,21 @@ extension RuneWeaverConfig {
         if let dbPath = try index.strictString("db_path", field: "index.db_path") {
             config.index.dbPath = dbPath
         }
+        if let effort = try index.strictString("effort", field: "index.effort") {
+            config.index.effort = effort
+        }
+        if let workers = try index.strictInt("workers", field: "index.workers") {
+            config.index.workers = workers
+        }
+        if let thermalBackoff = try index.strictBool("thermal_backoff", field: "index.thermal_backoff") {
+            config.index.thermalBackoff = thermalBackoff
+        }
+        if let pauseOnBattery = try index.strictBool("pause_on_battery", field: "index.pause_on_battery") {
+            config.index.pauseOnBattery = pauseOnBattery
+        }
+        if let cap = try index.strictInt("max_vector_chunks_per_document", field: "index.max_vector_chunks_per_document") {
+            config.index.maxVectorChunksPerDocument = cap
+        }
     }
 
     private static func decodeEmail(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

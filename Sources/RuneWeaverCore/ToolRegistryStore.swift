@@ -262,7 +262,14 @@ private enum SQLitePluginRegistryStore {
     }
 
     static func read(dbPath: String) -> [PluginRecord] {
-        guard let handle = try? open(dbPath: dbPath) else { return [] }
+        let handle: OpaquePointer?
+        do {
+            handle = try open(dbPath: dbPath)
+        } catch {
+            RuneWeaverLog.stores.error("ToolRegistryStore: could not open database at \(dbPath): \(error.localizedDescription)")
+            return []
+        }
+        guard let handle else { return [] }
         defer { sqlite3_close(handle) }
 
         let sql = """
@@ -292,10 +299,12 @@ private enum SQLitePluginRegistryStore {
             let updatedAt = Date(timeIntervalSince1970: SQLiteHelpers.columnDouble(statement, index: 8))
 
             var overrides: [String: String] = [:]
-            if let data = overridesJSON.data(using: .utf8),
-               let dict = try? JSONDecoder().decode([String: String].self, from: data)
-            {
-                overrides = dict
+            if let data = overridesJSON.data(using: .utf8) {
+                do {
+                    overrides = try JSONDecoder().decode([String: String].self, from: data)
+                } catch {
+                    RuneWeaverLog.stores.warning("ToolRegistryStore: failed decoding overrides JSON for \(id): \(error.localizedDescription)")
+                }
             }
 
             records.append(PluginRecord(
@@ -340,7 +349,13 @@ private enum SQLitePluginRegistryStore {
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(statement) }
 
-        let overridesData = (try? JSONEncoder().encode(record.permissionOverrides)) ?? Data()
+        let overridesData: Data
+        do {
+            overridesData = try JSONEncoder().encode(record.permissionOverrides)
+        } catch {
+            RuneWeaverLog.stores.error("ToolRegistryStore: failed encoding overrides for \(record.id): \(error.localizedDescription)")
+            overridesData = Data("{}".utf8)
+        }
         let overridesStr = String(data: overridesData, encoding: .utf8) ?? "{}"
 
         SQLiteHelpers.bindText(statement, index: 1, value: record.id)
