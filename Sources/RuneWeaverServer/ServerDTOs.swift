@@ -1,4 +1,13 @@
 // Rune Weaver Server — Shared REST and WebSocket contracts for the engine API.
+//
+// Purpose: carries the canonical route paths plus the shared REST and
+// WebSocket request/response shapes so chat, tools, memory, approvals,
+// scheduler, runs, and sessions encode identically on both ends of the wire.
+// Scope: DTO bodies and wire classification only; route registration, auth
+// gating, and persistence stay with the route and store layers.
+// Architectural role: keeps the Vapor adapters decoupled from the engine core
+// in version-tolerant Codable contracts, so a dashboard built against an
+// older engine still decodes.
 
 import Foundation
 import RuneWeaverCore
@@ -132,6 +141,13 @@ public enum DTODefaults {
 /// Carries the live Start stage when a SearXNG ensure flight is running so the
 /// dashboard profile menu can poll one endpoint for both the dot and the
 /// Starting line. Older engines omit the stage keys, which decode to nil.
+/// The optional bind keys carry the live boot socket (not the file): the
+/// dashboard compares the pending file from `GET /settings` against this boot
+/// snapshot for its restart banner instead of comparing file against file.
+/// The bind keys are owner-private: the route omits them unless the caller
+/// cleared the owner gate (or no gate is installed on the loopback-no-auth
+/// posture), so an unauthenticated probe never learns the boot bind. Absent
+/// keys decode to nil and the dashboard keeps its file snapshot.
 public struct HealthResponse: Content, Equatable {
     /// Always `"ok"` when the engine answers.
     public let status: String
@@ -158,6 +174,14 @@ public struct HealthResponse: Content, Equatable {
     /// A number (not a Date) so every dashboard decodes it without sharing a
     /// date strategy with the engine.
     public let searchStartedAt: Double?
+    /// Live boot bind hostname from the serving context. Nil on payloads from
+    /// engines that predate the boot-bind advertisement; the dashboard falls
+    /// back to its pre-save file snapshot in that case.
+    public let serverHostname: String?
+    /// Live boot bind port from the serving context. Nil when unknown.
+    public let serverPort: Int?
+    /// Live boot allowed-hosts from the serving context. Nil when unknown.
+    public let serverAllowedHosts: [String]?
 
     /// Creates a health response.
     public init(
@@ -171,7 +195,10 @@ public struct HealthResponse: Content, Equatable {
         searchURL: String? = nil,
         searchStatus: String? = nil,
         searchStage: String? = nil,
-        searchStartedAt: Double? = nil
+        searchStartedAt: Double? = nil,
+        serverHostname: String? = nil,
+        serverPort: Int? = nil,
+        serverAllowedHosts: [String]? = nil
     ) {
         self.status = status
         self.engine = engine
@@ -189,6 +216,17 @@ public struct HealthResponse: Content, Equatable {
         } else {
             self.searchStartedAt = nil
         }
+        let trimmedHostname = (serverHostname ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        self.serverHostname = trimmedHostname.isEmpty ? nil : trimmedHostname
+        if let serverPort, (1 ... 65535).contains(serverPort) {
+            self.serverPort = serverPort
+        } else {
+            self.serverPort = nil
+        }
+        // Normalize through the shared Host form plus dedupe so the dashboard
+        // restart banner compares pending file and boot snapshot under identical
+        // semantics instead of tripping on casing or `:port` spellings.
+        self.serverAllowedHosts = Self.normalizedAllowedHosts(serverAllowedHosts)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -203,10 +241,15 @@ public struct HealthResponse: Content, Equatable {
         case searchStatus
         case searchStage
         case searchStartedAt
+        case serverHostname
+        case serverPort
+        case serverAllowedHosts
     }
 
     /// Decodes tolerantly so payloads from engines that predate staged Start
     /// progress still parse with a nil stage instead of failing the probe.
+    /// The boot-bind keys are optional for the same reason: absent means the
+    /// dashboard keeps its snapshot fallback instead of failing the probe.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         status = try container.decodeIfPresent(String.self, forKey: .status) ?? "ok"
@@ -227,9 +270,46 @@ public struct HealthResponse: Content, Equatable {
         } else {
             searchStartedAt = nil
         }
+        let rawHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname)
+        let trimmedHostname = (rawHostname ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        serverHostname = trimmedHostname.isEmpty ? nil : trimmedHostname
+        let rawPort = try container.decodeIfPresent(Int.self, forKey: .serverPort)
+        if let rawPort, (1 ... 65535).contains(rawPort) {
+            serverPort = rawPort
+        } else {
+            serverPort = nil
+        }
+        let rawHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts)
+        serverAllowedHosts = Self.normalizedAllowedHosts(rawHosts)
+    }
+
+    /// Normalizes boot allowed-hosts through shared validation plus boot dedupe.
+    ///
+    /// Single-sourced through `RuneWeaverConfig.validateAllowedHosts` and
+    /// `ServerEndpointConfig.dedupeNormalizedBootHosts` in Core so the health
+    /// snapshot and the settings file compare under identical semantics;
+    /// widening shapes drop nil matching the Host gate instead of allowlisting
+    /// a carved fragment, and IPv6 counterparts ride along. The raw count
+    /// bound was enforced at write time, so the boot entry point skips the
+    /// raw-count prefix: the deduped form can legitimately exceed
+    /// `maxAllowedHosts` because each IPv6 literal stores both its bracketed
+    /// and bare spellings, so 11 IPv6 entries advertise as 22 matching the
+    /// file, the PUT, and the gate instead of being cut back to 20.
+    /// - Parameter hosts: Raw boot allowlist, or nil when unknown.
+    /// - Returns: Normalized, deduped allowlist, or nil when unknown.
+    private static func normalizedAllowedHosts(_ hosts: [String]?) -> [String]? {
+        guard let hosts else { return nil }
+        // Route through shared validation matching the Host gate so a widening
+        // shape never widens the banner compare; invalid entries drop instead
+        // of allowlisting a fragment.
+        let valid = hosts.filter { (try? RuneWeaverConfig.validateAllowedHosts([$0])) != nil }
+        return ServerEndpointConfig.dedupeNormalizedBootHosts(valid)
     }
 
     /// Encodes the stage keys only when a Start is in flight.
+    /// The boot-bind keys encode only when known so older dashboards that
+    /// ignore unknown keys keep parsing, and newer dashboards fall back to
+    /// their snapshot when the keys are absent.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(status, forKey: .status)
@@ -243,6 +323,9 @@ public struct HealthResponse: Content, Equatable {
         try container.encodeIfPresent(searchStatus, forKey: .searchStatus)
         try container.encodeIfPresent(searchStage, forKey: .searchStage)
         try container.encodeIfPresent(searchStartedAt, forKey: .searchStartedAt)
+        try container.encodeIfPresent(serverHostname, forKey: .serverHostname)
+        try container.encodeIfPresent(serverPort, forKey: .serverPort)
+        try container.encodeIfPresent(serverAllowedHosts, forKey: .serverAllowedHosts)
     }
 }
 
@@ -1007,349 +1090,5 @@ public struct ToolCancelResponse: Content, Equatable {
         self.sessionID = sessionID
         self.callID = callID
         self.cancelled = cancelled
-    }
-}
-
-/// Settings snapshot for `GET /settings` and `PUT /settings`.
-/// Carries both `browser*` (canonical `[browser]` keys) and `search*`
-/// dashboard aliases with identical values so either contract reads without
-/// falling back to defaults.
-public struct SettingsResponse: Content, Equatable {
-    public let engineName: String
-    public let logLevel: String
-    public let compactionThresholdPercent: Int
-    public let maxToolIterations: Int
-    public let defaultProvider: String
-    public let fallbackProvider: String?
-    public let providers: [String: ProviderConfig]
-    public let memoryVectorDBPath: String
-    public let memoryEpisodesDBPath: String
-    public let memoryEmbeddingModel: String
-    public let memoryEmbeddingBackend: String
-    public let voiceSTTProvider: String
-    public let voiceWhisperModel: String
-    public let voiceTTSProvider: String
-    public let sandboxContainerBaseImage: String
-    public let sandboxArchiveSessionTTLMinutes: Int
-    public let sandboxMaxConcurrentMachines: Int
-    public let filesDenyPatterns: [String]
-    public let filesAllowRoots: [String]
-    public let filesRequireApprovalOnDeny: Bool
-    public let browserSearxngURL: String
-    public let browserSearchTimeoutSeconds: Int
-    public let browserMaxResults: Int
-    public let browserAllowedOrigins: [String]
-    public let searchSearxngURL: String
-    public let searchTimeoutSeconds: Int
-    public let searchMaxResults: Int
-    public let emailAccounts: [EmailAccount]
-    public let pluginsDir: String
-    public let pluginsMarketplaceIndexURL: String
-    public let pluginsAutoRescan: Bool
-    public let media: MediaConfig
-    /// Local background indexer policy.
-    public let index: IndexConfig
-    /// macOS desktop vision and gated control policy.
-    public let desktop: DesktopConfig
-    public let configPath: String
-
-    public init(config: RuneWeaverConfig, configPath: String) {
-        self.engineName = config.engine.name
-        self.logLevel = config.engine.logLevel
-        self.compactionThresholdPercent = config.engine.compactionThresholdPercent
-        self.maxToolIterations = config.engine.maxToolIterations
-        self.defaultProvider = config.llm.defaultProvider
-        self.fallbackProvider = config.llm.fallbackProvider
-        self.providers = config.llm.providers
-        self.memoryVectorDBPath = config.memory.vectorDBPath
-        self.memoryEpisodesDBPath = config.memory.episodesDBPath
-        self.memoryEmbeddingModel = config.memory.embeddingModel
-        self.memoryEmbeddingBackend = config.memory.embeddingBackend
-        self.voiceSTTProvider = config.voice.sttProvider
-        self.voiceWhisperModel = config.voice.whisperModel
-        self.voiceTTSProvider = config.voice.ttsProvider
-        self.sandboxContainerBaseImage = config.sandbox.containerBaseImage
-        self.sandboxArchiveSessionTTLMinutes = config.sandbox.archiveSessionTTLMinutes
-        self.sandboxMaxConcurrentMachines = config.sandbox.maxConcurrentMachines
-        self.filesDenyPatterns = config.files.denyPatterns
-        self.filesAllowRoots = config.files.allowRoots
-        self.filesRequireApprovalOnDeny = config.files.requireApprovalOnDeny
-        self.browserSearxngURL = config.browser.searxngURL
-        self.browserSearchTimeoutSeconds = config.browser.searchTimeoutSeconds
-        self.browserMaxResults = config.browser.maxResults
-        self.browserAllowedOrigins = config.browser.allowedOrigins
-        self.searchSearxngURL = config.browser.searxngURL
-        self.searchTimeoutSeconds = config.browser.searchTimeoutSeconds
-        self.searchMaxResults = config.browser.maxResults
-        self.emailAccounts = config.email.accounts
-        self.pluginsDir = config.plugins.pluginsDir
-        self.pluginsMarketplaceIndexURL = config.plugins.marketplaceIndexURL
-        self.pluginsAutoRescan = config.plugins.autoRescan
-        self.media = config.media
-        self.index = config.index
-        self.desktop = config.desktop
-        self.configPath = configPath
-    }
-}
-
-/// Request payload to update settings via `PUT /settings`.
-/// Accepts both `browser*` (canonical) and `search*` (dashboard alias) keys;
-/// the canonical key wins when both are present so either contract writes.
-public struct UpdateSettingsRequest: Content, Equatable {
-    public let engineName: String?
-    public let logLevel: String?
-    public let compactionThresholdPercent: Int?
-    public let maxToolIterations: Int?
-    public let defaultProvider: String?
-    public let fallbackProvider: String?
-    public let providers: [String: ProviderConfig]?
-    public let memoryVectorDBPath: String?
-    public let memoryEpisodesDBPath: String?
-    public let memoryEmbeddingModel: String?
-    public let memoryEmbeddingBackend: String?
-    public let voiceSTTProvider: String?
-    public let voiceWhisperModel: String?
-    public let voiceTTSProvider: String?
-    public let sandboxContainerBaseImage: String?
-    public let sandboxArchiveSessionTTLMinutes: Int?
-    public let sandboxMaxConcurrentMachines: Int?
-    public let filesDenyPatterns: [String]?
-    public let filesAllowRoots: [String]?
-    public let filesRequireApprovalOnDeny: Bool?
-    public let browserSearxngURL: String?
-    public let browserSearchTimeoutSeconds: Int?
-    public let browserMaxResults: Int?
-    public let browserAllowedOrigins: [String]?
-    public let searchSearxngURL: String?
-    public let searchTimeoutSeconds: Int?
-    public let searchMaxResults: Int?
-    public let emailAccounts: [EmailAccount]?
-    public let pluginsDir: String?
-    public let pluginsMarketplaceIndexURL: String?
-    public let pluginsAutoRescan: Bool?
-    public let media: MediaSettingsUpdate?
-    /// Partial local index patch; a nil patch preserves the stored `[index]` section.
-    public let index: IndexSettingsUpdate?
-    /// Partial desktop patch; a nil patch preserves the stored `[desktop]` section.
-    public let desktop: DesktopSettingsUpdate?
-
-    public init(
-        engineName: String? = nil,
-        logLevel: String? = nil,
-        compactionThresholdPercent: Int? = nil,
-        maxToolIterations: Int? = nil,
-        defaultProvider: String? = nil,
-        fallbackProvider: String? = nil,
-        providers: [String: ProviderConfig]? = nil,
-        memoryVectorDBPath: String? = nil,
-        memoryEpisodesDBPath: String? = nil,
-        memoryEmbeddingModel: String? = nil,
-        memoryEmbeddingBackend: String? = nil,
-        voiceSTTProvider: String? = nil,
-        voiceWhisperModel: String? = nil,
-        voiceTTSProvider: String? = nil,
-        sandboxContainerBaseImage: String? = nil,
-        sandboxArchiveSessionTTLMinutes: Int? = nil,
-        sandboxMaxConcurrentMachines: Int? = nil,
-        filesDenyPatterns: [String]? = nil,
-        filesAllowRoots: [String]? = nil,
-        filesRequireApprovalOnDeny: Bool? = nil,
-        browserSearxngURL: String? = nil,
-        browserSearchTimeoutSeconds: Int? = nil,
-        browserMaxResults: Int? = nil,
-        browserAllowedOrigins: [String]? = nil,
-        searchSearxngURL: String? = nil,
-        searchTimeoutSeconds: Int? = nil,
-        searchMaxResults: Int? = nil,
-        emailAccounts: [EmailAccount]? = nil,
-        pluginsDir: String? = nil,
-        pluginsMarketplaceIndexURL: String? = nil,
-        pluginsAutoRescan: Bool? = nil,
-        media: MediaSettingsUpdate? = nil,
-        index: IndexSettingsUpdate? = nil,
-        desktop: DesktopSettingsUpdate? = nil
-    ) {
-        self.engineName = engineName
-        self.logLevel = logLevel
-        self.compactionThresholdPercent = compactionThresholdPercent
-        self.maxToolIterations = maxToolIterations
-        self.defaultProvider = defaultProvider
-        self.fallbackProvider = fallbackProvider
-        self.providers = providers
-        self.memoryVectorDBPath = memoryVectorDBPath
-        self.memoryEpisodesDBPath = memoryEpisodesDBPath
-        self.memoryEmbeddingModel = memoryEmbeddingModel
-        self.memoryEmbeddingBackend = memoryEmbeddingBackend
-        self.voiceSTTProvider = voiceSTTProvider
-        self.voiceWhisperModel = voiceWhisperModel
-        self.voiceTTSProvider = voiceTTSProvider
-        self.sandboxContainerBaseImage = sandboxContainerBaseImage
-        self.sandboxArchiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
-        self.sandboxMaxConcurrentMachines = sandboxMaxConcurrentMachines
-        self.filesDenyPatterns = filesDenyPatterns
-        self.filesAllowRoots = filesAllowRoots
-        self.filesRequireApprovalOnDeny = filesRequireApprovalOnDeny
-        self.browserSearxngURL = browserSearxngURL
-        self.browserSearchTimeoutSeconds = browserSearchTimeoutSeconds
-        self.browserMaxResults = browserMaxResults
-        self.browserAllowedOrigins = browserAllowedOrigins
-        self.searchSearxngURL = searchSearxngURL
-        self.searchTimeoutSeconds = searchTimeoutSeconds
-        self.searchMaxResults = searchMaxResults
-        self.emailAccounts = emailAccounts
-        self.pluginsDir = pluginsDir
-        self.pluginsMarketplaceIndexURL = pluginsMarketplaceIndexURL
-        self.pluginsAutoRescan = pluginsAutoRescan
-        self.media = media
-        self.index = index
-        self.desktop = desktop
-    }
-
-    /// Applies this update onto a loaded config, preserving every field
-    /// the request omits.
-    public func apply(to config: inout RuneWeaverConfig) throws {
-        try applyEngine(to: &config.engine)
-        applyLLM(to: &config.llm)
-        applyMemory(to: &config.memory)
-        try applyMemoryEmbeddingBackend(to: &config.memory)
-        applyVoice(to: &config.voice)
-        applySandbox(to: &config.sandbox)
-        try applyFiles(to: &config.files)
-        applyBrowser(to: &config.browser)
-        applyEmail(to: &config.email)
-        applyPlugins(to: &config.plugins)
-        applyMedia(to: &config.media)
-        applyIndex(to: &config.index)
-        applyDesktop(to: &config.desktop)
-    }
-
-    private func applyEngine(to engine: inout EngineConfig) throws {
-        if let engineName {
-            engine.name = engineName
-        }
-        if let logLevel {
-            engine.logLevel = logLevel
-        }
-        if let compactionThresholdPercent {
-            engine.compactionThresholdPercent = compactionThresholdPercent
-        }
-        if let maxToolIterations {
-            // Reject out-of-range budgets here so invalid values never persist
-            // or reach the live orchestrator through the settings route.
-            guard (1 ... 100).contains(maxToolIterations) else {
-                throw ConfigError.validationError(
-                    field: "engine.max_tool_iterations",
-                    message: "must be between 1 and 100 (got \(maxToolIterations))"
-                )
-            }
-            engine.maxToolIterations = maxToolIterations
-        }
-    }
-
-    private func applyLLM(to llm: inout LLMConfig) {
-        if let defaultProvider {
-            llm.defaultProvider = defaultProvider
-        }
-        if let fallbackProvider {
-            llm.fallbackProvider = fallbackProvider.isEmpty ? nil : fallbackProvider
-        }
-        if let providers {
-            llm.providers = providers
-        }
-    }
-
-    private func applyMemory(to memory: inout MemoryConfig) {
-        if let memoryVectorDBPath {
-            memory.vectorDBPath = memoryVectorDBPath
-        }
-        if let memoryEpisodesDBPath {
-            memory.episodesDBPath = memoryEpisodesDBPath
-        }
-        if let memoryEmbeddingModel {
-            memory.embeddingModel = memoryEmbeddingModel
-        }
-    }
-
-    private func applyMemoryEmbeddingBackend(to memory: inout MemoryConfig) throws {
-        guard let memoryEmbeddingBackend else { return }
-        let allowedBackends = MemoryConfig.allowedEmbeddingBackends
-        guard allowedBackends.contains(memoryEmbeddingBackend) else {
-            throw ConfigError.validationError(
-                field: "memory.embedding_backend",
-                message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memoryEmbeddingBackend)')"
-            )
-        }
-        memory.embeddingBackend = memoryEmbeddingBackend
-    }
-
-    private func applyVoice(to voice: inout VoiceConfig) {
-        if let voiceSTTProvider {
-            voice.sttProvider = voiceSTTProvider
-        }
-        if let voiceWhisperModel {
-            voice.whisperModel = voiceWhisperModel
-        }
-        if let voiceTTSProvider {
-            voice.ttsProvider = voiceTTSProvider
-        }
-    }
-
-    private func applySandbox(to sandbox: inout SandboxConfig) {
-        if let sandboxContainerBaseImage {
-            sandbox.containerBaseImage = sandboxContainerBaseImage
-        }
-        if let sandboxArchiveSessionTTLMinutes {
-            sandbox.archiveSessionTTLMinutes = sandboxArchiveSessionTTLMinutes
-        }
-        if let sandboxMaxConcurrentMachines {
-            sandbox.maxConcurrentMachines = sandboxMaxConcurrentMachines
-        }
-    }
-
-    private func applyFiles(to files: inout FilesConfig) throws {
-        if let filesDenyPatterns {
-            try RuneWeaverConfig.validateFilesPatterns(filesDenyPatterns, field: "files.deny_patterns")
-            files.denyPatterns = filesDenyPatterns
-        }
-        if let filesAllowRoots {
-            try RuneWeaverConfig.validateFilesPatterns(filesAllowRoots, field: "files.allow_roots")
-            files.allowRoots = filesAllowRoots
-        }
-        if let filesRequireApprovalOnDeny {
-            files.requireApprovalOnDeny = filesRequireApprovalOnDeny
-        }
-    }
-
-    private func applyBrowser(to browser: inout BrowserConfig) {
-        if let browserSearxngURL = browserSearxngURL ?? searchSearxngURL {
-            browser.searxngURL = browserSearxngURL
-        }
-        if let browserSearchTimeoutSeconds = browserSearchTimeoutSeconds ?? searchTimeoutSeconds {
-            browser.searchTimeoutSeconds = browserSearchTimeoutSeconds
-        }
-        if let browserMaxResults = browserMaxResults ?? searchMaxResults {
-            browser.maxResults = browserMaxResults
-        }
-        if let browserAllowedOrigins {
-            browser.allowedOrigins = browserAllowedOrigins
-        }
-    }
-
-    private func applyEmail(to email: inout EmailConfig) {
-        if let emailAccounts {
-            email.accounts = emailAccounts
-        }
-    }
-
-    private func applyPlugins(to plugins: inout PluginConfig) {
-        if let pluginsDir {
-            plugins.pluginsDir = pluginsDir
-        }
-        if let pluginsMarketplaceIndexURL {
-            plugins.marketplaceIndexURL = pluginsMarketplaceIndexURL
-        }
-        if let pluginsAutoRescan {
-            plugins.autoRescan = pluginsAutoRescan
-        }
     }
 }

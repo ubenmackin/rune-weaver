@@ -2271,7 +2271,8 @@ select.input-field {
   width: auto;
 }
 
-textarea {
+textarea,
+textarea.input-field {
   width: 100%;
   box-sizing: border-box;
   padding: 10px 12px;
@@ -2282,7 +2283,15 @@ textarea {
   font-size: 14px;
   font-family: inherit;
   line-height: 1.5;
+  height: auto;
   min-height: 80px;
+}
+
+.server-allowed-hosts-textarea {
+  min-height: 120px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  resize: vertical;
 }
 
 input:focus,
@@ -2860,7 +2869,7 @@ button:disabled {
    normal flow inside it. Toasts render only inside this stack. */
 .toast-stack {
   position: fixed;
-  top: 24px;
+  top: 64px;
   right: 24px;
   z-index: 1000;
   display: flex;
@@ -2870,39 +2879,38 @@ button:disabled {
 }
 
 /* Transient toast: in-flow item rendered only inside `.toast-stack` so action
-   feedback surfaces without blocking the form. Slides down from above on
-   appearance. Auto-dismiss timing lives in the Toast component; contextual
-   health/state errors stay as persistent inline banners instead of toasts. */
+   feedback surfaces without blocking the form. Slides down from just under the
+   nav bar on appearance. Auto-dismiss timing lives in the Toast component;
+   contextual health/state errors stay as persistent inline banners instead of toasts. */
 .toast {
   position: static;
   padding: 10px 14px;
-  background: rgba(34, 197, 94, 0.15);
-  border: 1px solid rgba(34, 197, 94, 0.3);
+  background: #142318;
+  border: 1px solid rgba(34, 197, 94, 0.45);
   color: #86efac;
   border-radius: 8px;
   font-size: 13px;
   max-width: 360px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
   display: flex;
   align-items: center;
   gap: 8px;
-  animation: toast-slide-down 0.3s ease-out;
+  animation: toast-slide-down 0.25s ease-out;
 }
 
 /* Error variant: red/orange tones matching the error-banner palette so
    transient failures look distinct from success toasts at a glance. */
 .toast.toast-error {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.3);
+  background: #2a1417;
+  border: 1px solid rgba(239, 68, 68, 0.45);
   color: #fca5a5;
 }
 
-/* Slide down from above so toasts enter from the top edge and settle into
-   their stacked position, matching the top-right anchor. */
+/* Slide down smoothly from just below the navbar into stacked position. */
 @keyframes toast-slide-down {
   from {
     opacity: 0;
-    transform: translateY(-100%);
+    transform: translateY(-16px);
   }
   to {
     opacity: 1;

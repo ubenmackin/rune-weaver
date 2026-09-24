@@ -141,6 +141,15 @@ struct ServeCommand: AsyncParsableCommand {
         }
         let bindHostname = hostname ?? loaded.config.server.hostname
         let bindPort = port ?? loaded.config.server.port
+        // Validate the effective bind hostname shape before the bind policy so a
+        // `--hostname` carrying a widening shape fails with a clear message
+        // rather than a bind-time or gate-time surprise. File values were
+        // already checked by `validate()` at load; the flag bypasses that path.
+        do {
+            try RuneWeaverConfig.validateServerHostname(bindHostname)
+        } catch {
+            throw ValidationError("Invalid hostname '\(bindHostname)': \(String(describing: error))")
+        }
         let auth: ServerAuth?
         do {
             auth = try await ServerAuth.resolve(authConfig: loaded.config.auth)
@@ -150,12 +159,17 @@ struct ServeCommand: AsyncParsableCommand {
         // The bind policy lives in `ServerConfig`; this only translates a refusal
         // into the CLI's loopback-only `ValidationError` so the operator gets an
         // actionable message instead of a bare transport error.
-        let serverConfig = ServerConfig(hostname: bindHostname, port: bindPort, authConfigured: auth != nil)
+        let serverConfig = ServerConfig(
+            hostname: bindHostname,
+            port: bindPort,
+            authConfigured: auth != nil,
+            allowedHosts: loaded.config.server.allowedHosts
+        )
         do {
             try serverConfig.requireBindable(authConfigured: auth != nil)
         } catch {
             throw ValidationError(
-                "Hostname must be loopback (127.0.0.1, localhost, or ::1) unless an owner token is configured "
+                "Hostname must be loopback (127.0.0.1, localhost, ::1, or [::1]) unless an owner token is configured "
                     + "(got '\(bindHostname)'). Set [server] hostname or pass --hostname to a loopback address, "
                     + "or run 'rune-weaver auth token generate' to enable LAN binds."
             )

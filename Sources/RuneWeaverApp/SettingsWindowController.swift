@@ -26,8 +26,9 @@ public final class SettingsWindowController: NSObject {
             webView?.load(URLRequest(url: url))
         }
 
+        win.orderFrontRegardless()
         win.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
     }
 
     private func getOrCreateWindow() -> NSWindow {

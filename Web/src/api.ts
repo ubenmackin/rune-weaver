@@ -1906,7 +1906,18 @@ export interface SettingsResponse {
   // Native desktop vision and gated control under [desktop]; optional for
   // back-compat with older engines that predate the section.
   desktop?: DesktopConfigData;
+  // HTTP bind from [server]; optional for back-compat with older engines that
+  // predate the bind keys. Absent degrades to the loopback defaults so the
+  // Network pane never renders blank.
+  serverHostname?: string;
+  serverPort?: number;
+  serverAllowedHosts?: string[];
   configPath: string;
+  // Whether the last PUT needs a restart to take effect. True only when the
+  // save carried bind-affecting [server] keys; the route never live-reloads
+  // the socket or the middleware set. Optional because older engines predate
+  // the flag; absent means no restart was advertised.
+  requiresRestart?: boolean;
 }
 
 export interface UpdateSettingsInput {
@@ -1950,6 +1961,12 @@ export interface UpdateSettingsInput {
   index?: IndexSettingsUpdate;
   // Partial desktop patch; an omitted patch preserves the stored [desktop] section.
   desktop?: DesktopSettingsUpdate;
+  // Bind patch for [server]; an omitted patch preserves the stored section.
+  // The engine persists these to the file and returns requiresRestart without
+  // live-reloading the bind, so the dashboard shows a restart banner.
+  serverHostname?: string;
+  serverPort?: number;
+  serverAllowedHosts?: string[];
 }
 
 // Textarea mirror of the empty allowed origins defaults.
@@ -1966,6 +1983,349 @@ export function formatAllowedOriginsText(
   origins: string[] | undefined | null
 ): string {
   return formatListToText(origins, DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT);
+}
+
+// Manual mirrors of ServerEndpointConfig ([server] bind) in
+// Sources/RuneWeaverCore/Config.swift so a fresh Network form matches the
+// boundary the engine enforces before the first settings fetch.
+export const DEFAULT_SERVER_HOSTNAME = "127.0.0.1";
+export const DEFAULT_SERVER_PORT = 8082;
+export const MAX_SERVER_ALLOWED_HOSTS = 20;
+export const MAX_SERVER_ALLOWED_HOST_LENGTH = 253;
+
+// Whether a bind hostname is loopback-only. Non-loopback binds need a
+// resolvable owner token and fail closed otherwise, so the Network pane gates
+// its save copy on this check before any network write. A trailing FQDN dot
+// never counts as loopback, mirroring ServerConfig.isLoopbackHostname:
+// validators reject trailing-dot hosts fail-closed, so `localhost.`
+// classifies as non-loopback here to agree with the validator instead of
+// riding loopback under a spelling that can never be configured.
+export function isLoopbackHostname(hostname: string | undefined | null): boolean {
+  const trimmed = (hostname ?? "").trim().toLowerCase();
+  return (
+    trimmed === "127.0.0.1" ||
+    trimmed === "localhost" ||
+    trimmed === "::1" ||
+    trimmed === "[::1]"
+  );
+}
+
+// Single web source for the restart compare: trimmed plus lowercased, then a
+// single outer bracket pair stripped only when the inner text holds a colon
+// so `::1` and `[::1]` (or `::` and `[::]`) compare equal while bracketed
+// non-IPv6 spellings stay distinct. Matches canonicalRestartHost in
+// Sources/RuneWeaverServer/ServerSettingsRoutes.swift; the Host gate stores
+// both spellings for IPv6 literals, so without this the compare reports a
+// spurious restart when only the bracket spelling moves. SettingsManager
+// consumes this helper directly so casing or IPv6 bracket-only spellings the
+// gate treats identically never trip a spurious save or restart badge.
+export function canonicalRestartHost(value: string): string {
+  const candidate = value.trim().toLowerCase();
+  if (candidate.length >= 2 && candidate.startsWith("[") && candidate.endsWith("]")) {
+    const inner = candidate.slice(1, -1);
+    if (inner.includes(":")) return inner;
+  }
+  return candidate;
+}
+
+// Normalizes one allowed_hosts entry to the compared Host form: trimmed,
+// lowercased, with a trailing empty or numeric :port stripped so
+// Example.COM:8082 stores as example.com. Bracketed IPv6 keeps its brackets
+// while a bare IPv6 literal keeps its colons instead of being mistaken for
+// host:port. A bracketed literal strips only for an empty suffix or a colon
+// plus numeric port (`[::1]`, `[::1]:8082`); any other trailing shape stays
+// verbatim so `[::1]evil` never truncates to an allowlisted literal. An
+// unbracketed suffix strips only for an empty or numeric port so
+// `evil.com:evil` stays verbatim instead of truncating to an allowlisted host.
+export function normalizeServerAllowedHost(entry: string): string {
+  const trimmed = entry.trim().toLowerCase();
+  if (!trimmed) return trimmed;
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close === -1) return trimmed;
+    const after = trimmed.slice(close + 1);
+    if (after.length === 0) return trimmed.slice(0, close + 1);
+    if (after.startsWith(":")) {
+      const portPart = after.slice(1);
+      if (portPart.length > 0 && /^[0-9]+$/.test(portPart)) {
+        return trimmed.slice(0, close + 1);
+      }
+    }
+    return trimmed;
+  }
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
+  if (colonCount > 1) return trimmed;
+  const colon = trimmed.indexOf(":");
+  if (colon !== -1) {
+    // Preserve the carved fragment for scheme inputs (`http://...` -> `http`)
+    // so the pinned parity fixtures stay stable; validation drops these
+    // fail-closed before any allowlist stores them.
+    if (trimmed.includes("://")) return trimmed.slice(0, colon);
+    const portPart = trimmed.slice(colon + 1);
+    if (/^[0-9]*$/.test(portPart)) return trimmed.slice(0, colon);
+    return trimmed;
+  }
+  return trimmed;
+}
+
+// Single source for IPv6 bracket-shape validation shared by the allowed_hosts
+// and hostname validators. Brackets only ever wrap an IPv6 literal, so any
+// other bracket shape would never match the Host gate exactly yet would read
+// as configured; keeping the shape check here keeps the client agreeing with
+// the server 400 when the accepted shape evolves. Takes the trimmed value for
+// shape checks but echoes the original entry for repair, matching the
+// surrounding validators. Mirrors validateExactHost.
+export function validateBracketedHost(trimmed: string, entry: string): string | null {
+  // Fail closed on `[` without `]` (and vice versa): an unbalanced bracket
+  // would never match exactly yet read as configured.
+  if (trimmed.includes("[") !== trimmed.includes("]")) {
+    return `must not contain unbalanced brackets (got '${entry}')`;
+  }
+  // Fail closed on bracketed non-IPv6 and empty brackets: `[example.com]`,
+  // `[127.0.0.1]`, or `[]` would never match exactly yet read as configured.
+  // A `:port` suffix after `]` strips only for a numeric port, so any other
+  // tail stays verbatim garbage and must fail here while numeric tails pass
+  // through for the allowlist strip or the hostname port-suffix rejection.
+  // Prefixed `[`, single `[`/`]` counts, non-empty inner holding a colon, and
+  // an after-bracket that is empty or colon-plus-numeric-port; bracket extras,
+  // prefix doubles, bare tails, and non-numeric ports all reject.
+  if (trimmed.includes("[") || trimmed.includes("]")) {
+    const openCount = (trimmed.match(/\[/g) ?? []).length;
+    const closeCount = (trimmed.match(/\]/g) ?? []).length;
+    const close = trimmed.indexOf("]");
+    if (
+      !trimmed.startsWith("[") ||
+      openCount !== 1 ||
+      closeCount !== 1 ||
+      close === -1
+    ) {
+      return `must not contain bracketed non-IPv6 (got '${entry}'); brackets are only for IPv6 literals`;
+    }
+    const inner = trimmed.slice(1, close);
+    if (!inner) {
+      return `must not contain empty brackets (got '${entry}')`;
+    }
+    if (!inner.includes(":")) {
+      return `must not contain bracketed non-IPv6 (got '${entry}'); list the host without brackets instead`;
+    }
+    const afterBracket = trimmed.slice(close + 1);
+    if (afterBracket) {
+      if (!afterBracket.startsWith(":")) {
+        return `must not contain bracketed non-IPv6 (got '${entry}'); brackets are only for IPv6 literals`;
+      }
+      const portPart = afterBracket.slice(1);
+      if (!portPart || !/^[0-9]+$/.test(portPart)) {
+        return `must not contain bracketed non-IPv6 (got '${entry}'); brackets are only for IPv6 literals`;
+      }
+    }
+  }
+  return null;
+}
+
+// Validates one allowed_hosts entry against the exact-only Host semantics the
+// gate enforces. A bare * would allow every host, schemes/wildcards/CIDR would
+// never match exactly yet read as configured, unbalanced brackets or brackets
+// around a non-IPv6 host would never match yet read as allowed, a trailing
+// FQDN dot would never match the stored form, and over-long entries exceed
+// the DNS name limit, so each shape fails closed here with the entry echoed
+// for repair. Mirrors RuneWeaverConfig.validateAllowedHosts via
+// validateExactHost.
+export function validateServerAllowedHost(entry: string): string | null {
+  const trimmed = entry.trim();
+  if (!trimmed) return "must not contain empty strings";
+  if (trimmed.length > MAX_SERVER_ALLOWED_HOST_LENGTH) {
+    return `must not exceed ${MAX_SERVER_ALLOWED_HOST_LENGTH} characters (got ${trimmed.length})`;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered.includes("://")) {
+    return `must not contain a scheme (got '${entry}'); list the host instead`;
+  }
+  if (lowered === "*") {
+    return `must not contain bare "*" (would allow every host)`;
+  }
+  if (lowered.includes("*")) {
+    return `must not contain wildcards (got '${entry}'); list exact hosts instead`;
+  }
+  if (lowered.includes("/")) {
+    return `must not contain CIDR or paths (got '${entry}'); list exact hosts instead`;
+  }
+  if (trimmed.includes("@")) {
+    return `must not contain userinfo (got '${entry}')`;
+  }
+  if (trimmed.includes("?") || trimmed.includes("#")) {
+    return `must be a host without query or fragment (got '${entry}')`;
+  }
+  if (trimmed.includes(" ") || trimmed.includes("\t")) {
+    return `must not contain whitespace (got '${entry}')`;
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001F\u007F]/.test(trimmed)) {
+    return `must not contain control characters (got '${entry}')`;
+  }
+  // Single-sourced bracket shape so a future IPv6 spelling change stays in
+  // lockstep with the server 400.
+  const bracketProblem = validateBracketedHost(trimmed, entry);
+  if (bracketProblem) {
+    return bracketProblem;
+  }
+  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
+  // normalization strips only an empty or numeric port, so `evil.com:evil`
+  // would otherwise persist verbatim garbage. Empty or numeric suffixes pass
+  // through for the allowlist strip; IPv6 literals keep their colons above.
+  // Mirrors validateExactHost.
+  if (!trimmed.startsWith("[")) {
+    const colonCount = (trimmed.match(/:/g) ?? []).length;
+    if (colonCount === 1) {
+      const colon = trimmed.indexOf(":");
+      const suffix = trimmed.slice(colon + 1);
+      if (!/^[0-9]*$/.test(suffix)) {
+        return `must be a host with an optional numeric port (got '${entry}'); list exact hosts instead`;
+      }
+    }
+  }
+  // Fail closed on a trailing FQDN dot: the gate compares exact normalized
+  // hosts, so `example.com.` would never match `example.com` yet read as
+  // allowed. Mirrors validateExactHost.
+  if (trimmed.endsWith(".")) {
+    return `must not end with '.' (got '${entry}'); list the host without the trailing dot instead`;
+  }
+  const normalized = normalizeServerAllowedHost(trimmed);
+  if (!normalized) {
+    return "must not contain empty strings";
+  }
+  return null;
+}
+
+// Validates the full allowed_hosts list: bounded count plus per-entry
+// exact-only rules so a bad line points at its editor line with its number.
+export function validateServerAllowedHosts(hosts: string[]): string | null {
+  if (hosts.length > MAX_SERVER_ALLOWED_HOSTS) {
+    return `Allowed hosts must contain at most ${MAX_SERVER_ALLOWED_HOSTS} entries (got ${hosts.length}).`;
+  }
+  for (let i = 0; i < hosts.length; i += 1) {
+    const problem = validateServerAllowedHost(hosts[i]);
+    if (problem) {
+      return `Line ${i + 1}: ${problem}`;
+    }
+  }
+  return null;
+}
+
+// Whether a trimmed hostname carries a `:port` suffix. Bracketed literals keep
+// their brackets and only a colon plus numeric port after `]` marks a port,
+// while unbracketed values with more than one colon are IPv6 literals that
+// keep their colons. Mirrors RuneWeaverConfig.isHostWithPortSuffix so a
+// `host:port` spelling fails closed here instead of persisting a hostname the
+// Host gate would never match.
+function isServerHostnameWithPortSuffix(trimmed: string): boolean {
+  if (trimmed.startsWith("[")) {
+    const close = trimmed.indexOf("]");
+    if (close === -1) return false;
+    const after = trimmed.slice(close + 1);
+    if (!after.startsWith(":")) return false;
+    const portPart = after.slice(1);
+    return portPart.length > 0 && /^[0-9]+$/.test(portPart);
+  }
+  const colonCount = (trimmed.match(/:/g) ?? []).length;
+  if (colonCount !== 1) return false;
+  const colon = trimmed.indexOf(":");
+  const suffix = trimmed.slice(colon + 1);
+  if (suffix.length === 0) return true;
+  return /^[0-9]+$/.test(suffix);
+}
+
+// Validates one server.hostname value against the exact-only Host semantics the
+// gate enforces, mirroring RuneWeaverConfig.validateServerHostname so a bad bind
+// fails closed in the form before any network write. Shares the allowed_hosts
+// widening shapes (scheme, wildcards, CIDR, userinfo, query, whitespace,
+// controls, unbalanced brackets, brackets around a non-IPv6 host, trailing
+// dot) while hostname wording stays singular and a `:port` suffix is rejected
+// because the port lives in server.port.
+export function validateServerHostname(entry: string): string | null {
+  const trimmed = entry.trim();
+  if (!trimmed) return "must not be empty";
+  if (trimmed.length > MAX_SERVER_ALLOWED_HOST_LENGTH) {
+    return `must not exceed ${MAX_SERVER_ALLOWED_HOST_LENGTH} characters (got ${trimmed.length})`;
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered.includes("://")) {
+    return `must not contain a scheme (got '${entry}'); list the host instead`;
+  }
+  if (lowered === "*") {
+    return `must not contain bare "*" (would allow every host)`;
+  }
+  if (lowered.includes("*")) {
+    return `must not contain wildcards (got '${entry}'); list the host instead`;
+  }
+  if (lowered.includes("/")) {
+    return `must not contain CIDR or paths (got '${entry}'); list the host instead`;
+  }
+  if (trimmed.includes("@")) {
+    return `must not contain userinfo (got '${entry}')`;
+  }
+  if (trimmed.includes("?") || trimmed.includes("#")) {
+    return `must be a host without query or fragment (got '${entry}')`;
+  }
+  if (trimmed.includes(" ") || trimmed.includes("\t")) {
+    return `must not contain whitespace (got '${entry}')`;
+  }
+  if ([...trimmed].some((ch) => { const code = ch.charCodeAt(0); return code < 0x20 || code === 0x7f; })) {
+    return `must not contain control characters (got '${entry}')`;
+  }
+  // Single-sourced bracket shape so a future IPv6 spelling change stays in
+  // lockstep with the server 400.
+  const bracketProblem = validateBracketedHost(trimmed, entry);
+  if (bracketProblem) {
+    return bracketProblem;
+  }
+  // Fail closed on unbracketed `host:suffix` with a non-numeric suffix:
+  // normalization strips only an empty or numeric port, so `evil.com:evil`
+  // would otherwise persist verbatim garbage. Empty or numeric suffixes pass
+  // through for the port-suffix rejection below; IPv6 literals keep their
+  // colons above. Mirrors validateExactHost.
+  if (!trimmed.startsWith("[")) {
+    const colonCount = (trimmed.match(/:/g) ?? []).length;
+    if (colonCount === 1) {
+      const colon = trimmed.indexOf(":");
+      const suffix = trimmed.slice(colon + 1);
+      if (!/^[0-9]*$/.test(suffix)) {
+        return `must be a host without a port (got '${entry}'); configure the port via server.port instead`;
+      }
+    }
+  }
+  if (trimmed.endsWith(".")) {
+    return `must not end with '.' (got '${entry}'); list the host without the trailing dot instead`;
+  }
+  if (isServerHostnameWithPortSuffix(trimmed)) {
+    return `must be a host without a port (got '${entry}'); configure the port via server.port instead`;
+  }
+  const normalized = normalizeServerAllowedHost(trimmed);
+  if (!normalized) {
+    return "must not be empty";
+  }
+  return null;
+}
+
+// Textarea mirror of the empty allowed-hosts defaults so the Network editor
+// starts from the same empty allowlist without joining inline in every caller.
+export const DEFAULT_SERVER_ALLOWED_HOSTS_TEXT = "";
+
+// Parses the allowed-hosts textarea into the wire shape, one exact host per
+// line with blank lines ignored, so an emptied editor reads as an explicit
+// empty allowlist instead of persisting whitespace-only rows.
+export function parseServerAllowedHostsText(
+  text: string | undefined | null,
+): string[] {
+  return parseLinesToList(text, []);
+}
+
+// Formats an allowed-hosts array for the multiline editor, falling back to
+// the empty allowlist when an older engine omits the [server] section so the
+// textarea and array states never diverge on the default boundary.
+export function formatServerAllowedHostsText(
+  hosts: string[] | undefined | null,
+): string {
+  return formatListToText(hosts, DEFAULT_SERVER_ALLOWED_HOSTS_TEXT);
 }
 
 // Manual mirror of FilesConfig.defaultDenyPatterns in Sources/RuneWeaverCore/Config.swift.

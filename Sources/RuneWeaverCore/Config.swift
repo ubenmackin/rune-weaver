@@ -66,28 +66,51 @@ public struct ServerEndpointConfig: Sendable, Codable, Equatable {
     public static let defaultHostname = "127.0.0.1"
     /// Default engine API port, chosen to avoid MLX (8080) and llama.cpp (8081).
     public static let defaultPort = 8082
+    /// Upper bound on explicit `allowed_hosts` entries, keeping the Host gate auditable.
+    public static let maxAllowedHosts = 20
+    /// Upper bound on one `allowed_hosts` entry, matching the DNS name limit.
+    public static let maxAllowedHostLength = 253
 
     /// Interface the service binds.
     public var hostname: String
     /// TCP port the service binds.
     public var port: Int
+    /// Extra exact hostnames the Host gate accepts beside loopback and the bind hostname.
+    ///
+    /// Entries are exact-only and matched after lowercasing plus port stripping,
+    /// so no scheme, wildcard, CIDR, or bare `*` is stored here; validation
+    /// rejects those shapes fail-closed and the middleware normalizes the rest.
+    public var allowedHosts: [String]
 
     /// Creates a server endpoint config.
-    public init(hostname: String = defaultHostname, port: Int = defaultPort) {
-        self.hostname = hostname
+    ///
+    /// The hostname and allowlist entries are trimmed so padded file values or
+    /// direct construction never reach the bind or the gate with whitespace;
+    /// widening shapes stay verbatim for the gate to drop fail-closed instead
+    /// of allowlisting a carved fragment.
+    public init(hostname: String = defaultHostname, port: Int = defaultPort, allowedHosts: [String] = []) {
+        self.hostname = hostname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.port = port
+        self.allowedHosts = allowedHosts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 
     private enum CodingKeys: String, CodingKey {
         case hostname
         case port
+        case allowedHosts = "allowed_hosts"
     }
 
     /// Decodes an endpoint, defaulting omitted keys to the loopback default.
+    ///
+    /// Values trim so padded payloads never reach the bind or the gate with
+    /// whitespace; widening shapes stay verbatim for the gate to drop.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.hostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? Self.defaultHostname
+        let rawHostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? Self.defaultHostname
+        self.hostname = rawHostname.trimmingCharacters(in: .whitespacesAndNewlines)
         self.port = try container.decodeIfPresent(Int.self, forKey: .port) ?? Self.defaultPort
+        let rawHosts = try container.decodeIfPresent([String].self, forKey: .allowedHosts) ?? []
+        self.allowedHosts = rawHosts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
     }
 }
 

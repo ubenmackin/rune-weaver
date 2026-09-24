@@ -45,6 +45,32 @@ public final class AppModel {
     public var isDesktopActive: Bool = false
     /// Set to true to signal an emergency abort of the current desktop batch.
     public var desktopEmergencyStop: Bool = false
+    /// Whether boot resolved no owner token, so the menu should surface the
+    /// first-run onboarding sheet. Loopback stays bootable for local use; the
+    /// flag only records that LAN binds stay refused until a token is minted.
+    public var needsOwnerToken: Bool = false
+    /// Freshly minted owner token shown exactly once. Held in memory only and
+    /// cleared on acknowledgement; never logged and never written outside the
+    /// Keychain/file persistence owned by the auth store. The setter stays
+    /// private so acknowledgement is the sole external mutation path and the
+    /// secret cannot be overwritten from outside the model.
+    public private(set) var generatedOnceToken: String?
+    /// Non-secret SHA-256 prefix identifying the stored owner token, so
+    /// Settings can prove which credential is active without rendering it.
+    public var ownerTokenFingerprint: String?
+
+    /// Credential-free origin of the stored token (environment, Keychain, or
+    /// file), explaining to the owner where the next boot will read from.
+    public var ownerTokenSourceLabel: String?
+    /// Last owner-token mint or status failure, rendered as guidance rather
+    /// than a bare error so the owner can act without opening Terminal.
+    public var ownerTokenError: String?
+    /// Whether a token mint is in flight, so Generate/Rotate stay single-flight
+    /// instead of persisting competing credentials.
+    public var isGeneratingOwnerToken: Bool = false
+    /// Whether a server restart is in flight, so concurrent Retry double-clicks
+    /// collapse to a single shutdown+boot sequence instead of racing the bind.
+    public var isRestarting: Bool = false
 
     public let notificationManager = AppNotificationManager()
     private let serverRunner = ServerRunnerActor()
@@ -95,8 +121,9 @@ public final class AppModel {
         // authorization prompt) so model construction stays side-effect
         // free; a retry after a failed boot re-runs it, which is idempotent.
         notificationManager.configure()
-        Task {
-            await bootServer()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.bootServer()
         }
     }
 
@@ -107,8 +134,8 @@ public final class AppModel {
     /// serves, a non-loopback endpoint serves only once an owner token resolved,
     /// and an unauthenticated LAN bind is refused rather than silently
     /// downgraded to an open surface.
-    private func validatedBootBind(host: String, port: Int, authConfigured: Bool) -> ServerConfig? {
-        let bindConfig = ServerConfig(hostname: host, port: port, authConfigured: authConfigured)
+    private func validatedBootBind(host: String, port: Int, authConfigured: Bool, allowedHosts: [String] = []) -> ServerConfig? {
+        let bindConfig = ServerConfig(hostname: host, port: port, authConfigured: authConfigured, allowedHosts: allowedHosts)
         do {
             try bindConfig.requireBindable(authConfigured: authConfigured)
         } catch {
@@ -138,7 +165,11 @@ public final class AppModel {
         self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
         // Record the endpoint actually bound so dashboard links follow it even
         // when `[server]` supplied the values.
-        self.boundEndpoint = ServerEndpointConfig(hostname: serverConfig.hostname, port: serverConfig.port)
+        self.boundEndpoint = ServerEndpointConfig(
+            hostname: serverConfig.hostname,
+            port: serverConfig.port,
+            allowedHosts: serverConfig.allowedHosts
+        )
 
         startPolling()
     }
@@ -148,7 +179,8 @@ public final class AppModel {
     /// never flips a healthy boot into a failure, while the health endpoint's
     /// live stage plus reachability carries state to the dashboard dot and
     /// message. Hops off the main actor via a nonisolated factory (a plain
-    /// Task here would inherit MainActor isolation from this class), with the
+    /// Task here is non-isolated and does not inherit MainActor isolation,
+    /// so isolation must be explicit), with the
     /// handle retained so quit can cancel the flight.
     private func startSearchWarmup(browserConfig: BrowserConfig) {
         searchWarmupTask?.cancel()
@@ -245,7 +277,11 @@ public final class AppModel {
             // adopts the configured value, and an explicit change wins. Snapshot
             // both once so an edit mid-boot cannot produce a half-old address;
             // the policy is applied after auth resolves.
-            let bindHost = hostname == ServerEndpointConfig.defaultHostname ? config.server.hostname : hostname
+            let rawBindHost = hostname == ServerEndpointConfig.defaultHostname ? config.server.hostname : hostname
+            // Trim surrounding whitespace so a padded file value still boots
+            // as the loopback it classifies as, and never reaches the bind
+            // policy or the served hostname untrimmed.
+            let bindHost = rawBindHost.trimmingCharacters(in: .whitespacesAndNewlines)
             let bindPort = port == ServerEndpointConfig.defaultPort ? config.server.port : port
 
             // Resolve the owner token before the bind check so the bind policy
@@ -262,11 +298,41 @@ public final class AppModel {
                 return
             }
 
+            // A missing token is a first-run posture, not a boot failure:
+            // loopback stays usable for local work while the menu surfaces an
+            // actionable onboarding state instead of failing silently. The
+            // fingerprint is derived and the raw value dropped immediately so
+            // only the non-secret prefix ever reaches published state.
+            if auth == nil {
+                self.needsOwnerToken = true
+                self.ownerTokenFingerprint = nil
+                self.ownerTokenSourceLabel = nil
+            } else {
+                self.needsOwnerToken = false
+                self.ownerTokenError = nil
+                if let resolved = try? await ServerAuthTokenStore(authConfig: config.auth).resolve() {
+                    self.ownerTokenFingerprint = ServerAuth.fingerprint(resolved.token)
+                    self.ownerTokenSourceLabel = resolved.source.label
+                } else {
+                    self.ownerTokenFingerprint = nil
+                    self.ownerTokenSourceLabel = nil
+                }
+            }
+
             guard let bindConfig = validatedBootBind(
                 host: bindHost,
                 port: bindPort,
-                authConfigured: auth != nil
-            ) else { return }
+                authConfigured: auth != nil,
+                allowedHosts: config.server.allowedHosts
+            ) else {
+                // A non-loopback bind without a token stays refused rather
+                // than downgraded to an open surface; keep the onboarding flag
+                // so the menu can still offer in-app generation.
+                if auth == nil {
+                    self.needsOwnerToken = true
+                }
+                return
+            }
 
             let pipeline = await buildBootPipeline(config: config, bindConfig: bindConfig, auth: auth)
             self.providerName = pipeline.selectedProvider.name
@@ -284,6 +350,16 @@ public final class AppModel {
             self.isDesktopEnabled = screenshotLive || actionLive
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
+            // A loopback boot without a token stays live for local use, but
+            // the status must say what is missing and where to fix it so the
+            // owner never mistakes local-only for fully provisioned.
+            if auth == nil {
+                self.needsOwnerToken = true
+                self.serverStatus = "Running on \(bindConfig.hostname):\(bindConfig.port) — "
+                    + "Owner token not configured (local use only; generate one to enable LAN binds)"
+            } else {
+                self.needsOwnerToken = false
+            }
             // Boot is already live at this point, so warm search detached:
             // a down engine must never block the menu bar or fail the boot.
             startSearchWarmup(browserConfig: config.browser)
@@ -423,20 +499,42 @@ public extension AppModel {
         await refreshPendingApprovals()
     }
 
+    /// Whether the web dashboard and web settings can be opened from the menu.
+    var isDashboardAvailable: Bool {
+        // A refused bind leaves no live endpoint while the published fields
+        // still fall back to loopback defaults, so availability must require
+        // a successful bind instead of a constructible URL alone; otherwise
+        // the menu would offer a dashboard that has no server behind it.
+        guard isRunning, boundEndpoint != nil else { return false }
+        return dashboardURL() != nil
+    }
+
     /// Builds a dashboard URL from the effective bind values so host text can never inject a
-    /// scheme or path, and so a concurrent edit cannot produce a half-old address. Only loopback
-    /// hosts are opened: the app never puts the owner token in a URL, so a non-loopback engine
-    /// address is left for the owner to open directly.
-    private func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
+    /// scheme or path, and so a concurrent edit cannot produce a half-old address.
+    /// When bound to an all-interfaces wildcard (0.0.0.0, ::, [::], *), resolves to 127.0.0.1
+    /// so local navigation reaches the service via loopback.
+    func dashboardURL(fragment: String? = nil, queryItems: [URLQueryItem]? = nil) -> URL? {
         // Follow the endpoint actually bound at boot (which may come from
         // `[server]`), falling back to the published fields before boot.
         let host = (boundEndpoint?.hostname ?? hostname).trimmingCharacters(in: .whitespacesAndNewlines)
         let portValue = boundEndpoint?.port ?? port
         guard ServerConfig.validPortRange.contains(portValue), !host.isEmpty else { return nil }
-        guard ServerConfig(hostname: host, port: portValue).isLoopbackOnly else { return nil }
+
+        // All-interfaces binds (0.0.0.0, ::, [::], *) listen across every interface
+        // including loopback; route local dashboard/settings navigation to 127.0.0.1.
+        let lower = host.lowercased()
+        let urlHost = if lower == "0.0.0.0" || lower == "::" || lower == "[::]" || lower == "*" {
+            "127.0.0.1"
+        } else if lower.hasPrefix("["), lower.hasSuffix("]"), lower.count >= 2 {
+            // URLComponents.host expects the bare IPv6 literal without outer brackets.
+            String(lower.dropFirst().dropLast())
+        } else {
+            host
+        }
+
         var components = URLComponents()
         components.scheme = "http"
-        components.host = host
+        components.host = urlHost
         components.port = portValue
         components.path = "/"
         if let queryItems, !queryItems.isEmpty {
@@ -464,6 +562,10 @@ public extension AppModel {
         if let url = dashboardURL(fragment: "settings", queryItems: [URLQueryItem(name: "standalone", value: "true")]) {
             SettingsWindowController.shared.show(url: url)
         }
+    }
+
+    func openOwnerAccess() {
+        OwnerAccessWindowController.shared.show(model: self)
     }
 
     func quit() {
@@ -499,6 +601,192 @@ public extension AppModel {
                 }
             }
         }
+    }
+}
+
+// MARK: - Owner Token Onboarding & Settings Access
+
+public extension AppModel {
+    /// Mints the first owner token for a fresh install through the shared
+    /// auth store, so the menu bar never reimplements randomness or storage.
+    /// The running service keeps its boot-time posture until the
+    /// acknowledgement restart, which is why the needs flag stays set here.
+    func generateOwnerToken() {
+        guard !isGeneratingOwnerToken else { return }
+        // Set synchronously before the Task hops so a double-tap cannot pass
+        // the guard twice and persist competing credentials; the async mint
+        // below only clears it.
+        isGeneratingOwnerToken = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.mintOwnerToken(replacing: false)
+        }
+    }
+
+    /// Replaces the stored owner token through the same store the first mint
+    /// uses, keeping Terminal optional for rotation. The live service still
+    /// enforces the previous credential until the acknowledgement restart
+    /// adopts the replacement, so a lost copy can be recovered by rotating
+    /// again before acknowledging.
+    func rotateOwnerToken() {
+        guard !isGeneratingOwnerToken else { return }
+        // Same synchronous single-flight as generation: claim the flag on the
+        // MainActor before spawning the mint Task.
+        isGeneratingOwnerToken = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.mintOwnerToken(replacing: true)
+        }
+    }
+
+    /// Re-reads the stored credential without minting, so Settings can prove
+    /// which token is active by fingerprint prefix alone. The raw value is
+    /// dropped immediately after hashing; only the prefix and source label
+    /// ever reach published state.
+    func refreshOwnerTokenStatus() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let config = try RuneWeaverConfig.loadDefault()
+                let store = ServerAuthTokenStore(authConfig: config.auth)
+                if let resolved = try await store.resolve() {
+                    self.ownerTokenFingerprint = ServerAuth.fingerprint(resolved.token)
+                    self.ownerTokenSourceLabel = resolved.source.label
+                    self.ownerTokenError = nil
+                    // The needs flag tracks the running service posture, not
+                    // merely stored presence: a freshly minted token still
+                    // needs the restart before the gate enforces it.
+                    if self.serverContext?.auth != nil {
+                        self.needsOwnerToken = false
+                    }
+                } else {
+                    // No stored credential means LAN binds stay refused; keep
+                    // the onboarding flag so the menu keeps offering generation.
+                    self.ownerTokenFingerprint = nil
+                    self.ownerTokenSourceLabel = nil
+                    if self.serverContext?.auth == nil {
+                        self.needsOwnerToken = true
+                    }
+                }
+            } catch {
+                // A loose-permissioned file or unreadable Keychain must read
+                // as guidance, never as a silent empty state that looks
+                // unconfigured.
+                self.ownerTokenError = "Could not read the owner token: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Clears the once-shown secret from memory and restarts the embedded
+    /// service so the gate adopts the stored credential. Clearing first
+    /// guarantees the secret cannot linger in published state past the owner's
+    /// confirmation, even if the restart itself fails.
+    func acknowledgeGeneratedToken() {
+        generatedOnceToken = nil
+        restartServerToAdoptToken()
+    }
+
+    /// Restarts the embedded service without terminating the menu bar, so a
+    /// newly minted token takes effect without relaunching the app. The
+    /// shutdown mirrors quit (polling, warmup, gate, hub, app) but returns to
+    /// boot instead of terminating.
+    func restartServerToAdoptToken() {
+        guard !isRestarting else { return }
+        // Claim synchronously on the MainActor before the Task hops so a
+        // concurrent Retry double-click collapses to one shutdown+boot.
+        isRestarting = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.restartServer()
+        }
+    }
+
+    /// Mints via the single-owner rotation path so CSPRNG bytes plus
+    /// Keychain/0600 persistence stay single-sourced with the terminal flow.
+    /// An empty seed is honest for first generation because the throwaway
+    /// verifier is never served; rotation seeds from the stored value so a
+    /// storage failure leaves the working credential untouched.
+    private func mintOwnerToken(replacing: Bool) async {
+        // The single-flight flag was already claimed synchronously by
+        // generateOwnerToken/rotateOwnerToken before the Task hop, so a
+        // double-tap cannot enter here twice; this hop only clears it.
+        ownerTokenError = nil
+        defer { isGeneratingOwnerToken = false }
+        do {
+            let config = try RuneWeaverConfig.loadDefault()
+            let store = ServerAuthTokenStore(authConfig: config.auth)
+            let existing = try await store.resolve()
+            if !replacing, existing != nil {
+                // Refusing to overwrite keeps a single call from silently
+                // invalidating every other device; rotation is the explicit
+                // path for replacement.
+                self.ownerTokenError = "An owner token is already configured (\(existing?.source.label ?? "stored")). Use Rotate to replace it."
+                if let existing {
+                    self.ownerTokenFingerprint = ServerAuth.fingerprint(existing.token)
+                    self.ownerTokenSourceLabel = existing.source.label
+                }
+                return
+            }
+            if replacing, existing == nil {
+                // Rotating with nothing stored would mint under a misleading
+                // label, so generation stays the honest entry point instead.
+                self.ownerTokenError = "No owner token is configured yet. Use Generate to create one."
+                return
+            }
+            let seeder = if replacing, let current = existing {
+                ServerAuth(initialToken: current.token, store: store)
+            } else {
+                ServerAuth(initialToken: "", store: store)
+            }
+            // The store persists before the swap, so a failure here leaves the
+            // previous credential valid instead of stranding the owner.
+            let token = try await seeder.rotate()
+            // Held in memory only for the once-only display; Settings and
+            // status surfaces render the fingerprint derived below, never this.
+            self.generatedOnceToken = token
+            self.ownerTokenFingerprint = ServerAuth.fingerprint(token)
+            if let reread = try? await store.resolve() {
+                self.ownerTokenSourceLabel = reread.source.label
+            }
+        } catch let error as ServerAuthError {
+            // An environment override outranks persisted storage across
+            // restarts, so its guidance must name the variable instead of
+            // reporting a success that the next boot would undo.
+            self.ownerTokenError = error.localizedDescription
+        } catch {
+            self.ownerTokenError = "Could not generate the owner token: \(error.localizedDescription)"
+        }
+    }
+
+    /// Shuts down the live service and boots again from disk, letting a newly
+    /// stored token flow through the same resolve-plus-bind path as launch.
+    /// Live state is dropped before reboot so a failed restart never resumes
+    /// a half-wired context, and the boot flag is held across the hop so a
+    /// concurrent menu appearance cannot bind the port twice.
+    private func restartServer() async {
+        // The isRestarting flag was claimed synchronously by
+        // restartServerToAdoptToken; clearing here releases the single-flight
+        // even when the reboot fails, so a later Retry can run.
+        defer { isRestarting = false }
+        pollingTask?.cancel()
+        pollingTask = nil
+        searchWarmupTask?.cancel()
+        searchWarmupTask = nil
+        let context = serverContext
+        let app = vaporApp
+        let task = serverTask
+        serverTask = nil
+        let runner = serverRunner
+        await runner.shutdown(context: context, app: app)
+        task?.cancel()
+        self.serverContext = nil
+        self.vaporApp = nil
+        self.boundEndpoint = nil
+        self.isRunning = false
+        // Hold the boot flag across the hop so the relaunch is the only
+        // writer; a failure inside boot clears it for a later retry.
+        self.hasStartedBoot = true
+        await bootServer()
     }
 }
 

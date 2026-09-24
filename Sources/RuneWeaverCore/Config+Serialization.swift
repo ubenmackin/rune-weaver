@@ -68,12 +68,18 @@ extension RuneWeaverConfig {
     }
 
     private func renderServerTOML() -> [String] {
-        [
+        var lines = [
             "[server]",
             "hostname = \(Self.tomlQuoted(server.hostname))",
-            "port = \(server.port)",
-            ""
+            "port = \(server.port)"
         ]
+        // Explicit hosts render only when set so stock files keep the
+        // loopback-only shape and a round-trip never invents an entry.
+        if !server.allowedHosts.isEmpty {
+            lines.append("allowed_hosts = \(Self.tomlStringArray(server.allowedHosts))")
+        }
+        lines.append("")
+        return lines
     }
 
     private func renderAuthTOML() -> [String] {

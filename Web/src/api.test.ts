@@ -7,6 +7,7 @@ import {
   authHeaders,
   authenticateWithToken,
   cancelChat,
+  canonicalRestartHost,
   clearAuthToken,
   concurrentTurnsBusyMessage,
   createJob,
@@ -33,6 +34,7 @@ import {
   listTrustGrants,
   MAX_CONCURRENT_CHAT_TURNS,
   MAX_CONCURRENT_CHAT_TURNS_HEADER,
+  normalizeServerAllowedHost,
   parseAllowedOriginsText,
   parseMaxConcurrentChatTurns,
   parsePlaceholderCallID,
@@ -52,6 +54,8 @@ import {
   textContainsPlaceholderForCall,
   toolCancel,
   updateJob,
+  validateServerAllowedHost,
+  validateServerHostname,
 } from "./api";
 import { jsonResponse } from "./test-utils/http";
 
@@ -1013,5 +1017,71 @@ describe("owner bearer auth client", () => {
     expect(
       formatAllowedOriginsText(["*.homelab.local", "192.168.1.*"])
     ).toBe("*.homelab.local\n192.168.1.*");
+  });
+});
+
+describe("host parity contract", () => {
+  // Pinned cross-language vectors shared with the engine suite. The same JSON
+  // literal lives in the Swift host-parity suite so a bracket, case, port, or
+  // trailing-dot drift on either side fails its own suite instead of silently
+  // forking the restart compare, the Host gate, or validation.
+  type HostParityVector = {
+    input: string;
+    canonical: string;
+    normalized: string;
+    hostnameValid: boolean;
+    allowedHostValid: boolean;
+  };
+
+  // Bracketed IPv6 strips only in the canonical form, casing folds in both
+  // string forms, `:port` survives the canonical form but strips in the
+  // normalized form only for an empty or colon-plus-numeric-port suffix
+  // after `]` (trailing junk like `[::1]evil` survives verbatim and fails
+  // validation), and a trailing dot survives both string forms while
+  // failing validation.
+  const fixtureJSON = `[
+    {"input":"example.com","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
+    {"input":"  Example.COM  ","canonical":"example.com","normalized":"example.com","hostnameValid":true,"allowedHostValid":true},
+    {"input":"[::1]","canonical":"::1","normalized":"[::1]","hostnameValid":true,"allowedHostValid":true},
+    {"input":"::1","canonical":"::1","normalized":"::1","hostnameValid":true,"allowedHostValid":true},
+    {"input":"[FE80::1]","canonical":"fe80::1","normalized":"[fe80::1]","hostnameValid":true,"allowedHostValid":true},
+    {"input":"[Example.COM]","canonical":"[example.com]","normalized":"[example.com]","hostnameValid":false,"allowedHostValid":false},
+    {"input":"Example.COM:8082","canonical":"example.com:8082","normalized":"example.com","hostnameValid":false,"allowedHostValid":true},
+    {"input":"[::1]:8082","canonical":"[::1]:8082","normalized":"[::1]","hostnameValid":false,"allowedHostValid":true},
+    {"input":"[::1]evil","canonical":"[::1]evil","normalized":"[::1]evil","hostnameValid":false,"allowedHostValid":false},
+    {"input":"localhost.","canonical":"localhost.","normalized":"localhost.","hostnameValid":false,"allowedHostValid":false},
+    {"input":"example.com.","canonical":"example.com.","normalized":"example.com.","hostnameValid":false,"allowedHostValid":false},
+    {"input":"LOCALHOST","canonical":"localhost","normalized":"localhost","hostnameValid":true,"allowedHostValid":true},
+    {"input":"  [::1]  ","canonical":"::1","normalized":"[::1]","hostnameValid":true,"allowedHostValid":true},
+    {"input":"http://evil.com","canonical":"http://evil.com","normalized":"http","hostnameValid":false,"allowedHostValid":false},
+    {"input":"*.example.com","canonical":"*.example.com","normalized":"*.example.com","hostnameValid":false,"allowedHostValid":false},
+    {"input":"[::1","canonical":"[::1","normalized":"[::1","hostnameValid":false,"allowedHostValid":false},
+    {"input":":8082","canonical":":8082","normalized":"","hostnameValid":false,"allowedHostValid":false}
+  ]`;
+
+  it("matches the pinned restart, normalize, and exact-host matrix", () => {
+    const vectors = JSON.parse(fixtureJSON) as HostParityVector[];
+    expect(vectors.length).toBeGreaterThan(0);
+    for (const vector of vectors) {
+      // The restart compare strips brackets only around a colon-bearing
+      // literal so `[::1]` and `::1` agree while `[example.com]` stays distinct.
+      expect(canonicalRestartHost(vector.input)).toBe(vector.canonical);
+      // The Host gate keeps bracketed IPv6 intact while stripping a
+      // `:port` only for an empty or colon-plus-numeric-port suffix
+      // after `]`, so the saved allowlist and the request header
+      // compare alike without truncating trailing junk to allowlisted.
+      expect(normalizeServerAllowedHost(vector.input)).toBe(
+        vector.normalized,
+      );
+      // Hostname validation rejects a `:port` suffix the allowlist strips,
+      // while both reject schemes, wildcards, unbalanced or non-IPv6
+      // brackets, trailing junk after `]`, and a trailing dot fail-closed.
+      expect(validateServerHostname(vector.input) === null).toBe(
+        vector.hostnameValid,
+      );
+      expect(validateServerAllowedHost(vector.input) === null).toBe(
+        vector.allowedHostValid,
+      );
+    }
   });
 });

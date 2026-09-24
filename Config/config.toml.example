@@ -13,15 +13,35 @@ log_level = "info"  # trace | debug | info | notice | warning | error | critical
 # Engine HTTP API bind endpoint. Loopback is the v1 default. A non-loopback
 # hostname is refused at boot unless owner auth resolves a token (auth-before-
 # exposure): the service never silently downgrades to an unauthenticated LAN bind.
+# A refused bind is visible in the menu-bar app status line (Failed reason plus
+# Open Settings / Retry), so a 0.0.0.0-without-token refusal is fixable without Terminal.
 #
 # Reaching the engine from a phone or another machine: prefer a WireGuard (or
 # equivalent) tunnel and leave this hostname on 127.0.0.1. The tunnel keeps the
 # engine off the physical LAN while the bearer token still guards every request.
-# Binding a raw LAN address (this Mac's LAN IP, or 0.0.0.0) is allowed only once
-# a token resolves and exposes the service to every host that can route to it,
-# so only do that on a trusted network you control.
+# Binding a raw LAN address is allowed only once a token resolves and exposes
+# the service to every host that can route to it, so only do that on a trusted
+# network you control.
+#
+# Literal LAN IP vs all-interfaces: binding this Mac's literal LAN IP (for
+# example "192.168.1.20") is the narrow workaround — that address alone joins
+# the Host allowlist beside loopback, so only that exact Host passes and
+# neighbors still answer 403. Binding "0.0.0.0" (or "::") listens on every
+# interface and, once a token resolves, additionally admits the LAN family:
+# 10/8, 172.16/12, 192.168/16, 169.254/16, IPv6 ULA plus link-local, and
+# ".local" names, plus any explicit allowed_hosts below. Without a token the
+# all-interfaces bind is refused at boot rather than served open.
+#
+# allowed_hosts admits extra exact hostnames beside loopback and the bind
+# hostname (for example a Tailscale name). Entries are exact-only after
+# lowercasing plus port stripping: one host per entry, no scheme ("https://"),
+# no wildcards ("*.example.com"), no CIDR ("192.168.1.0/24"), no bare "*",
+# no userinfo, query, fragment, whitespace, or control characters. At most 20
+# entries of at most 253 characters each; anything wider fails closed at load
+# and a hand-built widening entry is dropped by the Host gate itself.
 hostname = "127.0.0.1"
 port = 8082
+# allowed_hosts = ["my-mac.tail123.ts.net"]
 
 [auth]
 # Single-owner bearer auth. The token value itself must never live in this
@@ -31,13 +51,24 @@ port = 8082
 # then the 0600 file fallback. Resolved tokens are never logged. Non-loopback
 # binds require a resolvable token.
 #
+# First run from the menu-bar .app (no Terminal needed):
+#   1. Launch the app; loopback stays usable while no token is stored.
+#   2. The menu Server section reads "local use only" — open Settings.
+#   3. Generate the owner token and copy the once-only value immediately.
+#   4. Acknowledge "I saved it" to restart the embedded service and adopt it.
+#   5. Only then set [server] hostname to the literal LAN IP or "0.0.0.0";
+#      without the stored token that bind stays refused with a Failed reason
+#      in the menu plus a Retry action.
+#
 # Rotating the token (do this after enabling a LAN or tunnel bind):
 #   Settings: use the "Rotate access token" control in the dashboard Settings
 #             pane while signed in. This rotates the running engine in place:
 #             the previous token stops working immediately and every other
 #             signed-in browser or device is logged out on its next request.
 #             The new value is shown exactly once — copy it then; it is never
-#             displayed again.
+#             displayed again. Paste it into your password manager before
+#             acknowledging or navigating away; a lost copy cannot be re-shown
+#             and the only recovery is another rotation.
 #   CLI:      rune-weaver auth token rotate   (add --yes for scripts)
 #             rune-weaver auth token generate (first token; refuses to overwrite)
 #             rune-weaver auth token status   (which source resolves, no secret)
