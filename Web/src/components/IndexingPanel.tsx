@@ -2616,7 +2616,7 @@ export function IndexPolicyPanel() {
           {effortPreset === "custom" ? (
             <div className="form-group" style={{ marginTop: 8 }}>
               <label htmlFor="index-custom-workers">Custom workers</label>
-              <div className="row">
+              <div className="row index-stepper">
                 <button
                   type="button"
                   className="ghost"
@@ -2631,7 +2631,8 @@ export function IndexPolicyPanel() {
                 <input
                   id="index-custom-workers"
                   type="number"
-                  className="input-field"
+                  className="input-field index-stepper-input"
+                  inputMode="numeric"
                   min={1}
                   max={customMax}
                   value={customWorkers}
