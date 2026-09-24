@@ -41,6 +41,11 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Process stylesheets in tests so `?raw` CSS source imports resolve to
+    // file text instead of the default empty mock; stylesheet regression
+    // assertions then guard the real shared tokens rather than passing
+    // vacuously on an empty string.
+    css: true,
     setupFiles: ["./src/test-setup.ts"],
     globals: true,
     // Isolated workers per test file: no shared module state or globals

@@ -59,6 +59,11 @@ import {
   createMockWebSocketCapture,
   dispatchFrameOrThrow,
 } from "../test-utils/mockWebSocket";
+import sharedStyles from "../styles.css?raw";
+
+// Plain stylesheet imports resolve to empty under the test transform, so the
+// raw text import keeps the regression pinned to the single stylesheet owner
+// while staying inside the bundler module graph with no runtime file access.
 
 // Complete [index] section as the engine returns it under GET /settings.
 const indexConfig = {
@@ -765,6 +770,22 @@ describe("IndexingPanel", () => {
     // default) alongside the [index]-only patch.
     expect(patch?.max_vector_chunks_per_document).toBe(
       DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
+    );
+  });
+
+  it("keeps the shared Save fill in the stylesheet", () => {
+    // The Save control owns no local color: both Settings footers share one
+    // stylesheet fill so an enabled Save stays solid theme blue even as forms
+    // evolve, with hover brightening and disabled dimming pinned alongside.
+    expect(sharedStyles).toMatch(
+      /\.primary-button\s*\{[^}]*background:\s*var\(--accent-blue\)/,
+    );
+    expect(sharedStyles).toMatch(/\.primary-button\s*\{[^}]*color:\s*white/);
+    expect(sharedStyles).toMatch(
+      /\.primary-button:hover:not\(:disabled\)[^{]*\{[^}]*brightness/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.primary-button:disabled[^{]*\{[^}]*opacity/,
     );
   });
 
@@ -2263,6 +2284,72 @@ describe("IndexingPanel effort control", () => {
     expect(capInput).toHaveValue(DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT);
     expect(screen.getByRole("button", { name: "Decrease vector cap" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Increase vector cap" })).toBeInTheDocument();
+  });
+
+  it("renders the Custom workers compact stepper with bounded states", async () => {
+    // Engine reports four cores so the stepper ceiling stays deterministic
+    // regardless of the browser running the test; the stored count opens at
+    // the floor so both disabled edges are reachable in one render.
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, effort: "custom", workers: 1 },
+      status: {
+        ...statusPayload,
+        effort: { preset: "custom", resolvedWorkers: 1, activeProcessors: 4 },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Custom workers")).toBeInTheDocument();
+    });
+    const input = screen.getByLabelText("Custom workers");
+    // Compact presentation owns the single flex row: the numeric field keeps
+    // its label association while the row carries the stepper scope.
+    expect(input).toHaveClass("input-field");
+    expect(input).toHaveClass("index-stepper-input");
+    const row = input.closest(".index-stepper");
+    expect(row).not.toBeNull();
+    expect(row).toHaveClass("row");
+    expect(row).toHaveClass("index-stepper");
+    // Floor state keeps the stored count valid: Decrease has nothing to step
+    // to while Increase stays available.
+    expect(screen.getByRole("button", { name: "Decrease workers" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Increase workers" })).toBeEnabled();
+    // Typed entry still flows through the existing clamped handler, so a
+    // valid count updates the stored workers without touching Save.
+    fireEvent.change(input, { target: { value: "3" } });
+    expect(input).toHaveValue(3);
+    expect(screen.getByRole("button", { name: "Decrease workers" })).toBeEnabled();
+    // Ceiling state mirrors the floor: at the machine-clamped max the stored
+    // count cannot step higher while Decrease stays available.
+    fireEvent.change(input, { target: { value: "4" } });
+    expect(input).toHaveValue(4);
+    expect(screen.getByRole("button", { name: "Increase workers" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decrease workers" })).toBeEnabled();
+  });
+
+  it("disables Increase workers when the stored count opens at the ceiling", async () => {
+    // Opening directly at the clamped ceiling covers the persisted-at-max
+    // case without driving the stepper there first.
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, effort: "custom", workers: 4 },
+      status: {
+        ...statusPayload,
+        effort: { preset: "custom", resolvedWorkers: 4, activeProcessors: 4 },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Custom workers")).toBeInTheDocument();
+    });
+    expect(screen.getByLabelText("Custom workers")).toHaveValue(4);
+    expect(screen.getByRole("button", { name: "Increase workers" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Decrease workers" })).toBeEnabled();
   });
 
   it("reads canonical workers", () => {

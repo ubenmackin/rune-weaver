@@ -2908,6 +2908,27 @@ button:disabled {
   z-index: 10;
 }
 
+/* Shared Save presentation for Settings footers: both the Index policy form
+ * and the Settings manager footer consume these classes so enabled Saves stay
+ * solid theme blue in one place instead of per-component colors. `.save-button`
+ * keeps padding and typography while `.primary-button` owns the blue fill,
+ * hover brightening, and disabled dimming. */
+.primary-button {
+  background: var(--accent-blue);
+  border: 0;
+  color: white;
+  cursor: pointer;
+}
+
+.primary-button:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.primary-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .save-button {
   padding: 10px 24px;
   font-size: 14px;
@@ -4537,5 +4558,44 @@ button.danger:hover:not(:disabled) {
   .status-bar-details-toggle {
     display: none;
   }
+}
+
+/* ==========================================================================
+   Index Policy Custom Workers Stepper
+   ========================================================================== */
+
+/* Compact stepper row for the Custom workers control: the custom Decrease /
+ * Increase buttons stay the visible steppers, so the row keeps a single
+ * left-aligned flex line that holds at both narrow and wide viewports
+ * instead of stretching the numeric field across the form. */
+.index-stepper {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+/* Narrow centered field so Decrease, input, and Increase read as one compact
+ * unit; flex none keeps the shared row from stretching it on wide forms. */
+.index-stepper .index-stepper-input {
+  flex: none;
+  width: 4.75rem;
+  max-width: 6rem;
+  text-align: center;
+}
+
+/* Native spinners stay hidden inside the stepper so only the custom Decrease /
+ * Increase buttons act as steppers; the typed entry keeps its numeric value. */
+.index-stepper .index-stepper-input::-webkit-outer-spin-button,
+.index-stepper .index-stepper-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Textfield appearance removes the Firefox spinner while the standard
+ * appearance carries the same intent for engines following the spec. */
+.index-stepper .index-stepper-input {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }
 
