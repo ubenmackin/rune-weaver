@@ -407,4 +407,93 @@ struct IndexCoordinatorTests {
         #expect(messages.contains { $0.contains("committing") })
         #expect(messages.contains { $0.contains("docs/s") })
     }
+
+    @Test
+    func `Heartbeat arrives on stalled stage and totals stay monotonic`() async {
+        // Stalled double: one interim frame carrying a relative current item,
+        // then a stall just past the 2s heartbeat cadence with no further
+        // stage frames. The coordinator heartbeat must still emit with the
+        // same cumulative totals, current item, and phase/stage tokens. The
+        // stall stays just over one heartbeat interval so the suite stays fast,
+        // and the elapsed window stays wide so loaded CI never flakes on a
+        // late wake.
+        let progressRecorder = IndexProgressRecorder()
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { reporter, _ in
+            await reporter(ToolProgress(
+                message: "Indexing files",
+                scanned: 1,
+                matched: 0,
+                current: "notes/report.md"
+            ))
+            try await Task.sleep(nanoseconds: 2_500_000_000)
+            return IndexSourceRunReport(kind: .files, scanned: 2, indexed: 1, lastItem: "notes/report.md")
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            progress: { await progressRecorder.record($0) }
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 2)
+        #expect(summary.documentsIndexed == 1)
+        let frames = await progressRecorder.snapshot()
+        // Discovering, extracting, interim, heartbeat, committing, final.
+        #expect(frames.count >= 5)
+        // Totals never rewind, including the repeated heartbeat totals.
+        // Elapsed is intentionally unchecked here: stage frames carry their
+        // own per-stage clock while coordinator frames carry run elapsed.
+        for index in 1 ..< frames.count {
+            #expect(frames[index].scanned >= frames[index - 1].scanned)
+            #expect(frames[index].matched >= frames[index - 1].matched)
+        }
+        // The heartbeat reuses the coordinator emit path: phase plus stage
+        // tokens, docs/s rate, cumulative counts, and the relative current
+        // item, bypassing the floor despite unchanged totals.
+        let heartbeats = frames.filter { frame in
+            frame.message.contains("extracting")
+                && frame.message.contains("files")
+                && frame.message.contains("docs/s")
+                && frame.current == "notes/report.md"
+                && frame.scanned == 1
+                && frame.matched == 0
+                && frame.elapsedMs >= 1000
+                && frame.elapsedMs < 6000
+        }
+        #expect(!heartbeats.isEmpty)
+    }
+
+    @Test
+    func `Live snapshot reflects in-flight run and clears on settle`() async {
+        let progressRecorder = IndexProgressRecorder()
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+            try await Task.sleep(nanoseconds: 1_500_000_000)
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1, lastItem: "notes/report.md")
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: []),
+            stages: [stage],
+            progress: { await progressRecorder.record($0) }
+        )
+
+        #expect(await coordinator.liveTotals == nil)
+        let runTask = Task { await coordinator.run(trigger: .onDemand) }
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        let snapshot = await coordinator.liveTotals
+        #expect(await coordinator.isRunning == true)
+        #expect(snapshot != nil)
+        #expect(snapshot?.trigger == .onDemand)
+        #expect(snapshot?.phase == .extracting)
+        #expect(snapshot?.stage == .files)
+        #expect((snapshot?.elapsedMs ?? 0) > 0)
+        #expect(snapshot?.startedAt != nil)
+        let summary = await runTask.value
+        #expect(summary.status == .ok)
+        #expect(summary.trigger == .onDemand)
+        #expect(snapshot?.startedAt == summary.startedAt)
+        #expect(await coordinator.isRunning == false)
+        #expect(await coordinator.liveTotals == nil)
+    }
 }

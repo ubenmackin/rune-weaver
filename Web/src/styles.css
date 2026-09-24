@@ -22,6 +22,9 @@
   --status-green: #10b981;
   --status-amber: #f59e0b;
   --status-red: #ef4444;
+  --tool-progress-track: #2c2c36;
+  --tool-progress-stripe-high: rgba(196, 181, 253, 0.95);
+  --tool-progress-stripe-low: rgba(139, 92, 246, 0.45);
 }
 
 body {
@@ -1189,26 +1192,139 @@ a {
   white-space: nowrap;
 }
 
+/* Live per-tool progress under the Running pill. The engine publishes counters
+ * and a relative tail only, so the bar stays an indeterminate shimmer rather
+ * than a percent track it cannot fill honestly. One shared token drives both
+ * the chat rows and the index strip: the track reuses the border token while
+ * the sliding highlight pairs two high-contrast stripe stops. The highlight
+ * slides with transform only so the animation stays compositor-cheap. */
 .tool-progress-shimmer {
-  height: 3px;
+  height: 4px;
   border-radius: 2px;
-  background: repeating-linear-gradient(
-    45deg,
-    rgba(147, 51, 234, 0.65),
-    rgba(147, 51, 234, 0.65) 8px,
-    rgba(147, 51, 234, 0.2) 8px,
-    rgba(147, 51, 234, 0.2) 16px
-  );
-  animation: toolProgressShimmer 2.5s linear infinite;
+  background: var(--tool-progress-track, var(--border-color));
+  overflow: hidden;
+  position: relative;
 }
 
-@keyframes toolProgressShimmer {
+.tool-progress-shimmer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 40%;
+  border-radius: inherit;
+  background: repeating-linear-gradient(
+    45deg,
+    var(--tool-progress-stripe-high),
+    var(--tool-progress-stripe-high) 8px,
+    var(--tool-progress-stripe-low) 8px,
+    var(--tool-progress-stripe-low) 16px
+  );
+  animation: toolProgressSlide 1.6s ease-in-out infinite;
+  will-change: transform;
+}
+
+@keyframes toolProgressSlide {
   0% {
-    background-position: 0 0;
+    transform: translateX(-100%);
   }
   100% {
-    background-position: 32px 0;
+    transform: translateX(250%);
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tool-progress-shimmer::after {
+    animation: none;
+  }
+}
+
+/* Index live strip: horizontal wrapping mini-cards replace the old vertical
+ * phase list so five phases fit without scrolling. The base strip already
+ * wraps, so narrow panes flow cards onto the next row instead of clipping
+ * or scrolling sideways. */
+.index-live-progress {
+  margin-top: 12px;
+}
+
+.index-live-header {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.index-live-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.index-mini-card {
+  flex: 1 1 140px;
+  min-width: 140px;
+  max-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  box-sizing: border-box;
+}
+
+.index-mini-card.pending {
+  opacity: 0.6;
+}
+
+.index-mini-card.active {
+  border-color: var(--accent-purple);
+  background: var(--accent-purple-glow);
+  opacity: 1;
+}
+
+.index-mini-card.done {
+  border-color: rgba(16, 185, 129, 0.45);
+  opacity: 1;
+}
+
+.index-mini-card-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.index-mini-card-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent-purple);
+  flex-shrink: 0;
+}
+
+.index-mini-card.done .index-mini-card-icon {
+  color: var(--status-green);
+}
+
+.index-mini-card-label {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.index-mini-card-counts {
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.index-mini-card-current {
+  max-width: 100%;
 }
 
 /* Per-call cancel control. It sits beside the toggle in the pill header and
@@ -3855,5 +3971,30 @@ button.danger:hover:not(:disabled) {
   border-radius: 8px;
   object-fit: contain;
   background: #0d0d12;
+}
+
+/* Index stat flash: brief accent on committed-growth updates. Applied only to
+ * the Size/Documents/Chunks values when their totals change, then cleared
+ * after a short window so idle cards never hold the accent. */
+.index-stat-value-flash {
+  color: var(--accent-purple);
+  animation: indexStatFlash 1.2s ease-out;
+}
+
+@keyframes indexStatFlash {
+  0% {
+    color: var(--accent-purple);
+    text-shadow: 0 0 10px var(--accent-purple-glow);
+  }
+  100% {
+    color: inherit;
+    text-shadow: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .index-stat-value-flash {
+    animation: none;
+  }
 }
 

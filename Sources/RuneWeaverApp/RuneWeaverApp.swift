@@ -25,13 +25,20 @@ struct AppMenuLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            if model.isDesktopActive {
-                Image(systemName: "eye.fill")
-            } else {
-                Image(systemName: model.pendingApprovals.isEmpty ? "sparkles" : "exclamationmark.triangle.fill")
-            }
             if !model.pendingApprovals.isEmpty {
+                // Approvals outrank every activity indicator so a parked write
+                // is never hidden behind desktop or indexing liveness.
+                Image(systemName: "exclamationmark.triangle.fill")
                 Text("\(model.pendingApprovals.count)")
+            } else if model.isDesktopActive {
+                Image(systemName: "eye.fill")
+            } else if model.isIndexing {
+                // A run in flight shows the sync indicator plus text; idle
+                // falls through to the default mark.
+                Image(systemName: "arrow.triangle.2.circlepath")
+                Text("Indexing")
+            } else {
+                Image(systemName: "sparkles")
             }
         }
         .onAppear {
@@ -175,6 +182,31 @@ struct AppMenuView: View {
         Section("Scheduler") {
             Text("Next: \(model.nextScheduleText)")
             Text("Last: \(model.lastRunSummaryText)")
+        }
+
+        if model.isIndexing {
+            Divider()
+
+            // Shown only while a run is in flight; the shared refresh tick
+            // drives it so no second cadence is needed. Counts prefer the
+            // coordinator live snapshot with committed store counts as the
+            // fallback, and the current file truncates to menu width.
+            Section("Indexing") {
+                Text("\(model.indexTriggerText) · \(model.indexElapsedText)")
+                Text("Scanned \(model.indexScannedCount) · Indexed \(model.indexIndexedCount)")
+                if let current = model.indexCurrentFile {
+                    Text(current)
+                        .foregroundStyle(.secondary)
+                }
+                Button("Open Index Status") {
+                    model.openIndexStatus()
+                }
+                .disabled(!model.isDashboardAvailable)
+                Button(model.isCancellingIndex ? "Cancelling…" : "Cancel Index Run") {
+                    model.cancelIndexRun()
+                }
+                .disabled(model.isCancellingIndex)
+            }
         }
 
         if model.isDesktopEnabled {

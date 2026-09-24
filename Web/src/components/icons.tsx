@@ -499,3 +499,86 @@ export function MicIcon({ size = 18, className = "", ...props }: IconProps) {
   );
 }
 
+// Shared shell for the index run mini-card icons: one stroke style, one
+// accessibility default, and one prop spread so the five phase glyphs differ
+// only by their inner paths.
+function IndexIconBase({
+  size = 16,
+  className = "",
+  children,
+  ...props
+}: IconProps & { children: React.ReactNode }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      {children}
+    </svg>
+  );
+}
+
+// Index run mini-card icons share the dashboard stroke style so the live strip
+// reads as native surfaces: each glyph names its phase at a glance without a
+// new color token per step.
+export function IndexDiscoverIcon({ size = 16, className = "", ...props }: IconProps) {
+  return (
+    <IndexIconBase size={size} className={className} {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="m15.5 8.5-2 5-5 2 2-5z" />
+    </IndexIconBase>
+  );
+}
+
+// Open book for the reading phase: text extraction from discovered documents.
+export function IndexReadingIcon({ size = 16, className = "", ...props }: IconProps) {
+  return (
+    <IndexIconBase size={size} className={className} {...props}>
+      <path d="M2 4h6a4 4 0 0 1 4 4v12a3 3 0 0 0-3-3H2z" />
+      <path d="M22 4h-6a4 4 0 0 0-4 4v12a3 3 0 0 1 3-3h7z" />
+    </IndexIconBase>
+  );
+}
+
+// Layered stack for the vectorizing phase: chunk embeddings for search.
+export function IndexVectorIcon({ size = 16, className = "", ...props }: IconProps) {
+  return (
+    <IndexIconBase size={size} className={className} {...props}>
+      <path d="m12 2 9 5-9 5-9-5z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 17 9 5 9-5" />
+    </IndexIconBase>
+  );
+}
+
+// Framed image for the vision phase: LLM descriptions of images and scans.
+export function IndexVisionIcon({ size = 16, className = "", ...props }: IconProps) {
+  return (
+    <IndexIconBase size={size} className={className} {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <circle cx="9" cy="9" r="2" />
+      <path d="m21 15-3.5-3.5a2 2 0 0 0-3 0L6 20" />
+    </IndexIconBase>
+  );
+}
+
+// Database drum for the committing phase: saving batches to the index.
+export function IndexCommitIcon({ size = 16, className = "", ...props }: IconProps) {
+  return (
+    <IndexIconBase size={size} className={className} {...props}>
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5v14a9 3 0 0 0 18 0V5" />
+      <path d="M3 12a9 3 0 0 0 18 0" />
+    </IndexIconBase>
+  );
+}
+

@@ -45,6 +45,29 @@ public final class AppModel {
     public var isDesktopActive: Bool = false
     /// Set to true to signal an emergency abort of the current desktop batch.
     public var desktopEmergencyStop: Bool = false
+    /// Whether an index run is in flight. Polled from the live coordinator on
+    /// the shared refresh tick, so the menu label and Indexing section track
+    /// runs without a second cadence.
+    public var isIndexing: Bool = false
+    /// Whether a cancel request is in flight for the run in flight. Claimed
+    /// synchronously in `cancelIndexRun` so double-clicks collapse to one
+    /// cancel, and cleared on the refresh tick once the run settles. Drives
+    /// the disabled Cancelling state of the menu cancel button.
+    public var isCancellingIndex: Bool = false
+    /// Display label for what caused the run in flight (for example Manual Run).
+    public var indexTriggerText: String = "Index Run"
+    /// Display elapsed time for the run in flight (for example 12s).
+    public var indexElapsedText: String = "…"
+    /// Items examined by the run in flight, or zero (unknown) when no live
+    /// frame has landed yet. Scanned includes skipped and errored items, so
+    /// it never reports committed documents as a stand-in.
+    public var indexScannedCount: Int = 0
+    /// Documents written by the run in flight, or committed documents when no
+    /// live frame has landed yet.
+    public var indexIndexedCount: Int = 0
+    /// Last relative item reported by the run in flight, truncated to menu
+    /// width, or nil when the run has reported nothing yet.
+    public var indexCurrentFile: String?
     /// Whether boot resolved no owner token, so the menu should surface the
     /// first-run onboarding sheet. Loopback stays bootable for local use; the
     /// flag only records that LAN binds stay refused until a token is minted.
@@ -404,6 +427,9 @@ public final class AppModel {
             desktopEmergencyStop = false
             await DesktopControlMonitor.shared.clearEmergencyStop()
         }
+        // Poll the live index pair on the same tick so the label indicator
+        // and the Indexing section track runs without a second cadence.
+        await refreshIndexState(context: context)
 
         var chats: [ActiveChatInfo] = []
         for sid in runningIDs {
@@ -441,6 +467,123 @@ public final class AppModel {
     public func refreshPendingApprovals() async {
         guard let context = serverContext else { return }
         self.pendingApprovals = await context.approvals.list()
+    }
+
+    /// Refreshes the menu-bar indexing snapshot from the live index pair.
+    ///
+    /// Prefers the coordinator live totals while a run is in flight and falls
+    /// back to the store committed document count for indexed only when the run
+    /// started but no live frame has landed yet. Scanned counts examined items
+    /// including skipped and errored ones, so it stays zero (unknown) rather
+    /// than misreporting committed documents. Idle clears the flag so the
+    /// section hides.
+    private func refreshIndexState(context: ServerContext) async {
+        // Snapshot the pair atomically so the coordinator and store always
+        // belong to one generation, never a half-swapped mix.
+        let liveIndex = context.liveIndexSnapshot()
+        guard let coordinator = liveIndex.coordinator else {
+            self.isIndexing = false
+            self.isCancellingIndex = false
+            return
+        }
+        if let live = await coordinator.liveTotals {
+            self.isIndexing = true
+            self.indexTriggerText = Self.indexTriggerLabel(for: live.trigger)
+            self.indexElapsedText = Self.indexElapsedText(milliseconds: live.elapsedMs)
+            self.indexScannedCount = live.scanned
+            self.indexIndexedCount = live.indexed
+            self.indexCurrentFile = Self.truncatedIndexCurrent(live.current)
+        } else {
+            let running = await coordinator.isRunning
+            self.isIndexing = running
+            if running {
+                // No live frame yet (the run just started); show the committed
+                // document count as indexed so the row never reads zero for a
+                // live run. Scanned counts examined items including skipped and
+                // errored ones, so it stays zero (unknown) instead of
+                // misreporting committed documents as scanned.
+                if let store = liveIndex.store {
+                    do {
+                        let stats = try await store.stats()
+                        self.indexScannedCount = 0
+                        self.indexIndexedCount = stats.documents
+                    } catch {
+                        // A store failure must never read as an empty index:
+                        // log it and keep the previous counts so 0/0 cannot
+                        // masquerade as an empty store.
+                        RuneWeaverLog.app.warning("Index stats unavailable for menu snapshot: \(error.localizedDescription)")
+                    }
+                } else {
+                    // No store wired for this context; keep the previous
+                    // counts and let the elapsed placeholder carry the
+                    // unknown state instead of inventing a zero.
+                    RuneWeaverLog.app.warning("Index store unavailable for menu snapshot; keeping previous counts.")
+                }
+                self.indexTriggerText = "Index Run"
+                self.indexElapsedText = "…"
+                self.indexCurrentFile = nil
+            } else {
+                // Idle resets display state so a later run starts clean
+                // instead of inheriting a stale row.
+                self.isCancellingIndex = false
+                self.indexTriggerText = "Index Run"
+                self.indexElapsedText = "…"
+                self.indexScannedCount = 0
+                self.indexIndexedCount = 0
+                self.indexCurrentFile = nil
+            }
+        }
+    }
+
+    /// Maps an index run trigger to the menu display copy, matching the
+    /// dashboard wording for run notices and history rows.
+    /// - Parameter trigger: What caused the run.
+    /// - Returns: Plain-language label for the menu row.
+    static func indexTriggerLabel(for trigger: IndexRunTrigger) -> String {
+        switch trigger {
+        case .nightly:
+            "Nightly Run"
+        case .onDemand:
+            "Manual Run"
+        case .catchUp:
+            "Catch-Up Run"
+        }
+    }
+
+    /// Formats an elapsed millisecond count for the one-line menu row.
+    /// - Parameter milliseconds: Milliseconds since the run began.
+    /// - Returns: Compact duration such as 12s, 1m 5s, or 2h 3m.
+    static func indexElapsedText(milliseconds: Int) -> String {
+        let totalSeconds = max(0, milliseconds / 1000)
+        if totalSeconds < 60 {
+            return "\(totalSeconds)s"
+        }
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        if minutes < 60 {
+            return "\(minutes)m \(seconds)s"
+        }
+        let hours = minutes / 60
+        let remainingMinutes = minutes % 60
+        return "\(hours)h \(remainingMinutes)m"
+    }
+
+    /// Maximum characters for the menu-bar current-file row. Sized for the
+    /// narrow menu surface: long enough to keep the filename plus a few
+    /// parent segments, short enough to avoid widening the menu.
+    private static let indexCurrentMenuLimit = 48
+
+    /// Truncates a relative index path to menu width, keeping the trailing
+    /// portion so the filename stays visible (the suffix is significant for
+    /// paths, while a leading prefix would hide it behind parent directories).
+    /// - Parameter current: Last relative item reported by the run.
+    /// - Returns: Truncated row text, or nil when there is nothing to show.
+    static func truncatedIndexCurrent(_ current: String?) -> String? {
+        guard let current, !current.isEmpty else { return nil }
+        if current.count <= indexCurrentMenuLimit {
+            return current
+        }
+        return "…" + String(current.suffix(indexCurrentMenuLimit))
     }
 }
 
@@ -555,6 +698,38 @@ public extension AppModel {
     func openChat(id: UUID) {
         if let url = dashboardURL(fragment: "chat", queryItems: [URLQueryItem(name: "session", value: id.uuidString)]) {
             NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens the dashboard on the Memory section's Index Status inner tab,
+    /// where the run controls live beside Search and Memory. The fragment
+    /// carries the indexing subpath the dashboard routes on, so the inner tab
+    /// opens selected instead of the default Search and Memory view.
+    func openIndexStatus() {
+        if let url = dashboardURL(fragment: "memory/indexing") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Requests cancellation of the run in flight through the coordinator
+    /// cancel path, keeping committed batches so the next run resumes from
+    /// there. Claims the cancelling flag synchronously so double-clicks
+    /// collapse to one cancel; the flag clears on the refresh tick once the
+    /// run settles. Returns immediately; the refresh tick hides the section
+    /// once the run settles.
+    func cancelIndexRun() {
+        guard !isCancellingIndex else { return }
+        guard let context = serverContext else {
+            RuneWeaverLog.app.warning("Cancel index run requested with no live engine context.")
+            return
+        }
+        guard let coordinator = context.liveIndexSnapshot().coordinator else {
+            RuneWeaverLog.app.warning("Cancel index run requested with no index coordinator.")
+            return
+        }
+        isCancellingIndex = true
+        Task {
+            await coordinator.cancel()
         }
     }
 

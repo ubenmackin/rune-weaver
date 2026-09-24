@@ -6,24 +6,33 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import IndexingPanel, {
+  INDEX_LAST_ERRORS_COLLAPSED_COUNT,
+  INDEX_LAST_ERROR_PREVIEW_CHARS,
   INDEX_STEPS,
+  INDEX_STEP_ICONS,
   IndexPolicyPanel,
+  dedupeIndexErrors,
   describeAutoStartNotice,
   describeIndexLastRun,
   describeRunSummary,
   formatIndexAge,
   formatIndexAsOf,
   formatIndexBytes,
+  formatIndexRate,
   indexDonutArcs,
+  indexSourceBarPercent,
   indexSourceBarWidth,
   indexStepsForFrame,
   isIndexProgressFrame,
+  isLongIndexError,
+  resolveDisplayIndexErrors,
   resolveIndexLiveTitle,
   resolveIndexPhase,
   resolveIndexSourceContent,
   resolveIndexStage,
   resolveIndexStep,
   resolveIndexStepStatus,
+  truncateIndexError,
 } from "./IndexingPanel";
 import {
   indexRunLabelForRun,
@@ -227,6 +236,12 @@ describe("IndexingPanel helpers", () => {
     expect(indexSourceBarWidth(15, 30)).toBe("50%");
     expect(indexSourceBarWidth(0, 30)).toBe("0%");
     expect(indexSourceBarWidth(5, 0)).toBe("0%");
+    // Tiny buckets stay visible on the track but label honestly: a 1/100
+    // share paints at the 4% floor while the label reads the true 1%.
+    expect(indexSourceBarWidth(1, 100)).toBe("4%");
+    expect(indexSourceBarPercent(1, 100)).toBe("1%");
+    expect(indexSourceBarPercent(30, 30)).toBe("100%");
+    expect(indexSourceBarPercent(15, 30)).toBe("50%");
   });
 
   it("resolves canonical source rows with real totals", () => {
@@ -253,6 +268,13 @@ describe("IndexingPanel helpers", () => {
     expect(
       describeIndexLastRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
     ).toContain("3 indexed");
+  });
+
+  it("formats the active-card rate honestly, omitting it without work or time", () => {
+    expect(formatIndexRate(5, 1000)).toBe("5 scanned/s");
+    expect(formatIndexRate(33, 10000)).toBe("3.3 scanned/s");
+    expect(formatIndexRate(0, 1000)).toBeNull();
+    expect(formatIndexRate(5, 0)).toBeNull();
   });
 
   it("maps run triggers to display labels across notices, strip, and history rows", () => {
@@ -481,6 +503,119 @@ describe("IndexingPanel", () => {
     expect(screen.getByTestId("index-watermark-card")).toBeInTheDocument();
   });
 
+  it("titles both bar groups with their share-of-largest contract", async () => {
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-donut-chart")).toBeInTheDocument();
+    });
+    // Headings name the scaling so a half-width bar reads as half of the
+    // largest bucket rather than half of the total.
+    expect(
+      screen.getByText("Documents by source — share of largest"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Extraction outcomes — share of largest"),
+    ).toBeInTheDocument();
+  });
+
+  it("labels every bar with its share-of-largest percent", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    });
+    // Percent labels reuse the track scale so the copy and the paint agree.
+    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("100%");
+    expect(screen.getByTestId("index-bar-pct-mail")).toHaveTextContent("50%");
+    expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
+      "100%",
+    );
+    expect(screen.getByTestId("index-extract-pct-partial")).toHaveTextContent(
+      "50%",
+    );
+  });
+
+  it("renders No data yet instead of an empty track for zero-document rows", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 20, chunks: 40, bytes: 1000 },
+          { kind: "mail", documents: 0, chunks: 0, bytes: 0 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 10 },
+          { status: "failed", documents: 0 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-source-bars")).toBeInTheDocument();
+    });
+    // A zero-document source skips its track so the row never renders as a
+    // hairline bar, while the populated source keeps its bar and percent.
+    expect(screen.getByTestId("index-bar-empty-mail")).toHaveTextContent(
+      "No data yet",
+    );
+    expect(screen.queryByTestId("index-bar-mail")).toBeNull();
+    expect(screen.queryByTestId("index-bar-pct-mail")).toBeNull();
+    expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("100%");
+    // The same contract holds for extraction outcomes: the zero bucket names
+    // its gap while the largest bucket keeps its bar and percent.
+    expect(screen.getByTestId("index-extract-empty-failed")).toHaveTextContent(
+      "No data yet",
+    );
+    expect(screen.queryByTestId("index-extract-bar-failed")).toBeNull();
+    expect(screen.queryByTestId("index-extract-pct-failed")).toBeNull();
+    expect(screen.getByTestId("index-extract-bar-extracted")).toBeInTheDocument();
+    expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
+      "100%",
+    );
+    // Enablement pills stay as the on/off signal while bars carry content.
+    expect(screen.getByText("Files · Off")).toBeInTheDocument();
+  });
+
+  it("renders No data yet for an empty extraction breakdown", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, byExtractStatus: [] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-extract-bars")).toBeInTheDocument();
+    });
+    // With no outcome rows the group names the gap instead of an empty card.
+    expect(screen.getByTestId("index-extract-empty")).toHaveTextContent(
+      "No data yet",
+    );
+  });
+
   it("saves the index policy through a PUT /settings index patch", async () => {
     const user = userEvent.setup();
     const { fetchMock, calls } = stubFetch();
@@ -685,18 +820,27 @@ describe("IndexingPanel", () => {
       current: "notes/ideas.md",
     });
 
+    // The active mini-card carries the truncated current file plus counts.
     await waitFor(() => {
-      expect(screen.getByTestId("index-progress-current")).toHaveTextContent(
+      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
         "notes/ideas.md",
       );
     });
     // The extracting phase step is highlighted and the shimmer proves liveness.
     // The step renders the plain-language copy ("Reading") for the wire token.
     expect(screen.getByText("Reading")).toBeInTheDocument();
+    expect(screen.getByTestId("index-step-counts-extracting")).toHaveTextContent(
+      "5 scanned",
+    );
+    expect(screen.getByTestId("index-step-counts-extracting")).toHaveTextContent(
+      "3 indexed",
+    );
     expect(screen.getByTestId("index-progress-shimmer")).toBeInTheDocument();
+    // The live header is text only with the stage-aware title plus counts.
+    expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading…");
   });
 
-  it("wraps live progress in a Progress card keeping progressbar semantics", async () => {
+  it("renders a single pill with a wrapping icon strip keeping progressbar semantics", async () => {
     const capture = createMockWebSocketCapture();
     const { fetchMock } = stubFetch({
       settings: { ...indexConfig, enabled: true },
@@ -707,11 +851,19 @@ describe("IndexingPanel", () => {
 
     render(<IndexingPanel />);
 
-    // The card heading renders as soon as a run is in flight, before any
-    // progress frame arrives.
+    // The old Progress card is gone: no heading and no pill inside the live
+    // block, while the Status pill below stays the single running indicator.
     await waitFor(() => {
-      expect(screen.getByRole("heading", { name: "Progress" })).toBeInTheDocument();
+      expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
     });
+    expect(
+      screen.queryByRole("heading", { name: "Progress" }),
+    ).toBeNull();
+    expect(
+      within(screen.getByTestId("index-live-progress")).queryByText("Indexing"),
+    ).toBeNull();
+    const runningPills = document.querySelectorAll(".status-pill.running");
+    expect(runningPills.length).toBe(1);
 
     await waitFor(() => {
       expect(capture.onMessage).not.toBeNull();
@@ -729,7 +881,7 @@ describe("IndexingPanel", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-progress-current")).toHaveTextContent(
+      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
         "notes/ideas.md",
       );
     });
@@ -739,13 +891,22 @@ describe("IndexingPanel", () => {
     expect(shimmer).toHaveAttribute("role", "progressbar");
     expect(shimmer).toHaveAttribute("aria-label", "Index run in progress");
 
-    // Phase steps and live counts stay inside the Progress card.
-    const card = screen.getByRole("heading", { name: "Progress" }).closest(".card");
-    expect(card).not.toBeNull();
-    expect(within(card as HTMLElement).getByText("Reading")).toBeInTheDocument();
-    expect(
-      within(card as HTMLElement).getByTestId("index-progress-shimmer"),
-    ).toBeInTheDocument();
+    // The strip wraps instead of scrolling via the base flex-wrap rule, with
+    // no redundant wrap modifier.
+    const strip = screen.getByTestId("index-live-strip");
+    expect(strip).toHaveClass("index-live-strip");
+    expect(strip).not.toHaveClass("index-live-strip--wrap");
+
+    // Each mini-card renders its step icon alongside the label.
+    for (const step of INDEX_STEPS) {
+      const card = screen.getByTestId(`index-mini-card-${step.id}`);
+      expect(card).toBeInTheDocument();
+      expect(card.querySelector("svg")).not.toBeNull();
+    }
+
+    // Phase steps and live counts stay inside the strip.
+    expect(within(strip).getByText("Reading")).toBeInTheDocument();
+    expect(screen.getByTestId("index-progress-shimmer")).toBeInTheDocument();
   });
 
   it("ignores progress frames from other tools", async () => {
@@ -770,7 +931,8 @@ describe("IndexingPanel", () => {
       elapsedMs: 10,
     });
 
-    expect(screen.queryByTestId("index-progress-current")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-live-progress")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("index-live-strip")).not.toBeInTheDocument();
   });
 
   it("holds a cancelling state until the run settles, then re-enables Run", async () => {
@@ -889,7 +1051,7 @@ describe("IndexingPanel", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-progress-current")).toHaveTextContent(
+      expect(screen.getByTestId("index-step-current-extracting")).toHaveTextContent(
         "notes/ideas.md",
       );
     });
@@ -978,8 +1140,9 @@ describe("IndexingPanel", () => {
       expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
         "Starting…",
       );
-      // After ~3s without a frame it falls back to Running… instead of
-      // freezing on Starting…, while the Status pill stays authoritative.
+      // Well under two seconds without a frame it falls back to Running…
+      // instead of freezing on Starting…, while the Status pill stays
+      // authoritative.
       await waitFor(
         () => {
           expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
@@ -1169,9 +1332,15 @@ describe("IndexingPanel", () => {
     expect(readingStep).toHaveClass("active");
     expect(readingStep).toHaveTextContent("5 scanned");
     expect(readingStep).toHaveTextContent("3 indexed");
+    // The active card also carries elapsed, rate, and the truncated file.
+    expect(readingStep).toHaveTextContent("1.5s");
+    expect(readingStep).toHaveTextContent("3.3 scanned/s");
+    expect(
+      within(readingStep as HTMLElement).getByTestId("index-step-current-extracting"),
+    ).toHaveTextContent("notes/ideas.md");
   });
 
-  it("keeps visited steps checked after completion without live counts", async () => {
+  it("unmounts the strip on settle with no persistence", async () => {
     let running = true;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
@@ -1220,8 +1389,8 @@ describe("IndexingPanel", () => {
     // The committing step is live with its counts before the run settles.
     expect(screen.getByText("Committing").closest("li")).toHaveClass("active");
 
-    // Settle the run: the engine reports no run in flight and the terminal
-    // broadcast arrives. The summary keeps the visited steps checked.
+    // Settle the run: the terminal broadcast unmounts the strip instead of
+    // leaving a completed summary behind.
     running = false;
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
@@ -1234,40 +1403,14 @@ describe("IndexingPanel", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Completed",
-      );
+      expect(screen.queryByTestId("index-live-progress")).toBeNull();
     });
-    // Idle with a previous run still shows the checked steps.
-    const liveBlock = screen.getByTestId("index-live-progress");
-    expect(
-      within(liveBlock).getByText("Discovering").closest("li"),
-    ).toHaveClass("done");
-    expect(
-      within(liveBlock).getByText("Reading").closest("li"),
-    ).toHaveClass("done");
-    expect(
-      within(liveBlock).getByText("Vectorizing").closest("li"),
-    ).toHaveClass("done");
-    expect(
-      within(liveBlock).getByText("Describing images").closest("li"),
-    ).toHaveClass("done");
-    expect(
-      within(liveBlock).getByText("Committing").closest("li"),
-    ).toHaveClass("done");
-    // No live counts survive the summary: neither the header nor any step
-    // carries scanned/indexed tallies, and liveness stops.
-    expect(within(liveBlock).queryByText(/scanned/)).toBeNull();
-    expect(within(liveBlock).queryByText(/indexed/)).toBeNull();
-    expect(
-      within(liveBlock).queryByTestId("index-progress-shimmer"),
-    ).toBeNull();
-    expect(
-      within(liveBlock).queryByTestId("index-progress-current"),
-    ).toBeNull();
+    expect(screen.queryByTestId("index-live-strip")).toBeNull();
+    expect(screen.queryByTestId("index-progress-shimmer")).toBeNull();
+    expect(screen.queryByText("Completed")).toBeNull();
   });
 
-  it("clears visited steps when the next run starts", async () => {
+  it("mounts a fresh strip when the next run starts", async () => {
     let running = true;
     const fetchMock = vi.fn(async (input: string) => {
       const url = String(input);
@@ -1302,7 +1445,7 @@ describe("IndexingPanel", () => {
       expect(screen.getByText("Reading").closest("li")).toHaveClass("active");
     });
 
-    // Settle the first pass so its visited steps persist as a summary.
+    // Settle the first pass: the strip unmounts with no persisted summary.
     running = false;
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_completed",
@@ -1314,16 +1457,11 @@ describe("IndexingPanel", () => {
       },
     });
     await waitFor(() => {
-      expect(screen.getByTestId("index-live-progress")).toHaveTextContent(
-        "Completed",
-      );
+      expect(screen.queryByTestId("index-live-progress")).toBeNull();
     });
-    expect(
-      screen.getByText("Reading").closest("li"),
-    ).toHaveClass("done");
 
-    // The next run begins: the previous summary collapses and the steps return
-    // to pending before new frames rebuild them.
+    // The next run begins: a fresh strip mounts with every step pending
+    // before new frames rebuild the live state.
     running = true;
     await dispatchFrameOrThrow(capture.onMessage, {
       type: "run_started",
@@ -1353,5 +1491,469 @@ describe("IndexingPanel", () => {
     expect(
       within(screen.getByTestId("index-live-progress")).queryByText(/✓/),
     ).toBeNull();
+  });
+
+  it("names the first run in progress instead of an empty history", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true, running: true, lastRun: null },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-run")).toHaveTextContent(
+        "First run in progress…",
+      );
+    });
+    expect(screen.getByTestId("index-last-run")).not.toHaveTextContent(
+      "No runs yet",
+    );
+  });
+
+  it("keeps No runs yet for a fresh idle store", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true, running: false, lastRun: null },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-run")).toHaveTextContent("No runs yet");
+    });
+    expect(screen.queryByTestId("index-live-progress")).toBeNull();
+  });
+
+  it("renders one icon per mini-card from the shared set", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, enabled: true },
+      status: { ...statusPayload, enabled: true, running: true },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-strip")).toBeInTheDocument();
+    });
+
+    // Every step id maps to a shared icon component rendering one svg.
+    expect(Object.keys(INDEX_STEP_ICONS).sort()).toEqual(
+      ["committing", "discovering", "embedding", "extracting", "vision"].sort(),
+    );
+    for (const step of INDEX_STEPS) {
+      const card = screen.getByTestId(`index-mini-card-${step.id}`);
+      const icon = card.querySelector(".index-mini-card-icon svg");
+      expect(icon).not.toBeNull();
+    }
+  });
+
+  it(
+    "polls committed status while a run is in flight and stops on settle",
+    async () => {
+      let running = true;
+      const fetchMock = vi.fn(async (input: string) => {
+        const url = String(input);
+        if (url === "/index/status") {
+          return jsonResponse({ ...statusPayload, enabled: true, running });
+        }
+        return jsonResponse({
+          engineName: "Test Engine",
+          index: indexConfig,
+        });
+      });
+      const capture = createMockWebSocketCapture();
+      vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+      vi.stubGlobal("fetch", fetchMock);
+
+      render(<IndexingPanel />);
+
+      await waitFor(() => {
+        expect(screen.getByText("Running")).toBeInTheDocument();
+      });
+      const callsAfterMount = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/index/status",
+      ).length;
+      // One poll tick (~2s) while the run window stays open re-reads status.
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      const callsDuringRun = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/index/status",
+      ).length;
+      expect(callsDuringRun).toBeGreaterThan(callsAfterMount);
+
+      // Settle the run: the terminal broadcast plus a stopped probe ends the
+      // window, and the pill falls back to Enabled.
+      running = false;
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "run_completed",
+        run: {
+          kind: "index",
+          status: "ok",
+          message: "Index run ok: 3 indexed, 5 scanned",
+          response: "Index run ok: 3 indexed, 5 scanned",
+        },
+      });
+      await waitFor(() => {
+        expect(screen.getByText("Enabled")).toBeInTheDocument();
+      });
+      const callsAfterSettle = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/index/status",
+      ).length;
+      // Idle never polls: a full tick past settle adds no further reads.
+      await new Promise((resolve) => setTimeout(resolve, 2300));
+      const callsWhenIdle = fetchMock.mock.calls.filter(
+        ([url]) => String(url) === "/index/status",
+      ).length;
+      expect(callsWhenIdle).toBe(callsAfterSettle);
+    },
+    15000,
+  );
+
+  it("updates cards mid-run from the polled sequence while frames drive the live line", async () => {
+    let documents = 42;
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse({
+          ...statusPayload,
+          enabled: true,
+          running: true,
+          documents,
+        });
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: indexConfig,
+      });
+    });
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("42");
+    });
+    // Committed growth arrives through the status reload while the run stays
+    // in flight, so the card tracks the new total without settling.
+    documents = 87;
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        kind: "index",
+        message: "Index run started (onDemand)",
+        response: null,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("87");
+    });
+    // The live strip stays mounted through the committed update.
+    expect(screen.getByTestId("index-live-progress")).toBeInTheDocument();
+    // Frames remain the in-flight source: a progress frame still drives the
+    // stage-aware header after the committed update lands.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_progress",
+      callID: "c1",
+      toolName: "index",
+      message: "Indexing extracting files: 3 indexed (2 vectors), 5 scanned",
+      scanned: 5,
+      matched: 3,
+      elapsedMs: 1500,
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-live-header")).toHaveTextContent("Reading files…");
+    });
+  });
+
+  it("flashes changed Size/Documents/Chunks values on update only", async () => {
+    let payload = {
+      ...statusPayload,
+      enabled: true,
+      running: true,
+      documents: 42,
+      chunks: 100,
+      bytes: 2048,
+    };
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse(payload);
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: indexConfig,
+      });
+    });
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toBeInTheDocument();
+    });
+    // The first snapshot seeds the baseline and never flashes.
+    expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-documents-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-chunks-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+
+    // Change only Documents: that value flashes while Size and Chunks stay
+    // plain, and the watermark, pills, and last-run strip never carry it.
+    payload = { ...payload, documents: 60 };
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "run_started",
+      run: {
+        kind: "index",
+        message: "Index run started (onDemand)",
+        response: null,
+      },
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("60");
+    });
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-size-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-stat-chunks-value")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-last-run")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    expect(screen.getByTestId("index-watermark-card")).not.toHaveClass(
+      "index-stat-value-flash",
+    );
+    for (const pill of document.querySelectorAll(".index-source-pills .status-pill")) {
+      expect(pill).not.toHaveClass("index-stat-value-flash");
+    }
+  });
+});
+
+describe("IndexingPanel last errors helpers", () => {
+  it("dedupes identical error strings in first-seen order", () => {
+    expect(
+      dedupeIndexErrors(["b failed", "a failed", "b failed", "a failed", "c failed"]),
+    ).toEqual(["b failed", "a failed", "c failed"]);
+    // Malformed entries degrade to skipped instead of blank rows.
+    expect(dedupeIndexErrors(["a failed", 42, null, "a failed"])).toEqual([
+      "a failed",
+    ]);
+    expect(dedupeIndexErrors(null)).toEqual([]);
+    expect(dedupeIndexErrors("not-an-array")).toEqual([]);
+  });
+
+  it("pins the collapsed budget and preview budget", () => {
+    expect(INDEX_LAST_ERRORS_COLLAPSED_COUNT).toBe(3);
+    expect(INDEX_LAST_ERROR_PREVIEW_CHARS).toBeGreaterThan(0);
+  });
+
+  it("truncates long lines with an expand control rule", () => {
+    const short = "mail: IMAP unreachable";
+    expect(isLongIndexError(short)).toBe(false);
+    expect(truncateIndexError(short)).toBe(short);
+    const long = `files: scan failed: ${"x".repeat(INDEX_LAST_ERROR_PREVIEW_CHARS + 50)}`;
+    expect(isLongIndexError(long)).toBe(true);
+    const preview = truncateIndexError(long);
+    expect(preview.length).toBeLessThan(long.length);
+    expect(preview).toMatch(/…$/);
+    expect(long.startsWith(preview.slice(0, -1))).toBe(true);
+  });
+
+  it("suppresses the raw denial bullet when guidance renders", () => {
+    const denial = "messages: Full Disk Access required to read chat.db";
+    // Guidance is the formatted form, so the raw bullet drops out.
+    expect(resolveDisplayIndexErrors([denial, "mail: IMAP unreachable"])).toEqual([
+      "mail: IMAP unreachable",
+    ]);
+    // Dedupe applies before suppression so a repeated denial still vanishes once.
+    expect(resolveDisplayIndexErrors([denial, denial])).toEqual([]);
+    // Without a denial every deduped line stays visible.
+    expect(
+      resolveDisplayIndexErrors(["mail: IMAP unreachable", "mail: IMAP unreachable"]),
+    ).toEqual(["mail: IMAP unreachable"]);
+  });
+});
+
+describe("IndexingPanel last errors card", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("dedupes identical error strings in the card", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        lastErrors: ["mail: IMAP unreachable", "mail: IMAP unreachable", "files: denied"],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
+    });
+    // One repeated line reads once.
+    expect(screen.getAllByText("mail: IMAP unreachable").length).toBe(1);
+    expect(screen.getByText("files: denied")).toBeInTheDocument();
+    const items = within(screen.getByTestId("index-last-errors")).getAllByRole("listitem");
+    expect(items.length).toBe(2);
+    // Every row carries a warning icon.
+    for (const item of items) {
+      expect(item.querySelector("svg")).not.toBeNull();
+    }
+  });
+
+  it("suppresses the raw denial bullet when guidance renders", async () => {
+    const denial = "messages: Full Disk Access required to read chat.db";
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: [denial, "mail: IMAP unreachable"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    });
+    // Guidance is the formatted error, so the raw bullet stays hidden.
+    expect(screen.queryByText(denial)).toBeNull();
+    expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
+  });
+
+  it("renders guidance-only with no raw rows when every error is a denial", async () => {
+    const denial = "messages: Full Disk Access required to read chat.db";
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: [denial, denial] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(denial)).toBeNull();
+    // Guidance steps render their own list items, so scope the raw-row check
+    // to error rows: guidance-only means no indexed error row exists.
+    expect(screen.queryByTestId("index-error-list")).toBeNull();
+    expect(screen.queryAllByTestId(/^index-last-error-\d+$/).length).toBe(0);
+  });
+
+  it("caps rows with a show-all toggle", async () => {
+    const user = userEvent.setup();
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        lastErrors: ["error one", "error two", "error three", "error four", "error five"],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
+    });
+    // Collapsed to the budget with the remainder behind the toggle.
+    expect(
+      within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
+    ).toBe(INDEX_LAST_ERRORS_COLLAPSED_COUNT);
+    expect(screen.getByText("error one")).toBeInTheDocument();
+    expect(screen.queryByText("error five")).toBeNull();
+    const toggle = screen.getByTestId("index-errors-toggle");
+    expect(toggle).toHaveTextContent("Show all 5 errors");
+
+    await user.click(toggle);
+    await waitFor(() => {
+      expect(screen.getByText("error five")).toBeInTheDocument();
+    });
+    expect(
+      within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
+    ).toBe(5);
+    expect(screen.getByTestId("index-errors-toggle")).toHaveTextContent("Show fewer");
+
+    await user.click(screen.getByTestId("index-errors-toggle"));
+    await waitFor(() => {
+      expect(screen.queryByText("error five")).toBeNull();
+    });
+    expect(
+      within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
+    ).toBe(INDEX_LAST_ERRORS_COLLAPSED_COUNT);
+  });
+
+  it("truncates long lines with an expand control", async () => {
+    const user = userEvent.setup();
+    // Unique tail marker so the hidden-suffix check reads the truncated suffix
+    // rather than a repeated-character slice present in both states.
+    const longError = `files: scan failed on a very long path: ${"x".repeat(INDEX_LAST_ERROR_PREVIEW_CHARS + 40)}TAILEND98765`;
+    const tail = "TAILEND98765";
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: [longError] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-error-0")).toBeInTheDocument();
+    });
+    // Preview hides the tail behind the expand control.
+    expect(screen.getByTestId("index-last-error-0")).not.toHaveTextContent(tail);
+    expect(screen.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+    // Warning icon stays on the truncated row.
+    expect(
+      screen.getByTestId("index-last-error-0").querySelector("svg"),
+    ).not.toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Show more" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Show less" })).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-last-error-0")).toHaveTextContent(tail);
+
+    await user.click(screen.getByRole("button", { name: "Show less" }));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Show more" })).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-last-error-0")).not.toHaveTextContent(tail);
+  });
+
+  it("omits the expand control and toggle for short lists", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: ["mail: IMAP unreachable"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+    expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
   });
 });

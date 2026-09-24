@@ -28,6 +28,17 @@ import { CloseIcon, PlusIcon, SearchIcon, TrashIcon } from "./icons";
 // surface without adding another primary nav entry.
 type MemoryTab = "memory" | "indexing";
 
+// Initial inner tab from the dashboard deep link: the menu-bar Index Status
+// entry navigates to the memory fragment carrying the indexing subpath, so a
+// fresh load with that suffix (or an indexing query) opens selected on the
+// status pane instead of the default Search and Memory view.
+function getInitialMemoryTab(): MemoryTab {
+  if (typeof window === "undefined") return "memory";
+  if (window.location.hash.toLowerCase().includes("indexing")) return "indexing";
+  if (window.location.search.toLowerCase().includes("indexing")) return "indexing";
+  return "memory";
+}
+
 function hashContent(content: string): string {
   // cyrb53 53-bit hash: substantially fewer collisions than 32-bit djb2
   // while staying bounded (hex digest, never full content in the key).
@@ -64,7 +75,7 @@ function baseResultKey(result: MemoryResult): string {
 }
 
 export default function MemoryBrowser() {
-  const [activeTab, setActiveTab] = useState<MemoryTab>("memory");
+  const [activeTab, setActiveTab] = useState<MemoryTab>(() => getInitialMemoryTab());
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<MemoryResult[]>([]);
   const [facts, setFacts] = useState<FactsResponse | null>(null);
@@ -99,6 +110,29 @@ export default function MemoryBrowser() {
   );
 
   useSharedWebSocket(handleRunBroadcast);
+
+  // Follows the Index Status deep link while the view is open: a menu-bar
+  // navigation to the memory fragment carrying the indexing subpath selects
+  // the status pane instead of leaving the default view mounted. Syncs both
+  // ways so leaving the deep link (back navigation or a plain memory link)
+  // returns to the Search and Memory view instead of stranding the status
+  // pane. Hash edits fire hashchange while query-only history moves fire
+  // popstate, so both are observed.
+  useEffect(() => {
+    function syncTabFromUrl() {
+      if (typeof window === "undefined") return;
+      const isIndexing =
+        window.location.hash.toLowerCase().includes("indexing") ||
+        window.location.search.toLowerCase().includes("indexing");
+      setActiveTab(isIndexing ? "indexing" : "memory");
+    }
+    window.addEventListener("hashchange", syncTabFromUrl);
+    window.addEventListener("popstate", syncTabFromUrl);
+    return () => {
+      window.removeEventListener("hashchange", syncTabFromUrl);
+      window.removeEventListener("popstate", syncTabFromUrl);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
