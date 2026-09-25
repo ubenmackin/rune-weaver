@@ -137,3 +137,198 @@ struct AppleIntelligenceAssessorTests {
         #expect(parsed == nil)
     }
 }
+
+/// Fixture stub tool for two-phase approval queue tests.
+private struct AssessorBudgetStubTool: Tool, Sendable {
+    let name: String
+    var description: String {
+        "Fixture stub for \(name)."
+    }
+
+    let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+    let permissionLevel: PermissionLevel = .requiresApproval
+
+    func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+        .success("ok", callID: input.callID)
+    }
+}
+
+@Suite("Assessor Budget Prewarm and Queue Two-Phase")
+struct AssessorBudgetQueueTwoPhaseTests {
+    @Test
+    func `Assessment timeout equals 2_5 seconds`() {
+        #expect(AppleIntelligenceAssessor.assessmentTimeoutSeconds == 2.5)
+    }
+
+    @Test
+    func `Prewarm debounce interval equals 30 seconds`() {
+        #expect(AppleIntelligenceAssessor.prewarmDebounceSeconds == 30)
+    }
+
+    @Test
+    func `Prewarm never throws and returns immediately`() {
+        // Non-throwing by construction: a bare call without try proves it.
+        AppleIntelligenceAssessor.resetPrewarmForTesting()
+        let start = Date()
+        AppleIntelligenceAssessor.shared.prewarm()
+        AppleIntelligenceAssessor.prewarm()
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 1.0)
+        AppleIntelligenceAssessor.resetPrewarmForTesting()
+    }
+
+    @Test
+    func `Prewarm debounces to at most once per 30 seconds`() {
+        AppleIntelligenceAssessor.resetPrewarmForTesting()
+        AppleIntelligenceAssessor.shared.prewarm()
+        let first = AppleIntelligenceAssessor.lastPrewarmAtForTesting()
+        #expect(first != nil)
+        AppleIntelligenceAssessor.shared.prewarm()
+        let second = AppleIntelligenceAssessor.lastPrewarmAtForTesting()
+        #expect(second == first)
+        AppleIntelligenceAssessor.resetPrewarmForTesting()
+        #expect(AppleIntelligenceAssessor.lastPrewarmAtForTesting() == nil)
+    }
+
+    @Test
+    func `Parse maps unknown severity to moderate with trimming`() {
+        let parsed = AppleIntelligenceAssessor.parseAssessmentJSON("""
+        {"severity": "  CRITICAL  ", "outcome": "  Does something.  ", "warnings": []}
+        """)
+        #expect(parsed?.severity == .moderate)
+        #expect(parsed?.outcome == "Does something.")
+        #expect(AppleIntelligenceAssessor.parseAssessmentJSON("""
+        {"severity": "safe", "outcome": "Reads a file.", "warnings": []}
+        """)?.severity == .safe)
+        #expect(AppleIntelligenceAssessor.parseAssessmentJSON("""
+        {"severity": "moderate", "outcome": "Writes a file.", "warnings": []}
+        """)?.severity == .moderate)
+        #expect(AppleIntelligenceAssessor.parseAssessmentJSON("""
+        {"severity": "dangerous", "outcome": "Deletes everything.", "warnings": []}
+        """)?.severity == .dangerous)
+    }
+
+    @Test
+    func `FileRequest enqueues nil assessment immediately`() async {
+        let queue = ApprovalQueue()
+        let tool = AssessorBudgetStubTool(name: "files.write")
+        let call = ToolInput(toolName: "files.write", argumentsJSON: #"{"path":"a.txt"}"#)
+        let start = Date()
+        let pending = await queue.fileRequest(tool: tool, call: call, intent: "Writing")
+        let elapsed = Date().timeIntervalSince(start)
+        // Cold-model filing must not await the model budget.
+        #expect(elapsed < 1.0)
+        #expect(pending.assessment == nil)
+        #expect(await queue.request(id: pending.id)?.id == pending.id)
+        #expect(await queue.request(id: pending.id)?.assessment == nil)
+        await queue.clear()
+    }
+
+    @Test
+    func `Enriched update lands on identical id`() async {
+        let queue = ApprovalQueue()
+        let tool = AssessorBudgetStubTool(name: "files.write")
+        let call = ToolInput(toolName: "files.write", argumentsJSON: #"{"path":"b.txt"}"#)
+        let pending = await queue.fileRequest(tool: tool, call: call)
+        // Poll for the background enrichment (model budget plus scheduling jitter).
+        var enriched: PermissionRequest?
+        for _ in 0 ..< 120 {
+            if let current = await queue.request(id: pending.id), current.assessment != nil {
+                enriched = current
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        let final = try? #require(enriched)
+        #expect(final?.id == pending.id)
+        #expect(final?.toolName == pending.toolName)
+        #expect(final?.assessment != nil)
+        await queue.clear()
+    }
+
+    @Test
+    func `Explicit assessment enqueues directly with no child`() async {
+        let queue = ApprovalQueue()
+        await queue.setOnEnriched { _ in
+            Issue.record("Enrichment must not run for explicit assessments")
+        }
+        let tool = AssessorBudgetStubTool(name: "files.write")
+        let call = ToolInput(toolName: "files.write", argumentsJSON: "{}")
+        let supplied = ImpactAssessment(severity: .safe, outcome: "Supplied.", warnings: [])
+        let request = await queue.fileRequest(tool: tool, call: call, assessment: supplied)
+        #expect(request.assessment == supplied)
+        #expect(await queue.request(id: request.id)?.assessment == supplied)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(await queue.request(id: request.id)?.assessment == supplied)
+        await queue.setOnEnriched(nil)
+        await queue.clear()
+    }
+
+    @Test
+    func `UpdateAssessment preserves fields`() async {
+        let queue = ApprovalQueue()
+        let sessionID = UUID()
+        let input = ToolInput(toolName: "api.request", argumentsJSON: #"{"url":"https://example.com"}"#, callID: "call-1")
+        let seeded = PermissionRequest(
+            toolName: "api.request",
+            description: "Call API",
+            input: input,
+            suggestedDurations: [.thisTime, .oneHour],
+            sessionID: sessionID,
+            intent: "Syncing",
+            assessment: nil
+        )
+        await queue.enqueue(seeded)
+        let enriched = ImpactAssessment(severity: .moderate, outcome: "Calls endpoint.", warnings: [])
+        let updated = await queue.updateAssessment(id: seeded.id, assessment: enriched)
+        let value = try? #require(updated)
+        #expect(value?.id == seeded.id)
+        #expect(value?.toolName == seeded.toolName)
+        #expect(value?.description == seeded.description)
+        #expect(value?.input == seeded.input)
+        #expect(value?.suggestedDurations == seeded.suggestedDurations)
+        #expect(value?.sessionID == seeded.sessionID)
+        #expect(value?.intent == seeded.intent)
+        #expect(value?.assessment == enriched)
+        await queue.clear()
+    }
+
+    @Test
+    func `UpdateAssessment no-ops on decided id`() async {
+        let queue = ApprovalQueue()
+        let tool = AssessorBudgetStubTool(name: "files.write")
+        let call = ToolInput(toolName: "files.write", argumentsJSON: "{}")
+        let pending = await queue.fileRequest(
+            tool: tool,
+            call: call,
+            assessment: ImpactAssessment(severity: .safe, outcome: "Supplied.", warnings: [])
+        )
+        #expect(await queue.decide(id: pending.id, approved: true) == true)
+        let late = await queue.updateAssessment(
+            id: pending.id,
+            assessment: ImpactAssessment(severity: .dangerous, outcome: "Late.", warnings: [])
+        )
+        #expect(late == nil)
+        #expect(await queue.request(id: pending.id) == nil)
+        await queue.clear()
+    }
+
+    @Test
+    func `Decide during pending resolves with late enrichment dropped`() async {
+        let queue = ApprovalQueue()
+        let tool = AssessorBudgetStubTool(name: "files.write")
+        let call = ToolInput(toolName: "files.write", argumentsJSON: #"{"path":"late.txt"}"#)
+        let pending = await queue.fileRequest(tool: tool, call: call)
+        #expect(await queue.decide(id: pending.id, approved: true) == true)
+        // Allow the model budget to elapse; the late result must not resurrect.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        #expect(await queue.request(id: pending.id) == nil)
+        #expect(await queue.count() == 0)
+        let late = await queue.updateAssessment(
+            id: pending.id,
+            assessment: ImpactAssessment(severity: .safe, outcome: "Late.", warnings: [])
+        )
+        #expect(late == nil)
+        await queue.clear()
+    }
+}

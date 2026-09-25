@@ -1047,6 +1047,193 @@ describe("ApprovalsInbox", () => {
     expect(screen.getByText(/Hardware CGEvent input simulation/)).toBeInTheDocument();
     // Static description must NOT be present
     expect(screen.queryByText("Perform mouse and keyboard actions")).not.toBeInTheDocument();
+    // Pending badge must be absent once valued.
+    expect(
+      screen.queryByTestId(
+        "approval-assessment-pending-22222222-2222-2222-2222-222222222222",
+      ),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders pending badge with spinner copy and enabled controls while hiding outcome", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: "33333333-3333-3333-3333-333333333333",
+              toolName: "email.send",
+              description: "Send email to ops",
+              intent: "Notifying ops of deploy",
+              assessment: null,
+              input: {
+                toolName: "email.send",
+                argumentsJSON: '{"to":"ops@example.com"}',
+                callID: "call-3",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("email.send")).toBeInTheDocument();
+    });
+    // Pending badge carries the shared pending shape with the id suffix.
+    const pending = screen.getByTestId(
+      "approval-assessment-pending-33333333-3333-3333-3333-333333333333",
+    );
+    expect(pending).toBeInTheDocument();
+    expect(pending).toHaveClass("severity-pending");
+    expect(pending).toHaveTextContent("Checking safety…");
+    expect(
+      pending.querySelector(
+        ".approval-assessment-pending, .approval-assessment-pending-spinner",
+      ),
+    ).not.toBeNull();
+    // Valued badge, outcome, and warnings stay hidden while pending.
+    expect(
+      screen.queryByTestId("approval-severity-33333333-3333-3333-3333-333333333333"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Expected outcome/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/⚠️/)).not.toBeInTheDocument();
+    // Intent, arguments disclosure, and live decisions stay available.
+    expect(screen.getByText("Notifying ops of deploy")).toBeInTheDocument();
+    expect(screen.getByText("View arguments")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+  });
+
+  it("falls back to static description only when nil with description present", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: "44444444-4444-4444-4444-444444444444",
+              toolName: "email.send",
+              description: "Send email to ops",
+              assessment: null,
+              input: {
+                toolName: "email.send",
+                argumentsJSON: "{}",
+                callID: "call-4",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("Send email to ops")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByTestId(
+        "approval-assessment-pending-44444444-4444-4444-4444-444444444444",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("upserts identical-id approval frames so enrichment swaps pending for valued", async () => {
+    const { resetSharedSocket } = await import("../hooks/useSharedWebSocket");
+    const {
+      createMockWebSocket,
+      createMockWebSocketCapture,
+      dispatchFrameOrThrow,
+    } = await import("../test-utils/mockWebSocket");
+    resetSharedSocket();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    const pendingID = "55555555-5555-5555-5555-555555555555";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: pendingID,
+              toolName: "email.send",
+              description: "Send email to ops",
+              intent: "Notifying ops of deploy",
+              assessment: null,
+              input: {
+                toolName: "email.send",
+                argumentsJSON: '{"to":"ops@example.com"}',
+                callID: "call-5",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(`approval-assessment-pending-${pendingID}`),
+      ).toBeInTheDocument();
+    });
+    const allowBefore = screen.getByRole("button", { name: "Allow" });
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    // Enrichment rebroadcast for the identical id replaces the stored entry
+    // in place: no duplicate card, pending swaps for the valued copy, and
+    // the Allow control persists without remounting.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval",
+      request: {
+        id: pendingID,
+        toolName: "email.send",
+        description: "Send email to ops",
+        intent: "Notifying ops of deploy",
+        assessment: {
+          severity: "moderate",
+          outcome: "Sends deploy notice to ops",
+          warnings: ["External recipient"],
+        },
+        input: {
+          toolName: "email.send",
+          argumentsJSON: '{"to":"ops@example.com"}',
+          callID: "call-5",
+        },
+        suggestedDurations: ["thisTime"],
+      },
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(`approval-severity-${pendingID}`),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId(`approval-assessment-pending-${pendingID}`),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Sends deploy notice to ops")).toBeInTheDocument();
+    expect(screen.getByText(/External recipient/)).toBeInTheDocument();
+    expect(screen.getByText("1 pending")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBe(allowBefore);
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    // Static description stays hidden once valued.
+    expect(screen.queryByText("Send email to ops")).not.toBeInTheDocument();
+    resetSharedSocket();
   });
 });
 

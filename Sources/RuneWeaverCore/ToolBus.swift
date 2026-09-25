@@ -393,9 +393,9 @@ public actor ToolBus {
                 }
             }
         case .requiresApproval:
-            // Graduated trust applies even to dry runs: denials must hold whether or not the tool
-            // promises to avoid mutation, so the gate is always consulted and only the tool's side
-            // effect is skipped via the dryRun flag it already receives.
+            // Denials hold even for dry runs, while needs-approval previews
+            // through the tool's dryRun path instead of filing; only the side
+            // effect is skipped via the flag the tool already receives.
             if let gate = permissionGate {
                 switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
                 case .allowed:
@@ -517,7 +517,13 @@ public actor ToolBus {
     }
 
     /// Resolves gated approval through the attached handler.
+    ///
+    /// Dry-run previews never file: they fall through to the tool's preview
+    /// envelope instead of parking and waiting on the inbox.
     private func resolveApproval(tool: any Tool, call: ToolInput, context: ToolContext) async -> ToolResult? {
+        if context.dryRun {
+            return nil
+        }
         guard let approvalHandler else {
             return .failure(
                 toolCallID: call.callID,

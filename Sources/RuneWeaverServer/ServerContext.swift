@@ -623,8 +623,10 @@ private func reclaimSandboxDetonationMachines(config: SandboxConfig) {
     FileSandboxAuditLog.append(bootSummary)
 }
 
-/// Installs the live approval prompt path so narrated gated calls file parked requests for their session.
+/// Installs the live approval prompt path as the backstop for direct bus executions.
 /// Broadcasts each filed request and waits with a timeout, keeping the bus wiring single-sourced for boot.
+/// Structured turns park before the bus in the common case and never reach this handler; it remains
+/// the fail-safe for executions escaping the partition plus dry-run previews, denying on timeout.
 private func installLiveApprovalHandler(
     bus: ToolBus,
     approvals: ApprovalQueue,
@@ -634,10 +636,23 @@ private func installLiveApprovalHandler(
     let handlerApprovals = approvals
     let handlerHub = hub
     await bus.setApprovalHandler { tool, call, toolContext in
-        // Decorates the shared filing path: file through
-        // `fileRequest(tool:call:sessionID:)` tagging the owning session,
-        // then broadcast and wait with a timeout.
-        let request = await handlerApprovals.fileRequest(tool: tool, call: call, sessionID: toolContext.conversationID)
+        // Two-phase filing path: file the pending request immediately with a
+        // nil assessment so the inbox renders without awaiting the model, then
+        // broadcast and wait with a timeout. The enrichment hook rebroadcasts
+        // the updated request on the identical id through the same channel
+        // without re-parking, so live views replace the pending card in place.
+        let owningSession = toolContext.conversationID
+        let request = await handlerApprovals.fileRequest(
+            tool: tool,
+            call: call,
+            sessionID: owningSession,
+            onEnriched: { updated in
+                await handlerHub.broadcastApproval(updated)
+                if let onApprovalRequested {
+                    await onApprovalRequested(updated)
+                }
+            }
+        )
         await handlerHub.broadcastApproval(request)
         if let onApprovalRequested {
             await onApprovalRequested(request)

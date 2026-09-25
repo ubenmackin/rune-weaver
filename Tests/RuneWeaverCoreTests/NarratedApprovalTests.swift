@@ -450,3 +450,356 @@ struct NarratedApprovalTests {
         #expect(history.contains { $0.role == .assistant && $0.content.contains("Continuation stopped by user") })
     }
 }
+
+/// One scripted LLM round pairing narration text with native structured calls.
+private struct StructuredResumeRound: Sendable {
+    /// Narration text for the round.
+    let text: String
+    /// Native calls emitted alongside the text.
+    let calls: [ToolInput]
+
+    /// Creates a round.
+    init(_ text: String, _ calls: [ToolInput] = []) {
+        self.text = text
+        self.calls = calls
+    }
+}
+
+/// Scripted provider replaying native structured rounds in call order.
+private final class StructuredResumeLLM: LLMProvider, Sendable {
+    /// Stable test model metadata.
+    let modelInfo = ModelInfo(name: "fixture", provider: "test", contextLength: 8192)
+    private struct ScriptState: Sendable {
+        var rounds: [StructuredResumeRound]
+        var index: Int
+    }
+
+    /// Guards script state below.
+    private let state: OSAllocatedUnfairLock<ScriptState>
+
+    /// Creates a scripted provider.
+    /// - Parameter rounds: Canned rounds in call order.
+    init(rounds: [StructuredResumeRound]) {
+        self.state = OSAllocatedUnfairLock(initialState: ScriptState(rounds: rounds, index: 0))
+    }
+
+    /// Replays the next canned round as a finished stream.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let round: StructuredResumeRound = state.withLock { s in
+            let next = s.index < s.rounds.count ? s.rounds[s.index] : s.rounds.last ?? StructuredResumeRound("")
+            s.index += 1
+            return next
+        }
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: round.text, isFinished: true, toolCalls: round.calls))
+            continuation.finish()
+        }
+    }
+
+    /// Number of chat calls served so far.
+    func chatCallCount() -> Int {
+        state.withLock { $0.index }
+    }
+
+    /// Unused embeddings stub.
+    /// - Parameter text: Ignored texts.
+    /// - Returns: Empty vectors.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+@Suite("Structured Resume")
+struct StructuredResumeTests {
+    @Test
+    func `Late approve on a parked structured call executes plus synthesizes without retry`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "write-ok done"))
+        let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hello"}"#, callID: "call_struct_allow")
+        let synthesis = "Done: wrote your note."
+        let llm = StructuredResumeLLM(rounds: [
+            StructuredResumeRound("", [gated]),
+            StructuredResumeRound(synthesis)
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Write it", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 1)
+        guard let approvalID = await queue.list().first?.id else {
+            Issue.record("Expected a filed structured approval")
+            return
+        }
+        final class EventCollector: Sendable {
+            private let box = OSAllocatedUnfairLock<(started: Int, completed: Int)>(initialState: (0, 0))
+            func noteStarted() {
+                box.withLock { $0.started += 1 }
+            }
+
+            func noteCompleted() {
+                box.withLock { $0.completed += 1 }
+            }
+
+            func snapshot() -> (Int, Int) {
+                box.withLock { ($0.started, $0.completed) }
+            }
+        }
+        let collector = EventCollector()
+        #expect(await queue.decide(id: approvalID, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(
+            id: approvalID,
+            approved: true,
+            onEvent: { event in
+                switch event {
+                case .toolStarted:
+                    collector.noteStarted()
+                case .toolCompleted:
+                    collector.noteCompleted()
+                default:
+                    break
+                }
+            }
+        )
+        let (startedCount, completedCount) = collector.snapshot()
+        #expect(startedCount == 1)
+        #expect(completedCount == 1)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text == synthesis)
+        #expect(resumed?.toolActions.count == 1)
+        #expect(resumed?.toolActions.first?.toolName == "stub.write")
+        #expect(resumed?.toolActions.first?.result?.isError == false)
+        #expect(resumed?.toolActions.first?.result?.content.contains("write-ok") == true)
+        let history = await conversations.history(for: sessionID)
+        let filedCallID = resumed?.toolActions.first?.callID ?? ""
+        #expect(!filedCallID.isEmpty)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == filedCallID })
+        #expect(history.contains { $0.role == .assistant && $0.content == synthesis })
+        #expect(!history.contains { $0.content.lowercased().contains("waiting") })
+    }
+
+    @Test
+    func `Denied structured call records denial without execution`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "must not run"))
+        let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hi"}"#, callID: "call_struct_deny")
+        let llm = StructuredResumeLLM(rounds: [StructuredResumeRound("", [gated])])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(text: "Write it", sessionID: sessionID))
+        guard let approvalID = await queue.list().first?.id else {
+            Issue.record("Expected a filed structured approval")
+            return
+        }
+        #expect(await queue.decide(id: approvalID, approved: false) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: approvalID, approved: false)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.toolActions.isEmpty == true)
+        #expect(resumed?.text.lowercased().contains("denied") == true)
+        #expect(resumed?.text.contains("stub.write") == true)
+        let history = await conversations.history(for: sessionID)
+        #expect(!history.contains { $0.role == .tool })
+        #expect(history.contains { $0.role == .assistant && $0.content.lowercased().contains("denied") })
+    }
+
+    @Test
+    func `Approved structured call with missing tool records notice without execution`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "must not run"))
+        let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hi"}"#, callID: "call_struct_missing")
+        let llm = StructuredResumeLLM(rounds: [StructuredResumeRound("", [gated])])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(text: "Write it", sessionID: sessionID))
+        guard let approvalID = await queue.list().first?.id else {
+            Issue.record("Expected a filed structured approval")
+            return
+        }
+        await bus.unregister(toolNamed: "stub.write")
+        #expect(await queue.decide(id: approvalID, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: approvalID, approved: true)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.toolActions.isEmpty == true)
+        #expect(resumed?.text.contains("stub.write") == true)
+        #expect(resumed?.text.contains("no longer available") == true)
+        let history = await conversations.history(for: sessionID)
+        #expect(!history.contains { $0.role == .tool })
+    }
+
+    @Test
+    func `Batch siblings defer synthesis until the last decision then synthesize once`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "write-ok"))
+        let gated1 = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/a"}"#, callID: "call_struct_batch1")
+        let gated2 = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/b"}"#, callID: "call_struct_batch2")
+        let synthesis = "Both writes complete."
+        let llm = StructuredResumeLLM(rounds: [
+            StructuredResumeRound("", [gated1, gated2]),
+            StructuredResumeRound(synthesis)
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let parked = try await orchestrator.process(input: UserInput(text: "Write both", sessionID: sessionID))
+        #expect(parked.isParked == true)
+        #expect(await queue.count() == 2)
+        let pending = await queue.list()
+        guard pending.count == 2 else {
+            Issue.record("Expected two filed structured approvals")
+            return
+        }
+        let firstID = pending[0].id
+        let secondID = pending[1].id
+        let callsBeforeResume = llm.chatCallCount()
+        #expect(await queue.decide(id: firstID, approved: true) == true)
+        let firstResumed = try await orchestrator.resumeNarratedApproval(id: firstID, approved: true)
+        #expect(firstResumed?.isParked == true)
+        #expect(firstResumed?.text.contains("waiting for 1 more approval") == true)
+        #expect(llm.chatCallCount() == callsBeforeResume)
+        #expect(await queue.decide(id: secondID, approved: true) == true)
+        let secondResumed = try await orchestrator.resumeNarratedApproval(id: secondID, approved: true)
+        #expect(secondResumed?.sessionID == sessionID)
+        #expect(secondResumed?.isParked == false)
+        #expect(secondResumed?.text == synthesis)
+        #expect(secondResumed?.toolActions.count == 2)
+        #expect(secondResumed?.toolActions.allSatisfy { $0.result?.isError == false } == true)
+        #expect(secondResumed?.toolActions.allSatisfy { $0.result?.content.contains("write-ok") == true } == true)
+        let history = await conversations.history(for: sessionID)
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_batch1" })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_batch2" })
+        let syntheses = history.filter { $0.role == .assistant && $0.content == synthesis }
+        #expect(syntheses.count == 1)
+    }
+
+    @Test
+    func `Superseded session resumes against current history and clears waiting notes`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "write-ok done"))
+        let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"text":"hello"}"#, callID: "call_struct_superseded")
+        let synthesis = "Done after supersede."
+        let llm = StructuredResumeLLM(rounds: [
+            StructuredResumeRound("", [gated]),
+            StructuredResumeRound(synthesis)
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: queue,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        _ = try await orchestrator.process(input: UserInput(text: "Write it", sessionID: sessionID))
+        guard let approvalID = await queue.list().first?.id else {
+            Issue.record("Expected a filed structured approval")
+            return
+        }
+        await conversations.removeSession(id: sessionID)
+        #expect(await queue.decide(id: approvalID, approved: true) == true)
+        let resumed = try await orchestrator.resumeNarratedApproval(id: approvalID, approved: true)
+        #expect(resumed?.sessionID == sessionID)
+        #expect(resumed?.isParked == false)
+        #expect(resumed?.text == synthesis)
+        #expect(resumed?.toolActions.count == 1)
+        #expect(resumed?.toolActions.first?.result?.isError == false)
+        let history = await conversations.history(for: sessionID)
+        #expect(!history.contains { $0.content.lowercased().contains("waiting") })
+        #expect(history.contains { $0.role == .tool && $0.toolCallID == "call_struct_superseded" })
+        #expect(history.contains { $0.role == .assistant && $0.content == synthesis })
+    }
+
+    @Test
+    func `Decision backstop stays at 300 seconds and denies escaping waits`() async {
+        #expect(ApprovalQueue.defaultDecisionTimeoutSeconds == 300)
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let request = await queue.enqueue(
+            toolName: "stub.write",
+            description: "Backstop probe",
+            input: ToolInput(toolName: "stub.write", argumentsJSON: "{}", callID: "call_backstop")
+        )
+        let decision = await queue.waitForDecision(id: request.id, timeoutSeconds: 0.05)
+        #expect(decision.approved == false)
+        #expect(decision.timedOut == true)
+        #expect(await queue.request(id: request.id) != nil)
+        #expect(await queue.decide(id: request.id, approved: true) == true)
+    }
+
+    @Test
+    func `Headless structured turn files plus denies with zero parking`() async throws {
+        let conversations = ConversationManager()
+        let gate = PermissionGate()
+        let queue = ApprovalQueue(permissionGate: gate)
+        let bus = ToolBus(permissionGate: gate)
+        await bus.register(tool: makeParkedGatedTool(name: "stub.write", output: "must not run"))
+        let headlessHandler = await queue.headlessApprovalHandler()
+        await bus.setApprovalHandler(headlessHandler)
+        let gated = ToolInput(toolName: "stub.write", argumentsJSON: #"{"path":"/tmp/a"}"#, callID: "call_struct_headless")
+        let llm = StructuredResumeLLM(rounds: [
+            StructuredResumeRound("", [gated]),
+            StructuredResumeRound("Headless noted.")
+        ])
+        let orchestrator = Orchestrator(
+            conversations: conversations,
+            toolBus: bus,
+            llm: llm,
+            toolResolver: { _, _ in [] },
+            approvalQueue: nil,
+            permissionGate: gate
+        )
+        let sessionID = UUID()
+        let response = try await orchestrator.process(input: UserInput(text: "Write it", sessionID: sessionID))
+        #expect(response.isParked == false)
+        #expect(await orchestrator.parkedNarratedApprovals.isEmpty)
+        #expect(await orchestrator.isSessionParked(sessionID) == false)
+        #expect(await queue.count() == 1)
+        #expect(response.toolActions.first?.result?.isError == true)
+        let unknownResume = try await orchestrator.resumeNarratedApproval(id: UUID(), approved: true)
+        #expect(unknownResume == nil)
+    }
+}

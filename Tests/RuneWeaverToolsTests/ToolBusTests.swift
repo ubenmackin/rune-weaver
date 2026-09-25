@@ -124,15 +124,22 @@ struct ToolBusTests {
     }
 
     @Test
-    func `RequiresApproval dry run still requires approval`() async {
+    func `RequiresApproval dry run previews without approval`() async {
         let bus = ToolBus(permissionGate: PermissionGate())
         await bus.register(tool: ApprovalStubTool())
-        // No handler means denial; dry run must not bypass the gate.
-        let result = await bus.execute(
+        // Dry-run previews never park: no handler needed, the tool previews
+        // success through its dry-run path instead of waiting on the inbox.
+        let preview = await bus.execute(
             toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
             context: ToolContext(conversationID: UUID(), dryRun: true)
         )
-        #expect(result.isError == true)
+        #expect(preview.isError == false)
+        // Fail-closed: the same call without dry run still denies with no handler.
+        let denied = await bus.execute(
+            toolCall: ToolInput(toolName: "stub.write", argumentsJSON: "{}"),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(denied.isError == true)
     }
 
     @Test

@@ -1,6 +1,7 @@
 // Rune Weaver Core — On-device Apple Intelligence tool safety and impact assessor.
 
 import Foundation
+import os
 
 #if canImport(FoundationModels)
     import FoundationModels
@@ -11,14 +12,36 @@ public actor AppleIntelligenceAssessor {
     /// Shared singleton instance.
     public static let shared = AppleIntelligenceAssessor()
 
+    /// Budget bounding one model evaluation inside ``assess``.
+    ///
+    /// Fail-closed bound: the model race never stretches an approval filing.
+    /// Filing returns immediately (nil assessment plus background enrichment)
+    /// while the model gets at most this long to answer before heuristics win.
+    public static let assessmentTimeoutSeconds: Double = 2.5
+
+    /// Minimum spacing between real warm-up model calls.
+    ///
+    /// Warm-up is advisory: it only makes the next evaluation faster, so it
+    /// must never fan out one model call per session creation.
+    public static let prewarmDebounceSeconds: Double = 30
+
+    /// Lock-guarded timestamp of the last admitted warm-up.
+    ///
+    /// Static (not per-instance) so the fire-and-forget entry points can check
+    /// the debounce synchronously without an actor hop: the caller never blocks
+    /// on isolation just to learn the warm-up was skipped.
+    private static let prewarmState = OSAllocatedUnfairLock(initialState: Date?.none)
+
     /// Creates an assessor.
     public init() {}
 
     /// Evaluates tool invocation impact and safety.
     ///
     /// Attempts evaluation using macOS 26 Apple Intelligence (`SystemLanguageModel.default`)
-    /// with an 800ms deadline. Falls back gracefully to rule-based heuristics if the system
-    /// model is disabled, warming up, or times out.
+    /// with a 2.5-second deadline. Falls back gracefully to rule-based heuristics if the system
+    /// model is disabled, warming up, unavailable, refuses, times out, or returns
+    /// malformed JSON. Always returns — never throws — so filing always succeeds
+    /// even when the model path fails.
     /// - Parameters:
     ///   - toolName: Name of the tool requesting approval.
     ///   - argumentsJSON: Raw invocation arguments.
@@ -33,7 +56,7 @@ public actor AppleIntelligenceAssessor {
             if #available(macOS 26.0, *) {
                 if SystemLanguageModel.default.isAvailable {
                     do {
-                        return try await withTimeout(seconds: 0.8) {
+                        return try await withTimeout(seconds: Self.assessmentTimeoutSeconds) {
                             try await self.evaluateWithAppleIntelligence(
                                 toolName: toolName,
                                 argumentsJSON: argumentsJSON,
@@ -97,10 +120,92 @@ public actor AppleIntelligenceAssessor {
             }
             return parsed
         }
+
+        /// Performs one tiny warm-up round against the on-device model.
+        ///
+        /// Discards the result: warm-up only faults the model into memory so the
+        /// next real evaluation answers faster. Never throws — any failure
+        /// (unavailable model, refusal, timeout) is swallowed so session
+        /// creation can never fail because warm-up failed.
+        private func warmUp() async {
+            if #available(macOS 26.0, *) {
+                guard SystemLanguageModel.default.isAvailable else { return }
+                do {
+                    let session = LanguageModelSession(
+                        model: .default,
+                        instructions: "You are a safety analyzer. Reply briefly."
+                    )
+                    _ = try await session.respond(to: "ok")
+                } catch {
+                    // Intentionally discarded: warm-up is best-effort only.
+                }
+            }
+        }
+    #else
+        /// No-op warm-up on platforms without the on-device model.
+        ///
+        /// Keeps the debounce and never-throw contract identical where the
+        /// model cannot exist, so callers never branch on platform.
+        private func warmUp() async {}
     #endif
 
+    /// Requests a debounced, fire-and-forget model warm-up.
+    ///
+    /// At most one real warm-up runs per 30 seconds no matter how many
+    /// sessions are created. Returns immediately without awaiting the model,
+    /// discards the result, and never throws, so session creation never blocks
+    /// and never fails because of warm-up.
+    public nonisolated func prewarm() {
+        guard Self.claimPrewarmSlot() else { return }
+        Task { [self] in
+            await self.warmUp()
+        }
+    }
+
+    /// Type-level warm-up entry point for callers without an instance handy.
+    ///
+    /// Delegates to the shared instance so the debounce stays single-sourced
+    /// no matter which spelling the caller reaches for.
+    public static func prewarm() {
+        shared.prewarm()
+    }
+
+    /// Claims one warm-up slot when the debounce window has elapsed.
+    /// - Parameter now: Reference date. Defaults to now.
+    /// - Returns: True when the caller owns a warm-up round.
+    private static func claimPrewarmSlot(now: Date = Date()) -> Bool {
+        prewarmState.withLock { (last: inout Date?) -> Bool in
+            if let last, now.timeIntervalSince(last) < prewarmDebounceSeconds {
+                return false
+            }
+            last = now
+            return true
+        }
+    }
+
+    /// Clears the debounce timestamp so tests can admit a fresh warm-up.
+    public static func resetPrewarmForTesting() {
+        prewarmState.withLock { (last: inout Date?) in
+            last = nil
+        }
+    }
+
+    /// Returns the last admitted warm-up time, if any.
+    /// - Returns: Timestamp of the last admitted warm-up, or nil when none.
+    public static func lastPrewarmAtForTesting() -> Date? {
+        prewarmState.withLock { (last: inout Date?) in last }
+    }
+
     /// Parses the raw LLM response text into an ImpactAssessment.
-    static func parseAssessmentJSON(_ text: String) -> ImpactAssessment? {
+    ///
+    /// Extracts the outermost `{ ... }` brace range, decodes it with
+    /// `JSONDecoder`, trims surrounding whitespace, and normalizes severity:
+    /// exactly `safe`, `moderate`, or `dangerous` survive; any other string
+    /// maps to `moderate` so novel model wording fails toward the middle
+    /// instead of toward trust or alarm.
+    /// - Parameter text: Raw model response, possibly wrapped in prose.
+    /// - Returns: Parsed assessment, or nil when no JSON object decodes.
+    public static func parseAssessmentJSON(_ text: String) -> ImpactAssessment? {
         guard let start = text.firstIndex(of: "{"),
               let end = text.lastIndex(of: "}"),
               start <= end
@@ -123,10 +228,13 @@ public actor AppleIntelligenceAssessor {
             return nil
         }
 
-        let severity: ImpactSeverity = switch decoded.severity.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) {
+        let normalized = decoded.severity.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let severity: ImpactSeverity = switch normalized {
         case "safe":
             .safe
-        case "dangerous", "danger", "high":
+        case "moderate":
+            .moderate
+        case "dangerous":
             .dangerous
         default:
             .moderate

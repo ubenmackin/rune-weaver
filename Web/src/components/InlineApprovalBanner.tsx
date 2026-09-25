@@ -194,16 +194,38 @@ export default function InlineApprovalBanner({
     >
       <div className="inline-approval-header">
         <span className="badge approval-tool-badge">{request.toolName}</span>
-        {request.assessment?.severity ? (
+        {request.assessment ? (
+          // Fail-closed on unknown tiers: only the three engine-known
+          // severities render a badge so a drifted value never guesses a
+          // color or copies the wrong outcome tone.
+          request.assessment.severity === "safe" ||
+          request.assessment.severity === "moderate" ||
+          request.assessment.severity === "dangerous" ? (
+            <span
+              className={`badge approval-severity-badge severity-${request.assessment.severity}`}
+              data-testid={`approval-severity-${request.id}`}
+            >
+              {request.assessment.severity === "safe" && "🟢 Safe"}
+              {request.assessment.severity === "moderate" && "🟡 State Change"}
+              {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+            </span>
+          ) : null
+        ) : (
+          // Nil assessment means the background enrichment has not landed
+          // yet: show the pending badge with a spinner instead of outcome
+          // or warnings, while keeping Allow/Deny fully enabled so safety
+          // checking never blocks the decision.
           <span
-            className={`badge approval-severity-badge severity-${request.assessment.severity}`}
-            data-testid={`approval-severity-${request.id}`}
+            className="badge approval-severity-badge severity-pending"
+            data-testid={`approval-assessment-pending-${request.id}`}
           >
-            {request.assessment.severity === "safe" && "🟢 Safe"}
-            {request.assessment.severity === "moderate" && "🟡 State Change"}
-            {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+            <span
+              className="approval-assessment-pending approval-assessment-pending-spinner"
+              aria-hidden="true"
+            />
+            Checking safety…
           </span>
-        ) : null}
+        )}
       </div>
 
       {request.intent ? (

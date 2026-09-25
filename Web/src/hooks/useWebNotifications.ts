@@ -9,6 +9,69 @@ import type {
 } from "./useSharedWebSocket";
 import { normalizeSessionID } from "../approvalsSession";
 
+// Reads the filing identity from an approval prompt so rebroadcasts for the
+// same filing collapse to one badge bump. Trims defensively since the wire
+// carries UUID text; a missing id degrades to an untracked bump rather than
+// dropping a genuine filing.
+function approvalRequestID(request: Record<string, unknown>): string | undefined {
+  const raw = request.id;
+  if (typeof raw === "string" && raw.trim().length > 0) return raw.trim();
+  return undefined;
+}
+
+// Reads the resolved identity across the decided wire shapes the engine may
+// emit. Inline, inbox, and menu-bar decisions converge through the same
+// broadcast family, so every variant must resolve identically or the badge
+// would linger for one surface while the per-surface list already evicted.
+function decidedApprovalID(frame: WSGenericFrame): string | undefined {
+  const candidates: unknown[] = [frame.id, frame.approvalID, frame.approvalId];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  const nestedKeys = ["request", "approval"] as const;
+  for (const key of nestedKeys) {
+    const nested: unknown = frame[key];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const nestedID: unknown = (nested as Record<string, unknown>).id;
+      if (typeof nestedID === "string" && nestedID.trim().length > 0) {
+        return nestedID.trim();
+      }
+    }
+  }
+  return undefined;
+}
+
+// Decided broadcast family that evicts one pending filing. Kept as a set so
+// a newly added engine spelling cannot leave the badge pinned while the
+// inbox already removed the card.
+const DECIDED_FRAME_TYPES: ReadonlySet<string> = new Set([
+  "approval_decided",
+  "approval_resolved",
+  "approval_removed",
+  "approval_deleted",
+  "approval_completed",
+  "approval_cancelled",
+]);
+
+// Bound for remembered decided ids. The set exists only to collapse repeat
+// broadcasts for the same resolution, so it must not grow with session age;
+// evicting oldest-first keeps dedup effective while holding memory flat.
+const MAX_DECIDED_IDS = 500;
+
+function trackDecidedID(store: Set<string>, id: string): void {
+  store.add(id);
+  if (store.size <= MAX_DECIDED_IDS) return;
+  const excess = store.size - MAX_DECIDED_IDS;
+  const iterator = store.values();
+  for (let i = 0; i < excess; i++) {
+    const next = iterator.next();
+    if (next.done) break;
+    store.delete(next.value);
+  }
+}
+
 export function useWebNotifications() {
   const [permission, setPermission] = useState<NotificationPermission>(() => {
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -25,6 +88,15 @@ export function useWebNotifications() {
   const [warningsBadge, setWarningsBadge] = useState(0);
   // Dedup seen warning lines so live plus terminal repeats never inflate the bell.
   const seenWarningsRef = useRef<Set<string>>(new Set());
+  // Pending approval ids that already bumped the badge and still await a
+  // decision. Enrichment rebroadcasts reuse the identical id, so the set is
+  // what keeps a second arrival for the same filing from counting twice.
+  const seenApprovalIDsRef = useRef<Set<string>>(new Set());
+  // Decided ids already applied to the badge. Approvals filed before mount,
+  // decisions from another tab, and menu-bar resolutions arrive as decided
+  // frames for ids never seen here, so they still move the count once; the
+  // set keeps a repeated broadcast for the same id from moving it again.
+  const consumedDecidedIDsRef = useRef<Set<string>>(new Set());
 
   const handleMessage = useCallback((data: WSIncomingFrame) => {
     if (!data || typeof data !== "object") return;
@@ -46,7 +118,21 @@ export function useWebNotifications() {
       }
     } else if (frameType === "approval" && frame.request && typeof frame.request === "object") {
       const request = frame.request as Record<string, unknown>;
-      setApprovalsBadge((prev) => prev + 1);
+      // One bump per filing: enrichment rebroadcasts share the identical id,
+      // so an already-counted id never bumps again while a filing without a
+      // usable id still surfaces rather than dropping silently.
+      const filingID = approvalRequestID(request);
+      if (filingID !== undefined) {
+        if (
+          !seenApprovalIDsRef.current.has(filingID) &&
+          !consumedDecidedIDsRef.current.has(filingID)
+        ) {
+          seenApprovalIDsRef.current.add(filingID);
+          setApprovalsBadge((prev) => prev + 1);
+        }
+      } else {
+        setApprovalsBadge((prev) => prev + 1);
+      }
 
       if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
         const toolName = typeof request.toolName === "string" ? request.toolName : "unknown tool";
@@ -59,6 +145,23 @@ export function useWebNotifications() {
         new Notification("Rune Weaver: Approval Needed", {
           body: `Tool ${toolName}: ${detail}`,
         });
+      }
+    } else if (frameType !== undefined && DECIDED_FRAME_TYPES.has(frameType)) {
+      // One drop per resolution across every decide surface: a seen filing
+      // leaves the pending set, while a filing from before mount (or another
+      // tab, or the menu bar) still clears one stale count. Repeats for the
+      // same id apply at most once and the count never goes negative, so the
+      // badge stays advisory with server lists remaining the truth.
+      const resolvedID = decidedApprovalID(frame);
+      if (resolvedID !== undefined) {
+        if (consumedDecidedIDsRef.current.has(resolvedID)) return;
+        if (seenApprovalIDsRef.current.has(resolvedID)) {
+          seenApprovalIDsRef.current.delete(resolvedID);
+        }
+        trackDecidedID(consumedDecidedIDsRef.current, resolvedID);
+        setApprovalsBadge((prev) => Math.max(0, prev - 1));
+      } else {
+        setApprovalsBadge((prev) => Math.max(0, prev - 1));
       }
     } else if (frameType === "warning") {
       // Degraded-tool skips are informational, never fatal. Session-filter like the chat
@@ -149,6 +252,12 @@ export function useWebNotifications() {
   }, []);
 
   const clearApprovalsBadge = useCallback(() => {
+    // Navigation acknowledgment resets the advisory count without touching
+    // server pending lists. Both identity sets clear so a fresh visit starts
+    // with no memory of already-surfaced filings; a repeated decision after
+    // the reset still floors at zero rather than going negative.
+    seenApprovalIDsRef.current.clear();
+    consumedDecidedIDsRef.current.clear();
     setApprovalsBadge(0);
   }, []);
 

@@ -3490,6 +3490,43 @@ button:disabled {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+/* Pending safety-check badge: muted slate tone distinct from the valued
+ * safe/moderate/dangerous tiers, shared by the inline banner and the inbox
+ * card so both surfaces read identically with no local style duplication. */
+.approval-severity-badge.severity-pending {
+  background: rgba(148, 163, 184, 0.15);
+  color: #cbd5e1;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+}
+
+/* Pending spinner dot inside the severity-pending badge: indeterminate
+ * rotation signals the background assessment is still running while the
+ * pending copy stays in the muted tone above. */
+.approval-assessment-pending,
+.approval-assessment-pending-spinner {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid rgba(203, 213, 225, 0.35);
+  border-top-color: #cbd5e1;
+  display: inline-block;
+  flex-shrink: 0;
+  animation: approvalAssessmentSpin 0.9s linear infinite;
+}
+
+@keyframes approvalAssessmentSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .approval-assessment-pending,
+  .approval-assessment-pending-spinner {
+    animation: none;
+  }
+}
+
 .approval-narrative {
   font-size: 13.5px;
   line-height: 1.45;

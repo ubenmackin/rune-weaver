@@ -20,6 +20,12 @@ public struct ApprovalQueueDecision: Sendable, Equatable {
 }
 
 /// Pending approvals filed by headless scheduler turns.
+///
+/// Two-phase filing: `fileRequest` without an explicit assessment enqueues
+/// immediately with a nil assessment and enriches in the background, so the
+/// inbox renders instantly while the model (or heuristics on timeout) lands on
+/// the same identifier shortly after. Late enrichment after a decision is
+/// dropped without rebroadcast and without trust side effects.
 public actor ApprovalQueue {
     /// Pending requests indexed by identifier.
     private var pending: [UUID: PermissionRequest] = [:]
@@ -33,6 +39,17 @@ public actor ApprovalQueue {
     private var timeoutTasks: [UUID: Task<Void, Never>] = [:]
     /// Requests whose waiter timed out but whose inbox entry is retained.
     private var timedOutIDs: Set<UUID> = []
+    /// Background enrichment tasks keyed by the request they will enrich.
+    ///
+    /// One entry per nil-assessment filing. Cancelled on `decide` and `clear`
+    /// so a decision racing the model cannot be resurrected by a late result.
+    private var enrichmentTasks: [UUID: Task<Void, Never>] = [:]
+    /// Rebroadcast hook invoked with the enriched request on identical id.
+    ///
+    /// The pipeline installs the same `broadcastApproval` plus `onEvent`
+    /// approval path used for the initial filing here, so enriched updates
+    /// travel the identical channel without the queue knowing the transport.
+    private var enrichmentBroadcast: (@Sendable (PermissionRequest) async -> Void)?
     /// Graduated-trust gate receiving approved durations.
     private let permissionGate: PermissionGate?
 
@@ -41,6 +58,25 @@ public actor ApprovalQueue {
     ///   Defaults to nil (decisions resolve waiters only).
     public init(permissionGate: PermissionGate? = nil) {
         self.permissionGate = permissionGate
+    }
+
+    // MARK: - Enrichment broadcast hook
+
+    /// Rebroadcast hook for enriched assessments on identical id.
+    ///
+    /// The pipeline installs the same broadcast plus event path used for the
+    /// initial filing here, so enriched updates travel the identical channel
+    /// without the queue knowing the transport. Nil until installed; late
+    /// results for decided ids never reach it.
+    public var onEnriched: (@Sendable (PermissionRequest) async -> Void)? {
+        get { enrichmentBroadcast }
+        set { enrichmentBroadcast = newValue }
+    }
+
+    /// Installs the rebroadcast hook for enriched assessments.
+    /// - Parameter handler: Hook receiving the updated request on identical id.
+    public func setOnEnriched(_ handler: (@Sendable (PermissionRequest) async -> Void)?) {
+        enrichmentBroadcast = handler
     }
 
     /// Enqueues a prebuilt request, replacing any same-id entry.
@@ -70,22 +106,40 @@ public actor ApprovalQueue {
     }
 
     /// Files a gated tool call into the queue.
+    ///
+    /// Immediate enqueue: when no explicit assessment is supplied the pending
+    /// request is built with a nil assessment, stored, and returned without
+    /// awaiting the model. A background child task then evaluates (model with
+    /// a 2.5-second budget, heuristics on timeout, refusal, parse failure, or
+    /// unavailable model) and enriches the same identifier in place. When an
+    /// explicit assessment is supplied the request enqueues directly with that
+    /// value and no child task spawns. Filing always succeeds even when
+    /// enrichment later fails; the assessment always resolves through
+    /// heuristics as the fail-closed floor. The per-request hook, when
+    /// supplied, fires once with the enriched request on identical id
+    /// alongside the queue-wide rebroadcast; explicit assessments never invoke
+    /// it, and late results after decide never invoke it so a racing decision
+    /// wins.
     @discardableResult
     public func fileRequest(
         tool: any Tool,
         call: ToolInput,
         sessionID: UUID? = nil,
         intent: String? = nil,
-        assessment: ImpactAssessment? = nil
+        assessment: ImpactAssessment? = nil,
+        onEnriched: (@Sendable (PermissionRequest) async -> Void)? = nil
     ) async -> PermissionRequest {
-        let evaluatedAssessment = if let assessment {
-            assessment
-        } else {
-            await AppleIntelligenceAssessor.shared.assess(
+        if let assessment {
+            let request = PermissionRequest(
                 toolName: tool.name,
-                argumentsJSON: call.argumentsJSON,
-                intent: intent
+                description: tool.description,
+                input: call,
+                sessionID: sessionID,
+                intent: intent,
+                assessment: assessment
             )
+            pending[request.id] = request
+            return request
         }
         let request = PermissionRequest(
             toolName: tool.name,
@@ -93,10 +147,111 @@ public actor ApprovalQueue {
             input: call,
             sessionID: sessionID,
             intent: intent,
-            assessment: evaluatedAssessment
+            assessment: nil
         )
-        enqueue(request)
+        pending[request.id] = request
+        spawnEnrichment(
+            id: request.id,
+            toolName: tool.name,
+            argumentsJSON: call.argumentsJSON,
+            intent: intent,
+            perRequestHandler: onEnriched
+        )
         return request
+    }
+
+    /// Spawns the background enrichment child for one pending request.
+    private func spawnEnrichment(
+        id: UUID,
+        toolName: String,
+        argumentsJSON: String,
+        intent: String?,
+        perRequestHandler: (@Sendable (PermissionRequest) async -> Void)?
+    ) {
+        enrichmentTasks[id]?.cancel()
+        enrichmentTasks[id] = Task { [perRequestHandler] in
+            let assessed = await AppleIntelligenceAssessor.shared.assess(
+                toolName: toolName,
+                argumentsJSON: argumentsJSON,
+                intent: intent
+            )
+            guard !Task.isCancelled else { return }
+            await self.finishEnrichment(id: id, assessment: assessed, perRequestHandler: perRequestHandler)
+        }
+    }
+
+    /// Applies one enriched assessment and rebroadcasts on identical id.
+    ///
+    /// Single actor hop after the model resolves: a pending-existence check
+    /// drops late results for already-decided ids without rebroadcast and
+    /// without trust-grant side effects, so a decision racing the model wins.
+    private func finishEnrichment(
+        id: UUID,
+        assessment: ImpactAssessment,
+        perRequestHandler: (@Sendable (PermissionRequest) async -> Void)?
+    ) async {
+        guard !Task.isCancelled else {
+            enrichmentTasks.removeValue(forKey: id)
+            return
+        }
+        guard pending[id] != nil else {
+            enrichmentTasks.removeValue(forKey: id)
+            return
+        }
+        guard let updated = applyAssessment(id: id, assessment: assessment) else {
+            enrichmentTasks.removeValue(forKey: id)
+            return
+        }
+        enrichmentTasks.removeValue(forKey: id)
+        if let perRequestHandler {
+            await perRequestHandler(updated)
+            // A decision racing the per-request broadcast must win, so confirm
+            // the entry is still parked before touching the shared channel.
+            guard pending[id] != nil else { return }
+        }
+        if let broadcast = enrichmentBroadcast {
+            await broadcast(updated)
+        }
+    }
+
+    /// Applies an assessment in place for one pending request.
+    /// - Parameters:
+    ///   - id: Request identifier to enrich.
+    ///   - assessment: Assessment to set.
+    /// - Returns: Updated request, or nil when the id is already decided and removed.
+    private func applyAssessment(id: UUID, assessment: ImpactAssessment) -> PermissionRequest? {
+        guard let existing = pending[id] else { return nil }
+        let updated = PermissionRequest(
+            id: existing.id,
+            toolName: existing.toolName,
+            description: existing.description,
+            input: existing.input,
+            suggestedDurations: existing.suggestedDurations,
+            sessionID: existing.sessionID,
+            intent: existing.intent,
+            assessment: assessment
+        )
+        pending[id] = updated
+        return updated
+    }
+
+    /// Sets the assessment for one pending request in place.
+    ///
+    /// Preserves the filing identity while refreshing its safety grading, so
+    /// live views can replace the pending card without re-parking. A decided
+    /// id stays decided: the call no-ops without side effects. A successful
+    /// update rebroadcasts on the identical channel as background enrichment.
+    /// - Parameters:
+    ///   - id: Request identifier to enrich.
+    ///   - assessment: Assessment to set.
+    /// - Returns: Updated request, or nil when unknown or already decided.
+    @discardableResult
+    public func updateAssessment(id: UUID, assessment: ImpactAssessment) async -> PermissionRequest? {
+        guard let updated = applyAssessment(id: id, assessment: assessment) else { return nil }
+        if let broadcast = enrichmentBroadcast {
+            await broadcast(updated)
+        }
+        return updated
     }
 
     /// Lists pending requests for one session, in no guaranteed order.
@@ -137,6 +292,9 @@ public actor ApprovalQueue {
     /// - Returns: True when the request was pending and resolved.
     @discardableResult
     public func decide(id: UUID, approved: Bool, duration: TrustDuration = .thisTime, widen: Bool = false) async -> Bool {
+        // Cancel the enrichment child first so a model result landing in the
+        // gap cannot resurrect the entry or rebroadcast after the decision.
+        enrichmentTasks.removeValue(forKey: id)?.cancel()
         guard let request = pending.removeValue(forKey: id) else {
             return false
         }
@@ -252,11 +410,19 @@ public actor ApprovalQueue {
     }
 
     /// Removes every pending request and parks denials for waiters.
+    ///
+    /// Cancels all background enrichment children alongside the timeout
+    /// sleepers, so a clear racing the model leaves no late rebroadcast and
+    /// no resurrected entry.
     public func clear() {
         for (_, task) in timeoutTasks {
             task.cancel()
         }
         timeoutTasks.removeAll()
+        for (_, task) in enrichmentTasks {
+            task.cancel()
+        }
+        enrichmentTasks.removeAll()
         let suspended = waiters
         waiters.removeAll()
         pending.removeAll()
