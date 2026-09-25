@@ -12,12 +12,16 @@
 // `DocIndexStoreMaintenance.swift`.
 
 import Foundation
+import os
 
 #if canImport(SQLite3)
     import SQLite3
 #endif
 
 /// Actor-isolated SQLite store for the local document index.
+///
+/// The status snapshot cache below is owned by this actor: one aggregate pass
+/// fills it, and both status projections read from it until the TTL lapses.
 public actor DocIndexStore {
     /// Filesystem path of the sidecar SQLite database.
     public let dbPath: String
@@ -27,10 +31,104 @@ public actor DocIndexStore {
         IndexConfig.defaultDBPath
     }
 
+    /// How long a status snapshot stays reusable before the next poll recomputes it.
+    ///
+    /// Content writes invalidate the cache, so a status poll after a write
+    /// recomputes on the next read; the bound keeps repeated dashboard polls
+    /// within the window free of SQLite work while keeping staleness
+    /// predictable. `markSeen` stamps are excluded because no snapshot field
+    /// projects `last_seen_run`.
+    public static let statsCacheTTLSeconds: TimeInterval = 10
+
+    /// Cached aggregate snapshot plus when it was taken, in clock time.
+    private var cachedStatus: (snapshot: DocIndexStatusSnapshot, at: Date)?
+
+    /// Write generation guarding the status cache against stale resurrection.
+    ///
+    /// Incremented on every write that invalidates the cache. The snapshot
+    /// reader captures it before suspending and discards its pass when it
+    /// changed, so a concurrent write's invalidation is never overwritten
+    /// by a pre-write aggregate.
+    private var statusGeneration: UInt64 = 0
+
+    /// Wall-clock seam for the status cache, injectable so expiry is deterministic under test.
+    private let clock: @Sendable () -> Date
+
     /// Creates a store over a sidecar database.
-    /// - Parameter dbPath: SQLite file path. `~` is expanded on first use.
-    public init(dbPath: String = DocIndexStore.defaultDBPath) {
+    /// - Parameters:
+    ///   - dbPath: SQLite file path. `~` is expanded on first use.
+    ///   - clock: Wall-clock seam for the status cache.
+    public init(dbPath: String = DocIndexStore.defaultDBPath, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.dbPath = dbPath
+        self.clock = clock
+    }
+
+    /// Returns the cached status snapshot when it is still fresh, recomputing once otherwise.
+    ///
+    /// A hit performs no SQLite work at all, so a repeated poll inside the TTL
+    /// issues zero aggregate queries; a miss performs exactly one aggregate
+    /// pass through the shared snapshot helper and then projects from it.
+    /// The write generation captured before suspending guards against a
+    /// concurrent invalidation: when it changed, this pass may predate the
+    /// write, so it is discarded in favor of a fresh refill or a single
+    /// bounded post-write retry (at most two passes per call) instead of
+    /// caching stale aggregates.
+    private func cachedStatusSnapshot() async throws -> DocIndexStatusSnapshot {
+        if let cached = cachedStatus, clock().timeIntervalSince(cached.at) < Self.statsCacheTTLSeconds {
+            return cached.snapshot
+        }
+        let dbPath = self.dbPath
+        let generationBefore = statusGeneration
+        let snapshot = try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.statusSnapshot(dbPath: dbPath)
+        }
+        // A concurrent write invalidated while suspended, so this snapshot
+        // may predate it. Never resurrect it over the invalidation: prefer
+        // a refill that landed after the write, otherwise retry once for
+        // post-write aggregates. The retry is bounded to a single extra pass
+        // so sustained writes cannot livelock the poll.
+        if generationBefore != statusGeneration {
+            let now = clock()
+            if let refilled = cachedStatus, now.timeIntervalSince(refilled.at) < Self.statsCacheTTLSeconds {
+                return refilled.snapshot
+            }
+            let retryGenerationBefore = statusGeneration
+            let retrySnapshot = try await SQLiteSerialIO.run(lane: .indexing) {
+                try DocIndexStoreIO.statusSnapshot(dbPath: dbPath)
+            }
+            // Stay bounded: even when another write landed during the retry,
+            // return what was just computed instead of recursing, so one poll
+            // performs at most two aggregate passes.
+            let retryNow = clock()
+            if let refilled = cachedStatus, retryNow.timeIntervalSince(refilled.at) < Self.statsCacheTTLSeconds {
+                return refilled.snapshot
+            }
+            if retryGenerationBefore != statusGeneration {
+                return retrySnapshot
+            }
+            cachedStatus = (retrySnapshot, retryNow)
+            return retrySnapshot
+        }
+        // A concurrent caller may have filled the cache while suspended, so
+        // prefer that fresh fill over overwriting with a duplicate pass.
+        // A single clock read stamps the entry so an advancing injectable
+        // clock cannot extend the TTL beyond the snapshot instant.
+        let now = clock()
+        if let refilled = cachedStatus, now.timeIntervalSince(refilled.at) < Self.statsCacheTTLSeconds {
+            return refilled.snapshot
+        }
+        cachedStatus = (snapshot, now)
+        return snapshot
+    }
+
+    /// Clears the status cache and advances the write generation.
+    ///
+    /// Every mutating method except `markSeen` funnels through here so a
+    /// snapshot pass suspended across the write detects the invalidation
+    /// and discards its pre-write aggregates instead of caching them.
+    private func invalidateStatusCache() {
+        cachedStatus = nil
+        statusGeneration &+= 1
     }
 
     /// Inserts or updates a document, skipping the write when the content hash
@@ -40,9 +138,11 @@ public actor DocIndexStore {
     @discardableResult
     public func upsertDocument(_ document: IndexedDocument) async throws -> IndexedDocument {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocument(document, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Replaces all chunks for a document.
@@ -53,9 +153,11 @@ public actor DocIndexStore {
     @discardableResult
     public func upsertChunks(documentID: UUID, chunks: [IndexedChunk]) async throws -> Int {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertChunks(documentID: documentID, chunks: chunks, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Commits one document with its chunks and run stamp in a single transaction.
@@ -77,9 +179,11 @@ public actor DocIndexStore {
         runID: String
     ) async throws -> IndexedDocument {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.upsertDocumentWithChunks(document: document, chunks: chunks, runID: runID, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Deletes a document and its chunks. Missing rows are a no-op.
@@ -87,9 +191,11 @@ public actor DocIndexStore {
     /// - Returns: True when a document row was removed.
     public func deleteDocument(id: UUID) async throws -> Bool {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.deleteDocument(id: id, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Looks up a document by its source-scoped identifier.
@@ -157,6 +263,9 @@ public actor DocIndexStore {
     /// Records `runID` in `last_seen_run` so a later reconcile can tell a live
     /// document from one that no longer matches policy. Missing rows are a
     /// no-op so stamping a brand-new path before its first upsert stays safe.
+    /// The stamp intentionally leaves the status cache intact: no snapshot
+    /// field projects `last_seen_run`, so in-run `markSeen` calls never force
+    /// a status poll to miss and re-run the aggregate pass.
     /// - Parameters:
     ///   - source: Origin corpus.
     ///   - externalID: Source-scoped identifier.
@@ -193,12 +302,14 @@ public actor DocIndexStore {
     }
 
     /// Current document, chunk, vector, and byte counts.
+    ///
+    /// Projects from the cached status snapshot, so a poll inside the TTL
+    /// shares one aggregate pass with the storage breakdown instead of
+    /// issuing a second round of COUNTs and SUMs.
     /// - Returns: An index statistics snapshot.
     public func stats() async throws -> IndexStats {
-        let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.stats(dbPath: dbPath)
-        }
+        let snapshot = try await cachedStatusSnapshot()
+        return snapshot.makeStats()
     }
 
     /// Deletes documents indexed before a cutoff, then reclaims file space.
@@ -207,9 +318,11 @@ public actor DocIndexStore {
     @discardableResult
     public func prune(before cutoff: Date) async throws -> Int {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.prune(before: cutoff, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Deletes `files` documents not seen by the given run.
@@ -224,9 +337,11 @@ public actor DocIndexStore {
     @discardableResult
     public func retireUnseenFiles(runID: String) async throws -> Int {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.retireUnseenFiles(runID: runID, dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 
     /// Clears every document, chunk, and search-index entry.
@@ -235,20 +350,21 @@ public actor DocIndexStore {
         try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
         }
+        invalidateStatusCache()
     }
 
     /// Current on-disk and logical size breakdown.
     ///
-    /// File sizes are read from the filesystem so the caller reports what the
+    /// Projects from the same cached snapshot as stats, so one status poll
+    /// performs at most one aggregate pass no matter which projection runs
+    /// first. File sizes are read from the filesystem so the caller reports what the
     /// disk holds; logical bytes are aggregated from the content tables. A
     /// missing database reports zeros rather than throwing so status probes
     /// render an honest empty state.
     /// - Returns: The storage breakdown.
     public func storageBreakdown() async throws -> IndexStorageBreakdown {
-        let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.storageBreakdown(dbPath: dbPath)
-        }
+        let snapshot = try await cachedStatusSnapshot()
+        return snapshot.makeBreakdown()
     }
 
     /// Reclaims index file space with `VACUUM`.
@@ -259,9 +375,11 @@ public actor DocIndexStore {
     /// - Returns: The reclaim outcome.
     public func reclaim() async throws -> IndexReclaimResult {
         let dbPath = self.dbPath
-        return try await SQLiteSerialIO.run(lane: .indexing) {
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reclaim(dbPath: dbPath)
         }
+        invalidateStatusCache()
+        return result
     }
 }
 
@@ -393,6 +511,15 @@ enum DocIndexStoreIO {
         #endif
     }
 
+    /// Computes the shared status snapshot backing both aggregate projections.
+    static func statusSnapshot(dbPath: String) throws -> DocIndexStatusSnapshot {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.statusSnapshot(dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
     /// Deletes documents indexed before a cutoff and vacuums.
     static func prune(before cutoff: Date, dbPath: String) throws -> Int {
         #if canImport(SQLite3)
@@ -457,12 +584,29 @@ enum DocIndexStoreIO {
             "id, source, external_id, display_name, path, message_id, mailbox, mtime, "
                 + "size_bytes, content_hash, mime, extract_status, indexed_at, metadata"
 
+        /// Shared chunk full-text trigger definitions.
+        ///
+        /// Single-sourced so `tablesSQL` and `migrateFTSTriggers` cannot drift;
+        /// both execute the same `CREATE TRIGGER IF NOT EXISTS` block.
+        static let ftsTriggersSQL = """
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ai AFTER INSERT ON indexed_chunks BEGIN
+            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+        END;
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ad AFTER DELETE ON indexed_chunks BEGIN
+            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+        END;
+        CREATE TRIGGER IF NOT EXISTS indexed_chunks_au AFTER UPDATE ON indexed_chunks BEGIN
+            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
+            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
+        END;
+        """
+
         /// Table and trigger schema, applied before additive column probes.
         ///
         /// Only columns present since the first revision are referenced here so
         /// a legacy database that predates an additive column still executes
         /// this block cleanly; the indexes that depend on later columns live in
-        /// ``indexesSQL``.
+        /// ``indexesSQL``. Full-text triggers ride the shared ``ftsTriggersSQL``.
         private static let tablesSQL = """
         CREATE TABLE IF NOT EXISTS schema_meta(
             key TEXT PRIMARY KEY,
@@ -495,16 +639,7 @@ enum DocIndexStoreIO {
             FOREIGN KEY(document_id) REFERENCES indexed_documents(id) ON DELETE CASCADE
         );
         CREATE VIRTUAL TABLE IF NOT EXISTS indexed_chunks_fts USING fts5(chunk_text, content='', contentless_delete=1, tokenize='porter');
-        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ai AFTER INSERT ON indexed_chunks BEGIN
-            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
-        END;
-        CREATE TRIGGER IF NOT EXISTS indexed_chunks_ad AFTER DELETE ON indexed_chunks BEGIN
-            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
-        END;
-        CREATE TRIGGER IF NOT EXISTS indexed_chunks_au AFTER UPDATE ON indexed_chunks BEGIN
-            DELETE FROM indexed_chunks_fts WHERE rowid = old.rowid;
-            INSERT INTO indexed_chunks_fts(rowid, chunk_text) VALUES(new.rowid, new.chunk_text);
-        END;
+        \(ftsTriggersSQL)
         """
 
         /// Indexes applied after additive columns exist, so a column introduced
@@ -539,22 +674,159 @@ enum DocIndexStoreIO {
             let extractStatus: ExtractStatus
         }
 
+        /// Process-wide guard for the schema ensure gate owned by `SQLiteDocIndexStore.open`.
+        ///
+        /// Holds canonical database paths already ensured in this process so
+        /// later opens skip every DDL write. Only the path insertion is
+        /// serialized; the DDL itself runs unlocked because concurrent first
+        /// opens are idempotent through `IF NOT EXISTS` plus conditional ALTERs.
+        private static let ensuredPathsLock = OSAllocatedUnfairLock(initialState: Set<String>())
+
+        /// Bounds the ensure gate so distinct database paths never grow memory without bound.
+        private static let maxEnsuredPaths = 500
+
+        /// Canonical cache key for a database path.
+        ///
+        /// Expands `~` and resolves symlinks so two spellings of the same
+        /// file share one gate entry instead of ensuring twice.
+        /// - Parameter dbPath: SQLite file path.
+        /// - Returns: Symlink-resolved filesystem path.
+        static func canonicalDBPath(_ dbPath: String) -> String {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let leafResolved = resolveLeafSymlink(expanded)
+            return URL(fileURLWithPath: leafResolved).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+
+        /// Resolves a leaf symlink chain without requiring the target to exist.
+        ///
+        /// `resolvingSymlinksInPath` leaves a dangling leaf spelling unresolved,
+        /// so a symlink pointing at a not-yet-created database would keep its
+        /// link spelling and miss the shared gate entry. Walking the leaf with
+        /// `destinationOfSymbolicLink` handles that case, including relative
+        /// destinations and chained links, before the URL pass resolves parents.
+        private static func resolveLeafSymlink(_ path: String) -> String {
+            var current = path
+            var seen = Set<String>()
+            for _ in 0 ..< 32 {
+                if !seen.insert(current).inserted {
+                    break
+                }
+                guard let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: current) else {
+                    break
+                }
+                if (destination as NSString).isAbsolutePath {
+                    current = (destination as NSString).standardizingPath
+                } else {
+                    let parent = (current as NSString).deletingLastPathComponent
+                    current = ((parent as NSString).appendingPathComponent(destination) as NSString).standardizingPath
+                }
+            }
+            return current
+        }
+
+        /// Records a path as ensured, evicting deterministically at capacity.
+        /// - Parameter key: Canonical database path.
+        private static func noteEnsured(_ key: String) {
+            ensuredPathsLock.withLock { set in
+                if set.count >= maxEnsuredPaths, let victim = set.sorted().first {
+                    set.remove(victim)
+                }
+                set.insert(key)
+            }
+        }
+
+        /// Clears the ensure gate so tests can prove a cold open migrates again.
+        static func resetEnsuredPathsForTesting() {
+            ensuredPathsLock.withLock { $0.removeAll() }
+        }
+
+        /// Drops one path from the ensure gate so the next open re-runs DDL.
+        ///
+        /// Keeps a reset or a replaced database from reusing a stale gate entry.
+        /// - Parameter dbPath: SQLite file path.
+        static func removeEnsuredPath(_ dbPath: String) {
+            let key = canonicalDBPath(dbPath)
+            _ = ensuredPathsLock.withLock { $0.remove(key) }
+        }
+
+        /// Reports whether the document table exists on an open handle.
+        ///
+        /// Detects a database file deleted or replaced after the gate filled,
+        /// so the fast path can fall back to the full ensure instead of
+        /// handing out an empty file with no tables.
+        /// - Parameter handle: Open database handle.
+        /// - Returns: True when `indexed_documents` exists.
+        private static func hasDocumentTable(handle: OpaquePointer?) -> Bool {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle,
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'indexed_documents';",
+                -1,
+                &statement,
+                nil
+            ) == SQLITE_OK else {
+                return false
+            }
+            defer { sqlite3_finalize(statement) }
+            return sqlite3_step(statement) == SQLITE_ROW
+        }
+
         /// Opens (creating parent directories) and migrates the database.
+        ///
+        /// Ensure gate owned by `SQLiteDocIndexStore.open`: the first open per
+        /// canonical path in this process runs `tablesSQL`, `indexesSQL`,
+        /// `ensureColumns`, `ensureSchemaVersion`, and `migrateFTSTriggers`;
+        /// later opens perform `sqlite3_open` plus `PRAGMA foreign_keys` plus a
+        /// read-only `sqlite_master` table-exists probe.
+        /// The shared busy-timeout and WAL policy stays in
+        /// `SQLiteHelpers.openHandle`, which both paths call, so the fast path
+        /// keeps the same durability posture while issuing zero DDL writes
+        /// (the probe is a read-only `SELECT`, never a schema write).
+        /// When the file was deleted or replaced after the gate filled, the
+        /// fast path falls back to the full ensure so a fresh file regains its
+        /// tables instead of serving an empty schema.
         /// - Parameter dbPath: SQLite file path. `~` is expanded.
         /// - Returns: Open database handle. Caller must close it.
         static func open(dbPath: String) throws -> OpaquePointer? {
+            let canonical = canonicalDBPath(dbPath)
+            let alreadyEnsured = ensuredPathsLock.withLock { $0.contains(canonical) }
+            if alreadyEnsured {
+                // Fast path: schema is already ensured in this process, so only
+                // open plus the per-connection foreign-key pragma plus a
+                // read-only table-exists probe; no DDL writes issue here.
+                let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: DocIndexError.storeUnavailable)
+                do {
+                    try SQLiteHelpers.exec(
+                        handle: handle,
+                        sql: "PRAGMA foreign_keys = ON;",
+                        failure: DocIndexError.persistenceFailed
+                    )
+                } catch {
+                    sqlite3_close(handle)
+                    throw error
+                }
+                // A deleted or replaced file opens cleanly yet holds no tables;
+                // drop the stale gate entry and fall through to the full ensure.
+                if hasDocumentTable(handle: handle) {
+                    return handle
+                }
+                sqlite3_close(handle)
+                _ = ensuredPathsLock.withLock { $0.remove(canonical) }
+            }
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: DocIndexError.storeUnavailable)
             do {
                 try exec(handle: handle, sql: tablesSQL)
                 try ensureColumns(handle: handle)
                 try exec(handle: handle, sql: indexesSQL)
+                try migrateFTSTriggers(handle: handle)
                 try ensureSchemaVersion(handle: handle)
                 try SQLiteHelpers.exec(
                     handle: handle,
                     sql: "PRAGMA foreign_keys = ON;",
                     failure: DocIndexError.persistenceFailed
                 )
+                noteEnsured(canonical)
                 return handle
             } catch {
                 sqlite3_close(handle)
@@ -621,6 +893,16 @@ enum DocIndexStoreIO {
                 }
             }
             return names
+        }
+
+        /// Ensures the chunk full-text triggers exist without touching data.
+        ///
+        /// Runs only `CREATE TRIGGER IF NOT EXISTS` so replaying against an
+        /// already-current database is a schema no-op; gated with the rest of
+        /// the ensure path so later opens skip it entirely. Shares
+        /// ``ftsTriggersSQL`` with `tablesSQL` so the two paths cannot drift.
+        private static func migrateFTSTriggers(handle: OpaquePointer?) throws {
+            try exec(handle: handle, sql: ftsTriggersSQL)
         }
 
         /// Records the schema revision, migrating older databases first.

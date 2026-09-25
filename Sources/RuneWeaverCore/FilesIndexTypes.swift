@@ -16,7 +16,7 @@ public struct FilesIndexRunReport: Sendable, Equatable {
     public var filesIndexed = 0
     /// Files skipped because their stored body hash was already current.
     public var filesUnchanged = 0
-    /// Files deliberately skipped (excluded, denied, symlinked, oversized, or unsupported).
+    /// Files deliberately skipped (excluded, denied, symlinked, alias, oversized, or unsupported).
     public var filesSkipped = 0
     /// Files that could not be read, extracted, or written.
     public var errors = 0

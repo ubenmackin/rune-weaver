@@ -800,7 +800,7 @@ extension FilesIndexer {
     /// Disposition of one enumerated entry, shared by the sequential walk and parallel discovery.
     ///
     /// A single classification keeps skip totals from drifting when the two
-    /// walks cover the same tree: symlinks and AppleDouble sidecars are never
+    /// walks cover the same tree: symlinks, aliases, and AppleDouble sidecars are never
     /// followed, excluded trees prune without descending, denied entries stay
     /// out of policy, allowed directories descend, and allowed files collect
     /// with the guard-resolved URL.
@@ -839,7 +839,7 @@ extension FilesIndexer {
     ///
     /// Static so parallel discovery can share the exact pruning rules without
     /// hopping onto the indexer: patterns, guard, and home boundary travel as
-    /// parameters while the symlink, AppleDouble, exclude, and policy checks
+    /// parameters while the symlink, alias, AppleDouble, exclude, and policy checks
     /// stay single-sourced.
     /// - Parameters:
     ///   - url: Enumerated entry.
@@ -856,6 +856,10 @@ extension FilesIndexer {
         // A symlink is never followed: a link loop cannot form and a link
         // cannot redirect the walk to an out-of-policy target.
         if values?.isSymbolicLink == true {
+            return .skip(countSkipped: true, prune: isItemDirectory)
+        }
+        // Aliases are pointer files with the same threat shape as symlinks and are never followed.
+        if values?.isAliasFile == true {
             return .skip(countSkipped: true, prune: isItemDirectory)
         }
         let filename = url.lastPathComponent
@@ -888,7 +892,7 @@ extension FilesIndexer {
     /// Reports whether an enumerated directory must be pruned, shared by both walks.
     ///
     /// Thin wrapper over the shared classification so sequential and parallel
-    /// discovery prune excluded, symlinked, AppleDouble, and denied
+    /// discovery prune excluded, symlinked, alias, AppleDouble, and denied
     /// directories identically.
     /// - Parameters:
     ///   - url: Enumerated directory entry.
@@ -914,7 +918,7 @@ extension FilesIndexer {
     /// Reports whether an enumerated file must be collected, shared by both walks.
     ///
     /// Thin wrapper over the shared classification so sequential and parallel
-    /// discovery skip symlinked, AppleDouble, excluded, and denied files
+    /// discovery skip symlinked, alias, AppleDouble, excluded, and denied files
     /// identically and collect allowed files with the guard-resolved URL.
     /// - Parameters:
     ///   - url: Enumerated file entry.
@@ -1008,6 +1012,7 @@ extension FilesIndexer {
     static let entryKeys: [URLResourceKey] = [
         .isDirectoryKey,
         .isSymbolicLinkKey,
+        .isAliasFileKey,
         .fileSizeKey,
         .contentModificationDateKey,
         .isUbiquitousItemKey,

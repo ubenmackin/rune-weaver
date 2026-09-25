@@ -30,7 +30,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for component details and MVP phases, [CO
 | Home Assistant control | 5 Home plus Comms | planned | Query and control Home Assistant entities via URL plus token from chat with approval. |
 | Discord read | 5 Home plus Comms | planned | Read and summarize Discord channel messages and mentions from chat. |
 | GitHub integration | 5 Home plus Comms | planned | List issues and PRs and summarize repos via API with a token from the Keychain. |
-| Apple Messages read | 5 Home plus Comms | planned | Read and summarize recent Apple Messages threads from chat. |
+| Apple Messages read | 5 Home plus Comms | done-verified | Read and summarize recent Apple Messages threads from chat. |
 | Calendar integration | 5 Home plus Comms | planned | List upcoming events and answer availability questions from chat. |
 | Whisper STT plus system TTS plus push-to-talk | 6 Voice plus Polish | planned | Push-to-talk transcribes via local Whisper and speaks replies via system TTS. |
 | macOS menu bar app | 6 Voice plus Polish | done-verified | Menu bar chat window with approval notifications runs on macOS. |

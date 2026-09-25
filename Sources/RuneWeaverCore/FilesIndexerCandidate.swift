@@ -15,7 +15,7 @@ extension FilesIndexer {
         case indexed(chunks: Int, vectors: Int, truncated: Bool)
         /// Stored body was already current.
         case unchanged
-        /// Deliberately skipped (excluded, denied, symlinked, oversized, unsupported, or evicted).
+        /// Deliberately skipped (excluded, denied, symlinked, alias, oversized, unsupported, or evicted).
         case skipped
         /// Could not be read, extracted, or written; carries the content-free warning line.
         case error(warning: String)
@@ -273,7 +273,7 @@ extension FilesIndexer {
 
     /// Evaluates pre-read metadata and policies for a candidate.
     ///
-    /// Probes cancellation, unreadable resource values, symlinks, AppleDouble
+    /// Probes cancellation, unreadable resource values, symlinks, aliases, AppleDouble
     /// sidecars, iCloud eviction, max file size, access guard policy, and the
     /// stored fingerprint fast path.
     /// - Parameters:
@@ -299,7 +299,7 @@ extension FilesIndexer {
             }
             return .finished(failedOutcome(relative: resolved.relative, reason: "unreadable"))
         }
-        if values.isSymbolicLink == true || resolved.filename.hasPrefix("._") {
+        if values.isSymbolicLink == true || values.isAliasFile == true || resolved.filename.hasPrefix("._") {
             return .finished(skippedOutcome(relative: resolved.relative))
         }
         if isEvictedCandidate(policy: policy, canonicalURL: resolved.canonicalURL, values: values) {

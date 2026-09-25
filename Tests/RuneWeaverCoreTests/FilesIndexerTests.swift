@@ -457,6 +457,98 @@ struct FilesIndexerTests {
     }
 
     @Test
+    func `Finder aliases are detected and skipped without traversal (sequential)`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let real = base.appendingPathComponent("real.txt")
+        writeFile("real body", at: real)
+        let alias = base.appendingPathComponent("alias-file")
+        let bookmark = try real.bookmarkData(
+            options: .suitableForBookmarkFile,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        try URL.writeBookmarkData(bookmark, to: alias)
+        // The fixture must read as an alias so the skip below proves
+        // classification rather than a missing file.
+        let aliasValues = try alias.resourceValues(forKeys: [.isAliasFileKey])
+        #if os(macOS)
+            #expect(aliasValues.isAliasFile == true)
+        #else
+            // Finder aliases exist only on macOS; bookmark files written elsewhere
+            // do not report isAliasFile, so skip where the fixture cannot apply.
+            guard aliasValues.isAliasFile == true else { return }
+        #endif
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 1
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.filesSkipped == 1)
+        #expect(report.errors == 0)
+        #expect(report.warnings.isEmpty)
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+        let storedReal = try await store.document(source: .files, externalID: real.path)
+        #expect(storedReal != nil)
+        let storedAlias = try await store.document(source: .files, externalID: alias.path)
+        #expect(storedAlias == nil)
+    }
+
+    @Test
+    func `Finder aliases are detected and skipped without traversal (parallel)`() async throws {
+        let base = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let (store, storeDirectory) = makeStore()
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let real = base.appendingPathComponent("real.txt")
+        writeFile("real body", at: real)
+        let alias = base.appendingPathComponent("alias-file")
+        let bookmark = try real.bookmarkData(
+            options: .suitableForBookmarkFile,
+            includingResourceValuesForKeys: nil,
+            relativeTo: nil
+        )
+        try URL.writeBookmarkData(bookmark, to: alias)
+        // The fixture must read as an alias so the skip below proves
+        // classification rather than a missing file.
+        let aliasValues = try alias.resourceValues(forKeys: [.isAliasFileKey])
+        #if os(macOS)
+            #expect(aliasValues.isAliasFile == true)
+        #else
+            // Finder aliases exist only on macOS; bookmark files written elsewhere
+            // do not report isAliasFile, so skip where the fixture cannot apply.
+            guard aliasValues.isAliasFile == true else { return }
+        #endif
+
+        let indexer = makeIndexer(
+            store: store,
+            root: base,
+            accessGuard: FilesIndexerStubGuard(),
+            workerCountOverride: 3
+        )
+        let report = await indexer.run()
+
+        #expect(report.filesIndexed == 1)
+        #expect(report.filesSkipped == 1)
+        #expect(report.errors == 0)
+        #expect(report.warnings.isEmpty)
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+        let storedReal = try await store.document(source: .files, externalID: real.path)
+        #expect(storedReal != nil)
+        let storedAlias = try await store.document(source: .files, externalID: alias.path)
+        #expect(storedAlias == nil)
+    }
+
+    @Test
     func `Vector policy embeds complete documents and leaves partial ones keyword-only`() async throws {
         let base = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: base) }

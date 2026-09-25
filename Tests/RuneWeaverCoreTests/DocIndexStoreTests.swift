@@ -7,6 +7,7 @@
 // `~/.runeweaver/memory` store.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 import Testing
 
@@ -335,6 +336,33 @@ private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: St
             sqlite3_free(message)
             throw LegacyIndexError.failed(detail)
         }
+    #endif
+}
+
+/// Reads the schema-change counter without running any store ensure.
+///
+/// A second open that issues zero DDL writes leaves this value unchanged,
+/// so the test proves the fast path performs no schema writes.
+/// - Parameter path: Database file path.
+/// - Returns: Current `PRAGMA data_version` value.
+private func readIndexDataVersion(atPath path: String) throws -> Int {
+    #if canImport(SQLite3)
+        var handle: OpaquePointer?
+        guard sqlite3_open(path, &handle) == SQLITE_OK, let handle else {
+            throw LegacyIndexError.failed("Could not open database")
+        }
+        defer { sqlite3_close(handle) }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA data_version;", -1, &statement, nil) == SQLITE_OK else {
+            throw LegacyIndexError.failed("Could not prepare data version read")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw LegacyIndexError.failed("Could not step data version read")
+        }
+        return Int(sqlite3_column_int64(statement, 0))
+    #else
+        return 0
     #endif
 }
 
@@ -964,14 +992,15 @@ struct DocIndexStoreTests {
         #expect(hits.first?.documentID == stored.id)
 
         // The stamp rode the same commit, so the reconcile keeps the row for
-        // this run yet retires it for any other run.
+        // this run yet retires it for any other run. Fresh stores bypass the
+        // TTL cache so the checks observe the writes instead of a stale poll.
         let kept = try await store.retireUnseenFiles(runID: runID)
         #expect(kept == 0)
-        let keptStats = try await store.stats()
+        let keptStats = try await DocIndexStore(dbPath: path).stats()
         #expect(keptStats.documents == 1)
         let retired = try await store.retireUnseenFiles(runID: "run-atomic-other-\(UUID().uuidString)")
         #expect(retired == 1)
-        let retiredStats = try await store.stats()
+        let retiredStats = try await DocIndexStore(dbPath: path).stats()
         #expect(retiredStats.documents == 0)
     }
 
@@ -1133,5 +1162,243 @@ struct DocIndexStoreTests {
         #expect(stored?.contentHash == "hash-old")
         let retired = try await store.retireUnseenFiles(runID: runID)
         #expect(retired == 0)
+    }
+
+    @Test
+    func `Status cache returns identical snapshot inside TTL without new writes`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let frozen = Date(timeIntervalSince1970: 9000)
+        let store = DocIndexStore(dbPath: path, clock: { frozen })
+        let document = try await store.upsertDocument(makeDocument(externalID: "cached-doc", contentHash: "hash-cached"))
+        _ = try await store.upsertChunks(
+            documentID: document.id,
+            chunks: [IndexedChunk(documentID: document.id, ordinal: 0, text: "cached body")]
+        )
+
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        // The first poll fills the cache with one aggregate pass.
+        let first = try await store.stats()
+        #expect(first.documents == 1)
+        #expect(first.chunks == 1)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+        #endif
+
+        // A repeat poll without time passing reuses the snapshot, so it
+        // returns identical values with zero fresh aggregate queries.
+        let second = try await store.stats()
+        #expect(second == first)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+        #endif
+
+        // Writes invalidate the cache, so the next poll recomputes and the
+        // concurrent write becomes visible without waiting for expiry.
+        _ = try await store.upsertDocument(makeDocument(externalID: "cached-doc-2", contentHash: "hash-cached-2"))
+        let fresh = try await store.stats()
+        #expect(fresh != first)
+        #expect(fresh.documents == 2)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 2)
+        #endif
+    }
+
+    @Test
+    func `Status cache recomputes after TTL using injectable clock`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let timeLock = OSAllocatedUnfairLock(initialState: Date(timeIntervalSince1970: 20000))
+        let store = DocIndexStore(dbPath: path, clock: { timeLock.withLock { $0 } })
+        _ = try await store.upsertDocument(makeDocument(externalID: "ttl-doc-1", contentHash: "hash-ttl-1"))
+
+        let first = try await store.stats()
+        #expect(first.documents == 1)
+
+        // A write invalidates the snapshot, so the next poll recomputes even
+        // though the TTL has not lapsed.
+        _ = try await store.upsertDocument(makeDocument(externalID: "ttl-doc-2", contentHash: "hash-ttl-2"))
+        let invalidated = try await store.stats()
+        #expect(invalidated.documents == 2)
+        #expect(invalidated != first)
+
+        // Advancing the injectable clock past the TTL forces one more fresh
+        // pass, keeping the previously revealed write visible.
+        timeLock.withLock { $0 = $0.addingTimeInterval(DocIndexStore.statsCacheTTLSeconds + 1) }
+        let refreshed = try await store.stats()
+        #expect(refreshed.documents == 2)
+        #expect(refreshed != first)
+    }
+
+    @Test
+    func `Repeated opens leave schema version counter unchanged`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+        #endif
+        let store = DocIndexStore(dbPath: path)
+        _ = try await store.upsertDocument(makeDocument(externalID: "ensure-doc", contentHash: "hash-ensure"))
+
+        // The first ensure has landed; the counter now reflects a migrated schema.
+        let before = try readIndexDataVersion(atPath: path)
+
+        // A second store over the same canonical path must take the fast path:
+        // open plus the foreign-key pragma only, with zero DDL writes.
+        let second = DocIndexStore(dbPath: path)
+        _ = try await second.document(source: .files, externalID: "ensure-doc")
+        let afterRead = try readIndexDataVersion(atPath: path)
+        #expect(afterRead == before)
+
+        _ = try await second.stats()
+        let afterStats = try readIndexDataVersion(atPath: path)
+        #expect(afterStats == before)
+    }
+
+    @Test
+    func `Stats and breakdown agree field for field on one fixture`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        // One fixture exercising every aggregate leg: per-source GROUP BYs,
+        // the extract-status GROUP BY, both SUM(LENGTH) legs, and the dbstat walk.
+        let firstFiles = try await store.upsertDocument(makeDocument(externalID: "agree-files-a", contentHash: "hash-agree-a"))
+        _ = try await store.upsertChunks(documentID: firstFiles.id, chunks: [
+            IndexedChunk(documentID: firstFiles.id, ordinal: 0, text: "agree vector chunk", embedding: [0.1, 0.2]),
+            IndexedChunk(documentID: firstFiles.id, ordinal: 1, text: "agree keyword chunk")
+        ])
+        let mail = try await store.upsertDocument(makeDocument(
+            source: .mail,
+            externalID: "agree-mail-a",
+            contentHash: "hash-agree-mail",
+            extractStatus: .partial
+        ))
+        _ = try await store.upsertChunks(
+            documentID: mail.id,
+            chunks: [IndexedChunk(documentID: mail.id, ordinal: 0, text: "agree mail body")]
+        )
+
+        // Both projections share one cached snapshot, so they agree exactly.
+        let stats = try await store.stats()
+        let breakdown = try await store.storageBreakdown()
+        #expect(breakdown.dbFileBytes == stats.dbFileBytes)
+        #expect(breakdown.walBytes == stats.walBytes)
+        #expect(breakdown.textBytes == stats.bytes)
+        #expect(breakdown.freeBytes == stats.freeBytes)
+        #expect(breakdown.contentBytes == stats.contentBytes)
+        #expect(breakdown.contentBytes == IndexContentBytes.contentBytes(
+            textBytes: stats.bytes,
+            vectorBytes: stats.vectorBytes ?? 0
+        ))
+        #if canImport(SQLite3)
+            #expect(stats.textBytes != nil)
+            #expect(stats.vectorBytes != nil)
+            #expect(stats.ftsBytes != nil)
+            #expect(breakdown.textBytes == (stats.textBytes ?? -1))
+            #expect(breakdown.vectorBytes == (stats.vectorBytes ?? -1))
+            #expect(breakdown.ftsBytes == (stats.ftsBytes ?? -1))
+        #endif
+
+        // A cold store over the same file recomputes from scratch yet matches
+        // the cached values exactly, proving the cache never drifts.
+        let cold = DocIndexStore(dbPath: path)
+        let freshStats = try await cold.stats()
+        #expect(freshStats == stats)
+        let freshBreakdown = try await cold.storageBreakdown()
+        #expect(freshBreakdown == breakdown)
+    }
+
+    @Test
+    func `Status projections share one aggregate pass inside TTL`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        let frozen = Date(timeIntervalSince1970: 31000)
+        let store = DocIndexStore(dbPath: path, clock: { frozen })
+        let document = try await store.upsertDocument(makeDocument(externalID: "shared-doc", contentHash: "hash-shared"))
+        _ = try await store.upsertChunks(
+            documentID: document.id,
+            chunks: [IndexedChunk(documentID: document.id, ordinal: 0, text: "shared body")]
+        )
+
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.resetStatusSnapshotComputeCountForTesting(for: path)
+        #endif
+        // Both projections read from one cached snapshot, so one cold poll
+        // costs exactly one aggregate pass no matter which view runs first.
+        let stats = try await store.stats()
+        let breakdown = try await store.storageBreakdown()
+        #expect(breakdown.dbFileBytes == stats.dbFileBytes)
+        #expect(breakdown.textBytes == stats.bytes)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+        #endif
+
+        // A repeat poll inside the TTL reuses the snapshot with zero passes.
+        let again = try await store.stats()
+        #expect(again == stats)
+        #if canImport(SQLite3)
+            #expect(SQLiteDocIndexStore.statusSnapshotComputeCount(for: path) == 1)
+        #endif
+    }
+
+    @Test
+    func `Deleted database file re-ensures on next open`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+        #endif
+        let store = DocIndexStore(dbPath: path)
+        _ = try await store.upsertDocument(makeDocument(externalID: "doomed-doc", contentHash: "hash-doomed"))
+        let seeded = try await store.stats()
+        #expect(seeded.documents == 1)
+
+        // An external delete after the gate filled must not strand later
+        // opens on the fast path with an empty schema.
+        try FileManager.default.removeItem(atPath: path)
+        try? FileManager.default.removeItem(atPath: path + "-wal")
+        try? FileManager.default.removeItem(atPath: path + "-shm")
+        try await store.reset()
+
+        // Opening recreates an empty store instead of throwing a missing-table error.
+        let empty = try await store.stats()
+        #expect(empty.documents == 0)
+        #expect(empty.chunks == 0)
+
+        _ = try await store.upsertDocument(makeDocument(externalID: "reborn-doc", contentHash: "hash-reborn"))
+        let revived = try await store.stats()
+        #expect(revived.documents == 1)
+    }
+
+    @Test
+    func `Symlink spellings resolve to one canonical gate key`() throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        #if canImport(SQLite3)
+            let linkPath = base.appendingPathComponent("docindex-link.db").path
+            try? FileManager.default.removeItem(atPath: linkPath)
+            try FileManager.default.createSymbolicLink(atPath: linkPath, withDestinationPath: path)
+            // Both spellings name the same file, so the ensure gate must see
+            // one entry instead of ensuring twice. The link target does not
+            // exist yet, so the canonicalizer must resolve the dangling leaf
+            // itself instead of relying on the URL pass alone.
+            #expect(SQLiteDocIndexStore.canonicalDBPath(linkPath) == SQLiteDocIndexStore.canonicalDBPath(path))
+            SQLiteDocIndexStore.removeEnsuredPath(path)
+            SQLiteDocIndexStore.removeEnsuredPath(linkPath)
+        #endif
     }
 }
