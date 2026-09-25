@@ -2647,9 +2647,13 @@ export default function ChatView({ health }: ChatViewProps) {
       if (pendingRef.current && turnSessionIDRef.current != null) {
         armTurnTimeout();
       }
+      // Same-id upsert: an enrichment rebroadcast for a known id replaces
+      // the stored pending entry in place so the inline banner swaps its
+      // pending copy for the valued copy without remounting. Decided-frame
+      // eviction and timeout arming stay unchanged.
       setPendingApprovals((previous) =>
         previous.some((item) => item.id === request.id)
-          ? previous
+          ? previous.map((item) => (item.id === request.id ? request : item))
           : [...previous, request],
       );
     } else if (frameType === "warning") {

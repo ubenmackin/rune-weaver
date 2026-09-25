@@ -447,6 +447,9 @@ struct TurnLoopRequest {
     var priorBilledTokens: Int?
     var initialToolRounds: Int = 0
     var initialLlmRoundIndex: Int = 0
+    /// Whether this turn previews without mutating. Dry runs never park so gated
+    /// calls keep their ToolBus preview path instead of filing approvals.
+    var isDryRun: Bool = false
 }
 
 /// Outcome of one bounded tool-loop run.

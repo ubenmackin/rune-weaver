@@ -1,9 +1,18 @@
 // Rune Weaver Dashboard — Tests pinning the inline approval banner's allow
 // options to the shared trust-duration tiers.
 
-import { describe, expect, it, vi } from "vitest";
-import { splitAllowOptions } from "./InlineApprovalBanner";
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import InlineApprovalBanner, { splitAllowOptions } from "./InlineApprovalBanner";
 import { trustDurationOptions, type PermissionRequest } from "../api";
+
+// Explicit per-test DOM teardown: several suites below query generic controls
+// ("Allow", "Expected outcome") shared by every banner, so a lingering render
+// from an earlier test would make those queries ambiguous or falsely present.
+afterEach(() => {
+  cleanup();
+});
 
 describe("InlineApprovalBanner allow options", () => {
   it("mirrors every shared trust duration in the base option set", () => {
@@ -41,9 +50,6 @@ describe("InlineApprovalBanner allow options", () => {
 
 describe("InlineApprovalBanner continuation approval", () => {
   it("renders continuation banner with Continue and Stop buttons", async () => {
-    const { render, screen } = await import("@testing-library/react");
-    const userEvent = (await import("@testing-library/user-event")).default;
-    const InlineApprovalBanner = (await import("./InlineApprovalBanner")).default;
     const onDecide = vi.fn();
     const request: PermissionRequest = {
       id: "app-cont-1",
@@ -81,8 +87,6 @@ describe("InlineApprovalBanner continuation approval", () => {
 
 describe("InlineApprovalBanner tool approval with intent and assessment", () => {
   it("renders severity badge, intent, outcome, and warnings without tool description", async () => {
-    const { render, screen } = await import("@testing-library/react");
-    const InlineApprovalBanner = (await import("./InlineApprovalBanner")).default;
     const onDecide = vi.fn();
     const request: PermissionRequest = {
       id: "app-tool-1",
@@ -121,6 +125,197 @@ describe("InlineApprovalBanner tool approval with intent and assessment", () => 
     ).toBeInTheDocument();
     // Static tool description must NOT be rendered
     expect(screen.queryByText("Write files on disk")).not.toBeInTheDocument();
+    // Pending badge must be absent once valued.
+    expect(
+      screen.queryByTestId("approval-assessment-pending-app-tool-1"),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe("InlineApprovalBanner pending assessment", () => {
+  it("renders pending badge with spinner copy and enabled controls", async () => {
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-pending-1",
+      toolName: "email.send",
+      description: "Send email to ops",
+      intent: "Notifying ops of deploy",
+      input: {
+        toolName: "email.send",
+        argumentsJSON: '{"to":"ops@example.com"}',
+        callID: "call-pending-1",
+      },
+      suggestedDurations: ["thisTime"],
+      assessment: null,
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    // Pending badge carries the shared pending testid shape with the request
+    // id suffix and the exact pending copy.
+    const pending = screen.getByTestId("approval-assessment-pending-app-pending-1");
+    expect(pending).toBeInTheDocument();
+    expect(pending).toHaveClass("badge");
+    expect(pending).toHaveClass("approval-severity-badge");
+    expect(pending).toHaveClass("severity-pending");
+    expect(pending).toHaveTextContent("Checking safety…");
+    // Spinner element shares the stylesheet-owned animation class.
+    expect(
+      pending.querySelector(
+        ".approval-assessment-pending, .approval-assessment-pending-spinner",
+      ),
+    ).not.toBeNull();
+    // Outcome and warnings stay hidden while pending.
+    expect(screen.queryByText(/Expected outcome/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/⚠️/)).not.toBeInTheDocument();
+    // Intent row, arguments disclosure, and live decisions stay available.
+    expect(screen.getByText("Notifying ops of deploy")).toBeInTheDocument();
+    expect(screen.getByText("View arguments")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+    // Valued badge must be absent while pending.
+    expect(
+      screen.queryByTestId("approval-severity-app-pending-1"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("falls back to static description only when nil with description present", async () => {
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-pending-desc",
+      toolName: "email.send",
+      description: "Send email to ops",
+      input: {
+        toolName: "email.send",
+        argumentsJSON: "{}",
+        callID: "call-desc",
+      },
+      suggestedDurations: ["thisTime"],
+      assessment: null,
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    // With no intent and no assessment, the static description is the only
+    // narrative available so it renders as the fallback.
+    expect(screen.getByText("Send email to ops")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("approval-assessment-pending-app-pending-desc"),
+    ).toBeInTheDocument();
+  });
+
+  it("swaps pending for valued assessment on identical id without remounting controls", async () => {
+    const onDecide = vi.fn();
+    const pendingRequest: PermissionRequest = {
+      id: "app-swap-1",
+      toolName: "email.send",
+      description: "Send email to ops",
+      intent: "Notifying ops of deploy",
+      input: {
+        toolName: "email.send",
+        argumentsJSON: '{"to":"ops@example.com"}',
+        callID: "call-swap-1",
+      },
+      suggestedDurations: ["thisTime"],
+      assessment: null,
+    };
+    const valuedRequest: PermissionRequest = {
+      ...pendingRequest,
+      assessment: {
+        severity: "moderate",
+        outcome: "Sends deploy notice to ops",
+        warnings: ["External recipient"],
+      },
+    };
+
+    const { rerender } = render(
+      <InlineApprovalBanner
+        request={pendingRequest}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+    expect(
+      screen.getByTestId("approval-assessment-pending-app-swap-1"),
+    ).toBeInTheDocument();
+    const bannerBefore = screen.getByTestId("inline-approval-app-swap-1");
+    const allowBefore = screen.getByRole("button", { name: "Allow" });
+
+    // Enrichment for the identical id swaps the copy in place: the banner
+    // element and its Allow control persist instead of remounting.
+    rerender(
+      <InlineApprovalBanner
+        request={valuedRequest}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(
+      screen.queryByTestId("approval-assessment-pending-app-swap-1"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByTestId("approval-severity-app-swap-1")).toHaveTextContent(
+      "🟡 State Change",
+    );
+    expect(screen.getByText("Sends deploy notice to ops")).toBeInTheDocument();
+    expect(screen.getByText(/External recipient/)).toBeInTheDocument();
+    expect(screen.getByTestId("inline-approval-app-swap-1")).toBe(bannerBefore);
+    expect(screen.getByRole("button", { name: "Allow" })).toBe(allowBefore);
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+    // Static description stays hidden once valued.
+    expect(screen.queryByText("Send email to ops")).not.toBeInTheDocument();
+  });
+
+  it("renders no badge for unknown severity", async () => {
+    const onDecide = vi.fn();
+    const request = {
+      id: "app-unknown-1",
+      toolName: "email.send",
+      description: "Send email",
+      input: {
+        toolName: "email.send",
+        argumentsJSON: "{}",
+        callID: "call-unknown",
+      },
+      suggestedDurations: ["thisTime"],
+      assessment: {
+        severity: "critical",
+        outcome: "Does something",
+        warnings: [],
+      },
+    } as unknown as PermissionRequest;
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    // Unknown tiers fail closed with no badge rather than guessing a color,
+    // while outcome and decisions stay usable.
+    expect(
+      screen.queryByTestId("approval-severity-app-unknown-1"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("approval-assessment-pending-app-unknown-1"),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Does something")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
   });
 });
 

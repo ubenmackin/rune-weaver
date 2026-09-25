@@ -280,10 +280,15 @@ public actor ConversationManager {
     // MARK: - Sessions
 
     /// Creates a new empty session and tracks it.
+    ///
+    /// Warms the on-device safety model so the first gated turn finds it
+    /// already resident. Warm-up debounces internally and never blocks, so
+    /// creation returns instantly and can never fail on warm-up.
     @discardableResult
     public func createSession(goalID: UUID? = nil) async -> ConversationSession {
         let session = ConversationSession(goalID: goalID)
         sessions[session.id] = session
+        AppleIntelligenceAssessor.shared.prewarm()
         await persist(session)
         return session
     }
@@ -356,6 +361,10 @@ public actor ConversationManager {
     }
 
     /// Returns the session, creating it when missing.
+    ///
+    /// Only the newly-created branch warms the on-device safety model, so
+    /// existing-session hits stay free of warm-up work while creation still
+    /// returns instantly without ever failing on warm-up.
     @discardableResult
     public func ensureSession(id: UUID, title: String? = nil, source: String? = nil, overwrite: Bool = false, goalID: UUID? = nil) async -> ConversationSession {
         if let existing = sessions[id] {
@@ -411,6 +420,9 @@ public actor ConversationManager {
         let session = ConversationSession(id: id, title: title, source: source, goalID: goalID)
         sessions[id] = session
         unpersistedIDs.insert(id)
+        // Warm-up for newly created sessions only; the entry debounces
+        // internally and never blocks, so creation never waits on the model.
+        AppleIntelligenceAssessor.shared.prewarm()
         if let evictedID {
             await deletePersistedSessionUncancellable(id: evictedID)
         }

@@ -2613,3 +2613,131 @@ describe("Input history recall", () => {
   });
 });
 
+describe("Inline approval pending assessment", () => {
+  const pendingSessionID = "pending-assessment-session-1";
+  const pendingID = "approval-pending-chat-1";
+
+  function pendingApproval(): Record<string, unknown> {
+    return {
+      id: pendingID,
+      toolName: "email.send",
+      description: "Send email to ops",
+      intent: "Notifying ops of deploy",
+      assessment: null,
+      input: {
+        toolName: "email.send",
+        argumentsJSON: '{"to":"ops@example.com"}',
+        callID: "call-pending-chat-1",
+      },
+      suggestedDurations: ["thisTime"],
+      sessionID: pendingSessionID,
+    };
+  }
+
+  function stubPendingApprovalsFetch(
+    approvals: Array<Record<string, unknown>>,
+  ): void {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string, _init?: RequestInit) => {
+        if (typeof input === "string" && input.includes("/decide")) {
+          return jsonResponse({ id: pendingID, approved: true, duration: "thisTime" });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals, count: approvals.length });
+        }
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+    localStorage.setItem("rw_active_session_id", pendingSessionID);
+  });
+
+  it("renders pending badge with spinner copy and enabled controls", async () => {
+    stubPendingApprovalsFetch([pendingApproval()]);
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(`approval-assessment-pending-${pendingID}`),
+      ).toBeInTheDocument();
+    });
+    const pending = screen.getByTestId(`approval-assessment-pending-${pendingID}`);
+    expect(pending).toHaveTextContent("Checking safety…");
+    expect(
+      pending.querySelector(
+        ".approval-assessment-pending, .approval-assessment-pending-spinner",
+      ),
+    ).not.toBeNull();
+    // Valued badge, outcome, and warnings stay hidden while pending.
+    expect(
+      screen.queryByTestId(`approval-severity-${pendingID}`),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Notifying ops of deploy")).toBeInTheDocument();
+    expect(screen.getByText("View arguments")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+  });
+
+  it("upserts identical-id approval frames so enrichment swaps pending for valued", async () => {
+    stubPendingApprovalsFetch([pendingApproval()]);
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(`approval-assessment-pending-${pendingID}`),
+      ).toBeInTheDocument();
+    });
+    const allowBefore = screen.getByRole("button", { name: "Allow" });
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    // Enrichment rebroadcast for the identical id replaces the stored pending
+    // entry: no duplicate banner, pending swaps for the valued copy, and the
+    // Allow control persists without remounting.
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "approval",
+      request: {
+        id: pendingID,
+        toolName: "email.send",
+        description: "Send email to ops",
+        intent: "Notifying ops of deploy",
+        assessment: {
+          severity: "moderate",
+          outcome: "Sends deploy notice to ops",
+          warnings: ["External recipient"],
+        },
+        input: {
+          toolName: "email.send",
+          argumentsJSON: '{"to":"ops@example.com"}',
+          callID: "call-pending-chat-1",
+        },
+        suggestedDurations: ["thisTime"],
+        sessionID: pendingSessionID,
+      },
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByTestId(`approval-severity-${pendingID}`),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByTestId(`approval-assessment-pending-${pendingID}`),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Sends deploy notice to ops")).toBeInTheDocument();
+    expect(screen.getByText(/External recipient/)).toBeInTheDocument();
+    // Static description stays hidden once valued.
+    expect(screen.queryByText("Send email to ops")).not.toBeInTheDocument();
+    expect(screen.getAllByText("email.send")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Allow" })).toBe(allowBefore);
+    expect(screen.getByRole("button", { name: "Allow" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Deny" })).toBeEnabled();
+  });
+});
+

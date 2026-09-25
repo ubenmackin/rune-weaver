@@ -197,9 +197,12 @@ export default function ApprovalsInbox() {
       }
       const request = mergeApprovalFrame(data);
       if (!request) return;
+      // Same-id upsert: an enrichment rebroadcast for a known id replaces
+      // the stored pending entry in place so the card swaps pending copy
+      // for valued copy without remounting and without bumping the badge.
       setApprovals((previous) =>
         previous.some((item) => item.id === request.id)
-          ? previous
+          ? previous.map((item) => (item.id === request.id ? request : item))
           : [...previous, request],
       );
     },
@@ -382,16 +385,36 @@ export default function ApprovalsInbox() {
             <div className="approval-card-header">
               <div className="approval-title-group">
                 <span className="badge approval-tool-badge">{request.toolName}</span>
-                {request.assessment?.severity ? (
+                {request.assessment ? (
+                  // Fail-closed on unknown tiers: only engine-known severities
+                  // render a badge rather than guessing a tier color.
+                  request.assessment.severity === "safe" ||
+                  request.assessment.severity === "moderate" ||
+                  request.assessment.severity === "dangerous" ? (
+                    <span
+                      className={`badge approval-severity-badge severity-${request.assessment.severity}`}
+                      data-testid={`approval-severity-${request.id}`}
+                    >
+                      {request.assessment.severity === "safe" && "🟢 Safe"}
+                      {request.assessment.severity === "moderate" && "🟡 State Change"}
+                      {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+                    </span>
+                  ) : null
+                ) : (
+                  // Nil assessment is the pending state: spinner badge with
+                  // the shared pending copy, hiding outcome and warnings
+                  // while keeping Allow/Deny enabled.
                   <span
-                    className={`badge approval-severity-badge severity-${request.assessment.severity}`}
-                    data-testid={`approval-severity-${request.id}`}
+                    className="badge approval-severity-badge severity-pending"
+                    data-testid={`approval-assessment-pending-${request.id}`}
                   >
-                    {request.assessment.severity === "safe" && "🟢 Safe"}
-                    {request.assessment.severity === "moderate" && "🟡 State Change"}
-                    {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+                    <span
+                      className="approval-assessment-pending approval-assessment-pending-spinner"
+                      aria-hidden="true"
+                    />
+                    Checking safety…
                   </span>
-                ) : null}
+                )}
               </div>
             </div>
 

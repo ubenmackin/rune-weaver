@@ -86,10 +86,12 @@ func resolvedResumeStatus(approved: Bool, resumed: OrchestratorResponse) -> Stri
     return "ok"
 }
 
-/// Resumes a narrated parked approval in its tagged session, best-effort.
+/// Resumes a parked approval in its tagged session, best-effort.
 /// Exposed so non-Vapor clients (the menu-bar app) can resolve an approval
 /// through the exact same resume, run-row, and `approval_decided` broadcast
 /// path as the REST and WebSocket routes instead of reimplementing it.
+/// Structured and narrated approvals converge here on the identical decided
+/// frame plus orchestrator resume with zero new event type.
 public func resumeNarratedApproval(
     id: UUID,
     approved: Bool,
@@ -189,7 +191,7 @@ private func handleResumeFailure(
     await context.hub.broadcastRun(updated)
 }
 
-/// Records or updates the run log entry after a parked narrated approval finishes.
+/// Records or updates the run log entry after a parked approval finishes.
 private func recordResumedRun(
     resumed: OrchestratorResponse,
     approved: Bool,

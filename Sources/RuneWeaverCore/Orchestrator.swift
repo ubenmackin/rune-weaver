@@ -56,6 +56,11 @@ public actor Orchestrator {
     /// Stored so every tool-result message conversion honors the configured
     /// labeling posture instead of a hardcoded default.
     private let securityConfig: SecurityConfig
+    /// Graduated-trust gate consulted for structured admission.
+    /// Held alongside the bus so the turn loop can partition requiresApproval calls
+    /// before execution; callers pass the same instance the bus consults so covering
+    /// grants agree. Nil keeps the legacy execute path with zero parking.
+    private let permissionGate: PermissionGate?
 
     /// Creates an orchestrator.
     public init(
@@ -70,7 +75,8 @@ public actor Orchestrator {
         embedder: (any EmbeddingsBackend)? = nil,
         compactionThresholdPercent: Int = 80,
         steeringQueue: SteeringQueue? = nil,
-        securityConfig: SecurityConfig = SecurityConfig()
+        securityConfig: SecurityConfig = SecurityConfig(),
+        permissionGate: PermissionGate? = nil
     ) {
         self.conversationManager = conversations
         self.toolRegistry = toolBus
@@ -84,6 +90,7 @@ public actor Orchestrator {
         self.compactionPercent = max(10, min(100, compactionThresholdPercent))
         self.steeringQueue = steeringQueue
         self.securityConfig = securityConfig
+        self.permissionGate = permissionGate
     }
 
     /// Dynamically updates the maximum tool iterations allowed per turn.
@@ -130,6 +137,13 @@ public actor Orchestrator {
     /// Read-only approvals inbox for the parking extension.
     var approvalQueue: ApprovalQueue? {
         approvalInbox
+    }
+
+    /// Read-only admission gate for the parking extension.
+    /// The stored reference stays private so module code cannot swap the gate
+    /// mid-flight; the turn loop still reaches the same instance the bus checks.
+    var admissionGate: PermissionGate? {
+        permissionGate
     }
 
     /// Shared mid-turn steering queue draining user guidance into running loops.
@@ -482,22 +496,67 @@ extension Orchestrator {
     }
 
     /// Records the assistant tool intent note and executes the resolved tool calls.
+    /// When structured admission parks siblings, the note covers the full round
+    /// (allowed plus needs-park) so the persisted placeholders stay paired with
+    /// their filed approvals, while execution still runs only allowed-now.
     private func recordAndExecuteCalls(
         calls: [ToolInput],
         finalText: String,
         toolRounds: Int,
         request: TurnLoopRequest,
-        pendingEpisodic: inout [(content: String, role: Message.Role)]
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        noteCalls: [ToolInput]? = nil
     ) async throws -> [ToolAction] {
-        let assistantNote = assistantNoteMessage(text: finalText, calls: calls)
+        let noteInputs = noteCalls ?? calls
+        let assistantNote = assistantNoteMessage(text: finalText, calls: noteInputs)
         await conversations.append(assistantNote, to: request.sessionID)
         return try await executeToolCalls(
             calls,
             sessionID: request.sessionID,
             roundIndex: toolRounds - 1,
             onEvent: request.onEvent,
-            pendingEpisodic: &pendingEpisodic
+            pendingEpisodic: &pendingEpisodic,
+            isDryRun: request.isDryRun
         )
+    }
+
+    /// Splits resolved structured calls into immediately runnable versus needs-park.
+    /// Needs-park holds only calls whose tool lookup succeeds, whose level is
+    /// requiresApproval, whose gate verdict is requiresApproval, and whose turn is
+    /// live (inbox present, not a dry run). Everything else stays allowed-now so
+    /// unknown, disabled, denied, readOnly, trusted, covering-grant, and preview
+    /// paths keep their existing ToolBus behavior. Fail-closed: a missing gate or
+    /// inbox never parks.
+    private func partitionStructuredCalls(
+        _ calls: [ToolInput],
+        isDryRun: Bool
+    ) async -> (allowed: [ToolInput], needsPark: [ToolInput]) {
+        guard !isDryRun, approvalQueue != nil, let gate = permissionGate else {
+            return (calls, [])
+        }
+        var allowed: [ToolInput] = []
+        var needsPark: [ToolInput] = []
+        for call in calls {
+            guard let tool = await toolBus.tool(named: call.toolName) else {
+                allowed.append(call)
+                continue
+            }
+            guard await toolBus.isToolEnabled(named: call.toolName) else {
+                allowed.append(call)
+                continue
+            }
+            guard tool.permissionLevel == .requiresApproval else {
+                allowed.append(call)
+                continue
+            }
+            let verdict = await gate.checkPermission(toolCall: call, tool: tool)
+            if case .requiresApproval = verdict {
+                needsPark.append(call)
+            } else {
+                allowed.append(call)
+            }
+        }
+        return (allowed, needsPark)
     }
 
     /// Builds a park context from the current loop state.
@@ -541,12 +600,15 @@ extension Orchestrator {
     }
 
     /// Parks the turn when gated narrations require approval.
+    ///
+    /// Dry-run previews never park: they render would-act envelopes through
+    /// the bus instead of filing approvals.
     private func parkTurnIfGated(
         context: ParkTurnContext,
         request: TurnLoopRequest,
         pendingEpisodic: inout [(content: String, role: Message.Role)]
     ) async -> TurnLoopOutcome? {
-        guard !context.gated.isEmpty, approvalQueue != nil else { return nil }
+        guard !request.isDryRun, !context.gated.isEmpty, approvalQueue != nil else { return nil }
         return await parkTurn(context, request: request, pendingEpisodic: &pendingEpisodic)
     }
 
@@ -610,8 +672,8 @@ extension Orchestrator {
                 finalText: finalText,
                 tools: request.tools
             )
-            let gated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: request.tools)
-            if calls.isEmpty, gated.isEmpty {
+            let narratedGated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: request.tools)
+            if calls.isEmpty, narratedGated.isEmpty {
                 break
             }
             // Parked frames carry the latest round's context tokens (or fallback estimate)
@@ -620,44 +682,56 @@ extension Orchestrator {
                 for: workingMessages, tools: request.tools, finalText: finalText
             )
             let tokens = (billedTokens, currentContextTokens)
-            if !calls.isEmpty {
-                toolRounds += 1
-                let parkContext = makeParkContext(
-                    gated: gated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
-                )
-                if let outcome = try await checkLimitAndPark(
-                    toolRounds: toolRounds, parkContext: parkContext, request: request, pendingEpisodic: &pendingEpisodic
-                ) {
-                    return outcome
-                }
-                let executed = try await recordAndExecuteCalls(
-                    calls: calls, finalText: finalText, toolRounds: toolRounds, request: request, pendingEpisodic: &pendingEpisodic
-                )
-                toolActions.append(contentsOf: executed)
-                // The executed call already wrote this turn's narration note, so the
-                // sibling gated calls must park without persisting it a second time.
-                let updatedContext = makeParkContext(
-                    gated: gated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens,
-                    narrationAlreadyPersisted: true
-                )
-                if let parked = await parkTurnIfGated(context: updatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
-                    return parked
-                }
-                workingMessages = await refreshedWorkingMessages(
-                    sessionID: request.sessionID, recall: request.recall, systemPrompt: request.systemPrompt
-                )
-                finalText = ""
-                continue
-            }
-            if !gated.isEmpty {
-                let gatedContext = makeParkContext(
-                    gated: gated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
-                )
-                if let parked = await parkTurnIfGated(context: gatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
-                    return parked
+            // Structured admission: gated writes park before the suspending bus
+            // handler, while every other call keeps its existing execute path.
+            // The combined batch files structured needs-park plus narrated siblings
+            // under one identifier so mixed rounds park once.
+            let partition = await partitionStructuredCalls(calls, isDryRun: request.isDryRun)
+            // Dry runs never park: structured needs-park is already empty via
+            // the partition, and narrated siblings are dropped here so a dry
+            // run with narration cannot file through the combined batch.
+            let combinedGated = request.isDryRun ? [] : partition.needsPark + narratedGated
+            if partition.allowed.isEmpty {
+                // Gated-only round skips execution and parks immediately; an empty
+                // combined batch falls through to the break below like today.
+                if !combinedGated.isEmpty {
+                    let gatedContext = makeParkContext(
+                        gated: combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
+                    )
+                    if let parked = await parkTurnIfGated(context: gatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
+                        return parked
+                    }
                 }
                 break
             }
+            toolRounds += 1
+            let parkContext = makeParkContext(
+                gated: combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens
+            )
+            if let outcome = try await checkLimitAndPark(
+                toolRounds: toolRounds, parkContext: parkContext, request: request, pendingEpisodic: &pendingEpisodic
+            ) {
+                return outcome
+            }
+            let executed = try await recordAndExecuteCalls(
+                calls: partition.allowed, finalText: finalText, toolRounds: toolRounds, request: request, pendingEpisodic: &pendingEpisodic,
+                noteCalls: calls
+            )
+            toolActions.append(contentsOf: executed)
+            // The executed call already wrote this turn's narration note, so the
+            // sibling gated calls must park without persisting it a second time.
+            let updatedContext = makeParkContext(
+                gated: combinedGated, text: finalText, actions: toolActions, toolRounds: toolRounds, tokens: tokens,
+                narrationAlreadyPersisted: true
+            )
+            if let parked = await parkTurnIfGated(context: updatedContext, request: request, pendingEpisodic: &pendingEpisodic) {
+                return parked
+            }
+            workingMessages = await refreshedWorkingMessages(
+                sessionID: request.sessionID, recall: request.recall, systemPrompt: request.systemPrompt
+            )
+            finalText = ""
+            continue
         }
         // Finished turns advertise the latest round's active context window occupancy
         // (falling back to working-history + tools estimate when provider usage is absent)
@@ -739,12 +813,15 @@ extension Orchestrator {
     }
 
     /// Executes tool calls in sequence, publishing real-time events and recording outcomes.
+    /// Dry-run turns preview through the same bus path so gated calls keep their
+    /// would-act envelopes instead of filing approvals.
     private func executeToolCalls(
         _ calls: [ToolInput],
         sessionID: UUID,
         roundIndex: Int,
         onEvent: (@Sendable (OrchestratorEvent) async -> Void)?,
-        pendingEpisodic: inout [(content: String, role: Message.Role)]
+        pendingEpisodic: inout [(content: String, role: Message.Role)],
+        isDryRun: Bool = false
     ) async throws -> [ToolAction] {
         var actions: [ToolAction] = []
         var executedCallIDs = Set<String>()
@@ -752,7 +829,7 @@ extension Orchestrator {
         // show a slow tool still working. The bus stamps each report with the
         // authoritative call identity before it reaches this sink, so the closure
         // only relays; a report never affects the turn's outcome.
-        let context = ToolContext(conversationID: sessionID) { progress in
+        let context = ToolContext(conversationID: sessionID, dryRun: isDryRun) { progress in
             await onEvent?(.toolProgress(progress))
         }
         do {

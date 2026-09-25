@@ -13,7 +13,10 @@ extension Orchestrator {
         return false
     }
 
-    /// Resumes a parked narrated approval after its inbox decision.
+    /// Resumes a parked approval after its inbox decision.
+    /// Structured gated calls reuse this identical entry as narrated ones, so a
+    /// late decide resumes against the current history with the same take, session
+    /// ensure, and waiting-note removal instead of a second resume shape.
     public func resumeNarratedApproval(
         id: UUID,
         approved: Bool,
@@ -383,6 +386,9 @@ extension Orchestrator {
     }
 
     /// Executes one allowed parked call without re-entering the gate.
+    /// The recorded decide is the authorization, so the call runs through direct
+    /// tool execution bypassing the bus handler, still emitting started plus
+    /// completed events and appending the labeled result for synthesis.
     private func executeParkedCall(
         _ call: ToolInput,
         tool: any Tool,
@@ -522,6 +528,10 @@ extension Orchestrator {
         let batchID = UUID()
         let effectiveGatedRound = context.gatedRoundIndex
         let turnTotalTokens = Self.combinedTurnTokens(context.priorBilledTokens, context.billedTokens)
+        // Captured ahead of the filing loop so the enrichment rebroadcast
+        // closure only captures a Sendable event sink, never the whole turn
+        // context, and the enriched request travels the same approval channel.
+        let parkOnEvent = context.onEvent
         if let queue = approvalQueue {
             for call in context.gated {
                 let request: PermissionRequest
@@ -529,6 +539,8 @@ extension Orchestrator {
                     // Continuation approvals resume in the owning session, so they carry
                     // the same session link as normal gated tools.
                     // Limit continuation approval to thisTime so engine.continue cannot acquire forever grants.
+                    // Filed directly with a fixed moderate assessment: no model
+                    // enrichment spawns, so continuation never waits on safety.
                     let continuationAssessment = ImpactAssessment(
                         severity: .moderate,
                         outcome: "Allows the agent to proceed with additional tool execution rounds.",
@@ -546,8 +558,21 @@ extension Orchestrator {
                     await queue.enqueue(continuationRequest)
                     request = continuationRequest
                 } else if let tool = byName[call.toolName] {
+                    // Two-phase filing: intent threads the turn narration
+                    // (nil when empty), the pending request returns immediately
+                    // with a nil assessment so parking never waits on the
+                    // model, and the enrichment hook rebroadcasts the updated
+                    // request on the identical id without re-parking.
                     let intent = context.narratedText.isEmpty ? nil : context.narratedText
-                    request = await queue.fileRequest(tool: tool, call: call, sessionID: context.sessionID, intent: intent)
+                    request = await queue.fileRequest(
+                        tool: tool,
+                        call: call,
+                        sessionID: context.sessionID,
+                        intent: intent,
+                        onEnriched: { updated in
+                            await parkOnEvent?(.approval(updated))
+                        }
+                    )
                 } else {
                     continue
                 }
