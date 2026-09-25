@@ -1005,5 +1005,48 @@ describe("ApprovalsInbox", () => {
       widen: false,
     });
   });
+
+  it("renders severity badge, intent, outcome, and warnings without static description", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (typeof input === "string" && input.startsWith("/approvals/grants")) {
+          return jsonResponse({ grants: [], count: 0 });
+        }
+        return jsonResponse({
+          approvals: [
+            {
+              id: "22222222-2222-2222-2222-222222222222",
+              toolName: "desktop.action",
+              description: "Perform mouse and keyboard actions",
+              intent: "Closing inactive background tab",
+              assessment: {
+                severity: "dangerous",
+                outcome: "Simulates mouse click on close button",
+                warnings: ["Hardware CGEvent input simulation"],
+              },
+              input: {
+                toolName: "desktop.action",
+                argumentsJSON: '{"action":"click"}',
+                callID: "call-2",
+              },
+              suggestedDurations: ["thisTime"],
+            },
+          ],
+          count: 1,
+        });
+      }),
+    );
+    render(<ApprovalsInbox />);
+    await waitFor(() => {
+      expect(screen.getByText("desktop.action")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("approval-severity-22222222-2222-2222-2222-222222222222")).toHaveTextContent("🔴 Dangerous");
+    expect(screen.getByText("Closing inactive background tab")).toBeInTheDocument();
+    expect(screen.getByText("Simulates mouse click on close button")).toBeInTheDocument();
+    expect(screen.getByText(/Hardware CGEvent input simulation/)).toBeInTheDocument();
+    // Static description must NOT be present
+    expect(screen.queryByText("Perform mouse and keyboard actions")).not.toBeInTheDocument();
+  });
 });
 

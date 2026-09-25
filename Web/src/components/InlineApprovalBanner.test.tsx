@@ -79,3 +79,48 @@ describe("InlineApprovalBanner continuation approval", () => {
   });
 });
 
+describe("InlineApprovalBanner tool approval with intent and assessment", () => {
+  it("renders severity badge, intent, outcome, and warnings without tool description", async () => {
+    const { render, screen } = await import("@testing-library/react");
+    const InlineApprovalBanner = (await import("./InlineApprovalBanner")).default;
+    const onDecide = vi.fn();
+    const request: PermissionRequest = {
+      id: "app-tool-1",
+      toolName: "files.write",
+      description: "Write files on disk",
+      intent: "Updating deployment config",
+      assessment: {
+        severity: "moderate",
+        outcome: "Writes updated environment variables to .env",
+        warnings: ["Overwrites existing .env configuration"],
+      },
+      input: {
+        toolName: "files.write",
+        argumentsJSON: '{"path":".env"}',
+        callID: "call-1",
+      },
+      suggestedDurations: ["thisTime"],
+    };
+
+    render(
+      <InlineApprovalBanner
+        request={request}
+        deciding={false}
+        onDecide={onDecide}
+      />,
+    );
+
+    expect(screen.getByText("files.write")).toBeInTheDocument();
+    expect(screen.getByTestId("approval-severity-app-tool-1")).toHaveTextContent("🟡 State Change");
+    expect(screen.getByText("Updating deployment config")).toBeInTheDocument();
+    expect(
+      screen.getByText("Writes updated environment variables to .env"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Overwrites existing \.env configuration/),
+    ).toBeInTheDocument();
+    // Static tool description must NOT be rendered
+    expect(screen.queryByText("Write files on disk")).not.toBeInTheDocument();
+  });
+});
+

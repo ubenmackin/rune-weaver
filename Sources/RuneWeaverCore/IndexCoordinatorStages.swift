@@ -49,7 +49,7 @@ public extension IndexClosureStage {
                 // recall embedder stays out of the pool and remains the
                 // keyword fallback when the factory yields nothing.
                 let workerCount = policy.resolvedWorkerCount()
-                var embeddingsPool: EmbeddingsBackendPool? = nil
+                var embeddingsPool: EmbeddingsBackendPool?
                 // Single-worker runs stay sequential and never consult the
                 // pool, so skip minting backends to avoid paying a model-load
                 // per install for an unused pool.

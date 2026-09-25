@@ -382,17 +382,53 @@ export default function ApprovalsInbox() {
             <div className="approval-card-header">
               <div className="approval-title-group">
                 <span className="badge approval-tool-badge">{request.toolName}</span>
-                {request.description ? (
-                  <span className="approval-desc">{request.description}</span>
+                {request.assessment?.severity ? (
+                  <span
+                    className={`badge approval-severity-badge severity-${request.assessment.severity}`}
+                    data-testid={`approval-severity-${request.id}`}
+                  >
+                    {request.assessment.severity === "safe" && "🟢 Safe"}
+                    {request.assessment.severity === "moderate" && "🟡 State Change"}
+                    {request.assessment.severity === "dangerous" && "🔴 Dangerous"}
+                  </span>
                 ) : null}
               </div>
             </div>
 
-            {request.input?.argumentsJSON ? (
-              <div className="approval-args-wrapper">
-                <span className="text-xs muted approval-args-label">Arguments:</span>
-                <pre className="approval-args-code">{request.input.argumentsJSON}</pre>
+            {request.intent ? (
+              <div className="approval-narrative approval-intent">
+                <span className="approval-section-label">Why:</span> {request.intent}
               </div>
+            ) : request.description && !request.assessment ? (
+              <div className="approval-narrative approval-intent">
+                {request.description}
+              </div>
+            ) : null}
+
+            {request.assessment?.outcome ? (
+              <div className="approval-narrative approval-outcome">
+                <span className="approval-section-label">Expected outcome:</span>{" "}
+                {request.assessment.outcome}
+              </div>
+            ) : null}
+
+            {request.assessment?.warnings && request.assessment.warnings.length > 0 ? (
+              <ul className="approval-warnings">
+                {request.assessment.warnings.map((w, idx) => (
+                  <li key={idx} className="approval-warning-item">
+                    ⚠️ {w}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {request.input?.argumentsJSON ? (
+              <details className="approval-args-details">
+                <summary className="approval-args-summary">View arguments</summary>
+                <div className="approval-args-wrapper">
+                  <pre className="approval-args-code">{request.input.argumentsJSON}</pre>
+                </div>
+              </details>
             ) : null}
 
             <div className="approval-actions-bar">
