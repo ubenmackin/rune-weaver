@@ -338,6 +338,14 @@ private func updateIndexedChunkText(atPath path: String, chunkID: UUID, text: St
     #endif
 }
 
+/// Path guard allowing every candidate, so atomic-commit tests exercise the
+/// store without policy interference.
+private struct AtomicAllowGuard: FilesIndexAccessGuard {
+    func evaluate(path: String, homeDirectoryURL _: URL?) -> FilesIndexAccessDecision {
+        FilesIndexAccessDecision(allowed: true, resolvedPath: path)
+    }
+}
+
 @Suite("Document Index Store")
 struct DocIndexStoreTests {
     @Test
@@ -927,5 +935,203 @@ struct DocIndexStoreTests {
             #expect(stats.freeBytes >= 0)
             #expect(stats.dbFileBytes >= stats.contentBytes)
         #endif
+    }
+
+    @Test
+    func `Atomic commit lands document chunks and stamp together`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let document = makeDocument(externalID: "atomic-doc", contentHash: "hash-atomic")
+        let chunks = [
+            IndexedChunk(documentID: document.id, ordinal: 0, text: "atomic biscuit body"),
+            IndexedChunk(documentID: document.id, ordinal: 1, text: "second atomic chunk", embedding: [0.1, 0.2])
+        ]
+        let runID = "run-atomic-\(UUID().uuidString)"
+
+        // One call carries the document row, both chunk rows, and the stamp.
+        let stored = try await store.upsertDocumentWithChunks(document: document, chunks: chunks, runID: runID)
+        #expect(stored.id == document.id)
+
+        let loaded = try await store.document(source: .files, externalID: "atomic-doc")
+        #expect(loaded?.contentHash == "hash-atomic")
+        let stats = try await store.stats()
+        #expect(stats.documents == 1)
+        #expect(stats.chunks == 2)
+        #expect(stats.vectorChunks == 1)
+        let hits = try await store.searchKeyword(query: "biscuit", limit: 10)
+        #expect(hits.count == 1)
+        #expect(hits.first?.documentID == stored.id)
+
+        // The stamp rode the same commit, so the reconcile keeps the row for
+        // this run yet retires it for any other run.
+        let kept = try await store.retireUnseenFiles(runID: runID)
+        #expect(kept == 0)
+        let keptStats = try await store.stats()
+        #expect(keptStats.documents == 1)
+        let retired = try await store.retireUnseenFiles(runID: "run-atomic-other-\(UUID().uuidString)")
+        #expect(retired == 1)
+        let retiredStats = try await store.stats()
+        #expect(retiredStats.documents == 0)
+    }
+
+    @Test
+    func `Atomic commit rolls back document and stamp on chunk failure`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+
+        // A duplicated chunk identifier violates the primary key, aborting the
+        // whole commit before anything becomes visible.
+        let fresh = makeDocument(externalID: "rollback-new", contentHash: "hash-rollback-new")
+        let collidingID = UUID()
+        let badChunks = [
+            IndexedChunk(id: collidingID, documentID: fresh.id, ordinal: 0, text: "first rollback chunk"),
+            IndexedChunk(id: collidingID, documentID: fresh.id, ordinal: 1, text: "second rollback chunk")
+        ]
+        do {
+            _ = try await store.upsertDocumentWithChunks(
+                document: fresh,
+                chunks: badChunks,
+                runID: "run-rollback-\(UUID().uuidString)"
+            )
+            #expect(Bool(false), "Expected the colliding chunk identifiers to throw")
+        } catch {
+            // The colliding primary key aborts the commit; nothing may survive.
+        }
+        let missing = try await store.document(source: .files, externalID: "rollback-new")
+        #expect(missing == nil)
+        let emptyStats = try await store.stats()
+        #expect(emptyStats.documents == 0)
+        #expect(emptyStats.chunks == 0)
+        let emptyHits = try await store.searchKeyword(query: "rollback", limit: 10)
+        #expect(emptyHits.isEmpty)
+
+        // A later failed rewrite must leave the seeded row, its chunks, and
+        // its stamp untouched rather than stranding the new stamp.
+        let seededDoc = makeDocument(externalID: "rollback-existing", contentHash: "hash-old")
+        let seedRun = "run-seed-\(UUID().uuidString)"
+        let seeded = try await store.upsertDocumentWithChunks(
+            document: seededDoc,
+            chunks: [IndexedChunk(documentID: seededDoc.id, ordinal: 0, text: "seeded rollback body")],
+            runID: seedRun
+        )
+        let rewrite = makeDocument(externalID: "rollback-existing", contentHash: "hash-new")
+        let failedRun = "run-rewrite-\(UUID().uuidString)"
+        let rewriteChunks = [
+            IndexedChunk(id: collidingID, documentID: rewrite.id, ordinal: 0, text: "rewrite first"),
+            IndexedChunk(id: collidingID, documentID: rewrite.id, ordinal: 1, text: "rewrite second")
+        ]
+        do {
+            _ = try await store.upsertDocumentWithChunks(document: rewrite, chunks: rewriteChunks, runID: failedRun)
+            #expect(Bool(false), "Expected the rewrite collision to throw")
+        } catch {
+            // A failed rewrite rolls back to the seeded revision.
+        }
+        let kept = try await store.document(source: .files, externalID: "rollback-existing")
+        #expect(kept?.contentHash == "hash-old")
+        #expect(kept?.id == seeded.id)
+        let keptHits = try await store.searchKeyword(query: "seeded", limit: 10)
+        #expect(keptHits.count == 1)
+        let keptRetire = try await store.retireUnseenFiles(runID: seedRun)
+        #expect(keptRetire == 0)
+        let staleRetire = try await store.retireUnseenFiles(runID: failedRun)
+        #expect(staleRetire == 1)
+    }
+
+    @Test
+    func `Candidate write failure still stamps the pre-existing row`() async throws {
+        let (path, base) = makeIndexPath()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: path)
+        let canonicalPath = base.appendingPathComponent("note.txt").path
+
+        // Seed a live row so the failed rewrite has a prior revision to keep.
+        let seedRun = "run-candidate-seed-\(UUID().uuidString)"
+        let seedDoc = makeDocument(
+            externalID: canonicalPath,
+            displayName: "note.txt",
+            contentHash: "hash-old",
+            path: canonicalPath
+        )
+        _ = try await store.upsertDocumentWithChunks(
+            document: seedDoc,
+            chunks: [IndexedChunk(documentID: seedDoc.id, ordinal: 0, text: "seeded candidate body")],
+            runID: seedRun
+        )
+
+        // Fail only the new body so parallel stores writing other text stay green.
+        let marker = "candidate-fallback-\(UUID().uuidString)"
+        #if canImport(SQLite3)
+            SQLiteDocIndexStore.chunkInsertFailureHook = { $0.text.contains(marker) }
+            defer { SQLiteDocIndexStore.chunkInsertFailureHook = nil }
+        #endif
+        let runID = "run-candidate-\(UUID().uuidString)"
+        let identity = FilesIndexer.CandidateIdentity(
+            fileURL: URL(fileURLWithPath: canonicalPath),
+            root: base,
+            runID: runID
+        )
+        let services = FilesIndexer.CandidateServices(
+            store: store,
+            extractor: DocumentTextExtractor(),
+            embedder: nil,
+            embeddingsPool: nil,
+            accessGuard: AtomicAllowGuard(),
+            vectorPolicy: FilesVectorPolicy()
+        )
+        let policy = FilesIndexer.CandidatePolicy(
+            config: IndexConfig(enabled: true, files: true, roots: [base.path]),
+            homeDirectoryURL: base,
+            evictedCheck: nil,
+            downloadStarter: nil,
+            fileReader: nil
+        )
+        let state = FilesIndexer.CandidateRunState(
+            budget: FilesIndexer.FileIndexBudget(limit: 0),
+            cancellation: IndexCancellationFlag()
+        )
+        let resolved = FilesIndexer.ResolvedCandidate(
+            canonicalURL: URL(fileURLWithPath: canonicalPath),
+            canonicalPath: canonicalPath,
+            relative: "note.txt",
+            filename: "note.txt",
+            maxBytes: 20 * 1024 * 1024
+        )
+        let payload = FilesIndexer.CandidatePayload(
+            modificationDate: nil,
+            data: Data("new body".utf8),
+            contentHash: "hash-new",
+            extraction: DocumentExtraction(
+                status: .extracted,
+                format: .plainText,
+                chunks: [DocumentChunk(index: 0, text: "\(marker) new body", estimatedTokens: 1)],
+                reason: nil,
+                byteCount: 8,
+                truncated: false
+            ),
+            vectors: nil
+        )
+        let outcome = await FilesIndexer.commitCandidateDocument(
+            identity: identity,
+            services: services,
+            policy: policy,
+            state: state,
+            resolved: resolved,
+            payload: payload
+        )
+        switch outcome.kind {
+        case .error:
+            break
+        default:
+            #expect(Bool(false), "Expected an error outcome for the failed write")
+        }
+
+        // The fallback stamp kept the prior revision live for this run.
+        let stored = try await store.document(source: .files, externalID: canonicalPath)
+        #expect(stored != nil)
+        #expect(stored?.contentHash == "hash-old")
+        let retired = try await store.retireUnseenFiles(runID: runID)
+        #expect(retired == 0)
     }
 }

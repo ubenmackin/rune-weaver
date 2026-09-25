@@ -10,14 +10,18 @@ import Foundation
 public extension IndexClosureStage {
     /// Builds the files stage over the shared document store.
     ///
-    /// The `FilesIndexer` binds its progress sink at construction, so a fresh
-    /// indexer is built per run against the coordinator's reporter and kept in a
-    /// small actor box so cancellation can reach it.
+    /// Selection is frozen at boot from `config`, while every per-run value
+    /// (roots, excludes, caps, effort, workers, windows) comes from the
+    /// policy snapshot the coordinator hands the body. A fresh indexer is
+    /// built per run against that snapshot and kept in a small actor box so
+    /// cancellation can reach it; the boot-time config never leaks into the
+    /// run.
     /// - Parameters:
-    ///   - config: Index policy for the file walk.
+    ///   - config: Index policy snapshot used only for boot-time selection.
     ///   - store: Document store the run writes into.
     ///   - extractor: Text extractor for candidate files.
     ///   - embedder: Embeddings backend, or nil for keyword-only.
+    ///   - makeEmbeddingsBackend: Per-slot backend factory for the run's pool, or nil to share `embedder`.
     ///   - accessGuard: Path policy consulted before opening a candidate.
     ///   - vectorPolicy: Which extracted documents are vectorized.
     ///   - homeDirectoryURL: Home boundary override, or nil for the real home.
@@ -28,6 +32,7 @@ public extension IndexClosureStage {
         store: DocIndexStore,
         extractor: any DocumentTextExtracting = DocumentTextExtractor(),
         embedder: (any EmbeddingsBackend)? = nil,
+        makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil,
         accessGuard: any FilesIndexAccessGuard,
         vectorPolicy: FilesVectorPolicy = FilesVectorPolicy(),
         homeDirectoryURL: URL? = nil,
@@ -38,14 +43,36 @@ public extension IndexClosureStage {
             kind: .files,
             isEnabled: config.enabled && config.files,
             onCancel: { await box.cancel() },
-            body: { reporter, _ in
+            body: { policy, reporter, _ in
+                // Pool sizing tracks the live run snapshot so a settings save
+                // between boots still fans the next pass correctly; the shared
+                // recall embedder stays out of the pool and remains the
+                // keyword fallback when the factory yields nothing.
+                let workerCount = policy.resolvedWorkerCount()
+                var embeddingsPool: EmbeddingsBackendPool? = nil
+                // Single-worker runs stay sequential and never consult the
+                // pool, so skip minting backends to avoid paying a model-load
+                // per install for an unused pool.
+                if workerCount > 1, let makeEmbeddingsBackend {
+                    var backends: [any EmbeddingsBackend] = []
+                    backends.reserveCapacity(workerCount)
+                    for _ in 0 ..< workerCount {
+                        if let backend = makeEmbeddingsBackend() {
+                            backends.append(backend)
+                        }
+                    }
+                    if !backends.isEmpty {
+                        embeddingsPool = EmbeddingsBackendPool(backends: backends)
+                    }
+                }
                 let indexer = FilesIndexer(
                     store: store,
                     extractor: extractor,
                     embedder: embedder,
+                    embeddingsPool: embeddingsPool,
                     accessGuard: accessGuard,
                     vectorPolicy: vectorPolicy,
-                    config: config,
+                    config: policy,
                     homeDirectoryURL: homeDirectoryURL,
                     nowProvider: nowProvider,
                     progress: reporter
@@ -72,8 +99,12 @@ public extension IndexClosureStage {
     }
 
     /// Builds the mail stage over the shared document store.
+    ///
+    /// Boot-time selection comes from `config`; the indexer itself is built
+    /// per run from the coordinator-supplied snapshot so caps, budgets, and
+    /// the vector window track saves without rebuilt stages.
     /// - Parameters:
-    ///   - config: Index policy for mail.
+    ///   - config: Index policy snapshot used only for boot-time selection.
     ///   - emailConfig: Configured mail accounts.
     ///   - gateway: Read-only IMAP gateway seam.
     ///   - store: Document store the run writes into.
@@ -96,10 +127,10 @@ public extension IndexClosureStage {
         secrets: SecretsManager = SecretsManager(),
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> IndexClosureStage {
-        IndexClosureStage(kind: .mail, isEnabled: config.enabled && config.mail) { reporter, _ in
+        IndexClosureStage(kind: .mail, isEnabled: config.enabled && config.mail) { policy, reporter, _ in
             let indexer = MailIndexer(
                 emailConfig: emailConfig,
-                indexConfig: config,
+                indexConfig: policy,
                 gateway: gateway,
                 store: store,
                 embedder: embedder,
@@ -126,8 +157,14 @@ public extension IndexClosureStage {
     }
 
     /// Builds the Apple Messages stage over the shared document store.
+    ///
+    /// The reader itself carries no policy knobs, so the body honors the
+    /// per-run snapshot as an enablement gate: a source turned off after boot
+    /// reports skipped on the next pass, while a source turned on after boot
+    /// stays parked until stages are rebuilt because selection was frozen at
+    /// boot.
     /// - Parameters:
-    ///   - config: Index policy for Messages.
+    ///   - config: Index policy snapshot used only for boot-time selection.
     ///   - store: Document store the run writes into.
     ///   - chatDatabasePath: Live chat database path.
     ///   - extractor: Text extractor for attachment bodies.
@@ -144,7 +181,17 @@ public extension IndexClosureStage {
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {
-        IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { _, _ in
+        IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { policy, _, _ in
+            // Live disable is honored here so the next run skips without
+            // rebuilt stages; live enable still needs rebuilt stages because
+            // the coordinator never executes a boot-disabled stage.
+            guard policy.enabled, policy.messages else {
+                return IndexSourceRunReport(
+                    kind: .messages,
+                    didRun: false,
+                    skippedReason: "Messages indexing is disabled in [index]."
+                )
+            }
             #if canImport(SQLite3)
                 let indexer = MessagesIndexer(
                     chatDatabasePath: chatDatabasePath,
@@ -176,9 +223,12 @@ public extension IndexClosureStage {
     ///
     /// The document store exposes no "pending" listing, so the caller supplies
     /// the candidate documents and their image bytes; the stage runs each through
-    /// ``VisionDescribeIndexer`` and folds the outcomes into a report.
+    /// ``VisionDescribeIndexer`` built per run from the coordinator-supplied
+    /// snapshot. Boot-time selection is frozen from `config`; per-run caps and
+    /// the opt-in flag track saves, so a disable reports skipped on the next
+    /// pass without rebuilt stages.
     /// - Parameters:
-    ///   - config: Index policy; `describeImagesWithLLM` gates the stage.
+    ///   - config: Index policy snapshot used only for boot-time selection.
     ///   - store: Document store the descriptions are written to.
     ///   - provider: Multimodal provider that answers description requests.
     ///   - maxImageBytes: Per-file byte cap; defaults to the configured file cap.
@@ -195,9 +245,19 @@ public extension IndexClosureStage {
         pendingDocuments: @escaping @Sendable () async -> [IndexedDocument],
         imageData: @escaping @Sendable (IndexedDocument) async -> Data?
     ) -> IndexClosureStage {
-        IndexClosureStage(kind: .vision, isEnabled: config.enabled && config.describeImagesWithLLM) { reporter, isCancelled in
+        IndexClosureStage(kind: .vision, isEnabled: config.enabled && config.describeImagesWithLLM) { policy, reporter, isCancelled in
+            // Live disable short-circuits before any image bytes are read, so
+            // the next run after a settings save skips honestly; the indexer
+            // below is still built from the same snapshot for caps and budget.
+            guard policy.enabled, policy.describeImagesWithLLM else {
+                return IndexSourceRunReport(
+                    kind: .vision,
+                    didRun: false,
+                    skippedReason: "Vision description is disabled in [index]."
+                )
+            }
             let indexer = VisionDescribeIndexer(
-                config: config,
+                config: policy,
                 store: store,
                 provider: provider,
                 maxImageBytes: maxImageBytes,

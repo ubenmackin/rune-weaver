@@ -300,10 +300,16 @@ struct ServeCommand: AsyncParsableCommand {
         // Build the document index pipeline once so served recall, the nightly
         // trigger, and the `/index` routes share one store and coordinator; nil
         // when disabled keeps routes failing closed and recall unchanged.
+        let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
+            EmbeddingsBackendFactory.makePoolFactory(
+                memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+                providers: allProviders
+            )
         let indexComponents = ServerIndexBoot.makeComponents(
             config: loaded.config,
             embedder: embedder,
-            visionLLM: selected
+            visionLLM: selected,
+            makeEmbeddingsBackend: makeEmbeddingsBackend
         )
         // Resolve the media section once so the preview registry, the prompt
         // snapshot, and the served context register the same media tools.

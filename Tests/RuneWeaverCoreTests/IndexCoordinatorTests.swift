@@ -99,6 +99,51 @@ private actor IndexResumeLedger {
     }
 }
 
+/// Records the per-run policy snapshots stage bodies observe.
+private actor IndexPolicyRecorder {
+    /// Effort tokens observed in invocation order.
+    private var efforts: [String] = []
+    /// Source flags observed in invocation order.
+    private var filesFlags: [Bool] = []
+    /// Whether the in-flight body has started.
+    private var started = false
+
+    /// Records one observed effort token.
+    /// - Parameter effort: Effort preset from the per-run snapshot.
+    func recordEffort(_ effort: String) {
+        efforts.append(effort)
+    }
+
+    /// Records one observed files flag.
+    /// - Parameter enabled: Files toggle from the per-run snapshot.
+    func recordFilesFlag(_ enabled: Bool) {
+        filesFlags.append(enabled)
+    }
+
+    /// Marks the in-flight body as started.
+    func markStarted() {
+        started = true
+    }
+
+    /// Whether the body has started.
+    /// - Returns: True once the body marked start.
+    func isStarted() -> Bool {
+        started
+    }
+
+    /// Returns observed efforts.
+    /// - Returns: Efforts in invocation order.
+    func effortSnapshot() -> [String] {
+        efforts
+    }
+
+    /// Returns observed files flags.
+    /// - Returns: Flags in invocation order.
+    func filesFlagSnapshot() -> [Bool] {
+        filesFlags
+    }
+}
+
 /// Holds the coordinator so a running stage can request its own cancellation.
 private actor IndexCoordinatorHolder {
     /// Coordinator under test.
@@ -120,6 +165,58 @@ private actor IndexCoordinatorHolder {
     }
 }
 
+/// Tracks simultaneous stage entries to prove files plus mail overlap.
+///
+/// Each overlapped body holds the window open with a short sleep while
+/// registered as active; a serial pass never exceeds one entrant while an
+/// overlapped pass observes two, without relying on wall-clock bounds that
+/// flake on loaded runners.
+private actor IndexOverlapProbe {
+    /// Currently entered stages.
+    private var active = 0
+    /// Highest simultaneous entry observed.
+    private var maxSeen = 0
+
+    /// Marks one stage entered.
+    func enter() {
+        active += 1
+        maxSeen = max(maxSeen, active)
+    }
+
+    /// Marks one stage exited.
+    func exit() {
+        active -= 1
+    }
+
+    /// Returns the highest simultaneous entry observed.
+    /// - Returns: Maximum concurrent entrants.
+    func maxObserved() -> Int {
+        maxSeen
+    }
+}
+
+/// Records per-run budget snapshots to prove peers stay isolated.
+///
+/// Both overlapped peers receive the same policy snapshot and enforce their
+/// own caps from it; sharing would halve or serialize the counts, so
+/// observing the full value in both bodies proves isolation.
+private actor IndexBudgetRecorder {
+    /// Budgets observed in invocation order.
+    private var budgets: [Int] = []
+
+    /// Records one observed budget.
+    /// - Parameter budget: Nightly budget from the per-run snapshot.
+    func record(_ budget: Int) {
+        budgets.append(budget)
+    }
+
+    /// Returns the observed budgets.
+    /// - Returns: Budgets in invocation order.
+    func snapshot() -> [Int] {
+        budgets
+    }
+}
+
 /// Creates an isolated temporary directory.
 /// - Returns: The created directory.
 private func makeIndexTemporaryDirectory() -> URL {
@@ -135,7 +232,7 @@ struct IndexCoordinatorTests {
     func `Disabled indexer is a no-op`() async {
         let calls = IndexStageCallRecorder()
         let events = IndexRunEventRecorder()
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
             await calls.record(.files)
             return IndexSourceRunReport(kind: .files, indexed: 1)
         }
@@ -174,7 +271,7 @@ struct IndexCoordinatorTests {
         let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
 
         func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
-            IndexClosureStage(kind: kind, isEnabled: true) { _, _ in
+            IndexClosureStage(kind: kind, isEnabled: true) { _, _, _ in
                 await calls.record(kind)
                 return IndexSourceRunReport(kind: kind)
             }
@@ -197,7 +294,11 @@ struct IndexCoordinatorTests {
 
         #expect(summary.status == .ok)
         let recorded = await calls.snapshot()
-        #expect(recorded == [.files, .mail, .messages, .vision])
+        // Files plus mail overlap, so their start order races while trailing
+        // stages stay sequential after the join in canonical order.
+        #expect(recorded.count == 4)
+        #expect(Set(recorded.prefix(2)) == [.files, .mail])
+        #expect(Array(recorded.suffix(2)) == [.messages, .vision])
     }
 
     @Test
@@ -209,7 +310,7 @@ struct IndexCoordinatorTests {
         let holder = IndexCoordinatorHolder()
         let progressRecorder = IndexProgressRecorder()
         let stateStore = IndexRunStateStore(path: directory.appendingPathComponent("state.json").path)
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { reporter, isCancelled in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, isCancelled in
             var committed = 0
             for item in 0 ..< total {
                 if isCancelled() {
@@ -261,7 +362,7 @@ struct IndexCoordinatorTests {
         // an IMAP fetch, an embedding batch, or a vision turn: each batch awaits
         // a cancellable sleep so task cancellation throws at the next checkpoint
         // instead of running to stage end.
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in
             var report = IndexSourceRunReport(kind: .files)
             for _ in 0 ..< 5 {
                 if isCancelled() {
@@ -305,7 +406,7 @@ struct IndexCoordinatorTests {
         let beforeDate = startOfDay.addingTimeInterval(TimeInterval(max(0, nightlyHour - 1) * 3600))
 
         func makeCoordinator(statePath: String, events: IndexRunEventRecorder) -> IndexCoordinator {
-            let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+            let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
                 IndexSourceRunReport(kind: .files)
             }
             return IndexCoordinator(
@@ -359,7 +460,7 @@ struct IndexCoordinatorTests {
         let events = IndexRunEventRecorder()
         let progressRecorder = IndexProgressRecorder()
 
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
             for index in 0 ..< 2 {
                 let document = IndexedDocument(
                     source: .files,
@@ -424,7 +525,7 @@ struct IndexCoordinatorTests {
         // and the elapsed window stays wide so loaded CI never flakes on a
         // late wake.
         let progressRecorder = IndexProgressRecorder()
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { reporter, _ in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, _ in
             await reporter(ToolProgress(
                 message: "Indexing files",
                 scanned: 1,
@@ -474,7 +575,7 @@ struct IndexCoordinatorTests {
     @Test
     func `Live snapshot reflects in-flight run and clears on settle`() async {
         let progressRecorder = IndexProgressRecorder()
-        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _ in
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, _ in
             try await Task.sleep(nanoseconds: 1_500_000_000)
             return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1, lastItem: "notes/report.md")
         }
@@ -501,5 +602,276 @@ struct IndexCoordinatorTests {
         #expect(snapshot?.startedAt == summary.startedAt)
         #expect(await coordinator.isRunning == false)
         #expect(await coordinator.liveTotals == nil)
+    }
+
+    @Test
+    func `Stage body observes saved effort on the next run without rebuilt stages`() async {
+        // Saving a new effort preset must change the workers the next run
+        // resolves without rebuilding stages: the body reads only the
+        // coordinator-supplied snapshot, never a boot-captured config.
+        let recorder = IndexPolicyRecorder()
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { policy, _, _ in
+            await recorder.recordEffort(policy.effort)
+            // Resolved workers prove the preset actually changed the
+            // execution shape, not just the stored string.
+            let workers = policy.resolvedWorkerCount(cores: 8)
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1, vectorChunks: workers)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: [], effort: "light"),
+            stages: [stage]
+        )
+
+        let first = await coordinator.run()
+        #expect(first.status == .ok)
+        #expect(first.vectorChunks == IndexConfig(effort: "light").resolvedWorkerCount(cores: 8))
+
+        await coordinator.updateConfig(IndexConfig(enabled: true, files: true, roots: [], effort: "performance"))
+
+        let second = await coordinator.run()
+        #expect(second.status == .ok)
+        #expect(second.vectorChunks == IndexConfig(effort: "performance").resolvedWorkerCount(cores: 8))
+        #expect(first.vectorChunks != second.vectorChunks)
+
+        let efforts = await recorder.effortSnapshot()
+        #expect(efforts == ["light", "performance"])
+    }
+
+    @Test
+    func `In-flight run keeps its snapshot across a mid-run save`() async {
+        // A save landing while a stage is in flight must not rewrite the
+        // snapshot the body was invoked with; the fresh policy applies only
+        // to the following run.
+        let recorder = IndexPolicyRecorder()
+        let stage = IndexClosureStage(kind: .files, isEnabled: true) { policy, _, _ in
+            await recorder.markStarted()
+            // Hold the run open long enough for the save below to land
+            // mid-flight, then record the invocation snapshot.
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await recorder.recordEffort(policy.effort)
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, roots: [], effort: "light"),
+            stages: [stage]
+        )
+
+        let runTask = Task { await coordinator.run(trigger: .onDemand) }
+        // Wait for the body to start rather than sleeping a fixed window, so
+        // the save below always lands mid-flight even on loaded CI.
+        for _ in 0 ..< 100 {
+            if await recorder.isStarted() {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        #expect(await recorder.isStarted())
+        await coordinator.updateConfig(IndexConfig(enabled: true, files: true, roots: [], effort: "performance"))
+        let inFlight = await runTask.value
+        #expect(inFlight.status == .ok)
+
+        // The in-flight body kept the light snapshot despite the mid-run save.
+        let during = await recorder.effortSnapshot()
+        #expect(during == ["light"])
+
+        // The very next run picks up the saved preset with no rebuilt stages.
+        let next = await coordinator.run()
+        #expect(next.status == .ok)
+        let after = await recorder.effortSnapshot()
+        #expect(after == ["light", "performance"])
+    }
+
+    @Test
+    func `Disabled source skips while enabled source needs rebuilt stages`() async {
+        // Disabling after boot reports skipped through the per-run policy
+        // guard, while enabling after boot stays parked because selection was
+        // frozen at boot and only a rebuild introduces the new stage.
+        let recorder = IndexPolicyRecorder()
+        let calls = IndexStageCallRecorder()
+        let filesStage = IndexClosureStage(kind: .files, isEnabled: true) { policy, _, _ in
+            await recorder.recordFilesFlag(policy.files)
+            guard policy.enabled, policy.files else {
+                return IndexSourceRunReport(
+                    kind: .files,
+                    didRun: false,
+                    skippedReason: "File indexing is disabled in [index]."
+                )
+            }
+            return IndexSourceRunReport(kind: .files, scanned: 1, indexed: 1)
+        }
+        // Boot-disabled: simulates a source turned on after boot without a
+        // rebuild, so the coordinator never executes it.
+        let mailStage = IndexClosureStage(kind: .mail, isEnabled: false) { _, _, _ in
+            await calls.record(.mail)
+            return IndexSourceRunReport(kind: .mail, scanned: 1, indexed: 1)
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: false, roots: []),
+            stages: [filesStage, mailStage]
+        )
+
+        await coordinator.updateConfig(IndexConfig(enabled: true, files: false, mail: true, roots: []))
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        // The files body ran but honored the live disable as a skip.
+        let flags = await recorder.filesFlagSnapshot()
+        #expect(flags == [false])
+        #expect(summary.scanned == 0)
+        #expect(summary.documentsIndexed == 0)
+        // The mail body never ran despite the live enable: rebuilt stages
+        // are still required to introduce a newly enabled source.
+        let observed = await calls.snapshot()
+        #expect(observed.isEmpty)
+    }
+
+    @Test
+    func `Files plus mail overlap concurrently`() async {
+        // Disk-bound files and network-bound mail finish near the slower peer
+        // instead of the serial sum; simultaneous entry proves the overlap
+        // without wall-clock bounds that flake on loaded runners.
+        let probe = IndexOverlapProbe()
+        func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
+            IndexClosureStage(kind: kind, isEnabled: true) { _, _, _ in
+                await probe.enter()
+                // Hold the window open so the peer can arrive before either exits.
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                await probe.exit()
+                return IndexSourceRunReport(kind: kind, scanned: 1, indexed: 1)
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, roots: []),
+            stages: [staged(.files), staged(.mail)]
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 2)
+        #expect(summary.documentsIndexed == 2)
+        #expect(await probe.maxObserved() == 2)
+    }
+
+    @Test
+    func `Overlap sums totals and keeps live frames monotonic`() async {
+        // Each peer reports its own cumulative counts; the coordinator emits
+        // one summed stream so polling surfaces never rewind when frames
+        // interleave, and the terminal totals match the serial watermark math.
+        let progressRecorder = IndexProgressRecorder()
+        let filesStage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, _ in
+            await reporter(ToolProgress(message: "Indexing files", scanned: 2, matched: 1, current: "a.md"))
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            await reporter(ToolProgress(message: "Indexing files", scanned: 3, matched: 2, current: "b.md"))
+            return IndexSourceRunReport(kind: .files, scanned: 3, indexed: 2, lastItem: "b.md")
+        }
+        let mailStage = IndexClosureStage(kind: .mail, isEnabled: true) { _, reporter, _ in
+            await reporter(ToolProgress(message: "Indexing mail", scanned: 4, matched: 3, current: "inbox/1"))
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            await reporter(ToolProgress(message: "Indexing mail", scanned: 5, matched: 4, current: "inbox/2"))
+            return IndexSourceRunReport(kind: .mail, scanned: 5, indexed: 4, lastItem: "inbox/2")
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, roots: []),
+            stages: [filesStage, mailStage],
+            progress: { await progressRecorder.record($0) }
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 8)
+        #expect(summary.documentsIndexed == 6)
+        let frames = await progressRecorder.snapshot()
+        #expect(!frames.isEmpty)
+        for index in 1 ..< frames.count {
+            #expect(frames[index].scanned >= frames[index - 1].scanned)
+            #expect(frames[index].matched >= frames[index - 1].matched)
+        }
+        #expect(frames.last?.scanned == 8)
+        #expect(frames.last?.matched == 6)
+    }
+
+    @Test
+    func `Cancel reaches both overlapped stages`() async {
+        // A cancel racing the overlap must stop each peer within its current
+        // batch; pre-registering both peers keeps a start race from hiding one.
+        let started = IndexStageCallRecorder()
+        let cancelled = IndexStageCallRecorder()
+        func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
+            IndexClosureStage(
+                kind: kind,
+                isEnabled: true,
+                onCancel: { await cancelled.record(kind) }
+            ) { _, _, isCancelled in
+                await started.record(kind)
+                var done = 0
+                for _ in 0 ..< 10 {
+                    if isCancelled() {
+                        break
+                    }
+                    // Cancellable batch: the run-task cancel aborts this sleep
+                    // inside the batch instead of draining every iteration.
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    if isCancelled() {
+                        break
+                    }
+                    done += 1
+                }
+                return IndexSourceRunReport(kind: kind, scanned: done, indexed: done)
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, roots: []),
+            stages: [staged(.files), staged(.mail)]
+        )
+        let runTask = Task { await coordinator.run() }
+        // Wait for both peers to enter rather than a fixed window, so the
+        // cancel below always lands mid-overlap even on loaded CI.
+        for _ in 0 ..< 200 {
+            let seen = await started.snapshot()
+            if seen.contains(.files), seen.contains(.mail) {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let seen = await started.snapshot()
+        #expect(seen.contains(.files))
+        #expect(seen.contains(.mail))
+        await coordinator.cancel()
+        let summary = await runTask.value
+
+        #expect(summary.status == .cancelled)
+        let stopped = await cancelled.snapshot()
+        #expect(stopped.contains(.files))
+        #expect(stopped.contains(.mail))
+        #expect(summary.documentsIndexed < 20)
+    }
+
+    @Test
+    func `Overlapped stages observe isolated per-source budgets`() async {
+        // Both peers read the same snapshot yet enforce their own caps; a
+        // shared counter would halve the work, so summed full caps prove
+        // isolation while keeping thermal plus battery gates inside indexers.
+        let budgets = IndexBudgetRecorder()
+        func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
+            IndexClosureStage(kind: kind, isEnabled: true) { policy, _, _ in
+                await budgets.record(policy.nightlyBudget)
+                return IndexSourceRunReport(kind: kind, scanned: policy.nightlyBudget, indexed: policy.nightlyBudget)
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, roots: [], nightlyBudget: 7),
+            stages: [staged(.files), staged(.mail)]
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 14)
+        #expect(summary.documentsIndexed == 14)
+        let observed = await budgets.snapshot()
+        #expect(observed.count == 2)
+        #expect(observed.allSatisfy { $0 == 7 })
     }
 }

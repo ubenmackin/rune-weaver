@@ -739,8 +739,11 @@ extension FilesIndexer {
     ///
     /// The budget is claimed just before the write so concurrent finishers can
     /// never overshoot it, and released when the commit fails or cancels.
-    /// New rows land with a null stamp, so the reconcile write follows every
-    /// successful commit.
+    /// The document row, its chunk rows (and their FTS entries via triggers),
+    /// and the `last_seen_run` stamp land in one transaction, so a crash
+    /// between writes can never strand a half-indexed document. A failed
+    /// write still attempts a standalone stamp so a live row never retires
+    /// for a transient failure.
     /// - Parameters:
     ///   - identity: Per-file URLs plus the run stamp.
     ///   - services: Document index the run writes into.
@@ -776,16 +779,19 @@ extension FilesIndexer {
             extractStatus: payload.extraction.status,
             indexedAt: Date()
         )
-        let written: [IndexedChunk]
+        // Chunks bind the fresh identifier up front; the atomic commit remaps
+        // them onto the stable row when the path was already indexed.
+        let chunks = Self.makeChunks(
+            extraction: payload.extraction,
+            documentID: document.id,
+            vectors: payload.vectors
+        )
         do {
-            let stored = try await services.store.upsertDocument(document)
-            let chunks = Self.makeChunks(
-                extraction: payload.extraction,
-                documentID: stored.id,
-                vectors: payload.vectors
+            _ = try await services.store.upsertDocumentWithChunks(
+                document: document,
+                chunks: chunks,
+                runID: identity.runID
             )
-            _ = try await services.store.upsertChunks(documentID: stored.id, chunks: chunks)
-            written = chunks
         } catch is CancellationError {
             await state.budget.release()
             return FileOutcome(kind: .cancelled, relative: resolved.relative)
@@ -798,11 +804,6 @@ extension FilesIndexer {
             )
             return stamped(stamp, onto: failedOutcome(relative: resolved.relative, reason: "store write failed"))
         }
-        let stamp = await stampCandidate(
-            store: services.store,
-            canonicalPath: resolved.canonicalPath,
-            runID: identity.runID
-        )
         let truncated = FilesIndexer.isVectorTruncated(
             vectors: payload.vectors,
             chunkCount: payload.extraction.chunks.count,
@@ -810,8 +811,8 @@ extension FilesIndexer {
         )
         var outcome = FileOutcome(
             kind: .indexed(
-                chunks: written.count,
-                vectors: written.reduce(0) { $0 + ($1.isVector ? 1 : 0) },
+                chunks: chunks.count,
+                vectors: chunks.reduce(0) { $0 + ($1.isVector ? 1 : 0) },
                 truncated: truncated
             ),
             relative: resolved.relative
@@ -819,14 +820,6 @@ extension FilesIndexer {
         // A stop landing during the commit still marks the run so parallel
         // workers within one batch observe cancel without dropping the row.
         if state.cancellation.isSet || Task.isCancelled {
-            outcome.propagateCancel = true
-        }
-        switch stamp {
-        case .ok:
-            break
-        case .failed:
-            outcome.stampFailed = true
-        case .cancelled:
             outcome.propagateCancel = true
         }
         return outcome

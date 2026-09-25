@@ -52,6 +52,92 @@ import Foundation
             }
         }
 
+        /// Commits one document with its chunks and run stamp in a single transaction.
+        ///
+        /// The document row, its replacement chunk rows (whose FTS entries
+        /// follow through the chunk triggers), and the `last_seen_run` stamp
+        /// land or roll back together, so a crash between writes can never
+        /// strand a half-indexed document. Exactly one document is handled per
+        /// call so per-file cancel, resume, and reconcile accounting stay
+        /// independent across files.
+        /// - Parameters:
+        ///   - document: Document to persist; a stored row keeps its identifier.
+        ///   - chunks: Replacement chunks bound to the resolved document.
+        ///   - runID: Opaque stamp recorded alongside the rows for reconcile.
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        /// - Returns: The persisted document carrying the stable identifier.
+        static func upsertDocumentWithChunks(
+            document: IndexedDocument,
+            chunks: [IndexedChunk],
+            runID: String,
+            dbPath: String
+        ) throws -> IndexedDocument {
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            do {
+                let existing = try existingRow(
+                    handle: handle,
+                    source: document.source,
+                    externalID: document.externalID
+                )
+                if let existing, existing.contentHash == document.contentHash, existing.extractStatus != .failed {
+                    // Unchanged body keeps its chunks; only the stamp refreshes
+                    // in the same commit so the reconcile still sees the file.
+                    try stampDocument(handle: handle, documentID: existing.id, runID: runID)
+                    try exec(handle: handle, sql: "COMMIT;")
+                    return try loadDocument(
+                        handle: handle,
+                        source: document.source,
+                        externalID: document.externalID
+                    ) ?? replacingID(of: document, with: existing.id)
+                }
+                let resolvedID: UUID
+                if let existing {
+                    try updateDocument(document, id: existing.id, handle: handle)
+                    // Body changed: prior chunks describe stale text.
+                    try deleteChunks(documentID: existing.id, handle: handle)
+                    resolvedID = existing.id
+                } else {
+                    // A new path keeps the caller's identifier so chunk foreign
+                    // keys line up without a second lookup.
+                    try insertDocument(document, handle: handle)
+                    resolvedID = document.id
+                }
+                try insertChunkRows(documentID: resolvedID, chunks: chunks, handle: handle)
+                try stampDocument(handle: handle, documentID: resolvedID, runID: runID)
+                try exec(handle: handle, sql: "COMMIT;")
+                if resolvedID == document.id {
+                    return document
+                }
+                return replacingID(of: document, with: resolvedID)
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+        }
+
+        /// Records the run stamp for one document inside an open transaction.
+        ///
+        /// Scoped by stable identifier rather than source key so the stamp
+        /// cannot drift onto a concurrent row with the same external identity.
+        /// - Parameters:
+        ///   - handle: Open database handle owning the transaction.
+        ///   - documentID: Stable row to stamp.
+        ///   - runID: Opaque identifier for the run in flight.
+        private static func stampDocument(handle: OpaquePointer?, documentID: UUID, runID: String) throws {
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "UPDATE indexed_documents SET last_seen_run = ? WHERE id = ?;", -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare seen stamp")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: runID)
+            SQLiteHelpers.bindText(statement, index: 2, value: documentID.uuidString)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw DocIndexError.persistenceFailed("Could not stamp document \(documentID)")
+            }
+        }
+
         /// Returns a copy of a document carrying a different stable identifier.
         private static func replacingID(of document: IndexedDocument, with id: UUID) -> IndexedDocument {
             IndexedDocument(

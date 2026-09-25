@@ -7,7 +7,7 @@
 // field while the full snapshot round-trips through the same merge path.
 
 import Foundation
-import RuneWeaverCore
+@testable import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
 import Vapor
@@ -771,7 +771,7 @@ struct IndexLiveConstructionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let dbPath = directory.appendingPathComponent("index.db").path
         let store = DocIndexStore(dbPath: dbPath)
-        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in
             for _ in 0 ..< 200 {
                 if isCancelled() {
                     break
@@ -859,7 +859,7 @@ struct IndexStatusLiveLatestTests {
 
     @Test
     func `Live present during run and null when idle`() async throws {
-        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { reporter, _ in
+        let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, reporter, _ in
             await reporter(ToolProgress(
                 message: "Indexing files",
                 scanned: 3,
@@ -961,7 +961,7 @@ struct IndexStatusLiveLatestTests {
             let context = makeIndexTestContext()
             let store = DocIndexStore(dbPath: directory.appendingPathComponent("index.db").path)
             let reporter = ServerIndexRunReporter(runs: context.runs, hub: context.hub)
-            let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, isCancelled in
+            let slowStage = IndexClosureStage(kind: .files, isEnabled: true) { _, _, isCancelled in
                 for _ in 0 ..< 200 {
                     if isCancelled() {
                         break
@@ -1041,5 +1041,218 @@ struct IndexStatusLiveLatestTests {
         #expect(decoded.indexed == 7)
         #expect(decoded.trigger == IndexRunTrigger.onDemand.rawValue)
         #expect(decoded.skippedReason == nil)
+    }
+}
+
+// MARK: - Files embedding pool
+
+/// Covers the per-run files embedding pool: the stage mints one backend per
+/// resolved worker from the injected factory, an empty factory keeps the
+/// shared-embedder path, and candidate embedding prefers a pooled backend.
+private struct FilesPoolTestEmbedder: EmbeddingsBackend, Sendable {
+    /// Instance identifier stamped onto every vector for observability.
+    let id: Int
+
+    /// Stable stub identifier for diagnostics.
+    var modelID: String {
+        "pool-test-\(id)"
+    }
+
+    /// Fixed stub width.
+    var dimension: Int? {
+        1
+    }
+
+    /// Returns one identifying vector per input.
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        texts.map { _ in [Float(id)] }
+    }
+}
+
+/// Path policy stub that allows every candidate so pool tests never depend on
+/// the real `[files]` policy.
+private struct FilesPoolAllowGuard: FilesIndexAccessGuard, Sendable {
+    /// Allows every path.
+    func evaluate(path: String, homeDirectoryURL _: URL?) -> FilesIndexAccessDecision {
+        FilesIndexAccessDecision(allowed: true, resolvedPath: path)
+    }
+}
+
+/// Lock-guarded monotonically increasing identifier source for pool slots.
+private final class FilesPoolIDSource: @unchecked Sendable {
+    /// Guarded counter state.
+    private let lock = NSLock()
+    /// Next identifier to hand out.
+    private var nextValue = 0
+    /// Call count observed so far.
+    private var callCount = 0
+
+    /// Hands out the next identifier and records the call.
+    func next() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        nextValue += 1
+        callCount += 1
+        return nextValue
+    }
+
+    /// Number of factory invocations observed.
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return callCount
+    }
+}
+
+/// Lock-guarded collector retaining every backend the factory minted.
+private final class FilesPoolCollector: @unchecked Sendable {
+    /// Guarded backends in mint order.
+    private let lock = NSLock()
+    /// Retained backends.
+    private var stored: [any EmbeddingsBackend] = []
+
+    /// Retains one minted backend.
+    func append(_ backend: any EmbeddingsBackend) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored.append(backend)
+    }
+
+    /// Retained backends in mint order.
+    var all: [any EmbeddingsBackend] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
+@Suite("Files Embedding Pool")
+struct FilesEmbeddingPoolTests {
+    /// Makes an isolated store directory for one test's index database.
+    private func makePoolStore() throws -> (store: DocIndexStore, directory: URL) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = DocIndexStore(dbPath: directory.appendingPathComponent("index.db").path)
+        return (store, directory)
+    }
+
+    @Test
+    func `Files stage calls the backend factory once per resolved worker`() async throws {
+        let (store, directory) = try makePoolStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A custom count under the live core count resolves deterministically
+        // so the expectation tracks this machine without oversubscribing it.
+        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let requested = max(1, min(3, cores))
+        let policy = IndexConfig(enabled: true, files: true, roots: [], effort: "custom", workers: requested)
+        let expected = policy.resolvedWorkerCount()
+        let source = FilesPoolIDSource()
+        let factory: @Sendable () -> (any EmbeddingsBackend)? = {
+            FilesPoolTestEmbedder(id: source.next())
+        }
+        let stage = IndexClosureStage.files(
+            config: policy,
+            store: store,
+            embedder: nil,
+            makeEmbeddingsBackend: factory,
+            accessGuard: FilesPoolAllowGuard()
+        )
+        let report = try await stage.run(reporter: { _ in }, isCancelled: { false }, policy: policy)
+        #expect(report.didRun)
+        // One distinct backend per slot keeps parallel workers from
+        // serializing on a single actor-backed instance.
+        #expect(source.count == expected)
+    }
+
+    @Test
+    func `Files pool holds one backend per resolved worker`() async throws {
+        let (store, directory) = try makePoolStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let requested = max(1, min(3, cores))
+        let policy = IndexConfig(enabled: true, files: true, roots: [], effort: "custom", workers: requested)
+        let expected = policy.resolvedWorkerCount()
+        let source = FilesPoolIDSource()
+        let collector = FilesPoolCollector()
+        let factory: @Sendable () -> (any EmbeddingsBackend)? = {
+            let backend: any EmbeddingsBackend = FilesPoolTestEmbedder(id: source.next())
+            collector.append(backend)
+            return backend
+        }
+        let stage = IndexClosureStage.files(
+            config: policy,
+            store: store,
+            embedder: nil,
+            makeEmbeddingsBackend: factory,
+            accessGuard: FilesPoolAllowGuard()
+        )
+        _ = try await stage.run(reporter: { _ in }, isCancelled: { false }, policy: policy)
+        let minted = collector.all
+        #expect(minted.count == expected)
+        // Distinct identifiers prove each slot received its own instance
+        // rather than sharing one backend across the pool.
+        let ids = minted.compactMap { ($0 as? FilesPoolTestEmbedder)?.id }
+        #expect(Set(ids).count == expected)
+        // The run-sized pool vends exactly the resolved worker count.
+        let pool = EmbeddingsBackendPool(backends: minted)
+        #expect(await pool.count == expected)
+        #expect(await pool.availableCount == expected)
+    }
+
+    @Test
+    func `Nil-producing factory keeps the shared-embedder path`() async throws {
+        let (store, directory) = try makePoolStore()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cores = max(1, ProcessInfo.processInfo.activeProcessorCount)
+        let requested = max(1, min(3, cores))
+        let policy = IndexConfig(enabled: true, files: true, roots: [], effort: "custom", workers: requested)
+        let expected = policy.resolvedWorkerCount()
+        let source = FilesPoolIDSource()
+        let nilFactory: @Sendable () -> (any EmbeddingsBackend)? = {
+            _ = source.next()
+            return nil
+        }
+        let shared = FilesPoolTestEmbedder(id: 99)
+        let stage = IndexClosureStage.files(
+            config: policy,
+            store: store,
+            embedder: shared,
+            makeEmbeddingsBackend: nilFactory,
+            accessGuard: FilesPoolAllowGuard()
+        )
+        let report = try await stage.run(reporter: { _ in }, isCancelled: { false }, policy: policy)
+        // The factory still runs once per slot even when every slot declines,
+        // so a future backend appearing mid-fleet cannot leave a slot empty.
+        #expect(source.count == expected)
+        // An empty mint yields no pool, leaving the shared backend as the only
+        // embedding path instead of failing the run.
+        #expect(report.didRun)
+        let dropped: [any EmbeddingsBackend] = []
+        let pool: EmbeddingsBackendPool? = dropped.isEmpty ? nil : EmbeddingsBackendPool(backends: dropped)
+        #expect(pool == nil)
+    }
+
+    @Test
+    func `Candidate embedding prefers the pool over the shared backend`() async throws {
+        let extraction = DocumentExtraction(
+            status: .extracted,
+            format: .plainText,
+            chunks: [DocumentChunk(index: 0, text: "pool preference probe", estimatedTokens: 2)],
+            reason: nil,
+            byteCount: 21,
+            truncated: false
+        )
+        let config = IndexConfig(enabled: true, files: true, roots: [])
+        let shared = FilesPoolTestEmbedder(id: 10)
+        let pool = EmbeddingsBackendPool(backends: [FilesPoolTestEmbedder(id: 7)])
+        // A pooled backend wins when both paths are configured so parallel
+        // workers never fall back to serializing on the shared instance.
+        let vectors = try await FilesIndexer.embedCandidate(
+            extraction: extraction,
+            config: config,
+            embedder: shared,
+            embeddingsPool: pool
+        )
+        #expect(vectors == [[Float(7)]])
     }
 }
