@@ -48,6 +48,7 @@ func registerSettingsRoutes(_ app: Application) {
         let oldServerHostname = config.server.hostname
         let oldServerPort = config.server.port
         let oldServerAllowedHosts = config.server.allowedHosts
+        let oldLLMConfig = config.llm
         do {
             try body.apply(to: &config)
             // Validate the merged config before persisting so a single bad
@@ -75,7 +76,12 @@ func registerSettingsRoutes(_ app: Application) {
                 && (normalizedHostname != normalizedOldHostname
                     || config.server.port != oldServerPort
                     || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
-            let needsRestart = serverChanged
+            let llmChanged = config.llm != oldLLMConfig
+            // Providers build the live LLM at boot with no live-reload path,
+            // so any provider delta (including supportsVision) leaves the live
+            // model stale until restart.
+            let providersChanged = config.llm.providers != oldLLMConfig.providers
+            let needsRestart = serverChanged || llmChanged || providersChanged
             let liveContext = req.application.runeWeaver
             // Fail-closed bind guard: a changed non-loopback hostname persists
             // only when an owner token resolves. Without one the save is

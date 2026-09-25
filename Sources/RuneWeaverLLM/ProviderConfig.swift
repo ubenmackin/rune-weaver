@@ -48,6 +48,8 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
     public var model: String
     /// Context window in tokens.
     public var contextLength: Int
+    /// Whether the model accepts vision input (screenshots, images).
+    public var supportsVision: Bool
     /// Slot pool size for sticky `id_slot` pinning; nil omits the hint.
     /// Match this to the server's `--parallel` value to opt into prefix reuse.
     public var slotCount: Int?
@@ -64,12 +66,14 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         serverURL: String = LlamaCppProvider.defaultServerURL,
         model: String = LlamaCppProvider.defaultModel,
         contextLength: Int = LlamaCppProvider.defaultContextLength,
+        supportsVision: Bool = false,
         slotCount: Int? = LlamaPrefixReuse.defaultSlotCount,
         cachePrompt: Bool? = LlamaPrefixReuse.defaultCachePrompt
     ) {
         self.serverURL = serverURL
         self.model = model
         self.contextLength = contextLength
+        self.supportsVision = supportsVision
         self.slotCount = slotCount
         self.cachePrompt = cachePrompt
     }
@@ -85,6 +89,7 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
             serverURL: serverURL,
             model: model,
             contextLength: contextLength,
+            supportsVision: supportsVision,
             slotCount: slotCount,
             cachePrompt: LlamaPrefixReuse.resolvedCachePrompt(fileValue: cachePrompt)
         )
@@ -98,6 +103,7 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         case serverURL
         case model
         case contextLength
+        case supportsVision
         case slotCount
         case cachePrompt
     }
@@ -113,16 +119,19 @@ public struct LlamaCppProviderOptions: Sendable, Codable, Equatable {
         self.serverURL = try container.decodeIfPresent(String.self, forKey: .serverURL) ?? LlamaCppProvider.defaultServerURL
         self.model = try container.decodeIfPresent(String.self, forKey: .model) ?? LlamaCppProvider.defaultModel
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength) ?? LlamaCppProvider.defaultContextLength
+        self.supportsVision = try container.decodeIfPresent(Bool.self, forKey: .supportsVision) ?? false
         self.slotCount = try container.decodeIfPresent(Int.self, forKey: .slotCount)
         self.cachePrompt = try container.decodeIfPresent(Bool.self, forKey: .cachePrompt)
     }
 
-    /// Encodes options, omitting unset hints so older decoders see no new keys.
+    /// Encodes options, always including the vision flag while omitting unset
+    /// slot and cache hints so older decoders see no new keys for those knobs.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(serverURL, forKey: .serverURL)
         try container.encode(model, forKey: .model)
         try container.encode(contextLength, forKey: .contextLength)
+        try container.encode(supportsVision, forKey: .supportsVision)
         try container.encodeIfPresent(slotCount, forKey: .slotCount)
         try container.encodeIfPresent(cachePrompt, forKey: .cachePrompt)
     }
@@ -144,6 +153,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
     public var embeddingsEnabled: Bool
     /// Request style selecting the wire endpoint and SSE shape.
     public var apiStyle: APIStyle = .chatCompletions
+    /// Whether the model accepts vision input (screenshots, images).
+    public var supportsVision: Bool = true
 
     /// Creates generic endpoint options.
     public init(
@@ -153,7 +164,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
         contextLength: Int = OpenAICompatibleProvider.defaultContextLength,
         providerID: String = "openrouter",
         embeddingsEnabled: Bool = true,
-        apiStyle: APIStyle = .chatCompletions
+        apiStyle: APIStyle = .chatCompletions,
+        supportsVision: Bool = true
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -162,6 +174,7 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
         self.providerID = providerID
         self.embeddingsEnabled = embeddingsEnabled
         self.apiStyle = apiStyle
+        self.supportsVision = supportsVision
     }
 
     /// Builds the provider.
@@ -174,7 +187,8 @@ public struct OpenAICompatibleProviderOptions: Sendable, Codable, Equatable {
             contextLength: contextLength,
             providerID: providerID,
             embeddingsEnabled: embeddingsEnabled,
-            apiStyle: apiStyle
+            apiStyle: apiStyle,
+            supportsVision: supportsVision
         )
     }
 }
@@ -218,7 +232,8 @@ public enum LLMProviderFactory: Sendable {
             return MLXProvider(
                 serverURL: config.serverURL ?? MLXProvider.defaultServerURL,
                 model: config.model ?? MLXProvider.defaultModel,
-                contextLength: config.contextLength ?? MLXProvider.defaultContextLength
+                contextLength: config.contextLength ?? MLXProvider.defaultContextLength,
+                supportsVision: config.supportsVision ?? false
             )
         case "llamacpp", "llama-cpp", "llama_cpp", "local":
             // An absent pool keeps server auto-assignment so default installs
@@ -232,6 +247,7 @@ public enum LLMProviderFactory: Sendable {
                 serverURL: config.serverURL ?? LlamaCppProvider.defaultServerURL,
                 model: config.model ?? LlamaCppProvider.defaultModel,
                 contextLength: config.contextLength ?? LlamaCppProvider.defaultContextLength,
+                supportsVision: config.supportsVision ?? false,
                 slotCount: config.slotCount ?? RuneWeaverCore.LlamaPrefixReuse.defaultSlotCount,
                 cachePrompt: RuneWeaverCore.LlamaPrefixReuse.resolvedCachePrompt(fileValue: config.cachePrompt)
             )
@@ -242,7 +258,8 @@ public enum LLMProviderFactory: Sendable {
                 model: config.model ?? OpenAICompatibleProvider.defaultModel,
                 contextLength: config.contextLength ?? OpenAICompatibleProvider.defaultContextLength,
                 providerID: entryName,
-                apiStyle: config.apiStyle
+                apiStyle: config.apiStyle,
+                supportsVision: config.supportsVision ?? true
             )
         }
     }

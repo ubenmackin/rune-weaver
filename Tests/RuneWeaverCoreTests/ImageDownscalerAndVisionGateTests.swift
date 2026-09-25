@@ -43,4 +43,33 @@ struct ImageDownscalerAndVisionGateTests {
         let stripped = VisionGate.stripMessages(messages, supportsVision: false)
         #expect(stripped[0].content.contains(VisionGate.strippedPlaceholder))
     }
+
+    @Test
+    func `VisionGate extractDataURLs extracts JSON screenshotDataURL with escaped slashes`() {
+        let json = #"{"displayIndex":0,"scaledWidth":1280,"screenshotDataURL":"data:image\/jpeg;base64,\/9j\/4AAQSkZJRg==","screenshotHash":"hash123"}"#
+        let extracted = VisionGate.extractDataURLs(json)
+        #expect(extracted.dataURLs.count == 1)
+        #expect(extracted.dataURLs[0] == "data:image/jpeg;base64,/9j/4AAQSkZJRg==")
+        #expect(extracted.cleanedText.contains("\"screenshotDataURL\": \"[image attached]\""))
+        #expect(!extracted.cleanedText.contains("/9j/4AAQSkZJRg=="))
+        #expect(extracted.cleanedText.contains("\"screenshotHash\":\"hash123\""))
+    }
+
+    @Test
+    func `VisionGate extractDataURLs extracts inline data URLs from user prompt`() {
+        let text = "Here is the screenshot:\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==\nPlease analyze it."
+        let extracted = VisionGate.extractDataURLs(text)
+        #expect(extracted.dataURLs.count == 1)
+        #expect(extracted.dataURLs[0].hasPrefix("data:image/png;base64,iVBOR"))
+        #expect(!extracted.cleanedText.contains("data:image/png;base64"))
+        #expect(extracted.cleanedText.contains("Please analyze it."))
+    }
+
+    @Test
+    func `VisionGate extractDataURLs returns empty array when no images present`() {
+        let text = "Just a regular text message without any image."
+        let extracted = VisionGate.extractDataURLs(text)
+        #expect(extracted.dataURLs.isEmpty)
+        #expect(extracted.cleanedText == text)
+    }
 }

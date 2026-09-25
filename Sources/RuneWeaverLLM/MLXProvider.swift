@@ -26,6 +26,8 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
     public let model: String
     /// Maximum context window in tokens.
     public let contextLength: Int
+    /// Whether the fronted model accepts vision input.
+    public let supportsVision: Bool
 
     /// Stable provider identifier used by the router and config keys.
     public var name: String {
@@ -40,7 +42,7 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
             contextLength: contextLength,
             supportsTools: true,
             supportsEmbeddings: false,
-            supportsVision: false
+            supportsVision: supportsVision
         )
     }
 
@@ -48,11 +50,13 @@ public struct MLXProvider: ChunkStreamingProvider, Sendable {
     public init(
         serverURL: String = MLXProvider.defaultServerURL,
         model: String = MLXProvider.defaultModel,
-        contextLength: Int = MLXProvider.defaultContextLength
+        contextLength: Int = MLXProvider.defaultContextLength,
+        supportsVision: Bool = false
     ) {
         self.serverURL = serverURL
         self.model = model
         self.contextLength = contextLength
+        self.supportsVision = supportsVision
     }
 
     /// Shared HTTP client for this provider.

@@ -89,7 +89,7 @@ public enum VisionGate: Sendable {
         // 1. Data URLs: data:image/jpeg;base64,...
         if result.contains("data:image") {
             if let pattern = try? NSRegularExpression(
-                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]+(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
+                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]{16,}(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
                 options: []
             ) {
                 let range = NSRange(result.startIndex ..< result.endIndex, in: result)
@@ -131,6 +131,85 @@ public enum VisionGate: Sendable {
             guard stripped != message.content else { return message }
             return message.withContent(stripped)
         }
+    }
+
+    /// Output of extracting data URLs and cleaning a message content string.
+    public struct ExtractedImages: Sendable, Equatable {
+        /// The message content with the heavy image payloads replaced by a clean placeholder.
+        public let cleanedText: String
+        /// The extracted data URLs (e.g. `data:image/jpeg;base64,...`).
+        public let dataURLs: [String]
+
+        public init(cleanedText: String, dataURLs: [String]) {
+            self.cleanedText = cleanedText
+            self.dataURLs = dataURLs
+        }
+    }
+
+    /// Extracts image data URLs from message content and returns a cleaned version of the text
+    /// with placeholders so context tokens are not wasted with large base64 strings.
+    /// Supports JSON image fields (`screenshotDataURL`, `imageDataBase64`) as well as inline data URLs.
+    public static func extractDataURLs(_ content: String) -> ExtractedImages {
+        var result = content
+        var extracted: [String] = []
+
+        // 1. JSON image payload fields: "screenshotDataURL": "..." or "imageDataBase64": "..."
+        if result.contains("screenshotDataURL") || result.contains("imageDataBase64") {
+            if let jsonPattern = try? NSRegularExpression(
+                pattern: #"\"(screenshotDataURL|imageDataBase64)\"\s*:\s*\"([^\"]{16,})\""#,
+                options: []
+            ) {
+                let nsString = result as NSString
+                let matches = jsonPattern.matches(in: result, options: [], range: NSRange(location: 0, length: nsString.length))
+                for match in matches where match.numberOfRanges > 2 {
+                    let rawValue = nsString.substring(with: match.range(at: 2))
+                    // Unescape escaped slashes like "data:image\/jpeg;base64,..."
+                    let unescaped = rawValue.replacingOccurrences(of: "\\/", with: "/")
+                    if unescaped.hasPrefix("data:image/") {
+                        extracted.append(unescaped)
+                    } else if unescaped.hasPrefix("/9j/") || unescaped.hasPrefix("iVBOR") {
+                        extracted.append("data:image/jpeg;base64,\(unescaped)")
+                    }
+                }
+                // Scrub every 16+ value so unknown shapes never retain raw
+                // payload in tool metadata; only known image prefixes extract.
+                result = jsonPattern.stringByReplacingMatches(
+                    in: result,
+                    options: [],
+                    range: NSRange(location: 0, length: nsString.length),
+                    withTemplate: "\"$1\": \"[image attached]\""
+                )
+            }
+        }
+
+        // 2. Inline data URLs in text
+        if result.contains("data:image") {
+            if let pattern = try? NSRegularExpression(
+                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]{16,}(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
+                options: []
+            ) {
+                let nsString = result as NSString
+                let matches = pattern.matches(in: result, options: [], range: NSRange(location: 0, length: nsString.length))
+                for match in matches {
+                    let raw = nsString.substring(with: match.range)
+                    let cleanedURL = raw.replacingOccurrences(of: "\r\n", with: "")
+                        .replacingOccurrences(of: "\n", with: "")
+                    if !extracted.contains(cleanedURL) {
+                        extracted.append(cleanedURL)
+                    }
+                }
+                if !extracted.isEmpty {
+                    result = pattern.stringByReplacingMatches(
+                        in: result,
+                        options: [],
+                        range: NSRange(location: 0, length: nsString.length),
+                        withTemplate: ""
+                    )
+                }
+            }
+        }
+
+        return ExtractedImages(cleanedText: result, dataURLs: extracted)
     }
 }
 

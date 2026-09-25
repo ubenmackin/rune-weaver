@@ -781,7 +781,7 @@ private extension MailIndexer {
     ) async throws -> (messages: [MailIndexMessage], complete: Bool) {
         var collected: [MailIndexMessage] = []
         var seenIDs = Set<String>()
-        var beforeUID: Int? = nil
+        var beforeUID: Int?
         while true {
             try Task.checkCancellation()
             let page = try await gateway.messages(

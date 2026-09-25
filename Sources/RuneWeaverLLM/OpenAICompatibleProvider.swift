@@ -36,6 +36,8 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
     public let apiStyle: APIStyle
     /// Chat session identifier sent as `x-opencode-session`, when set.
     public var sessionID: String?
+    /// Whether the model accepts vision input (screenshots, images).
+    public let supportsVision: Bool
 
     /// Stable provider identifier used by the router and config keys.
     public var name: String {
@@ -50,7 +52,7 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
             contextLength: contextLength,
             supportsTools: true,
             supportsEmbeddings: embeddingsEnabled,
-            supportsVision: true
+            supportsVision: supportsVision
         )
     }
 
@@ -63,7 +65,8 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
         providerID: String = "openrouter",
         embeddingsEnabled: Bool = true,
         apiStyle: APIStyle = .chatCompletions,
-        sessionID: String? = nil
+        sessionID: String? = nil,
+        supportsVision: Bool = true
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
@@ -73,6 +76,7 @@ public struct OpenAICompatibleProvider: ChunkStreamingProvider, Sendable {
         self.embeddingsEnabled = embeddingsEnabled
         self.apiStyle = apiStyle
         self.sessionID = sessionID
+        self.supportsVision = supportsVision
     }
 
     /// Shared HTTP client for this provider.

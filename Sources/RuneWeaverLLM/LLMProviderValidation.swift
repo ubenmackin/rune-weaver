@@ -67,55 +67,7 @@ func openAIChatRequestBody(
     cachePrompt: Bool? = nil,
     slotID: Int? = nil
 ) throws -> Data {
-    // OpenAI-compatible endpoints reject an assistant `tool_calls` entry that no
-    // following tool-role message answers. Parked/approval-gated placeholders persist
-    // an assistant note with no results until the approval resumes, so restrict
-    // promotion to call IDs that already have a result in this request.
-    let answeredCallIDs = answeredToolCallIDs(in: messages)
-    // Track identifiers across the whole request so a call ID re-persisted in a
-    // later note cannot reach the wire twice beside its single answer.
-    var emittedCallIDs = Set<String>()
-    var wireMessages: [[String: Any]] = []
-    wireMessages.reserveCapacity(messages.count)
-    for message in messages {
-        var entry: [String: Any] = [
-            "role": OpenAIWireRole.string(for: message.role),
-            "content": message.content
-        ]
-        if let callID = message.toolCallID {
-            entry["tool_call_id"] = callID
-        }
-        if message.role == .assistant {
-            let split = splitResponsesAssistantContent(
-                message.content,
-                answeredCallIDs: answeredCallIDs,
-                excludingCallIDs: emittedCallIDs
-            )
-            if !split.toolCalls.isEmpty {
-                emittedCallIDs.formUnion(split.toolCalls.map(\.id))
-                entry["tool_calls"] = split.toolCalls.map { call in
-                    [
-                        "id": call.id,
-                        "type": "function",
-                        "function": [
-                            "name": call.name,
-                            "arguments": sanitizedToolCallArgumentsJSON(call.argumentsJSON)
-                        ]
-                    ]
-                }
-            }
-            // Plumbing notes carry only their leftover prose, so a scrubbed
-            // dangling line or an excluded twin collapses to empty instead of
-            // leaking `Calling …` upstream as request content.
-            if split.recognizedPlumbing {
-                entry["content"] = split.leftover
-            }
-        }
-        wireMessages.append(entry)
-    }
-    if wireMessages.isEmpty {
-        wireMessages = [["role": "user", "content": ""]]
-    }
+    let wireMessages = buildOpenAIChatWireMessages(messages: messages)
     var body: [String: Any] = [
         "model": model,
         "messages": wireMessages,
@@ -160,6 +112,110 @@ func openAIChatRequestBody(
     } catch {
         throw LLMProviderError.invalidResponse("Could not encode chat request: \(error.localizedDescription)")
     }
+}
+
+private func buildOpenAIChatWireMessages(messages: [Message]) -> [[String: Any]] {
+    // OpenAI-compatible endpoints reject an assistant `tool_calls` entry that no
+    // following tool-role message answers. Parked/approval-gated placeholders persist
+    // an assistant note with no results until the approval resumes, so restrict
+    // promotion to call IDs that already have a result in this request.
+    let answeredCallIDs = answeredToolCallIDs(in: messages)
+    // Track identifiers across the whole request so a call ID re-persisted in a
+    // later note cannot reach the wire twice beside its single answer.
+    var emittedCallIDs = Set<String>()
+    var wireMessages: [[String: Any]] = []
+    wireMessages.reserveCapacity(messages.count)
+    for message in messages {
+        if message.role == .tool {
+            let extracted = VisionGate.extractDataURLs(message.content)
+            var entry: [String: Any] = [
+                "role": OpenAIWireRole.string(for: message.role),
+                "content": extracted.cleanedText
+            ]
+            if let callID = message.toolCallID {
+                entry["tool_call_id"] = callID
+            }
+            wireMessages.append(entry)
+
+            if !extracted.dataURLs.isEmpty {
+                var contentParts: [[String: Any]] = [
+                    ["type": "text", "text": "Screenshot result from tool:"]
+                ]
+                for url in extracted.dataURLs {
+                    contentParts.append([
+                        "type": "image_url",
+                        "image_url": ["url": url]
+                    ])
+                }
+                wireMessages.append([
+                    "role": "user",
+                    "content": contentParts
+                ])
+            }
+            continue
+        }
+
+        if message.role == .user {
+            let extracted = VisionGate.extractDataURLs(message.content)
+            if !extracted.dataURLs.isEmpty {
+                var contentParts: [[String: Any]] = []
+                let promptText = extracted.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !promptText.isEmpty {
+                    contentParts.append(["type": "text", "text": promptText])
+                }
+                for url in extracted.dataURLs {
+                    contentParts.append([
+                        "type": "image_url",
+                        "image_url": ["url": url]
+                    ])
+                }
+                wireMessages.append([
+                    "role": "user",
+                    "content": contentParts
+                ])
+                continue
+            }
+        }
+
+        var entry: [String: Any] = [
+            "role": OpenAIWireRole.string(for: message.role),
+            "content": message.content
+        ]
+        if let callID = message.toolCallID {
+            entry["tool_call_id"] = callID
+        }
+        if message.role == .assistant {
+            let split = splitResponsesAssistantContent(
+                message.content,
+                answeredCallIDs: answeredCallIDs,
+                excludingCallIDs: emittedCallIDs
+            )
+            if !split.toolCalls.isEmpty {
+                emittedCallIDs.formUnion(split.toolCalls.map(\.id))
+                entry["tool_calls"] = split.toolCalls.map { call in
+                    [
+                        "id": call.id,
+                        "type": "function",
+                        "function": [
+                            "name": call.name,
+                            "arguments": sanitizedToolCallArgumentsJSON(call.argumentsJSON)
+                        ]
+                    ]
+                }
+            }
+            // Plumbing notes carry only their leftover prose, so a scrubbed
+            // dangling line or an excluded twin collapses to empty instead of
+            // leaking `Calling …` upstream as request content.
+            if split.recognizedPlumbing {
+                entry["content"] = split.leftover
+            }
+        }
+        wireMessages.append(entry)
+    }
+    if wireMessages.isEmpty {
+        wireMessages = [["role": "user", "content": ""]]
+    }
+    return wireMessages
 }
 
 /// Validates and returns tool call arguments for the wire, falling back to "{}" if malformed.
@@ -268,6 +324,46 @@ func openAIResponsesRequestBody(
     cachePrompt: Bool? = nil,
     slotID: Int? = nil
 ) throws -> Data {
+    let wireInput = buildOpenAIResponsesWireInput(messages: messages)
+    var body: [String: Any] = [
+        "model": model,
+        "input": wireInput,
+        "stream": stream
+    ]
+    // Same llama.cpp-only prefix hints as the chat wire, behind the same
+    // optionals so cloud requests never see them; absent values omit the keys.
+    if let cachePrompt {
+        body["cache_prompt"] = cachePrompt
+    }
+    if let slotID {
+        body["id_slot"] = slotID
+    }
+    if !tools.isEmpty {
+        // Omit invalid entries so a turn with zero valid tools proceeds text-only instead of throwing.
+        let filtered = validatedDefinitions(tools)
+        // Same canonical sort as the chat wire so both endpoints share one prefix
+        // from this boundary layer; callers arrive unsorted by contract.
+        let ordered = VisionSchemaFilter.sortedByName(filtered.valid, name: { $0.name })
+        if !ordered.isEmpty {
+            body["tools"] = try ordered.map { tool -> [String: Any] in
+                let parsed = try encodeToolParameters(tool)
+                return [
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": parsed
+                ]
+            }
+        }
+    }
+    do {
+        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+    } catch {
+        throw LLMProviderError.invalidResponse("Could not encode responses request: \(error.localizedDescription)")
+    }
+}
+
+private func buildOpenAIResponsesWireInput(messages: [Message]) -> [[String: Any]] {
     let systemMessages = messages.filter { $0.role == .system }
     let conversationMessages = messages.filter { $0.role != .system }
     let ordered = systemMessages + conversationMessages
@@ -282,12 +378,49 @@ func openAIResponsesRequestBody(
     wireInput.reserveCapacity(ordered.count * 2)
     for message in ordered {
         if message.role == .tool {
+            let extracted = VisionGate.extractDataURLs(message.content)
             wireInput.append([
                 "type": "function_call_output",
                 "call_id": message.toolCallID ?? "",
-                "output": message.content
+                "output": extracted.cleanedText
             ])
+            if !extracted.dataURLs.isEmpty {
+                var contentParts: [[String: Any]] = [
+                    ["type": "input_text", "text": "Screenshot result from tool:"]
+                ]
+                for url in extracted.dataURLs {
+                    contentParts.append([
+                        "type": "input_image",
+                        "image_url": url
+                    ])
+                }
+                wireInput.append([
+                    "role": "user",
+                    "content": contentParts
+                ])
+            }
             continue
+        }
+        if message.role == .user {
+            let extracted = VisionGate.extractDataURLs(message.content)
+            if !extracted.dataURLs.isEmpty {
+                var contentParts: [[String: Any]] = []
+                let promptText = extracted.cleanedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !promptText.isEmpty {
+                    contentParts.append(["type": "input_text", "text": promptText])
+                }
+                for url in extracted.dataURLs {
+                    contentParts.append([
+                        "type": "input_image",
+                        "image_url": url
+                    ])
+                }
+                wireInput.append([
+                    "role": OpenAIWireRole.string(for: message.role),
+                    "content": contentParts
+                ])
+                continue
+            }
         }
         if message.role == .assistant {
             let split = splitResponsesAssistantContent(
@@ -333,40 +466,5 @@ func openAIResponsesRequestBody(
     if wireInput.isEmpty {
         wireInput = [["role": "user", "content": [["type": "input_text", "text": ""]]]]
     }
-    var body: [String: Any] = [
-        "model": model,
-        "input": wireInput,
-        "stream": stream
-    ]
-    // Same llama.cpp-only prefix hints as the chat wire, behind the same
-    // optionals so cloud requests never see them; absent values omit the keys.
-    if let cachePrompt {
-        body["cache_prompt"] = cachePrompt
-    }
-    if let slotID {
-        body["id_slot"] = slotID
-    }
-    if !tools.isEmpty {
-        // Omit invalid entries so a turn with zero valid tools proceeds text-only instead of throwing.
-        let filtered = validatedDefinitions(tools)
-        // Same canonical sort as the chat wire so both endpoints share one prefix
-        // from this boundary layer; callers arrive unsorted by contract.
-        let ordered = VisionSchemaFilter.sortedByName(filtered.valid, name: { $0.name })
-        if !ordered.isEmpty {
-            body["tools"] = try ordered.map { tool -> [String: Any] in
-                let parsed = try encodeToolParameters(tool)
-                return [
-                    "type": "function",
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": parsed
-                ]
-            }
-        }
-    }
-    do {
-        return try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
-    } catch {
-        throw LLMProviderError.invalidResponse("Could not encode responses request: \(error.localizedDescription)")
-    }
+    return wireInput
 }
