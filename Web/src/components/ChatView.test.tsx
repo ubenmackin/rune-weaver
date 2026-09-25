@@ -2741,3 +2741,366 @@ describe("Inline approval pending assessment", () => {
   });
 });
 
+describe("Reloaded-tab reattach without cancel", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  // Shared stub for the reload shape: persisted history plus the run log plus
+  // an empty inbox. The run rows drive adoption while history stays the only
+  // source for visible messages, so the helper keeps both explicit.
+  function stubReloadFetch(
+    sessionID: string,
+    runs: Array<Record<string, unknown>>,
+    messages: Array<Record<string, unknown>>,
+    seenFetch: string[],
+  ): void {
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        seenFetch.push(typeof input === "string" ? input : String(input));
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionID,
+                title: "Reload Session",
+                messageCount: messages.length,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Reload Session",
+            messages,
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs, count: runs.length });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        if (typeof input === "string" && input === "/chat/cancel") {
+          return jsonResponse({ sessionID, cancelled: true });
+        }
+        return jsonResponse({});
+      }),
+    );
+  }
+
+  it("adopts a running row on reload with zero cancel traffic", async () => {
+    // A tab that reloads mid-turn starts idle, yet the server still owns the
+    // turn. Adoption must light the pending affordance from run-log evidence
+    // alone, without fabricating a reply and without cancelling the owner.
+    const sessionA = "reload-adopt-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-adopt-1",
+          kind: "chat",
+          status: "running",
+          message: "stuck prompt",
+          sessionID: sessionA,
+          timestamp: now,
+        },
+      ],
+      [{ id: "u1", role: "user", content: "stuck prompt", createdAt: now }],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("stuck prompt")).toBeInTheDocument();
+    // Reattach never dials: no outbound socket frame and no REST cancel for a
+    // turn the server still owns.
+    expect(capture.sentFrames).toHaveLength(0);
+    expect(
+      seenFetch.filter((url) => url.includes("/chat/cancel")),
+    ).toHaveLength(0);
+  });
+
+  it("rebuilds the timeline from broadcast deltas after adoption", async () => {
+    // Deltas that arrive after adoption belong to the same server turn, so
+    // they must extend the adopted shell instead of starting a second bubble.
+    const sessionA = "reload-delta-aaaa-2222";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-delta-1",
+          kind: "chat",
+          status: "running",
+          message: "resume me",
+          sessionID: sessionA,
+          timestamp: now,
+        },
+      ],
+      [{ id: "u1", role: "user", content: "resume me", createdAt: now }],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "tool_start",
+      toolName: "email.search",
+      callID: "call-reload-1",
+      argumentsJSON: '{"limit":1}',
+      sessionID: sessionA,
+    });
+    await waitFor(() => {
+      expect(screen.getByText("email.search")).toBeInTheDocument();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "resumed progress ",
+      sessionID: sessionA,
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/resumed progress/)).toBeInTheDocument();
+    });
+    // Still live and still silent on cancel: rebuilding never aborts the owner.
+    expect(
+      screen.getByRole("button", { name: "Cancel turn" }),
+    ).toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
+  });
+
+  it("completes an adopted turn normally on its terminal frame", async () => {
+    // The terminal broadcast settles the adopted shell exactly once, leaving
+    // one finished message and a free input like any locally started turn.
+    const sessionA = "reload-done-aaaa-3333";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-done-1",
+          kind: "chat",
+          status: "running",
+          message: "finish me",
+          sessionID: sessionA,
+          timestamp: now,
+        },
+      ],
+      [{ id: "u1", role: "user", content: "finish me", createdAt: now }],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByRole("button", { name: "Cancel turn" }),
+      ).toBeInTheDocument();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "halfway ",
+      sessionID: sessionA,
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/halfway/)).toBeInTheDocument();
+    });
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "halfway done",
+      sessionID: sessionA,
+      toolActions: [],
+      totalTokens: 10,
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    expect(screen.getByText("halfway done")).toBeInTheDocument();
+    expect(screen.getAllByText(/halfway done/)).toHaveLength(1);
+    expect(capture.sentFrames).toHaveLength(0);
+  });
+
+  it("loads persisted history without adopting when no running row remains", async () => {
+    // A turn that finished while away leaves only settled rows, so the reload
+    // must render history idly instead of resurrecting a live bubble.
+    const sessionA = "reload-settled-aaaa-4444";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-settled-1",
+          kind: "chat",
+          status: "ok",
+          message: "earlier prompt",
+          sessionID: sessionA,
+          timestamp: now,
+          response: "earlier reply",
+        },
+      ],
+      [
+        { id: "u1", role: "user", content: "earlier prompt", createdAt: now },
+        { id: "a1", role: "assistant", content: "earlier reply", createdAt: now },
+      ],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("earlier reply")).toBeInTheDocument();
+    });
+    expect(screen.getByText("earlier prompt")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Cancel turn" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
+    expect(
+      seenFetch.filter((url) => url.includes("/chat/cancel")),
+    ).toHaveLength(0);
+  });
+
+  it("keeps other sessions running turns out of the active view", async () => {
+    // Run rows and live frames carry their owner, so a foreign turn must badge
+    // elsewhere instead of lighting this session or leaking its deltas here.
+    const sessionA = "reload-active-aaaa-5555";
+    const sessionB = "reload-other-bbbb-6666";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-other-1",
+          kind: "chat",
+          status: "running",
+          message: "foreign prompt",
+          sessionID: sessionB,
+          timestamp: now,
+        },
+      ],
+      [{ id: "u1", role: "user", content: "own prompt", createdAt: now }],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("own prompt")).toBeInTheDocument();
+    });
+    // Foreign running evidence never adopts the active view.
+    expect(
+      screen.queryByRole("button", { name: "Cancel turn" }),
+    ).not.toBeInTheDocument();
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "delta",
+      delta: "foreign progress",
+      sessionID: sessionB,
+    });
+    expect(screen.queryByText(/foreign progress/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Cancel turn" }),
+    ).not.toBeInTheDocument();
+    expect(capture.sentFrames).toHaveLength(0);
+  });
+
+  it("lets explicit cancel abort an adopted turn", async () => {
+    // Adoption locks the input like a local send, so the visible Cancel must
+    // still reach the same session instead of stranding the adopted owner.
+    const user = userEvent.setup();
+    const sessionA = "reload-cancel-aaaa-7777";
+    localStorage.setItem("rw_active_session_id", sessionA);
+    const now = new Date().toISOString();
+    const seenFetch: string[] = [];
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    stubReloadFetch(
+      sessionA,
+      [
+        {
+          id: "run-cancel-1",
+          kind: "chat",
+          status: "running",
+          message: "abort me",
+          sessionID: sessionA,
+          timestamp: now,
+        },
+      ],
+      [{ id: "u1", role: "user", content: "abort me", createdAt: now }],
+      seenFetch,
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    const cancelBtn = await screen.findByRole("button", {
+      name: "Cancel turn",
+    });
+    await user.click(cancelBtn);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    // The explicit gesture is the one path allowed to cancel the owner.
+    const outbound = capture.sentFrames.map((raw) => {
+      try {
+        return JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    });
+    expect(outbound.some((frame) => frame.type === "cancel")).toBe(true);
+  });
+});
+

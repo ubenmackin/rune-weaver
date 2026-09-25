@@ -1,6 +1,7 @@
 // Rune Weaver Tests — HTTP REST API, WebSocket, and scheduler integration tests.
 
 import Foundation
+import NIOWebSocket
 import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
@@ -1763,5 +1764,329 @@ struct AuthenticatedSurfaceTests {
             #expect(authenticated.status == .ok)
             #expect(authenticated.headers.first(name: "X-Probe-Authenticated") == "true")
         }
+    }
+}
+
+/// Recording socket capturing frames for detached-turn tests without a live handshake.
+private actor DetachmentRecordingSocket: WSConnectionSocket {
+    /// Frames delivered to this connection.
+    private(set) var sent: [String] = []
+
+    /// Records one frame.
+    func send(_ text: String) async throws {
+        sent.append(text)
+    }
+
+    /// Ignored; these tests never close the connection.
+    func close(code _: WebSocketErrorCode) async throws {}
+}
+
+/// Provider holding the turn open with a synchronous pause so the test can seal
+/// the socket while inference is still in flight.
+private struct DetachmentDelayedProvider: LLMProvider, Sendable {
+    /// Canned model metadata.
+    let modelInfo = ModelInfo(name: "detachment-delayed", provider: "stub", contextLength: 2048)
+    /// Answer served after the pause.
+    let answer: String
+    /// Synchronous pause before serving, holding the turn open.
+    let delaySeconds: TimeInterval
+
+    /// Creates a delayed stub.
+    init(answer: String = "detached ok", delaySeconds: TimeInterval = 0.5) {
+        self.answer = answer
+        self.delaySeconds = delaySeconds
+    }
+
+    /// Serves the canned answer after the pause.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let text = answer
+        let delay = delaySeconds
+        if delay > 0 {
+            Thread.sleep(forTimeInterval: delay)
+        }
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: text))
+            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text: [String]) async throws -> [[Float]] {
+        Array(repeating: [Float](), count: text.count)
+    }
+}
+
+/// Provider delaying only turns carrying a marker so one session can hold a slow
+/// turn while its replacement answers immediately.
+private struct DetachmentBranchingProvider: LLMProvider, Sendable {
+    /// Canned model metadata.
+    let modelInfo = ModelInfo(name: "detachment-branching", provider: "stub", contextLength: 2048)
+    /// Marker selecting the slow path.
+    let slowMarker: String
+    /// Pause for the slow path.
+    let slowDelaySeconds: TimeInterval
+    /// Answer for the slow path.
+    let slowAnswer: String
+    /// Answer for the fast path.
+    let fastAnswer: String
+
+    /// Serves the slow answer after a pause when the marker is present, else fast.
+    func chat(messages: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let isSlow = messages.contains { $0.content.contains(slowMarker) }
+        if isSlow {
+            Thread.sleep(forTimeInterval: slowDelaySeconds)
+        }
+        let text = isSlow ? slowAnswer : fastAnswer
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: text))
+            continuation.yield(LLMResponse(delta: "", isFinished: true, totalTokens: 7))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text: [String]) async throws -> [[Float]] {
+        Array(repeating: [Float](), count: text.count)
+    }
+}
+
+/// Builds an isolated context for detached-turn tests off the real data directory.
+private func makeDetachmentContext(provider: any LLMProvider) throws -> (ServerContext, URL) {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-detachment-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let dbPath = base.appendingPathComponent("episodes.db").path
+    let conversations = ConversationManager()
+    let gate = PermissionGate()
+    let approvals = ApprovalQueue(permissionGate: gate)
+    let bus = ToolBus(permissionGate: gate)
+    let memory = MemoryEngine(
+        episodesDBPath: dbPath,
+        vectorDBPath: base.appendingPathComponent("vectors").path,
+        profilePath: base.appendingPathComponent("profile.json").path
+    )
+    let orchestrator = Orchestrator(
+        conversations: conversations,
+        toolBus: bus,
+        llm: provider,
+        memoryEngine: memory
+    )
+    let context = ServerContext(
+        conversations: conversations,
+        toolBus: bus,
+        orchestrator: orchestrator,
+        memoryEngine: memory,
+        permissionGate: gate,
+        approvals: approvals,
+        pluginStore: ToolRegistryStore(dbPath: dbPath),
+        toolStates: ToolStateStore(dbPath: dbPath)
+    )
+    return (context, base)
+}
+
+/// Polls an async condition until it holds or a short budget expires.
+private func detachmentWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(8)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+    return await condition()
+}
+
+@Suite("WebSocket Turn Detachment")
+struct WebSocketTurnDetachmentTests {
+    @Test
+    func `Socket close leaves detached turn running`() async throws {
+        let (context, base) = try makeDetachmentContext(provider: DetachmentDelayedProvider(delaySeconds: 0.5))
+        defer { try? FileManager.default.removeItem(at: base) }
+        let connectionID = UUID()
+        _ = await context.hub.add(id: connectionID, box: DetachmentRecordingSocket())
+        let connectionTasks = ConnectionChatTasks()
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "hello detached", sessionID: sessionID),
+            connectionID: connectionID,
+            context: context
+        )
+        // Slot plus running row exist immediately after spawn.
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == true)
+        // Seal the socket while inference is still in flight.
+        connectionTasks.cancelAll()
+        await context.hub.remove(id: connectionID)
+        // Detached ownership keeps the slot and the running row across the seal.
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == true)
+        #expect(await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "running")
+        // The turn still settles to success after the seal.
+        let settled = await detachmentWaitUntil {
+            await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "ok"
+        }
+        #expect(settled == true)
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == false)
+    }
+
+    @Test
+    func `Explicit cancel stops detached turn`() async throws {
+        let (context, base) = try makeDetachmentContext(provider: DetachmentDelayedProvider(delaySeconds: 0.6))
+        defer { try? FileManager.default.removeItem(at: base) }
+        let connectionID = UUID()
+        _ = await context.hub.add(id: connectionID, box: DetachmentRecordingSocket())
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "please cancel me", sessionID: sessionID),
+            connectionID: connectionID,
+            context: context
+        )
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == true)
+        #expect(await context.activeTurns.cancel(sessionID: sessionID) == true)
+        await context.steeringQueue.clear(for: sessionID)
+        let settled = await detachmentWaitUntil {
+            await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "cancelled"
+        }
+        #expect(settled == true)
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == false)
+    }
+
+    @Test
+    func `Same-session supersede cancels prior turn`() async throws {
+        let provider = DetachmentBranchingProvider(
+            slowMarker: "slow-first",
+            slowDelaySeconds: 0.8,
+            slowAnswer: "slow",
+            fastAnswer: "fast"
+        )
+        let (context, base) = try makeDetachmentContext(provider: provider)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let connectionID = UUID()
+        _ = await context.hub.add(id: connectionID, box: DetachmentRecordingSocket())
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "slow-first", sessionID: sessionID),
+            connectionID: connectionID,
+            context: context
+        )
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == true)
+        await handleWebSocketChat(
+            WSChatMessage(text: "fast-second", sessionID: sessionID),
+            connectionID: connectionID,
+            context: context
+        )
+        // Both rows settle: the superseded turn cancels while its replacement succeeds.
+        let settled = await detachmentWaitUntil {
+            let rows = await context.runs.list(limit: 10, sessionID: sessionID)
+            return rows.count == 2
+                && rows.contains { $0.status == "cancelled" }
+                && rows.contains { $0.status == "ok" }
+        }
+        #expect(settled == true)
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == false)
+    }
+
+    @Test
+    func `Fresh session past cap is rejected`() async throws {
+        #expect(ActiveTurnTracker.maxConcurrentTurns == 3)
+        let (context, base) = try makeDetachmentContext(provider: DetachmentDelayedProvider(delaySeconds: 0))
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstSession = UUID()
+        let secondSession = UUID()
+        let thirdSession = UUID()
+        let first = try #require(await context.activeTurns.tryAcquire(sessionID: firstSession, onCancel: {}))
+        let second = try #require(await context.activeTurns.tryAcquire(sessionID: secondSession, onCancel: {}))
+        let third = try #require(await context.activeTurns.tryAcquire(sessionID: thirdSession, onCancel: {}))
+        #expect(first.replaced == false)
+        #expect(second.replaced == false)
+        #expect(third.replaced == false)
+        let rejectedSession = UUID()
+        let connectionID = UUID()
+        let socket = DetachmentRecordingSocket()
+        _ = await context.hub.add(id: connectionID, box: socket)
+        await handleWebSocketChat(
+            WSChatMessage(text: "over cap", sessionID: rejectedSession),
+            connectionID: connectionID,
+            context: context
+        )
+        // Busy rejection answers the requester directly with no run row and no slot.
+        let frames = await socket.sent
+        #expect(frames.count == 1)
+        let raw = try #require(frames.first)
+        let frame = try JSONDecoder().decode(WSErrorFrame.self, from: Data(raw.utf8))
+        #expect(frame.message.contains("Already running 3") == true)
+        #expect(frame.sessionID == rejectedSession)
+        #expect(await context.activeTurns.isActive(sessionID: rejectedSession) == false)
+        #expect(await context.runs.list(limit: 10, sessionID: rejectedSession).isEmpty == true)
+        // A replacement for the same session still fits past the cap.
+        let superseding = await context.activeTurns.tryAcquire(sessionID: thirdSession, onCancel: {})
+        #expect(superseding?.replaced == true)
+        // Release every held slot so the isolated tracker drains cleanly.
+        for session in await context.activeTurns.runningSessionIDs() {
+            _ = await context.activeTurns.cancel(sessionID: session)
+        }
+    }
+
+    @Test
+    func `Watchdog expiry settles error with timeout detail`() async throws {
+        #expect(WebSocketTurnWatchdog.timeoutNanoseconds == 15 * 60 * 1_000_000_000)
+        let detail = WebSocketTurnTimeoutError().errorDescription ?? ""
+        #expect(detail.contains("timed out") == true)
+        #expect(detail.contains("15 minutes") == true)
+        // Timeout never masquerades as cooperative cancellation.
+        let timeout: Error = WebSocketTurnTimeoutError()
+        #expect((timeout is CancellationError) == false)
+        #expect((timeout is WebSocketTurnTimeoutError) == true)
+        // A hanging operation loses the race to the watchdog.
+        do {
+            _ = try await withWebSocketTurnWatchdog(timeoutNanoseconds: 20_000_000) {
+                try await Task.sleep(nanoseconds: 500_000_000)
+                return "hung"
+            }
+            Issue.record("Expected watchdog timeout")
+        } catch is WebSocketTurnTimeoutError {
+            // Expected failed-turn path.
+        } catch {
+            Issue.record("Unexpected watchdog error: \(error)")
+        }
+        // A fast operation wins before the timer fires.
+        let fast = try await withWebSocketTurnWatchdog(timeoutNanoseconds: 500_000_000) {
+            "fast"
+        }
+        #expect(fast == "fast")
+        // Failed-turn audit shape keeps the timeout detail when no partial text exists.
+        let runs = RunLogStore()
+        let sessionID = UUID()
+        let entry = await runs.append(kind: "chat", status: "running", message: "slow", sessionID: sessionID)
+        let audit = ChatTurnAuditSnapshot(partialText: "", toolActions: [], totalTokens: nil)
+        let auditResponse = audit.partialText.isEmpty
+            ? (WebSocketTurnTimeoutError().errorDescription ?? "timeout")
+            : audit.partialText
+        let updated = await runs.update(
+            id: entry.id,
+            status: "error",
+            response: auditResponse,
+            toolActions: audit.toolActions,
+            totalTokens: audit.totalTokens
+        )
+        #expect(updated?.status == "error")
+        #expect(updated?.response?.contains("timed out") == true)
+    }
+
+    @Test
+    func `Stale unregister keeps replacement slot`() async throws {
+        let tracker = ActiveTurnTracker()
+        let sessionID = UUID()
+        let first = await tracker.tryAcquire(sessionID: sessionID, onCancel: {})
+        let firstToken = try #require(first).token
+        #expect(first?.replaced == false)
+        let second = await tracker.tryAcquire(sessionID: sessionID, onCancel: {})
+        #expect(second?.replaced == true)
+        // A stale completion must not release its replacement.
+        await tracker.unregister(sessionID: sessionID, token: firstToken)
+        #expect(await tracker.isActive(sessionID: sessionID) == true)
+        #expect(await tracker.cancel(sessionID: sessionID) == true)
+        let secondToken = try #require(second).token
+        await tracker.unregister(sessionID: sessionID, token: secondToken)
+        #expect(await tracker.isActive(sessionID: sessionID) == false)
+        #expect(await tracker.cancel(sessionID: sessionID) == false)
     }
 }

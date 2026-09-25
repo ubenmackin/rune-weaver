@@ -1,6 +1,7 @@
 // Rune Weaver Tests — Run lifecycle with approval parking and session linkage.
 
 import Foundation
+import NIOWebSocket
 import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
@@ -367,5 +368,451 @@ struct RunApprovalLifecycleTests {
         #expect(resolvedResumeStatus(approved: false, resumed: deniedResponse) == "denied")
         let missingTool = OrchestratorResponse(text: "missing", sessionID: UUID(), toolActions: [])
         #expect(resolvedResumeStatus(approved: true, resumed: missingTool) == "error")
+    }
+}
+
+/// Recording socket capturing broadcast and direct frames without a live handshake.
+///
+/// Two instances model a reloaded tab plus its original: broadcast delivery must
+/// reach both while requester-scoped replies reach only the requester, so each
+/// socket keeps its own frame list for the delivery assertions below.
+private actor BroadcastRecordingSocket: WSConnectionSocket {
+    /// Frames delivered to this connection.
+    private(set) var sent: [String] = []
+
+    /// Records one frame.
+    func send(_ text: String) async throws {
+        sent.append(text)
+    }
+
+    /// Ignored; delivery tests never close the connection.
+    func close(code _: WebSocketErrorCode) async throws {}
+}
+
+/// Immediate provider serving one finished text chunk.
+///
+/// A single delta plus the terminal done frame is enough to prove detached
+/// delivery: the second socket must see both without re-sending the turn.
+private struct BroadcastImmediateProvider: LLMProvider, Sendable {
+    /// Stable test model metadata.
+    let modelInfo = ModelInfo(name: "broadcast-immediate", provider: "test", contextLength: 2048)
+    /// Canned answer text.
+    let answer: String
+
+    /// Creates an immediate stub.
+    init(answer: String = "hello broadcast") {
+        self.answer = answer
+    }
+
+    /// Serves the canned answer as one finished stream.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let text = answer
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: text, isFinished: true, totalTokens: 5))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+/// Delayed provider holding the turn open so cancellation can land mid-flight.
+///
+/// The synchronous pause mirrors the existing detachment fixtures: the turn stays
+/// in `running` long enough for the test to cancel through the tracker, proving
+/// the terminal cancelled frame broadcasts instead of answering one socket.
+private struct BroadcastDelayedProvider: LLMProvider, Sendable {
+    /// Stable test model metadata.
+    let modelInfo = ModelInfo(name: "broadcast-delayed", provider: "test", contextLength: 2048)
+    /// Pause holding the turn open.
+    let delaySeconds: TimeInterval
+
+    /// Creates a delayed stub.
+    init(delaySeconds: TimeInterval = 0.8) {
+        self.delaySeconds = delaySeconds
+    }
+
+    /// Serves a canned answer after the pause.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        if delaySeconds > 0 {
+            Thread.sleep(forTimeInterval: delaySeconds)
+        }
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: "slow answer", isFinished: true, totalTokens: 5))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+/// Failing provider reporting a mid-stream LLM error.
+///
+/// The error chunk routes the turn onto the failed path, proving the terminal
+/// error frame broadcasts session-tagged instead of answering one socket.
+private struct BroadcastFailingProvider: LLMProvider, Sendable {
+    /// Stable test model metadata.
+    let modelInfo = ModelInfo(name: "broadcast-failing", provider: "test", contextLength: 2048)
+    /// Failure detail surfaced in the error frame.
+    let detail: String
+
+    /// Creates a failing stub.
+    init(detail: String = "broadcast boom") {
+        self.detail = detail
+    }
+
+    /// Serves one error chunk.
+    func chat(messages _: [Message], tools _: [any Tool]) -> AsyncStream<LLMResponse> {
+        let detail = detail
+        return AsyncStream { continuation in
+            continuation.yield(LLMResponse(delta: "", errorMessage: detail))
+            continuation.finish()
+        }
+    }
+
+    /// Unused embeddings stub.
+    func embeddings(text _: [String]) async throws -> [[Float]] {
+        []
+    }
+}
+
+/// Builds an isolated server context for broadcast delivery tests.
+///
+/// Each test owns its tracker, run store, and hub so the three-slot cap and the
+/// frame lists never leak across cases; the temporary directory keeps SQLite off
+/// the real engine data directory.
+/// - Parameter provider: LLM backend driving the turn under test.
+/// - Returns: Isolated context plus its temporary directory for cleanup.
+private func makeBroadcastContext(provider: any LLMProvider) throws -> (ServerContext, URL) {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent("runeweaver-broadcast-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+    let dbPath = base.appendingPathComponent("episodes.db").path
+    let conversations = ConversationManager()
+    let gate = PermissionGate()
+    let approvals = ApprovalQueue(permissionGate: gate)
+    let bus = ToolBus(permissionGate: gate)
+    let memory = MemoryEngine(
+        episodesDBPath: dbPath,
+        vectorDBPath: base.appendingPathComponent("vectors").path,
+        profilePath: base.appendingPathComponent("profile.json").path
+    )
+    let orchestrator = Orchestrator(
+        conversations: conversations,
+        toolBus: bus,
+        llm: provider,
+        memoryEngine: memory
+    )
+    let context = ServerContext(
+        conversations: conversations,
+        toolBus: bus,
+        orchestrator: orchestrator,
+        memoryEngine: memory,
+        permissionGate: gate,
+        approvals: approvals,
+        scheduler: SchedulerStore(),
+        runs: RunLogStore(),
+        hub: WSHub()
+    )
+    return (context, base)
+}
+
+/// Polls until a condition holds or a short budget expires.
+///
+/// Turns spawn detached, so the test must wait for the run row plus the fan-out
+/// to land instead of asserting immediately after the spawn returns.
+/// - Parameter condition: Async predicate to poll.
+/// - Returns: True when the predicate held in budget.
+private func broadcastWaitUntil(_ condition: @Sendable @escaping () async -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(8)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+    }
+    return await condition()
+}
+
+/// Reads the frame discriminator without failing on unrelated shapes.
+///
+/// Run broadcasts carry a different payload than turn frames, so the delivery
+/// assertions filter by this type instead of counting every frame on the socket.
+/// - Parameter raw: Raw frame text.
+/// - Returns: The `type` value, or nil when the payload is not JSON.
+private func broadcastFrameType(_ raw: String) -> String? {
+    guard let data = raw.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else {
+        return nil
+    }
+    return object["type"] as? String
+}
+
+/// Reads the owning session from a frame, when present.
+///
+/// Every broadcast turn frame carries its session so multiplexed views filter
+/// before touching state; requester-scoped replies carry it too, so the direct
+/// assertions below can prove the reply belonged to the requesting session.
+/// - Parameter raw: Raw frame text.
+/// - Returns: The session identifier, or nil when absent or malformed.
+private func broadcastFrameSessionID(_ raw: String) -> UUID? {
+    guard let data = raw.data(using: .utf8),
+          let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let sid = object["sessionID"] as? String
+    else {
+        return nil
+    }
+    return UUID(uuidString: sid)
+}
+
+@Suite("WebSocket Broadcast Delivery")
+struct WebSocketBroadcastDeliveryTests {
+    @Test
+    func `Second socket receives live deltas plus terminal done`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastImmediateProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "hello detached", sessionID: sessionID),
+            connectionID: firstID,
+            context: context
+        )
+        // The turn settles to success on its single audit row.
+        let settled = await broadcastWaitUntil {
+            await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "ok"
+        }
+        #expect(settled == true)
+        // Both viewers see the same live delta plus the terminal done for the
+        // session started elsewhere; a reloaded tab reconciles without re-sending.
+        let firstSettled = await broadcastWaitUntil {
+            let frames = await first.sent
+            return frames.contains { broadcastFrameType($0) == "delta" && broadcastFrameSessionID($0) == sessionID }
+                && frames.contains { broadcastFrameType($0) == "done" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(firstSettled == true)
+        let secondSettled = await broadcastWaitUntil {
+            let frames = await second.sent
+            return frames.contains { broadcastFrameType($0) == "delta" && broadcastFrameSessionID($0) == sessionID }
+                && frames.contains { broadcastFrameType($0) == "done" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(secondSettled == true)
+        // The terminal done decodes with its owning session intact.
+        let secondFrames = await second.sent
+        let doneRaw = try #require(secondFrames.first { broadcastFrameType($0) == "done" })
+        let done = try JSONDecoder().decode(WSStreamDone.self, from: Data(doneRaw.utf8))
+        #expect(done.sessionID == sessionID)
+        #expect(done.text.contains("hello broadcast") == true)
+    }
+
+    @Test
+    func `Cancelled frame broadcasts to every socket`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastDelayedProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "please cancel me", sessionID: sessionID),
+            connectionID: firstID,
+            context: context
+        )
+        #expect(await context.activeTurns.isActive(sessionID: sessionID) == true)
+        #expect(await context.activeTurns.cancel(sessionID: sessionID) == true)
+        await context.steeringQueue.clear(for: sessionID)
+        let settled = await broadcastWaitUntil {
+            await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "cancelled"
+        }
+        #expect(settled == true)
+        // Cancellation clears every viewer together, not just the requester.
+        let firstGotCancel = await broadcastWaitUntil {
+            let frames = await first.sent
+            return frames.contains { broadcastFrameType($0) == "cancelled" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(firstGotCancel == true)
+        let secondGotCancel = await broadcastWaitUntil {
+            let frames = await second.sent
+            return frames.contains { broadcastFrameType($0) == "cancelled" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(secondGotCancel == true)
+    }
+
+    @Test
+    func `Error frame broadcasts to every socket`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastFailingProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "please fail", sessionID: sessionID),
+            connectionID: firstID,
+            context: context
+        )
+        let settled = await broadcastWaitUntil {
+            await context.runs.list(limit: 10, sessionID: sessionID).first?.status == "error"
+        }
+        #expect(settled == true)
+        // The terminal failure reaches every viewer holding the session.
+        let firstGotError = await broadcastWaitUntil {
+            let frames = await first.sent
+            return frames.contains { broadcastFrameType($0) == "error" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(firstGotError == true)
+        let secondGotError = await broadcastWaitUntil {
+            let frames = await second.sent
+            return frames.contains { broadcastFrameType($0) == "error" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(secondGotError == true)
+        let secondFrames = await second.sent
+        let errorRaw = try #require(secondFrames.first { broadcastFrameType($0) == "error" })
+        let errorFrame = try JSONDecoder().decode(WSErrorFrame.self, from: Data(errorRaw.utf8))
+        #expect(errorFrame.sessionID == sessionID)
+        #expect(errorFrame.message.contains("broadcast boom") == true)
+    }
+
+    @Test
+    func `Validation reply reaches only the requesting socket`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastImmediateProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "   ", sessionID: sessionID),
+            connectionID: firstID,
+            context: context
+        )
+        // Empty text never spawns a turn, so no run row exists to broadcast.
+        #expect(await context.runs.list(limit: 10, sessionID: sessionID).isEmpty == true)
+        let firstFrames = await first.sent
+        #expect(firstFrames.count == 1)
+        let raw = try #require(firstFrames.first)
+        #expect(broadcastFrameType(raw) == "error")
+        let errorFrame = try JSONDecoder().decode(WSErrorFrame.self, from: Data(raw.utf8))
+        #expect(errorFrame.sessionID == sessionID)
+        // The unrelated viewer sees nothing for another session's rejection.
+        #expect(await second.sent.isEmpty == true)
+    }
+
+    @Test
+    func `Busy rejection reaches only the requesting socket`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastImmediateProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        #expect(ActiveTurnTracker.maxConcurrentTurns == 3)
+        let firstSession = UUID()
+        let secondSession = UUID()
+        let thirdSession = UUID()
+        _ = try #require(await context.activeTurns.tryAcquire(sessionID: firstSession, onCancel: {}))
+        _ = try #require(await context.activeTurns.tryAcquire(sessionID: secondSession, onCancel: {}))
+        _ = try #require(await context.activeTurns.tryAcquire(sessionID: thirdSession, onCancel: {}))
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let rejectedSession = UUID()
+        await handleWebSocketChat(
+            WSChatMessage(text: "over cap", sessionID: rejectedSession),
+            connectionID: firstID,
+            context: context
+        )
+        // Past-cap rejection spawns nothing, so no run row and no slot.
+        #expect(await context.activeTurns.isActive(sessionID: rejectedSession) == false)
+        #expect(await context.runs.list(limit: 10, sessionID: rejectedSession).isEmpty == true)
+        let firstFrames = await first.sent
+        #expect(firstFrames.count == 1)
+        let raw = try #require(firstFrames.first)
+        let errorFrame = try JSONDecoder().decode(WSErrorFrame.self, from: Data(raw.utf8))
+        #expect(errorFrame.message.contains("Already running 3") == true)
+        #expect(errorFrame.sessionID == rejectedSession)
+        #expect(await second.sent.isEmpty == true)
+        // Drain the held slots so the isolated tracker ends empty.
+        for session in await context.activeTurns.runningSessionIDs() {
+            _ = await context.activeTurns.cancel(sessionID: session)
+        }
+    }
+
+    @Test
+    func `Cancel acknowledgement reaches only the requesting socket`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastImmediateProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        // No turn runs, so the acknowledgement honestly reports nothing stopped.
+        await handleWebSocketCancel(
+            WSCancelMessage(sessionID: sessionID),
+            connectionID: firstID,
+            context: context
+        )
+        let firstFrames = await first.sent
+        #expect(firstFrames.count == 1)
+        let raw = try #require(firstFrames.first)
+        #expect(broadcastFrameType(raw) == "cancelled")
+        let ack = try JSONDecoder().decode(WSCancelledFrame.self, from: Data(raw.utf8))
+        #expect(ack.sessionID == sessionID)
+        #expect(ack.cancelled == false)
+        // The unrelated viewer never sees another session's acknowledgement.
+        #expect(await second.sent.isEmpty == true)
+    }
+
+    @Test
+    func `Broadcast event helper is the single turn-event path`() async throws {
+        let (context, base) = try makeBroadcastContext(provider: BroadcastImmediateProvider())
+        defer { try? FileManager.default.removeItem(at: base) }
+        let firstID = UUID()
+        let secondID = UUID()
+        let first = BroadcastRecordingSocket()
+        let second = BroadcastRecordingSocket()
+        _ = await context.hub.add(id: firstID, box: first)
+        _ = await context.hub.add(id: secondID, box: second)
+        let sessionID = UUID()
+        // Every orchestrator event fans out through the shared broadcast helper,
+        // so a delta emitted here must land on every connected socket.
+        await broadcastWSEventFrame(.textDelta("shared delta"), sessionID: sessionID, context: context)
+        let firstGotDelta = await broadcastWaitUntil {
+            let frames = await first.sent
+            return frames.contains { broadcastFrameType($0) == "delta" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(firstGotDelta == true)
+        let secondGotDelta = await broadcastWaitUntil {
+            let frames = await second.sent
+            return frames.contains { broadcastFrameType($0) == "delta" && broadcastFrameSessionID($0) == sessionID }
+        }
+        #expect(secondGotDelta == true)
+        let firstFrames = await first.sent
+        let raw = try #require(firstFrames.first { broadcastFrameType($0) == "delta" })
+        let delta = try JSONDecoder().decode(WSStreamDelta.self, from: Data(raw.utf8))
+        #expect(delta.sessionID == sessionID)
+        #expect(delta.delta == "shared delta")
     }
 }
