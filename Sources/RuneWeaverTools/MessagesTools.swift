@@ -508,7 +508,7 @@ public struct MessagesSearchTool: Tool, Sendable {
             + #"against message text; omitted, empty, or \"*\" returns newest messages"},"#
             + #""recipient":{"type":"string","description":"Optional phone number, email address, or contact name to filter by"},"#
             + #""limit":{"type":"integer","description":"Maximum messages to return (1-50, default 10)","minimum":1,"maximum":50}},"#
-            + #"additionalProperties":false}"#
+            + #""additionalProperties":false}"#
     )
 
     public let permissionLevel = PermissionLevel.readOnly
@@ -559,7 +559,7 @@ public struct MessagesReadTool: Tool, Sendable {
             + #""chat_id":{"type":"string","description":"Alias for chatId"},"#
             + #""recipient":{"type":"string","description":"Recipient phone number, email, or handle"},"#
             + #""limit":{"type":"integer","description":"Maximum messages to return (1-100, default 20)","minimum":1,"maximum":100}},"#
-            + #"additionalProperties":false}"#
+            + #""additionalProperties":false}"#
     )
 
     public let permissionLevel = PermissionLevel.readOnly
@@ -616,7 +616,7 @@ public struct MessagesSendTool: Tool, Sendable {
             + #""to":{"type":"string","description":"Alias for recipient"},"#
             + #""text":{"type":"string","description":"Message text to send"},"#
             + #""message":{"type":"string","description":"Alias for text"}},"#
-            + #"required":["recipient","text"],"additionalProperties":false}"#
+            + #""required":["recipient","text"],"additionalProperties":false}"#
     )
 
     public let permissionLevel = PermissionLevel.requiresApproval
