@@ -194,13 +194,46 @@ struct ServeCommand: AsyncParsableCommand {
         }
         return (selected, providers)
     }
+}
 
+// MARK: - Context & Lifecycle
+
+extension ServeCommand {
     private struct ToolBootstrapDependencies {
         let memoryEngine: MemoryEngine
         let embedder: (any EmbeddingsBackend)?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
         let conversations: ConversationManager
+    }
+
+    private func loadConversations(episodesDBPath: String) async -> ConversationManager {
+        let conversations = ConversationManager(episodesDBPath: episodesDBPath)
+        do {
+            try await conversations.loadAll()
+        } catch {
+            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
+        }
+        return conversations
+    }
+
+    private func loadPermissionGate(episodesDBPath: String, pluginsDir: String) async -> PermissionGate {
+        let episodesDB = (episodesDBPath as NSString).expandingTildeInPath
+        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
+        return await PermissionGate.load(
+            store: trustStore,
+            pluginsDir: URL(fileURLWithPath: (pluginsDir as NSString).expandingTildeInPath)
+        )
+    }
+
+    private func makeGoalStack(
+        memoryConfig: MemoryConfig,
+        goalsConfig: GoalsConfig,
+        selected: any LLMProvider
+    ) -> (store: GoalStore, engine: GoalEngine) {
+        let goalStore = GoalStore(dbPath: memoryConfig.episodesDBPath)
+        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: goalsConfig)
+        return (goalStore, goalEngine)
     }
 
     private func makePreviewBus(
@@ -278,17 +311,10 @@ struct ServeCommand: AsyncParsableCommand {
         // enabled; a disabled section keeps the keyword-and-vector engine.
         let docIndexDBPath: String? = loaded.config.index.enabled ? loaded.config.index.dbPath : nil
         let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory, docIndexDBPath: docIndexDBPath)
-        let conversations = ConversationManager(episodesDBPath: loaded.config.memory.episodesDBPath)
-        do {
-            try await conversations.loadAll()
-        } catch {
-            cliPrintError(TerminalStyle.dim("Could not load conversation history; starting fresh."))
-        }
-        let episodesDB = (loaded.config.memory.episodesDBPath as NSString).expandingTildeInPath
-        let trustStore = SQLiteTrustStore(dbPath: episodesDB)
-        let permissionGate = await PermissionGate.load(
-            store: trustStore,
-            pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
+        let conversations = await loadConversations(episodesDBPath: loaded.config.memory.episodesDBPath)
+        let permissionGate = await loadPermissionGate(
+            episodesDBPath: loaded.config.memory.episodesDBPath,
+            pluginsDir: loaded.config.plugins.pluginsDir
         )
         // Resolve the embeddings producer once from config so served memory
         // routes and the orchestrator share one backend; nil keeps the
@@ -318,12 +344,11 @@ struct ServeCommand: AsyncParsableCommand {
         // the plugin snapshot, and the served context observe one fallback
         // store instead of minting per-tool instances that diverge.
         let sharedSecrets = SecretsManager()
-        // Build the goal stack over the shared episodes database so the preview
-        // registry, the prompt snapshot, and the served context advance the
-        // same goals; a disabled `[goals]` section still registers and fails
-        // closed inside each tool instead of shape-shifting the surface.
-        let goalStore = GoalStore(dbPath: loaded.config.memory.episodesDBPath)
-        let goalEngine = GoalEngine(store: goalStore, llm: selected, config: loaded.config.goals)
+        let (goalStore, goalEngine) = makeGoalStack(
+            memoryConfig: loaded.config.memory,
+            goalsConfig: loaded.config.goals,
+            selected: selected
+        )
         // Compose the default system prompt from the live registry so the
         // served model sees every registered tool; an explicit
         // --system-prompt still overrides it verbatim.

@@ -529,17 +529,25 @@ extension Orchestrator {
                     // Continuation approvals resume in the owning session, so they carry
                     // the same session link as normal gated tools.
                     // Limit continuation approval to thisTime so engine.continue cannot acquire forever grants.
+                    let continuationAssessment = ImpactAssessment(
+                        severity: .moderate,
+                        outcome: "Allows the agent to proceed with additional tool execution rounds.",
+                        warnings: []
+                    )
                     let continuationRequest = PermissionRequest(
                         toolName: "engine.continue",
                         description: "The agent has completed \(context.gatedRoundIndex) tool rounds and is requesting continuation.",
                         input: call,
                         suggestedDurations: [.thisTime],
-                        sessionID: context.sessionID
+                        sessionID: context.sessionID,
+                        intent: context.narratedText.isEmpty ? nil : context.narratedText,
+                        assessment: continuationAssessment
                     )
                     await queue.enqueue(continuationRequest)
                     request = continuationRequest
                 } else if let tool = byName[call.toolName] {
-                    request = await queue.fileRequest(tool: tool, call: call, sessionID: context.sessionID)
+                    let intent = context.narratedText.isEmpty ? nil : context.narratedText
+                    request = await queue.fileRequest(tool: tool, call: call, sessionID: context.sessionID, intent: intent)
                 } else {
                     continue
                 }

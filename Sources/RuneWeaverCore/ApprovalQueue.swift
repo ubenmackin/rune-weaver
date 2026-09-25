@@ -51,20 +51,49 @@ public actor ApprovalQueue {
 
     /// Builds and enqueues a request for a tool call.
     @discardableResult
-    public func enqueue(toolName: String, description: String, input: ToolInput) -> PermissionRequest {
-        let request = PermissionRequest(toolName: toolName, description: description, input: input)
+    public func enqueue(
+        toolName: String,
+        description: String = "",
+        input: ToolInput,
+        intent: String? = nil,
+        assessment: ImpactAssessment? = nil
+    ) -> PermissionRequest {
+        let request = PermissionRequest(
+            toolName: toolName,
+            description: description,
+            input: input,
+            intent: intent,
+            assessment: assessment
+        )
         pending[request.id] = request
         return request
     }
 
     /// Files a gated tool call into the queue.
     @discardableResult
-    public func fileRequest(tool: any Tool, call: ToolInput, sessionID: UUID? = nil) -> PermissionRequest {
+    public func fileRequest(
+        tool: any Tool,
+        call: ToolInput,
+        sessionID: UUID? = nil,
+        intent: String? = nil,
+        assessment: ImpactAssessment? = nil
+    ) async -> PermissionRequest {
+        let evaluatedAssessment = if let assessment {
+            assessment
+        } else {
+            await AppleIntelligenceAssessor.shared.assess(
+                toolName: tool.name,
+                argumentsJSON: call.argumentsJSON,
+                intent: intent
+            )
+        }
         let request = PermissionRequest(
             toolName: tool.name,
             description: tool.description,
             input: call,
-            sessionID: sessionID
+            sessionID: sessionID,
+            intent: intent,
+            assessment: evaluatedAssessment
         )
         enqueue(request)
         return request

@@ -308,6 +308,14 @@ export interface ApprovalInput {
   callID: string;
 }
 
+export type ImpactSeverity = "safe" | "moderate" | "dangerous";
+
+export interface ImpactAssessment {
+  severity: ImpactSeverity;
+  outcome: string;
+  warnings?: string[];
+}
+
 export interface PermissionRequest {
   id: string;
   toolName: string;
@@ -318,6 +326,8 @@ export interface PermissionRequest {
   // payloads, so session filtering must treat it as unattributed rather
   // than guessing an owner.
   sessionID?: string | null;
+  intent?: string | null;
+  assessment?: ImpactAssessment | null;
 }
 
 export interface ApprovalsResponse {

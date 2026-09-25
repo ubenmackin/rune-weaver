@@ -435,6 +435,33 @@ public struct TrustGrant: Sendable, Codable, Equatable {
     }
 }
 
+/// Estimated risk level of an action requesting approval.
+public enum ImpactSeverity: String, Sendable, Codable, Equatable, CaseIterable {
+    /// Read-only inspection, search, or status query with no side effects.
+    case safe
+    /// Local state changes, non-destructive file writes, or network requests.
+    case moderate
+    /// Destructive actions, bulk deletions, privilege escalation, or sensitive data access.
+    case dangerous
+}
+
+/// Safety and impact assessment for a tool invocation.
+public struct ImpactAssessment: Sendable, Codable, Equatable {
+    /// Evaluated risk severity.
+    public let severity: ImpactSeverity
+    /// Plain-English explanation of the expected outcome.
+    public let outcome: String
+    /// Specific risk warnings identified during evaluation.
+    public let warnings: [String]
+
+    /// Creates an impact assessment.
+    public init(severity: ImpactSeverity, outcome: String, warnings: [String] = []) {
+        self.severity = severity
+        self.outcome = outcome
+        self.warnings = warnings
+    }
+}
+
 /// Approval prompt sent to connected clients (e.g. over WebSocket).
 public struct PermissionRequest: Sendable, Codable, Equatable {
     /// Stable request identifier.
@@ -449,6 +476,10 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
     public let suggestedDurations: [TrustDuration]
     /// Owning session for narrated parked turns, if known.
     public let sessionID: UUID?
+    /// Conversational intent of the agent proposing this action.
+    public let intent: String?
+    /// Evaluated safety and impact outcome.
+    public let assessment: ImpactAssessment?
 
     /// Coding keys for the approval prompt.
     private enum CodingKeys: String, CodingKey {
@@ -464,16 +495,22 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         case suggestedDurations
         /// Owning session, when tagged.
         case sessionID
+        /// Agent intent.
+        case intent
+        /// Impact assessment.
+        case assessment
     }
 
     /// Creates a permission request.
     public init(
         id: UUID = UUID(),
         toolName: String,
-        description: String,
+        description: String = "",
         input: ToolInput,
         suggestedDurations: [TrustDuration] = TrustDuration.allCases,
-        sessionID: UUID? = nil
+        sessionID: UUID? = nil,
+        intent: String? = nil,
+        assessment: ImpactAssessment? = nil
     ) {
         self.id = id
         self.toolName = toolName
@@ -481,21 +518,25 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         self.input = input
         self.suggestedDurations = suggestedDurations
         self.sessionID = sessionID
+        self.intent = intent
+        self.assessment = assessment
     }
 
-    /// Decodes a request, tolerating payloads written before session tagging.
+    /// Decodes a request, tolerating payloads written before session tagging or assessment.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
         self.toolName = try container.decode(String.self, forKey: .toolName)
-        self.description = try container.decode(String.self, forKey: .description)
+        self.description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
         self.input = try container.decode(ToolInput.self, forKey: .input)
         self.suggestedDurations = try container.decode([TrustDuration].self, forKey: .suggestedDurations)
         self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        self.intent = try container.decodeIfPresent(String.self, forKey: .intent)
+        self.assessment = try container.decodeIfPresent(ImpactAssessment.self, forKey: .assessment)
     }
 
-    /// Encodes a request, omitting the session tag when untagged.
+    /// Encodes a request, omitting optional fields when absent.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -505,6 +546,8 @@ public struct PermissionRequest: Sendable, Codable, Equatable {
         try container.encode(input, forKey: .input)
         try container.encode(suggestedDurations, forKey: .suggestedDurations)
         try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(intent, forKey: .intent)
+        try container.encodeIfPresent(assessment, forKey: .assessment)
     }
 }
 
