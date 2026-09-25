@@ -2468,5 +2468,148 @@ describe("Input history recall", () => {
     fireEvent.keyDown(inputEl, { key: "ArrowDown" });
     expect(inputEl).toHaveValue("my draft");
   });
+
+  it("restores persisted history plus session messages after reload", async () => {
+    // A reload must merge the stored stack with the server user texts so prior
+    // sends stay recallable without resending; the merged order stays
+    // oldest-first with the newest server text on the first Up.
+    const sessionID = "reload-history-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionID);
+    localStorage.setItem(
+      `rw_input_history_${sessionID}`,
+      JSON.stringify(["persisted older"]),
+    );
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({ sessions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Reload Session",
+            messages: [
+              { id: "u1", role: "user", content: "server older", createdAt: now },
+              { id: "a1", role: "assistant", content: "ack older", createdAt: now },
+              { id: "u2", role: "user", content: "server newer", createdAt: now },
+              { id: "a2", role: "assistant", content: "ack newer", createdAt: now },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByText("server newer")).toBeInTheDocument();
+    });
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+    expect(inputEl).toHaveValue("");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("server newer");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("server older");
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("persisted older");
+  });
+
+  it("records steered inputs in the recall stack", async () => {
+    // Steering feeds the same recall stack as sends so mid-turn guidance stays
+    // recallable after the turn settles; the newest entry must be the steer.
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(capture.onMessage).not.toBeNull();
+    });
+    await user.type(screen.getByLabelText("Chat input"), "start long task");
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(1);
+    });
+    const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+      .sessionID;
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+    await user.type(inputEl, "please focus on tests");
+    await user.click(screen.getByRole("button", { name: "Steer turn" }));
+    await waitFor(() => {
+      expect(capture.sentFrames.length).toBe(2);
+    });
+    expect(inputEl).toHaveValue("");
+    expect(screen.getByText("please focus on tests")).toBeInTheDocument();
+    await dispatchFrameOrThrow(capture.onMessage, {
+      type: "done",
+      text: "steered done",
+      sessionID: turnSID,
+      toolActions: [],
+      totalTokens: 10,
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Send" })).toBeInTheDocument();
+    });
+    fireEvent.keyDown(inputEl, { key: "ArrowUp" });
+    expect(inputEl).toHaveValue("please focus on tests");
+  });
+
+  it("degrades a corrupt persisted payload to empty without throwing", async () => {
+    // A tampered history key must degrade to an empty stack so recall stays
+    // inert instead of throwing or surfacing stale text.
+    const sessionID = "corrupt-history-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionID);
+    localStorage.setItem(`rw_input_history_${sessionID}`, "not-json{{{");
+    const now = new Date().toISOString();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({ sessions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Corrupt Session",
+            messages: [],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    render(<ChatView />);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Chat input")).toBeInTheDocument();
+    });
+    const inputEl = screen.getByLabelText("Chat input") as HTMLTextAreaElement;
+    expect(inputEl).toHaveValue("");
+    expect(() => fireEvent.keyDown(inputEl, { key: "ArrowUp" })).not.toThrow();
+    expect(inputEl).toHaveValue("");
+  });
 });
 

@@ -133,6 +133,11 @@ const MAX_PARKED_FLIGHTS = 10;
 const PARKED_FLIGHT_TTL_MS = 30 * 60 * 1000;
 const PARKED_SETTLE_GRACE_MS = 10 * 1000;
 
+// Bounds the per-session Up/Down input recall stack oldest-first so reload
+// restores survive without unbounded storage; shares the named-constant
+// discipline of the parked-flight and message caps above.
+const MAX_INPUT_HISTORY = 50;
+
 // Outcome of a capped store so callers can surface lossy evictions through
 // component state. Completed-shell evictions lose nothing and stay quiet;
 // live evictions and refusals drop runnable timelines and must reach visible
@@ -678,6 +683,108 @@ function contextTokensKey(id: string): string {
 
 function loadContextTokens(id: string): number {
   return loadTokens("context", id);
+}
+
+// Per-session input-history storage key so Up/Down recall never leaks across
+// sessions. An empty normalized identifier disables storage so untagged
+// drafts never share a bucket.
+function historyStorageKey(id: string | null | undefined): string {
+  const normalized = normalizeSessionID(id);
+  if (!normalized) return "";
+  return `rw_input_history_${normalized}`;
+}
+
+// Loads the persisted Up/Down recall stack for one session, sanitized to at
+// most MAX_INPUT_HISTORY trimmed non-empty strings oldest-first. Corrupt
+// payloads degrade to an empty stack so a tampered key renders an empty
+// input with no throw.
+function loadInputHistory(id: string | null | undefined): string[] {
+  const key = historyStorageKey(id);
+  if (!key) return [];
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw == null) return [];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cleaned: string[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== "string") continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      cleaned.push(trimmed);
+    }
+    return cleaned.slice(-MAX_INPUT_HISTORY);
+  } catch {
+    return [];
+  }
+}
+
+// Persists one session's recall stack, sanitized and capped oldest-first.
+// Quota or private-mode failures stay silent so sending never fails over
+// storage.
+function persistInputHistory(
+  id: string | null | undefined,
+  entries: string[],
+): void {
+  const key = historyStorageKey(id);
+  if (!key) return;
+  try {
+    const cleaned: string[] = [];
+    for (const entry of entries) {
+      if (typeof entry !== "string") continue;
+      const trimmed = entry.trim();
+      if (!trimmed) continue;
+      cleaned.push(trimmed);
+    }
+    localStorage.setItem(
+      key,
+      JSON.stringify(cleaned.slice(-MAX_INPUT_HISTORY)),
+    );
+  } catch {
+    // Storage is best-effort only.
+  }
+}
+
+// Merges a stored recall stack with later additions oldest-first,
+// deduplicated so reloads and cross-tab sends converge without duplicates,
+// capped to MAX_INPUT_HISTORY.
+function mergeHistoryEntries(stored: string[], additions: string[]): string[] {
+  const seen = new Set(stored);
+  const merged = [...stored];
+  for (const entry of additions) {
+    if (typeof entry !== "string") continue;
+    if (!entry || seen.has(entry)) continue;
+    seen.add(entry);
+    merged.push(entry);
+  }
+  return merged.slice(-MAX_INPUT_HISTORY);
+}
+
+// Carries an in-memory recall stack forward when a provisional draft adopts
+// its authoritative session identifier: merges the draft stack into whatever
+// is already stored under the adopted key, persists the merged result, and
+// removes the orphan draft key so first turns never leave a permanent
+// `rw_input_history_<draft-uuid>` entry behind.
+function carryHistoryForward(
+  fromEntries: string[],
+  adoptedID: string | null | undefined,
+  draftID?: string | null | undefined,
+): string[] {
+  const merged = mergeHistoryEntries(
+    loadInputHistory(adoptedID),
+    fromEntries,
+  );
+  persistInputHistory(adoptedID, merged);
+  try {
+    const draftKey = historyStorageKey(draftID);
+    const adoptedKey = historyStorageKey(adoptedID);
+    if (draftKey && adoptedKey && draftKey !== adoptedKey) {
+      localStorage.removeItem(draftKey);
+    }
+  } catch {
+    // Storage is best-effort only.
+  }
+  return merged;
 }
 
 // Compact session total for the collapsed handheld summary line. A full
@@ -1246,8 +1353,7 @@ export default function ChatView({ health }: ChatViewProps) {
   // small threshold (150 px) of the scroll end.
   const userHasScrolledUpRef = useRef(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  // Per-mounted input history for Up/Down recall at caret edges. In-memory
-  // only so a send-session change persists naturally with the refs.
+  // Per-session Up/Down recall stack, seeded from localStorage + server backfill.
   const inputHistoryRef = useRef<string[]>([]);
   const historyIndexRef = useRef<number>(-1);
   const draftRef = useRef<string>("");
@@ -2603,6 +2709,16 @@ export default function ChatView({ health }: ChatViewProps) {
         frameSessionID &&
         normalizeSessionID(frameSessionID) !== normalizeSessionID(sessionIDRef.current)
       ) {
+        // A terminal frame can adopt the authoritative identifier for a turn
+        // that started under a provisional draft. The session effect reloads
+        // recall from the adopted key, so carry the in-memory stack forward
+        // merged with any stack already stored there; otherwise the reload
+        // would present an empty stack and drop prior sends from recall.
+        inputHistoryRef.current = carryHistoryForward(
+          inputHistoryRef.current,
+          frameSessionID,
+          sessionIDRef.current,
+        );
         setSessionID(frameSessionID);
       }
       const rawModelName: unknown = data.modelName;
@@ -3093,6 +3209,14 @@ export default function ChatView({ health }: ChatViewProps) {
     setContextTokens(hydratedContext);
     setLastTurnTokens(null);
 
+    // Seed the Up/Down recall stack from per-session storage so a reload
+    // restores prior sends without resending; the server backfill below only
+    // adds missing user texts. Resetting the recall index exits history mode
+    // so the fresh session starts from an honest empty draft.
+    inputHistoryRef.current = loadInputHistory(activeID);
+    historyIndexRef.current = -1;
+    draftRef.current = "";
+
     // If this session is a local draft (not yet sent or persisted to the server),
     // skip fetching to avoid expected 404 errors in the console.
     if (knownDraftIDRef.current === activeID) {
@@ -3114,6 +3238,38 @@ export default function ChatView({ health }: ChatViewProps) {
               : undefined,
           );
           setMessages(mapped);
+          // Backfill the recall stack from persisted user texts oldest-first
+          // by createdAt (wire order is oldest-first but never trusted),
+          // deduplicated against the stored stack so reloads and cross-tab
+          // sends converge without duplicates; the merged result persists
+          // for the next reload. Only the fetched window backfills, so a
+          // truncated history restores at most that window.
+          if (
+            normalizeSessionID(sessionIDRef.current) !==
+            normalizeSessionID(activeID)
+          ) {
+            return;
+          }
+          const ordered = [...res.messages].sort((a, b) => {
+            const aMs = normalizeCompletedAtMs(a.createdAt) ?? -1;
+            const bMs = normalizeCompletedAtMs(b.createdAt) ?? -1;
+            return aMs - bMs;
+          });
+          const backfillTexts: string[] = [];
+          for (const m of ordered) {
+            if (m.role !== "user") continue;
+            const textValue =
+              typeof m.content === "string" ? m.content.trim() : "";
+            if (!textValue) continue;
+            backfillTexts.push(textValue);
+          }
+          const capped = mergeHistoryEntries(
+            inputHistoryRef.current,
+            backfillTexts,
+          );
+          inputHistoryRef.current = capped;
+          historyIndexRef.current = -1;
+          persistInputHistory(activeID, capped);
         }
       })
       .catch((failure) => {
@@ -3363,6 +3519,15 @@ export default function ChatView({ health }: ChatViewProps) {
     }
     lastSteerTimestampRef.current = Date.now();
     setInput("");
+    // Steered inputs feed the same Up/Down recall stack as sends, capped at
+    // MAX_INPUT_HISTORY entries; the steer exits recall and clears the
+    // stashed draft.
+    inputHistoryRef.current = [...inputHistoryRef.current, text].slice(
+      -MAX_INPUT_HISTORY,
+    );
+    historyIndexRef.current = -1;
+    draftRef.current = "";
+    persistInputHistory(sessionID, inputHistoryRef.current);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -3625,11 +3790,14 @@ export default function ChatView({ health }: ChatViewProps) {
     userHasScrolledUpRef.current = false;
     setMessages((prev) => [...prev, userMessage].slice(-MAX_MESSAGES));
     setInput("");
-    // Sent inputs feed the Up/Down recall stack capped at 50 entries; a
-    // successful send exits recall and clears the stashed draft.
-    inputHistoryRef.current = [...inputHistoryRef.current, text].slice(-50);
+    // Sent inputs feed the Up/Down recall stack capped at MAX_INPUT_HISTORY
+    // entries; a successful send exits recall and clears the stashed draft.
+    inputHistoryRef.current = [...inputHistoryRef.current, text].slice(
+      -MAX_INPUT_HISTORY,
+    );
     historyIndexRef.current = -1;
     draftRef.current = "";
+    persistInputHistory(sessionID, inputHistoryRef.current);
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
@@ -3679,6 +3847,17 @@ export default function ChatView({ health }: ChatViewProps) {
         response.sessionID &&
         normalizeSessionID(response.sessionID) !== normalizeSessionID(sessionID)
       ) {
+        // A REST reply can adopt the authoritative identifier for a send that
+        // started under a provisional draft. The session effect reloads recall
+        // from the adopted key, so carry the in-memory stack (which already
+        // holds this send) forward merged with any stack already stored there;
+        // otherwise the reload would present an empty stack and drop prior
+        // sends from recall.
+        inputHistoryRef.current = carryHistoryForward(
+          inputHistoryRef.current,
+          response.sessionID,
+          sessionID,
+        );
         setSessionID(response.sessionID);
       }
 
@@ -3838,6 +4017,12 @@ export default function ChatView({ health }: ChatViewProps) {
     sessionBaseRef.current = fresh;
     const freshContext = loadContextTokens(nextID);
     setContextTokens(freshContext);
+    // Hydrate the recall stack synchronously, mirroring the token hydration
+    // above, so an immediate Up cannot recall the prior session's stack in
+    // the window before the [sessionID] effect reseeds the refs.
+    inputHistoryRef.current = loadInputHistory(nextID);
+    historyIndexRef.current = -1;
+    draftRef.current = "";
   }
 
   function handleSelectSession(id: string) {
@@ -3874,6 +4059,12 @@ export default function ChatView({ health }: ChatViewProps) {
     sessionBaseRef.current = hydrated;
     const hydratedContext = loadContextTokens(id);
     setContextTokens(hydratedContext);
+    // Hydrate the recall stack synchronously, mirroring the token hydration
+    // above, so an immediate Up cannot recall the prior session's stack in
+    // the window before the [sessionID] effect reseeds the refs.
+    inputHistoryRef.current = loadInputHistory(id);
+    historyIndexRef.current = -1;
+    draftRef.current = "";
     restoreParkedFlight(id);
   }
 
