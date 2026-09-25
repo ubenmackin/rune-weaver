@@ -72,15 +72,20 @@ import {
   ChatIcon,
   CheckIcon,
   CloseIcon,
+  FolderIcon,
+  GlobeIcon,
   MailIcon,
   MemoryIcon,
   MenuIcon,
+  MessageSquareIcon,
   MicIcon,
+  MonitorIcon,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
   SettingsIcon,
   StopIcon,
+  TargetIcon,
   TrashIcon,
   UserIcon,
   WrenchIcon,
@@ -134,6 +139,41 @@ function isSettingsTab(value: unknown): value is SettingsTab {
     typeof value === "string" &&
     (SETTINGS_TABS as readonly string[]).includes(value)
   );
+}
+
+interface ToolCategoryMeta {
+  id: string;
+  name: string;
+  description: string;
+  icon: (props: { size?: number; className?: string }) => React.JSX.Element;
+}
+
+const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
+  { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
+  { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
+  { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
+  { id: "browser", name: "Browser Automation", description: "Web page navigation, interaction, and page extraction", icon: GlobeIcon },
+  { id: "files", name: "Files & Workspace", description: "Local filesystem reads, writes, listing, and search", icon: FolderIcon },
+  { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
+  { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
+  { id: "media", name: "Media & Streaming", description: "Media search and client control", icon: WrenchIcon },
+  { id: "web", name: "Web Search", description: "Live web search and URL fetching", icon: SearchIcon },
+  { id: "api", name: "API & Integrations", description: "External REST calls and webhook triggers", icon: WrenchIcon },
+  { id: "other", name: "Other Tools", description: "General utility tools and external plugins", icon: WrenchIcon },
+];
+
+function getToolCategory(toolName: string): string {
+  if (toolName.startsWith("desktop.")) return "desktop";
+  if (toolName.startsWith("messages.")) return "messages";
+  if (toolName.startsWith("email.")) return "email";
+  if (toolName.startsWith("browser.")) return "browser";
+  if (toolName.startsWith("files.")) return "files";
+  if (toolName.startsWith("memories.") || toolName === "remember_fact" || toolName === "recall_memories") return "memories";
+  if (toolName.startsWith("goal.")) return "goal";
+  if (toolName.startsWith("media.")) return "media";
+  if (toolName.startsWith("web.")) return "web";
+  if (toolName.startsWith("api.")) return "api";
+  return "other";
 }
 
 interface ProviderEntry {
@@ -552,6 +592,9 @@ export default function SettingsManager() {
   const [radarrDefaultRoot, setRadarrDefaultRoot] = useState("");
 
   const [configuringToolName, setConfiguringToolName] = useState<string | null>(null);
+  const [toolSearchQuery, setToolSearchQuery] = useState("");
+  const [selectedToolCategory, setSelectedToolCategory] = useState("all");
+  const [togglingCategory, setTogglingCategory] = useState<string | null>(null);
   const [mediaSaveLoading, setMediaSaveLoading] = useState(false);
   const [mediaModalError, setMediaModalError] = useState<string | null>(null);
   // Short-lived success-then-close timer for the media modal: held in a ref
@@ -1137,6 +1180,30 @@ export default function SettingsManager() {
     }
   };
 
+  // Bulk-toggles all builtin tools in a given category.
+  const handleToggleCategory = async (categoryId: string, enable: boolean) => {
+    const categoryTools = (Array.isArray(allTools) ? allTools : []).filter(
+      (t) => t.isBuiltIn && getToolCategory(t.name) === categoryId
+    );
+    const targets = categoryTools.filter((t) => t.isEnabled !== enable);
+    if (targets.length === 0) return;
+    setTogglingCategory(categoryId);
+    try {
+      for (const tool of targets) {
+        await updateToolState(tool.name, enable);
+      }
+      const toolsRes = await getTools();
+      setAllTools(Array.isArray(toolsRes?.tools) ? toolsRes.tools : []);
+      pushSuccessToast(
+        `${enable ? "Enabled" : "Disabled"} all tools in '${categoryId}'.`
+      );
+    } catch (err) {
+      pushErrorToast(err instanceof Error ? err.message : `Failed to update ${categoryId} tools.`);
+    } finally {
+      setTogglingCategory(null);
+    }
+  };
+
   // Copies one settings fetch into the Sonarr/Radarr fields, tolerating both
   // snake_case and camelCase DTO aliases and falling back to the conventional
   // key names. Only overwrites sections the engine returns so older engines
@@ -1249,27 +1316,16 @@ export default function SettingsManager() {
     []
   );
 
-  // Builds the [desktop] delta from the knob fields so the full-settings save
-  // and the modal-only save share one shape. A per-tool modal sends only its
-  // own knobs (capture bounds for desktop.screenshot, the blocklist for
-  // desktop.action); the full-settings save sends every knob. Enable keys
-  // never travel here — tool enablement lives in the tool-state toggles.
+  // Builds the unified [desktop] delta for the single Configure Desktop
+  // Integration modal so the full-settings save and the modal-only save share
+  // one shape. Both call sites always send every knob (capture bounds plus the
+  // application blocklist). Enable keys never travel here — tool enablement
+  // lives in the tool-state toggles.
   // Numeric fields preserve the raw input (including empty/invalid) so the
   // modal validation surfaces range errors instead of silently coercing back
   // to defaults.
   const buildDesktopPayload = useCallback(
-    (toolName: string | null = null): DesktopSettingsUpdate => {
-      if (toolName === "desktop.screenshot") {
-        return {
-          max_image_dimension: Number(desktopMaxImageDimension),
-          jpeg_quality: Number(desktopJpegQuality),
-        };
-      }
-      if (toolName === "desktop.action") {
-        return {
-          blocked_apps: parseBlockedAppsText(desktopBlockedAppsText),
-        };
-      }
+    (): DesktopSettingsUpdate => {
       return {
         max_image_dimension: Number(desktopMaxImageDimension),
         jpeg_quality: Number(desktopJpegQuality),
@@ -2174,29 +2230,25 @@ export default function SettingsManager() {
     }
   };
 
-  // Saves only the [desktop] delta for the open per-tool modal through PUT
+  // Saves the unified [desktop] delta for the desktop modal through PUT
   // /settings, mirroring the media-only save shape so unsaved edits in other
-  // tabs survive. The screenshot modal validates its capture bounds through
-  // the same shared bounds helper as the full save instead of coercing to
-  // defaults; the control modal carries only the blocklist, which needs no
-  // range check. Each modal sends only its own knobs and never enable keys,
-  // and the engine live-reloads capture knobs without a restart.
+  // tabs survive. Validates capture bounds through the shared helper and
+  // saves both screen capture knobs and application blocklists without enable
+  // keys, which live exclusively in tool-state toggles.
   const handleSaveDesktopConfig = async () => {
-    if (configuringToolName !== "desktop.action") {
-      const desktopBoundsError = validateDesktopCaptureBounds(
-        desktopMaxImageDimension,
-        desktopJpegQuality
-      );
-      if (desktopBoundsError) {
-        setDesktopModalError(desktopBoundsError);
-        return;
-      }
+    const desktopBoundsError = validateDesktopCaptureBounds(
+      desktopMaxImageDimension,
+      desktopJpegQuality
+    );
+    if (desktopBoundsError) {
+      setDesktopModalError(desktopBoundsError);
+      return;
     }
     setDesktopSaveLoading(true);
     setDesktopModalError(null);
     try {
       const updated = await updateSettings({
-        desktop: buildDesktopPayload(configuringToolName),
+        desktop: buildDesktopPayload(),
       });
       populateForm(updated);
       pushSuccessToast("Desktop settings saved!");
@@ -3502,99 +3554,218 @@ export default function SettingsManager() {
             )}
 
             {/* Built-in Core Tools Section */}
-            <h4 style={{ margin: "28px 0 12px 0", display: "flex", alignItems: "center", gap: "8px" }}>
-              <span>Built-in Engine Tools</span>
-            </h4>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", margin: "28px 0 8px 0", flexWrap: "wrap", gap: "10px" }}>
+              <h4 style={{ margin: 0, display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>Built-in Engine Tools</span>
+              </h4>
+              <span className="muted text-sm">
+                {safeTools.filter((t) => t.isBuiltIn && t.isEnabled).length} of {safeTools.filter((t) => t.isBuiltIn).length} enabled
+              </span>
+            </div>
 
-            {/* Responsive cards grid keeps 13 engine tools above the fold: dense
-                3–4-up cards on wide panes collapse to one column on narrow
-                screens so the Tools tab no longer scrolls through full rows. */}
-            {safeTools.filter((t) => t.isBuiltIn).length === 0 ? (
-              <div className="empty-state-box">
-                <WrenchIcon size={32} />
-                <p>No built-in tools available.</p>
+            {/* Search and Category Filter Bar */}
+            <div className="tools-filter-bar">
+              <div className="tools-search-wrapper">
+                <SearchIcon size={16} className="tools-search-icon" />
+                <input
+                  type="search"
+                  className="tools-search-input"
+                  placeholder="Search tools by name or description..."
+                  value={toolSearchQuery}
+                  onChange={(e) => setToolSearchQuery(e.target.value)}
+                />
               </div>
-            ) : (
-              <div className="builtin-tools-grid">
-                {safeTools.filter((t) => t.isBuiltIn).map((tool) => {
-                  const isToggling = togglingToolName === tool.name;
+
+              {/* Category Pills */}
+              <div className="tools-category-pills">
+                <button
+                  type="button"
+                  className={`tools-category-pill ${selectedToolCategory === "all" ? "active" : ""}`}
+                  onClick={() => setSelectedToolCategory("all")}
+                >
+                  <span>All</span>
+                  <span className="tools-category-pill-count">
+                    {safeTools.filter((t) => t.isBuiltIn).length}
+                  </span>
+                </button>
+                {TOOL_CATEGORIES.map((cat) => {
+                  const catToolCount = safeTools.filter((t) => t.isBuiltIn && getToolCategory(t.name) === cat.id).length;
+                  if (catToolCount === 0) return null;
+                  const Icon = cat.icon;
                   return (
-                    <article key={tool.name} className="builtin-tool-card">
-                      <div className="builtin-tool-card-header">
-                        <code className="builtin-tool-name" title={tool.name}>
-                          {tool.name}
-                        </code>
-                        <span className="builtin-tool-permission">{tool.permissionLevel}</span>
-                      </div>
-                      {/* Single-line clamp with full-text tooltip keeps cards even;
-                          native details below reveals the complete wording on
-                          demand for keyboard and screen-reader users. */}
-                      <p className="builtin-tool-desc" title={tool.description}>
-                        {tool.description}
-                      </p>
-                      {tool.description && (
-                        <details className="builtin-tool-details">
-                          <summary>Details</summary>
-                          <p className="builtin-tool-details-body">{tool.description}</p>
-                        </details>
-                      )}
-                      <div className="builtin-tool-footer builtin-tool-footer--split">
-                        <label
-                          className="toggle-label tool-switch"
-                          style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
-                        >
-                          <input
-                            type="checkbox"
-                            role="switch"
-                            className="tool-switch-input"
-                            aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
-                            aria-checked={tool.isEnabled}
-                            checked={tool.isEnabled}
-                            onChange={() => void handleToggleTool(tool)}
-                            disabled={isToggling}
-                          />
-                          {/* Visual switch affordance: data-on drives the accent/muted
-                              fill and knob side in CSS while the native checkbox keeps
-                              keyboard and screen-reader semantics. */}
-                          <span
-                            className="tool-switch-track"
-                            data-on={tool.isEnabled ? "true" : "false"}
-                            aria-hidden="true"
-                          >
-                            <span className="tool-switch-thumb" />
-                          </span>
-                          {/* State-first text reports the persisted bus state instead of
-                              the next action so the row reads like a mobile setting. */}
-                          <span className="tool-switch-state">
-                            {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
-                          </span>
-                        </label>
-                        {/* Configure affordance follows the server hasConfig flag
-                            alone so capability detection stays with the tool
-                            listing route instead of a client name allowlist. */}
-                        {tool.hasConfig && (
-                          <button
-                            type="button"
-                            className="accent-ghost icon-text-btn"
-                            onClick={() => {
-                              setMediaModalError(null);
-                              setBrowserModalError(null);
-                              setDesktopModalError(null);
-                              setConfiguringToolName(tool.name);
-                            }}
-                            style={{ padding: "4px 8px", fontSize: "0.78rem" }}
-                            title="Edit this tool's configuration"
-                          >
-                            <SettingsIcon size={12} />
-                            <span>Configure</span>
-                          </button>
-                        )}
-                      </div>
-                    </article>
+                    <button
+                      key={cat.id}
+                      type="button"
+                      className={`tools-category-pill ${selectedToolCategory === cat.id ? "active" : ""}`}
+                      onClick={() => setSelectedToolCategory(cat.id)}
+                    >
+                      <Icon size={13} />
+                      <span>{cat.name.split(" ")[0]}</span>
+                      <span className="tools-category-pill-count">{catToolCount}</span>
+                    </button>
                   );
                 })}
               </div>
-            )}
+            </div>
+
+            {(() => {
+              const builtIns = safeTools.filter((t) => t.isBuiltIn);
+              const q = toolSearchQuery.trim().toLowerCase();
+              const filteredTools = builtIns.filter((tool) => {
+                if (q && !tool.name.toLowerCase().includes(q) && !(tool.description?.toLowerCase().includes(q))) {
+                  return false;
+                }
+                if (selectedToolCategory !== "all" && getToolCategory(tool.name) !== selectedToolCategory) {
+                  return false;
+                }
+                return true;
+              });
+
+              if (builtIns.length === 0) {
+                return (
+                  <div className="empty-state-box">
+                    <WrenchIcon size={32} />
+                    <p>No built-in tools available.</p>
+                  </div>
+                );
+              }
+
+              if (filteredTools.length === 0) {
+                return (
+                  <div className="empty-state-box" style={{ padding: "32px 16px" }}>
+                    <SearchIcon size={28} />
+                    <p style={{ margin: "8px 0 4px 0" }}>No tools match your filter criteria.</p>
+                    <button
+                      type="button"
+                      className="accent-ghost"
+                      onClick={() => {
+                        setToolSearchQuery("");
+                        setSelectedToolCategory("all");
+                      }}
+                      style={{ marginTop: "8px", fontSize: "0.82rem" }}
+                    >
+                      Reset filters
+                    </button>
+                  </div>
+                );
+              }
+
+              // Group filtered tools by category preserving TOOL_CATEGORIES order
+              const visibleCategories = TOOL_CATEGORIES.map((cat) => ({
+                ...cat,
+                tools: filteredTools.filter((t) => getToolCategory(t.name) === cat.id),
+              })).filter((cat) => cat.tools.length > 0);
+
+              return (
+                <div className="tool-categories-container">
+                  {visibleCategories.map((cat) => {
+                    const enabledCount = cat.tools.filter((t) => t.isEnabled).length;
+                    const allEnabled = enabledCount === cat.tools.length;
+                    const anyEnabled = enabledCount > 0;
+                    const isTogglingCat = togglingCategory === cat.id;
+                    const Icon = cat.icon;
+
+                    return (
+                      <section key={cat.id} className="tool-category-section">
+                        <div className="tool-category-header">
+                          <div className="tool-category-title-group">
+                            <Icon size={18} />
+                            <h4 className="tool-category-title">{cat.name}</h4>
+                            <span
+                              className={`tool-category-badge ${
+                                allEnabled ? "all-enabled" : anyEnabled ? "partial" : "all-disabled"
+                              }`}
+                            >
+                              {enabledCount} of {cat.tools.length} enabled
+                            </span>
+                          </div>
+                          <div className="tool-category-actions">
+                            <button
+                              type="button"
+                              className="tool-category-action-btn"
+                              onClick={() => void handleToggleCategory(cat.id, !allEnabled)}
+                              disabled={isTogglingCat}
+                            >
+                              {isTogglingCat ? "Updating…" : allEnabled ? "Disable All" : "Enable All"}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="builtin-tools-grid">
+                          {cat.tools.map((tool) => {
+                            const isToggling = togglingToolName === tool.name;
+                            const isDesktopTool = tool.name.startsWith("desktop.");
+                            return (
+                              <article key={tool.name} className="builtin-tool-card">
+                                <div className="builtin-tool-card-header">
+                                  <code className="builtin-tool-name" title={tool.name}>
+                                    {tool.name}
+                                  </code>
+                                  <span className="builtin-tool-permission">{tool.permissionLevel}</span>
+                                </div>
+                                <p className="builtin-tool-desc" title={tool.description}>
+                                  {tool.description}
+                                </p>
+                                {tool.description && (
+                                  <details className="builtin-tool-details">
+                                    <summary>Details</summary>
+                                    <p className="builtin-tool-details-body">{tool.description}</p>
+                                  </details>
+                                )}
+                                <div className="builtin-tool-footer builtin-tool-footer--split">
+                                  <label
+                                    className="toggle-label tool-switch"
+                                    style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      role="switch"
+                                      className="tool-switch-input"
+                                      aria-label={`${tool.name} ${tool.isEnabled ? "Enabled" : "Disabled"}`}
+                                      aria-checked={tool.isEnabled}
+                                      checked={tool.isEnabled}
+                                      onChange={() => void handleToggleTool(tool)}
+                                      disabled={isToggling}
+                                    />
+                                    <span
+                                      className="tool-switch-track"
+                                      data-on={tool.isEnabled ? "true" : "false"}
+                                      aria-hidden="true"
+                                    >
+                                      <span className="tool-switch-thumb" />
+                                    </span>
+                                    <span className="tool-switch-state">
+                                      {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
+                                    </span>
+                                  </label>
+                                  {tool.hasConfig && (
+                                    <button
+                                      type="button"
+                                      className="accent-ghost icon-text-btn"
+                                      onClick={() => {
+                                        setMediaModalError(null);
+                                        setBrowserModalError(null);
+                                        setDesktopModalError(null);
+                                        setConfiguringToolName(isDesktopTool ? "desktop" : tool.name);
+                                      }}
+                                      style={{ padding: "4px 8px", fontSize: "0.78rem" }}
+                                      title={isDesktopTool ? "Configure Desktop Integration" : "Edit this tool's configuration"}
+                                    >
+                                      <SettingsIcon size={12} />
+                                      <span>Configure</span>
+                                    </button>
+                                  )}
+                                </div>
+                              </article>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    );
+                  })}
+                </div>
+              );
+            })()}
 
             {/* Plugin Configuration */}
             <div style={{ marginTop: "24px", paddingTop: "20px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
@@ -5652,16 +5823,18 @@ export default function SettingsManager() {
             </button>
           </div>
         </Modal>
-      ) : configuringToolName === "desktop.screenshot" ? (
+      ) : configuringToolName === "desktop" ||
+          configuringToolName === "desktop.screenshot" ||
+          configuringToolName === "desktop.action" ? (
         <Modal
-          label="Configure Desktop Screenshot"
+          label="Configure Desktop Integration"
           onClose={() => {
             if (!desktopSaveLoading) setConfiguringToolName(null);
           }}
           containerClassName="modal-container"
         >
           <div className="modal-header">
-            <h3>Configure Desktop Screenshot</h3>
+            <h3>Configure Desktop Integration</h3>
             <button
               type="button"
               className="icon-button"
@@ -5683,134 +5856,87 @@ export default function SettingsManager() {
             )}
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Read-only display or app-window capture with downscaled JPEG plus
-              coordinate metadata for control actions. Captures stay in memory
-              for the turn with only the content hash plus dimensions retained
-              afterwards.
+              Configure screen capture resolution, vision downscaling, and application safety blocklists for desktop control.
             </p>
 
-            {/* Capture knobs */}
-            <div className="form-row" style={{ display: "flex", gap: "10px", marginBottom: "10px" }}>
-              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                <label htmlFor="desktop-max-dimension" style={{ fontSize: "0.82rem" }}>Max Image Dimension (px)</label>
-                <input
-                  id="desktop-max-dimension"
-                  type="number"
-                  min={256}
-                  max={3840}
-                  step={1}
-                  className="input-field"
-                  value={desktopMaxImageDimension}
-                  onChange={(e) =>
-                    setDesktopMaxImageDimension(
-                      e.target.value === "" ? "" : Number(e.target.value)
-                    )
-                  }
-                  placeholder="1280"
-                />
-                <span className="form-group-hint">
-                  Longest edge of the downscaled screenshot (256-3840).
-                </span>
-              </div>
-              <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                <label htmlFor="desktop-jpeg-quality" style={{ fontSize: "0.82rem" }}>JPEG Quality (0.1-1.0)</label>
-                <input
-                  id="desktop-jpeg-quality"
-                  type="number"
-                  min={0.1}
-                  max={1.0}
-                  step={0.05}
-                  className="input-field"
-                  value={desktopJpegQuality}
-                  onChange={(e) =>
-                    setDesktopJpegQuality(
-                      e.target.value === "" ? "" : Number(e.target.value)
-                    )
-                  }
-                  placeholder="0.75"
-                />
-                <span className="form-group-hint">
-                  In-memory JPEG quality for downscaled captures.
-                </span>
+            {/* Section 1: Screen Capture & Vision */}
+            <div style={{ marginBottom: "20px" }}>
+              <h4 style={{ fontSize: "0.9rem", margin: "0 0 10px 0", color: "var(--text-primary, #ffffff)" }}>
+                Screen Capture & Vision
+              </h4>
+              <div className="form-row" style={{ display: "flex", gap: "10px", marginBottom: "4px" }}>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="desktop-max-dimension" style={{ fontSize: "0.82rem" }}>Max Image Dimension (px)</label>
+                  <input
+                    id="desktop-max-dimension"
+                    type="number"
+                    min={256}
+                    max={3840}
+                    step={1}
+                    className="input-field"
+                    value={desktopMaxImageDimension}
+                    onChange={(e) =>
+                      setDesktopMaxImageDimension(
+                        e.target.value === "" ? "" : Number(e.target.value)
+                      )
+                    }
+                    placeholder="1280"
+                  />
+                  <span className="form-group-hint">
+                    Longest edge of the downscaled screenshot (256-3840).
+                  </span>
+                </div>
+                <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
+                  <label htmlFor="desktop-jpeg-quality" style={{ fontSize: "0.82rem" }}>JPEG Quality (0.1-1.0)</label>
+                  <input
+                    id="desktop-jpeg-quality"
+                    type="number"
+                    min={0.1}
+                    max={1.0}
+                    step={0.05}
+                    className="input-field"
+                    value={desktopJpegQuality}
+                    onChange={(e) =>
+                      setDesktopJpegQuality(
+                        e.target.value === "" ? "" : Number(e.target.value)
+                      )
+                    }
+                    placeholder="0.75"
+                  />
+                  <span className="form-group-hint">
+                    In-memory JPEG quality for downscaled captures.
+                  </span>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setConfiguringToolName(null)}
-              disabled={desktopSaveLoading}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void handleSaveDesktopConfig()}
-              disabled={desktopSaveLoading}
-            >
-              {desktopSaveLoading ? "Saving…" : "Save Configuration"}
-            </button>
-          </div>
-        </Modal>
-      ) : configuringToolName === "desktop.action" ? (
-        <Modal
-          label="Configure Desktop Control"
-          onClose={() => {
-            if (!desktopSaveLoading) setConfiguringToolName(null);
-          }}
-          containerClassName="modal-container"
-        >
-          <div className="modal-header">
-            <h3>Configure Desktop Control</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => {
-                if (!desktopSaveLoading) setConfiguringToolName(null);
-              }}
-              disabled={desktopSaveLoading}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
-            {desktopModalError && (
-              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <AlertTriangleIcon size={16} />
-                <span>{desktopModalError}</span>
-              </div>
-            )}
 
-            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Approval-gated mouse, keyboard, and app-switch actions. Every batch
-              parks in the approvals inbox and never runs without approval.
-            </p>
-
-            {/* Blocked apps */}
-            <div className="form-group" style={{ marginBottom: "10px" }}>
-              <label htmlFor="desktop-blocked-apps-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span>
-                  Blocked Apps{" "}
-                  <span className="muted text-sm">
-                    ({parseBlockedAppsText(desktopBlockedAppsText).length}{" "}
-                    {parseBlockedAppsText(desktopBlockedAppsText).length === 1 ? "app" : "apps"})
+            {/* Section 2: Control & Safety Blocklist */}
+            <div style={{ paddingTop: "14px", borderTop: "1px solid var(--border-color, #2d3748)" }}>
+              <h4 style={{ fontSize: "0.9rem", margin: "0 0 10px 0", color: "var(--text-primary, #ffffff)" }}>
+                Control & Security Blocklist
+              </h4>
+              <div className="form-group" style={{ marginBottom: "10px" }}>
+                <label htmlFor="desktop-blocked-apps-textarea" style={{ fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span>
+                    Blocked Apps{" "}
+                    <span className="muted text-sm">
+                      ({parseBlockedAppsText(desktopBlockedAppsText).length}{" "}
+                      {parseBlockedAppsText(desktopBlockedAppsText).length === 1 ? "app" : "apps"})
+                    </span>
                   </span>
+                </label>
+                <textarea
+                  id="desktop-blocked-apps-textarea"
+                  className="input-field allowed-origins-textarea"
+                  value={desktopBlockedAppsText}
+                  onChange={(e) => setDesktopBlockedAppsText(e.target.value)}
+                  placeholder={"Terminal\nKeychain Access\n1Password"}
+                />
+                <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
+                  One application name per line. Blocked targets refuse automated
+                  input before dispatch. Blank lines are ignored.
                 </span>
-              </label>
-              <textarea
-                id="desktop-blocked-apps-textarea"
-                className="input-field allowed-origins-textarea"
-                value={desktopBlockedAppsText}
-                onChange={(e) => setDesktopBlockedAppsText(e.target.value)}
-                placeholder={"Terminal\nKeychain Access\n1Password"}
-              />
-              <span className="form-group-hint" style={{ marginTop: "4px", display: "block" }}>
-                One application name per line. Blocked targets refuse automated
-                input before dispatch. Blank lines are ignored.
-              </span>
+              </div>
             </div>
           </div>
           <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>

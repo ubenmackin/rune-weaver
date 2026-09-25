@@ -119,9 +119,7 @@ private func makeSmokeStack(gateway: any EmailIMAPGateway) async throws -> (
     for tool in EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig(), gateway: gateway, sandboxConfig: sandbox) {
         await bus.register(tool: tool)
     }
-    for tool in MemoryTools.makeTools(engine: engine, audit: { audit.record($0) }) {
-        await bus.register(tool: tool)
-    }
+    await MemoryTools.register(on: bus, engine: engine, audit: { audit.record($0) })
     let systemPrompt = await SystemPromptComposer.compose(toolBus: bus)
     return (base, engine, conversations, bus, systemPrompt, audit)
 }
@@ -332,7 +330,7 @@ struct SmokeHarnessTests {
         )
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let busTools = await bus.availableTools()
-        let smokeExpected: Set = ["email.search", "email.read", "email.attachment", "remember_fact", "recall_memories"]
+        let smokeExpected: Set = ["email.search", "email.read", "email.attachment", "memories.store", "memories.recall"]
         let busNames = Set(busTools.map(\.name))
         #expect(smokeExpected.isSubset(of: busNames), "Missing tools: \(smokeExpected.subtracting(busNames))")
         // Exhaustive registry mirrors the dedicated schema suite so smoke stays

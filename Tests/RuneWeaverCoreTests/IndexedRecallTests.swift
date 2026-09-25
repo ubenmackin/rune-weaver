@@ -232,4 +232,30 @@ struct IndexedRecallTests {
         #expect(prompt.contains("files.grep"))
         #expect(prompt.contains(LiveSearchGuidance.forceLiveFlagName))
     }
+
+    @Test
+    func `Document recall enriches hit metadata with display name, path, and source`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        let doc = IndexedDocument(
+            source: .files,
+            externalID: "bills.numbers",
+            displayName: "bills.numbers",
+            path: "/Users/alice/Desktop/bills.numbers",
+            contentHash: "hash-bills",
+            indexedAt: Date()
+        )
+        let stored = try await store.upsertDocument(doc)
+        _ = try await store.upsertChunks(documentID: stored.id, chunks: [
+            IndexedChunk(documentID: stored.id, ordinal: 0, text: "Electricity $120 Paid Water $45 Unpaid")
+        ])
+
+        let results = await engine.recallDocuments(query: "Electricity bills", limit: 5)
+        #expect(!results.isEmpty)
+        let hit = try #require(results.first)
+        #expect(hit.metadata["display_name"] == "bills.numbers")
+        #expect(hit.metadata["path"] == "/Users/alice/Desktop/bills.numbers")
+        #expect(hit.metadata["document_source"] == "files")
+    }
 }

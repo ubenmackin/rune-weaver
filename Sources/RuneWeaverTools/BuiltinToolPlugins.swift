@@ -20,9 +20,16 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, files, memory, goals, web, browser, api, media, desktop).
+    /// (email, messages, files, memory, goals, web, browser, api, media, desktop).
     public static var allToolNames: [String] {
-        EmailTools.toolNames + FilesTools.toolNames + MemoryTools.toolNames + GoalTools.toolNames + toolNames + MediaTools.toolNames + DesktopTools.allToolNames
+        EmailTools.toolNames
+            + MessagesTools.toolNames
+            + FilesTools.toolNames
+            + MemoryTools.toolNames
+            + GoalTools.toolNames
+            + toolNames
+            + MediaTools.toolNames
+            + DesktopTools.allToolNames
     }
 
     /// Builds the shared five-tool set for one `[browser]` policy.
@@ -107,7 +114,9 @@ public enum BuiltinToolPlugins {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        messagesGateway: (any MessagesGateway)? = nil,
+        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath
     ) -> [any Tool] {
         var tools: [any Tool] = []
         if let emailConfig {
@@ -120,6 +129,7 @@ public enum BuiltinToolPlugins {
                 securityConfig: securityConfig
             )
         }
+        tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
@@ -233,7 +243,9 @@ public enum BuiltinToolPlugins {
         goalEngine: GoalEngine? = nil,
         goalStore: GoalStore? = nil,
         goalConversations: ConversationManager? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        messagesGateway: (any MessagesGateway)? = nil,
+        chatDatabasePath: String = MessagesIndexer.defaultChatDatabasePath
     ) async {
         let desktopNames = Set(DesktopTools.allToolNames)
         for tool in makeAllTools(
@@ -260,12 +272,17 @@ public enum BuiltinToolPlugins {
             goalEngine: goalEngine,
             goalStore: goalStore,
             goalConversations: goalConversations,
-            goalsConfig: goalsConfig
+            goalsConfig: goalsConfig,
+            messagesGateway: messagesGateway,
+            chatDatabasePath: chatDatabasePath
         ) {
             // Every other builtin keeps the enabled-by-default registration;
             // desktop tools ship disabled so only an operator-enabled tool
             // goes live (stored rows restore right after registration).
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
+        }
+        if memoryEngine != nil {
+            await MemoryTools.registerMemoryAliases(on: bus)
         }
     }
 }

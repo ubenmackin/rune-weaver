@@ -446,10 +446,10 @@ public enum SystemPromptComposer {
                 + "Patterns without '/' (e.g. *.md) match filenames at any depth under baseDir."
         )
         lines.append(
-            "- Memory writes auto-allowed and auditable: remember_fact and recall_memories are trusted "
+            "- Memory writes auto-allowed and auditable: memories.store and memories.recall (aliases: remember_fact, recall_memories) are trusted "
                 + "without prompts and every write is logged; never include secrets. "
-                + "Call recall_memories before answering from history without inventing; "
-                + "call remember_fact unprompted for durable facts."
+                + "Call memories.recall before answering from history or searching indexed documents without inventing; "
+                + "call memories.store unprompted for durable facts."
         )
         // Delimited-content rule: untrusted tool output arrives wrapped by the
         // single-sourced labeler, so the model treats it as quoted evidence rather
@@ -623,8 +623,8 @@ public enum SystemPromptComposer {
         base += """
         Scheduled task guidance:
         - You are executing as an automated scheduled background task. There is no active human waiting in real time.
-        - Persist critical run outcomes, updates, timestamps, or state changes into memory via remember_fact so subsequent runs or user chats can recall them.
-        - Proactively query recall_memories to check prior run state, baselines, or preferences when relevant to the task.
+        - Persist critical run outcomes, updates, timestamps, or state changes into memory via memories.store so subsequent runs or user chats can recall them.
+        - Proactively query memories.recall to check prior run state, baselines, or preferences when relevant to the task.
         """
         storeCachedPrompt(base, forKey: key)
         return base

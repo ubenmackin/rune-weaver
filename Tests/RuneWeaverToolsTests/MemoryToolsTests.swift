@@ -40,8 +40,8 @@ struct MemoryToolsTests {
         for tool in tools {
             #expect(tool.permissionLevel == .trusted)
         }
-        #expect(tools.map(\.name) == ["remember_fact", "recall_memories"])
-        #expect(MemoryTools.toolNames == ["remember_fact", "recall_memories"])
+        #expect(tools.map(\.name) == ["memories.store", "memories.recall"])
+        #expect(MemoryTools.toolNames == ["memories.store", "memories.recall"])
     }
 
     @Test
@@ -51,7 +51,7 @@ struct MemoryToolsTests {
         let capture = ToolsTestSupport.AuditCapture()
         let tool = RememberFactTool(engine: engine, audit: { capture.record($0) })
         let output = try await tool.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses","category":"preference"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses","category":"preference"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == false)
@@ -73,7 +73,7 @@ struct MemoryToolsTests {
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let tool = RememberFactTool(engine: engine, audit: { _ in })
         let output = try await tool.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"My gate code is 1234"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"My gate code is 1234"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == false)
@@ -91,13 +91,13 @@ struct MemoryToolsTests {
         )
         let remember = RememberFactTool(engine: engine, audit: { _ in })
         let stored = try await remember.execute(
-            input: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"My favorite lighthouse is the northern brass beacon","category":"preference"}"#),
+            input: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"My favorite lighthouse is the northern brass beacon","category":"preference"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(stored.isError == false)
         let recall = RecallMemoriesTool(engine: engine)
         let output = try await recall.execute(
-            input: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"lighthouse brass","limit":10}"#),
+            input: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"lighthouse brass","limit":10}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(output.isError == false)
@@ -111,23 +111,36 @@ struct MemoryToolsTests {
         defer { ToolsTestSupport.cleanupIsolatedEngineBase(base) }
         let capture = ToolsTestSupport.AuditCapture()
         let bus = ToolBus()
-        for tool in MemoryTools.makeTools(engine: engine, audit: { capture.record($0) }) {
-            await bus.register(tool: tool)
-        }
+        await MemoryTools.register(on: bus, engine: engine, audit: { capture.record($0) })
         let names = await bus.toolNames()
-        #expect(Set(names) == Set(["remember_fact", "recall_memories"]))
+        #expect(Set(names) == Set(["memories.store", "memories.recall"]))
+        // Execute via primary names
         let stored = await bus.execute(
-            toolCall: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
+            toolCall: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"The lighthouse keeper collects brass compasses"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(stored.isError == false)
         #expect(capture.captured().count == 1)
         let recalled = await bus.execute(
-            toolCall: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"lighthouse compasses","limit":5}"#),
+            toolCall: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"lighthouse compasses","limit":5}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(recalled.isError == false)
         #expect(recalled.content.contains("lighthouse keeper"))
+
+        // Execute via legacy aliases
+        let storedViaAlias = await bus.execute(
+            toolCall: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"Foghorn sounds at 4 AM"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(storedViaAlias.isError == false)
+        #expect(capture.captured().count == 2)
+        let recalledViaAlias = await bus.execute(
+            toolCall: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"Foghorn","limit":5}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(recalledViaAlias.isError == false)
+        #expect(recalledViaAlias.content.contains("Foghorn"))
     }
 
     @Test
@@ -137,18 +150,16 @@ struct MemoryToolsTests {
         // Chat configuration: gate attached, denying handler. Trusted
         // memory tools must still succeed without prompting.
         let bus = ToolBus(permissionGate: PermissionGate())
-        for tool in MemoryTools.makeTools(engine: engine, audit: { _ in }) {
-            await bus.register(tool: tool)
-        }
+        await MemoryTools.register(on: bus, engine: engine, audit: { _ in })
         await bus.setLegacyApprovalHandler { _, _ in false }
         try await engine.storeEpisodic(content: "Sailed past the lighthouse at dawn", sessionID: UUID())
         let remembered = await bus.execute(
-            toolCall: ToolInput(toolName: "remember_fact", argumentsJSON: #"{"text":"My favorite lighthouse is brass"}"#),
+            toolCall: ToolInput(toolName: "memories.store", argumentsJSON: #"{"text":"My favorite lighthouse is brass"}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(remembered.isError == false)
         let recalled = await bus.execute(
-            toolCall: ToolInput(toolName: "recall_memories", argumentsJSON: #"{"query":"lighthouse","limit":5}"#),
+            toolCall: ToolInput(toolName: "memories.recall", argumentsJSON: #"{"query":"lighthouse","limit":5}"#),
             context: ToolContext(conversationID: UUID())
         )
         #expect(recalled.isError == false)

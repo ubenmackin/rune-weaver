@@ -140,14 +140,14 @@ struct ToolSchemaTests {
                     #expect(properties[key] != nil, "files.glob missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["pattern"]"#))
-            case "remember_fact":
+            case "remember_fact", "memories.store":
                 for key in ["text", "category"] {
-                    #expect(properties[key] != nil, "remember_fact missing property \(key)")
+                    #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["text"]"#))
-            case "recall_memories":
+            case "recall_memories", "memories.recall":
                 for key in ["query", "limit"] {
-                    #expect(properties[key] != nil, "recall_memories missing property \(key)")
+                    #expect(properties[key] != nil, "\(tool.name) missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["query"]"#))
             case "email.search":
@@ -184,6 +184,19 @@ struct ToolSchemaTests {
                 #expect(raw.contains(#""required":["account"]"#))
                 #expect(raw.contains(#""required":["id"]"#))
                 #expect(raw.contains(#""required":["destination"]"#))
+            case "messages.search":
+                for key in ["query", "recipient", "limit"] {
+                    #expect(properties[key] != nil, "messages.search missing property \(key)")
+                }
+            case "messages.read":
+                for key in ["chatId", "chat_id", "recipient", "limit"] {
+                    #expect(properties[key] != nil, "messages.read missing property \(key)")
+                }
+            case "messages.send":
+                for key in ["recipient", "to", "text", "message"] {
+                    #expect(properties[key] != nil, "messages.send missing property \(key)")
+                }
+                #expect(raw.contains(#""required":["recipient","text"]"#))
             default:
                 Issue.record("Unexpected builtin tool \(tool.name)")
             }
