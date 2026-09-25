@@ -519,19 +519,84 @@ function buildDoneSegments(
       }
     }
     // The streamed skeleton already carries every round's prose in order; the
-    // terminal text repeats only the final round, so preferring it would discard
-    // intermediate narration. Keep streamed prose unless nothing streamed.
+    // terminal text repeats only the final round, so preferring it blindly would
+    // discard intermediate narration. Keep streamed prose unless nothing streamed,
+    // with one reattach exception below where the streamed fragment is a prefix
+    // of the authoritative reply and the tail would otherwise be lost.
     const hasStreamedText = merged.some(
       (segment) => segment.kind === "text" && segment.text.trim().length > 0,
     );
-    if (!hasStreamedText && doneText && doneText.trim().length > 0) {
-      merged.push({ kind: "text" as const, text: doneText });
+    const doneTrimmed =
+      typeof doneText === "string" ? doneText.trim() : "";
+    if (!hasStreamedText && doneTrimmed.length > 0) {
+      merged.push({ kind: "text" as const, text: doneText as string });
     } else if (
       !hasStreamedText &&
       snapshotText.trim().length > 0 &&
-      (!doneText || doneText.trim().length === 0)
+      doneTrimmed.length === 0
     ) {
       merged.push({ kind: "text" as const, text: snapshotText });
+    } else if (hasStreamedText && doneTrimmed.length > 0) {
+      // A reloaded tab adopts mid-turn, so its streamed fragment misses every
+      // delta from before the reload while the terminal frame carries the full
+      // reply. When the streamed text is a leading fragment of the terminal
+      // text the tail has never rendered, so adopt the terminal copy instead
+      // of truncating at the last live delta. Equal copies converge to the
+      // same value, while a longer streamed timeline (intermediate narration
+      // the terminal omits) keeps its prose because it is not a prefix.
+      const streamedFlat = flatTextFromSegments(merged).trim();
+      const hasToolSegments = merged.some(
+        (segment) => segment.kind === "tools",
+      );
+      if (!hasToolSegments) {
+        if (
+          streamedFlat.length > 0 &&
+          (doneTrimmed.startsWith(streamedFlat) ||
+            (doneTrimmed.length > streamedFlat.length &&
+              doneTrimmed.includes(streamedFlat)))
+        ) {
+          const toolsOnly = merged.filter(
+            (segment) => segment.kind === "tools",
+          );
+          return [
+            ...toolsOnly,
+            { kind: "text" as const, text: doneText as string },
+          ];
+        }
+      } else {
+        // Multi-round turns interleave prose with tool batches, so only the
+        // final prose piece may extend into the terminal copy. Extending the
+        // last text piece preserves earlier rounds while still recovering a
+        // tail that arrived only in the terminal frame.
+        let lastTextIndex = -1;
+        for (let index = merged.length - 1; index >= 0; index--) {
+          const candidate = merged[index];
+          if (
+            candidate.kind === "text" &&
+            candidate.text.trim().length > 0
+          ) {
+            lastTextIndex = index;
+            break;
+          }
+        }
+        if (lastTextIndex !== -1) {
+          const lastText = (
+            merged[lastTextIndex] as { kind: "text"; text: string }
+          ).text.trim();
+          if (
+            lastText.length > 0 &&
+            doneTrimmed.startsWith(lastText) &&
+            doneTrimmed.length !== lastText.length
+          ) {
+            const next = [...merged];
+            next[lastTextIndex] = {
+              kind: "text" as const,
+              text: doneText as string,
+            };
+            return next;
+          }
+        }
+      }
     }
     return merged;
   }
@@ -1649,6 +1714,59 @@ export default function ChatView({ health }: ChatViewProps) {
     }
   }, []);
 
+  // Reattaches a reloaded tab to a turn the server still owns. A fresh mount
+  // starts idle with no live shell, but the run log may already carry a
+  // running row for the active session from before the reload. Adopting an
+  // empty live shell plus a re-armed budget lets later broadcast deltas
+  // rebuild the timeline without fabricating messages and without issuing a
+  // cancel; settled rows keep the existing history-reload path. The start
+  // stamp reuses the run's own timestamp so the existing settle evidence
+  // still matches instead of stranding the shell behind a grace computed
+  // from the adoption instant, while the timeout budget itself arms from now.
+  const tryAdoptReloadedTurn = useCallback(() => {
+    if (pendingRef.current) return false;
+    if (cancelledRef.current) return false;
+    const activeID = sessionIDRef.current;
+    if (!activeID) return false;
+    const activeNorm = normalizeSessionID(activeID);
+    if (!activeNorm) return false;
+    if (knownDraftIDRef.current === activeID) return false;
+    if (!sharedRunningIDsRef.current.includes(activeNorm)) return false;
+    // A parked timeline already owns this session's live content after a
+    // switch-away, so an empty adopt must never overwrite it; the parked
+    // restore path stays the owner there.
+    const parked = parkedFlightsRef.current.get(activeNorm);
+    if (parked?.pending) return false;
+    let startedAt: number | null = null;
+    for (const run of sharedRunsRef.current) {
+      const raw = (run as { sessionID?: unknown }).sessionID;
+      if (typeof raw !== "string" || !raw.trim()) continue;
+      if (raw.trim().toLowerCase() !== activeNorm) continue;
+      const status = (run as { status?: unknown }).status;
+      if (
+        !isActiveRunStatus(typeof status === "string" ? status : undefined)
+      ) {
+        continue;
+      }
+      const ts = parseRunTimestamp(
+        (run as { timestamp?: unknown }).timestamp as string | number,
+      ).getTime();
+      if (Number.isFinite(ts) && ts > 0) {
+        startedAt = ts;
+        break;
+      }
+    }
+    const shell: InFlightTurn = { toolActions: [], text: "", segments: [] };
+    inFlightTurnRef.current = shell;
+    setInFlightTurn(shell);
+    setPending(true);
+    pendingRef.current = true;
+    turnSessionIDRef.current = activeID;
+    activeTurnStartMsRef.current = startedAt ?? Date.now();
+    armTurnTimeout();
+    return true;
+  }, [armTurnTimeout]);
+
   // Clears the reconnecting notice once the shared socket recovers. A turn
   // that finished while the socket was down misses both its terminal frame
   // and its run broadcast, so revalidating against the polled run log keeps
@@ -1656,6 +1774,9 @@ export default function ChatView({ health }: ChatViewProps) {
   // surfacing a misleading timeout plus a no-op cancel. Persisted history
   // wins when no running row remains; live turns resume from their next
   // frame with a re-armed budget because nothing was cancelled outright.
+  // A reloaded tab with no live shell reattaches here when the run log shows
+  // a running row for the active session, adopting pending state with zero
+  // cancel traffic so broadcast deltas rebuild the timeline.
   const handleWSOpen = useCallback(() => {
     setReconnecting(false);
     // Reconnect reaps expired shells on the same tick that reconciles the
@@ -1663,6 +1784,7 @@ export default function ChatView({ health }: ChatViewProps) {
     // park. Live reaps surface through state rather than the dev-only log.
     reapExpiredFlightsAndSurface();
     if (!pendingRef.current || cancelledRef.current) {
+      tryAdoptReloadedTurn();
       return;
     }
     const activeNorm = normalizeSessionID(sessionIDRef.current);
@@ -1725,7 +1847,7 @@ export default function ChatView({ health }: ChatViewProps) {
     setPending(false);
     markBackgroundRunning(activeNorm, false);
     reloadActiveHistory(sessionIDRef.current);
-  }, [armTurnTimeout, clearTurnTimeout, markBackgroundRunning, reloadActiveHistory, reapExpiredFlightsAndSurface]);
+  }, [armTurnTimeout, clearTurnTimeout, markBackgroundRunning, reloadActiveHistory, reapExpiredFlightsAndSurface, tryAdoptReloadedTurn]);
 
   // Parks the active turn into the per-session map before leaving it, keeping
   // the server turn alive. The inactivity timer is cleared because the parked
@@ -3359,6 +3481,17 @@ export default function ChatView({ health }: ChatViewProps) {
         markBackgroundRunning(norm, true);
       }
     }
+    // Reloaded-tab reattach from the poll tick: when the active view is idle
+    // but the run log shows a live row for its session and the socket is open,
+    // adopt an empty shell with zero cancel traffic so later deltas rebuild.
+    // The open handler covers the socket-recovery ordering while this tick
+    // covers a poll that lands after the open; both share one helper so the
+    // two orderings converge instead of drifting.
+    if (!pendingRef.current && !cancelledRef.current && activeNorm) {
+      if (running.includes(activeNorm) && isOpen()) {
+        tryAdoptReloadedTurn();
+      }
+    }
     // Sessions with a settled row but no running row finished while the
     // socket was away; settle the parked shell so the concurrency cap
     // frees and a return reloads history instead of a stale bubble. A
@@ -3459,7 +3592,7 @@ export default function ChatView({ health }: ChatViewProps) {
         }
       }
     }
-  }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface, reconcileReconnecting]);
+  }, [sharedRuns, sharedRunningIDs, markBackgroundRunning, clearTurnTimeout, reloadActiveHistory, refreshApprovals, reapExpiredFlightsAndSurface, reconcileReconnecting, tryAdoptReloadedTurn, isOpen]);
 
   useEffect(() => {
     // Own sends reset the lock before appending, so this suppresses only remote

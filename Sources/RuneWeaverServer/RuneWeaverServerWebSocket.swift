@@ -5,7 +5,12 @@ import os
 import RuneWeaverCore
 import Vapor
 
-/// Tracks in-flight chat turns plus approval resumes for one WebSocket connection.
+/// Tracks in-flight approval resumes for one WebSocket connection.
+///
+/// Chat turns stay server-scoped through the tracker slot plus their detached
+/// task, so a socket close never cancels them; only resume continuations need
+/// the socket lifetime, and sealing them here keeps orphaned synthesis from
+/// outliving its viewer.
 final class ConnectionChatTasks: Sendable {
     /// One slot: awaiting its task, holding it, or already cancelled.
     /// Sendable so the lock-protected table stays within Swift 6 isolation.
@@ -42,7 +47,7 @@ final class ConnectionChatTasks: Sendable {
         }
     }
 
-    /// Tracks a chat or resume task until it completes.
+    /// Tracks a resume task until it completes.
     /// Always stores when open, even without a reservation, so a socket close
     /// can still stop it; when the slot was already cancelled (or the socket
     /// closed first) the task is cancelled immediately instead of stored.
@@ -63,13 +68,13 @@ final class ConnectionChatTasks: Sendable {
         }
     }
 
-    /// Stops tracking a completed chat or resume task.
+    /// Stops tracking a completed resume task.
     /// - Parameter id: Tracking identifier from `insert`.
     func remove(id: UUID) {
         _ = state.withLock { $0.slots.removeValue(forKey: id) }
     }
 
-    /// Cancels every tracked chat and resume task.
+    /// Cancels every tracked resume task.
     /// Reserved slots flip to cancelled so a racing insert aborts on arrival,
     /// and the closed flag makes later reserves cancel on insert; the socket
     /// close path and an explicit in-flight cancel share this one hop.
@@ -92,6 +97,66 @@ final class ConnectionChatTasks: Sendable {
         }
         for task in current {
             task.cancel()
+        }
+    }
+}
+
+/// Server bound for one WebSocket chat turn.
+///
+/// Fifteen minutes caps a runaway local inference without cutting normal long
+/// turns: expiry cancels the turn and settles its run row as an error with
+/// timeout detail, never as success with partial text. Kept beside the turn
+/// runner so the bound and the race that enforces it change together.
+enum WebSocketTurnWatchdog {
+    /// Nanoseconds for the per-turn watchdog (15 minutes).
+    static let timeoutNanoseconds: UInt64 = 15 * 60 * 1_000_000_000
+}
+
+/// Timeout detail persisted when the watchdog fires.
+///
+/// A dedicated error keeps expiry on the failed-turn path (run row `error`
+/// plus error frame) instead of the cancellation path, so a hung turn never
+/// masquerades as a user cancel or a partial success.
+struct WebSocketTurnTimeoutError: LocalizedError, Sendable {
+    /// Human-readable timeout detail surfaced in the error frame and audit row.
+    var errorDescription: String? {
+        "Chat turn timed out after 15 minutes without completing."
+    }
+}
+
+/// Races one turn operation against the watchdog.
+///
+/// The winner settles while the loser is cancelled, so a hung inference cannot
+/// outlive its bound and a fast turn never waits out the timer. Timeout throws
+/// ``WebSocketTurnTimeoutError`` so callers land on the failed-turn path; the
+/// outer task cancellation still surfaces as ``CancellationError`` for the
+/// cancel path.
+/// - Parameters:
+///   - timeoutNanoseconds: Watchdog budget, defaulting to the server bound.
+///   - operation: Turn work to bound.
+/// - Returns: Operation result when it wins the race.
+func withWebSocketTurnWatchdog<T: Sendable>(
+    timeoutNanoseconds: UInt64 = WebSocketTurnWatchdog.timeoutNanoseconds,
+    operation: @Sendable @escaping () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(nanoseconds: timeoutNanoseconds)
+            throw WebSocketTurnTimeoutError()
+        }
+        do {
+            guard let first = try await group.next() else {
+                group.cancelAll()
+                throw CancellationError()
+            }
+            group.cancelAll()
+            return first
+        } catch {
+            group.cancelAll()
+            throw error
         }
     }
 }
@@ -302,11 +367,14 @@ func authorizeWebSocketUpgrade(_ request: Request) -> HTTPHeaders? {
 }
 
 /// Handles one inbound WebSocket text frame.
+///
+/// Chat turns dispatch without the connection table so they survive socket
+/// close; resume continuations keep the table so close still seals them.
 func handleWebSocketText(_ text: String, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
     guard !Task.isCancelled else { return }
     switch WSInboundKind.classify(text) {
     case let .chat(message):
-        await handleWebSocketChat(message, connectionID: connectionID, context: context, connectionTasks: connectionTasks)
+        await handleWebSocketChat(message, connectionID: connectionID, context: context)
     case let .cancel(message):
         await handleWebSocketCancel(message, connectionID: connectionID, context: context)
     case let .toolCancel(message):
@@ -383,21 +451,13 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
     }
 }
 
-/// Dispatches an orchestrator event to a connected WebSocket client.
-func sendWSEventFrame(_ event: OrchestratorEvent, connectionID: UUID, sessionID: UUID, context: ServerContext) async {
-    guard !Task.isCancelled else {
-        return
-    }
-    if case let .approval(request) = event {
-        await context.hub.broadcastApproval(request)
-        return
-    }
-    if let frameText = wsEventFrameText(event, sessionID: sessionID) {
-        await context.hub.send(id: connectionID, text: frameText)
-    }
-}
-
-/// Broadcasts an orchestrator event to every connected WebSocket client.
+/// Broadcasts one orchestrator event to every connected WebSocket client.
+///
+/// Turns are server-scoped, so a reloaded tab or a second viewer must see the
+/// same live deltas without re-sending: every frame carries the owning
+/// sessionID and viewers filter before touching state. Approval prompts keep
+/// their dedicated hub fan-out inside this path. A nil encoding drops before
+/// broadcast, and a cancelled turn emits zero further frames via the guard.
 func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
     guard !Task.isCancelled else {
         return
@@ -412,7 +472,14 @@ func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context:
 }
 
 /// Executes a chat turn over WebSocket with real-time streaming and cooperative cancellation.
-func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: ServerContext, connectionTasks: ConnectionChatTasks) async {
+///
+/// Chat turns are server-scoped: the tracker slot plus the detached task own
+/// the turn, so closing the requesting socket never cancels it. Cancellation
+/// arrives only through explicit cancel, same-session supersede, or the
+/// watchdog, all bridged through the tracker. Requester-scoped replies
+/// (validation errors, busy rejection) still answer the requesting socket
+/// directly before any spawn.
+func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: ServerContext) async {
     let trimmed: String
     do {
         trimmed = try validatedChatText(message.text)
@@ -491,8 +558,11 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         durationMs: 0
     )
     await context.hub.broadcastRun(initialEntry)
-    let trackingID = UUID()
-    connectionTasks.reserve(id: trackingID)
+    // Detached ownership: the tracker slot plus this task own the turn, so no
+    // connection-table reserve/insert follows. A socket close seals only resume
+    // continuations while this turn keeps its slot and running row; the box
+    // bridges tracker cancellation (explicit cancel, supersede, watchdog sweep)
+    // to the task created just below.
     let params = WebSocketTurnParameters(
         context: context,
         connectionID: connectionID,
@@ -500,17 +570,19 @@ func handleWebSocketChat(_ message: WSChatMessage, connectionID: UUID, context: 
         source: source,
         trimmed: trimmed,
         registration: registration,
-        trackingID: trackingID,
         initialEntry: initialEntry
     )
-    let chatTask: Task<Void, Never> = Task { [weak connectionTasks] in
-        await executeWebSocketTurn(params: params, connectionTasks: connectionTasks)
+    let chatTask: Task<Void, Never> = Task {
+        await executeWebSocketTurn(params: params)
     }
-    connectionTasks.insert(chatTask, id: trackingID)
     taskBox.set(chatTask)
 }
 
 /// Parameters required to execute a single WebSocket chat turn.
+///
+/// The requesting socket identifies who started the turn for pre-spawn
+/// requester-scoped replies, while live and terminal delivery broadcasts
+/// session-tagged so detached viewers settle together.
 private struct WebSocketTurnParameters: Sendable {
     let context: ServerContext
     let connectionID: UUID
@@ -518,7 +590,6 @@ private struct WebSocketTurnParameters: Sendable {
     let source: String
     let trimmed: String
     let registration: TurnRegistration
-    let trackingID: UUID
     let initialEntry: RunLogEntry
 }
 
@@ -526,38 +597,38 @@ private struct WebSocketTurnParameters: Sendable {
 ///
 /// The heartbeat and audit accumulator stay here while terminal persistence
 /// lives in the finish helpers below, keeping this body inside the lint budget
-/// without changing the per-path audit behavior.
-private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTasks: ConnectionChatTasks?) async {
+/// without changing the per-path audit behavior. The inference runs under the
+/// watchdog race so a hung turn settles as an error with timeout detail
+/// instead of lingering past its bound.
+private func executeWebSocketTurn(params: WebSocketTurnParameters) async {
     let context = params.context
-    let connectionID = params.connectionID
     let sessionID = params.sessionID
     let source = params.source
     let trimmed = params.trimmed
     let registration = params.registration
-    let trackingID = params.trackingID
     let initialEntry = params.initialEntry
 
-    defer { connectionTasks?.remove(id: trackingID) }
     let startTime = Date()
-    let heartbeat = startHeartbeat(context: context, connectionID: connectionID, sessionID: sessionID)
+    let heartbeat = startHeartbeat(context: context, sessionID: sessionID)
     defer { heartbeat.cancel() }
     let auditProgress = ChatTurnAuditProgress()
     do {
-        let response = try await context.orchestrator.process(
-            input: UserInput(
-                text: trimmed,
-                sessionID: sessionID,
-                source: source.isEmpty ? "websocket" : source
-            ),
-            onEvent: { event in
-                auditProgress.record(event)
-                await sendWSEventFrame(event, connectionID: connectionID, sessionID: sessionID, context: context)
-            }
-        )
+        let response = try await withWebSocketTurnWatchdog {
+            try await context.orchestrator.process(
+                input: UserInput(
+                    text: trimmed,
+                    sessionID: sessionID,
+                    source: source.isEmpty ? "websocket" : source
+                ),
+                onEvent: { event in
+                    auditProgress.record(event)
+                    await broadcastWSEventFrame(event, sessionID: sessionID, context: context)
+                }
+            )
+        }
         guard !Task.isCancelled else {
             await handleWebSocketTurnCancellation(
                 context: context,
-                connectionID: connectionID,
                 sessionID: sessionID,
                 registrationToken: registration.token,
                 initialEntry: initialEntry,
@@ -569,7 +640,6 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
     } catch is CancellationError {
         await handleWebSocketTurnCancellation(
             context: context,
-            connectionID: connectionID,
             sessionID: sessionID,
             registrationToken: registration.token,
             initialEntry: initialEntry,
@@ -579,7 +649,6 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
         guard !Task.isCancelled else {
             await handleWebSocketTurnCancellation(
                 context: context,
-                connectionID: connectionID,
                 sessionID: sessionID,
                 registrationToken: registration.token,
                 initialEntry: initialEntry,
@@ -601,7 +670,10 @@ private func executeWebSocketTurn(params: WebSocketTurnParameters, connectionTas
 /// Parked approval-gated turns persist as awaiting_approval instead of ok so the
 /// inbox decision can transition the same session entry. Late steering stays
 /// queued for the next turn so guidance arriving after the final ingest still
-/// gets answered instead of vanishing after its optimistic render.
+/// gets answered instead of vanishing after its optimistic render. The done
+/// frame broadcasts so every viewer holding the session settles together; a
+/// reloaded tab reconciles from the run log while live sockets settle from the
+/// frame.
 private func finishWebSocketSuccessfulTurn(
     params: WebSocketTurnParameters,
     response: OrchestratorResponse,
@@ -626,7 +698,7 @@ private func finishWebSocketSuccessfulTurn(
     var done = WSStreamDone(from: response)
     done.retainedSteerCount = await context.steeringQueue.pendingCount(for: params.sessionID)
     if let frame = encodeWSFrame(done) {
-        await context.hub.send(id: params.connectionID, text: frame)
+        await context.hub.broadcast(text: frame)
     }
     await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
 }
@@ -637,7 +709,9 @@ private func finishWebSocketSuccessfulTurn(
 /// so the row is never response-less) plus the tools that already ran and their
 /// billed total, matching the tools the client already rendered live. Failed
 /// turns keep late steering queued so the retry can still answer guidance that
-/// arrived after the final ingest.
+/// arrived after the final ingest. The error frame broadcasts session-tagged so
+/// every viewer holding the session clears its live bubble together;
+/// requester-scoped validation and busy replies stay on the direct error path.
 private func finishWebSocketFailedTurn(
     params: WebSocketTurnParameters,
     error: Error,
@@ -662,18 +736,21 @@ private func finishWebSocketFailedTurn(
         isError: true
     )
     await context.conversations.append(errorMessage, to: params.sessionID)
-    await sendWSError(
-        error.localizedDescription,
-        connectionID: params.connectionID,
-        context: context,
-        sessionID: params.sessionID
-    )
+    if let frame = encodeWSFrame(WSErrorFrame(message: error.localizedDescription, sessionID: params.sessionID)) {
+        await context.hub.broadcast(text: frame)
+    }
     await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
 }
 
+/// Settles a cancelled WebSocket turn and notifies every viewer.
+///
+/// Cancellation arrives only through explicit cancel, same-session supersede,
+/// or the watchdog; the run row updates in place so the turn keeps one audit
+/// entry. The cancelled frame broadcasts session-tagged so detached viewers
+/// clear their live bubbles together, while the cancel acknowledgement in
+/// `handleWebSocketCancel` stays direct to the requester.
 private func handleWebSocketTurnCancellation(
     context: ServerContext,
-    connectionID: UUID,
     sessionID: UUID,
     registrationToken: UUID,
     initialEntry: RunLogEntry,
@@ -685,17 +762,30 @@ private func handleWebSocketTurnCancellation(
         status: "cancelled",
         durationMs: durationMs
     ) ?? initialEntry
-    await context.hub.broadcastRun(entry)
-    let cancelledFrame = WSCancelledFrame(sessionID: sessionID)
-    if let frame = encodeWSFrame(cancelledFrame) {
-        await context.hub.send(id: connectionID, text: frame)
-    }
+    // Terminal settlement runs inside the cancelled turn task, where the
+    // per-send timeout observes cancellation and would drop the fan-out.
+    // A detached task carries a fresh cancellation scope so the run update
+    // plus the session-tagged cancelled frame still reach every viewer,
+    // while the event-path guard keeps emitting zero further deltas.
+    let cancelledText = encodeWSFrame(WSCancelledFrame(sessionID: sessionID))
+    let hub = context.hub
+    await Task.detached {
+        await hub.broadcastRun(entry)
+        if let frame = cancelledText {
+            await hub.broadcast(text: frame)
+        }
+    }.value
     await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
     await context.steeringQueue.clear(for: sessionID)
 }
 
 /// Spawns a background liveness heartbeat task for long inference turns.
-private func startHeartbeat(context: ServerContext, connectionID: UUID, sessionID: UUID) -> Task<Void, Never> {
+///
+/// Heartbeats broadcast session-tagged so every viewer holding the session
+/// re-arms its inactivity timer while prompt evaluation stays silent; there is
+/// no owning socket because turns are server-scoped and detached viewers must
+/// stay live together.
+private func startHeartbeat(context: ServerContext, sessionID: UUID) -> Task<Void, Never> {
     Task {
         while !Task.isCancelled {
             do {
@@ -707,13 +797,18 @@ private func startHeartbeat(context: ServerContext, connectionID: UUID, sessionI
                 break
             }
             if let alive = WSTurnAlive.frameText(sessionID: sessionID) {
-                await context.hub.send(id: connectionID, text: alive)
+                await context.hub.broadcast(text: alive)
             }
         }
     }
 }
 
 /// Cancels an in-flight chat turn over WebSocket.
+///
+/// The tracker stop plus steering clear settle the turn, while this
+/// acknowledgement answers only the requesting socket: it reports whether a
+/// running turn was actually stopped. Terminal settlement still broadcasts
+/// separately so every viewer clears together.
 func handleWebSocketCancel(_ message: WSCancelMessage, connectionID: UUID, context: ServerContext) async {
     var cancelled = false
     if let sid = message.sessionID {
@@ -829,7 +924,12 @@ func handleWebSocketDecision(_ message: WSDecisionMessage, connectionID: UUID, c
     }
 }
 
-/// Sends one WebSocket error frame through the hub, best-effort.
+/// Sends one requester-scoped error frame through the hub, best-effort.
+///
+/// Validation failures and busy rejections answer only the requesting socket so
+/// an unrelated viewer never tears down its own turn over another session's
+/// rejection. Terminal turn failures broadcast separately so every viewer
+/// holding the session settles together.
 func sendWSError(_ message: String, connectionID: UUID, context: ServerContext, sessionID: UUID? = nil) async {
     if Task.isCancelled {
         return
