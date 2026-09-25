@@ -39,7 +39,7 @@ public enum IndexPhase: String, Sendable, Equatable, CaseIterable {
 /// Declared separately from ``IndexSource`` because the vision describe pass is
 /// not a document origin — it enriches documents already written by another
 /// source — yet it still needs a stable position in the run order.
-public enum IndexSourceKind: String, Sendable, Equatable, CaseIterable {
+public enum IndexSourceKind: String, Sendable, Hashable, CaseIterable {
     /// Local filesystem documents.
     case files
     /// Mail messages read from a configured mailbox.
@@ -402,24 +402,33 @@ public struct NullIndexRunReporter: IndexRunReporting {
 /// One sequenced source stage the coordinator runs.
 ///
 /// Implementations wrap a concrete indexer and translate its report into an
-/// ``IndexSourceRunReport``. The coordinator passes its progress sink and a
-/// cooperative cancellation probe so a stage can report liveness and stop
-/// between batches without the core target reaching into the server.
+/// ``IndexSourceRunReport``. The coordinator passes its progress sink, a
+/// cooperative cancellation probe, and the per-run policy snapshot so a stage
+/// can report liveness and stop between batches without the core target
+/// reaching into the server. The snapshot is the single source for effort,
+/// workers, caps, excludes, roots, and windows; selection still consults the
+/// boot-time `isEnabled` flag.
 public protocol IndexSourceStage: Sendable {
     /// Source this stage indexes.
     var kind: IndexSourceKind { get }
 
-    /// Whether the stage should run for the active configuration.
+    /// Whether the stage was selected at boot for the active configuration.
+    ///
+    /// Captured when stages are built, so enabling a source later needs
+    /// rebuilt stages while disabling is honored through the per-run policy.
     var isEnabled: Bool { get }
 
-    /// Runs the stage.
+    /// Runs the stage against one per-run policy snapshot.
     /// - Parameters:
     ///   - reporter: Sink for liveness frames.
     ///   - isCancelled: Probe that reports whether the run was cancelled.
+    ///   - policy: Live index policy snapshot for this run; the only source
+    ///     for effort, workers, caps, excludes, roots, and windows.
     /// - Returns: The stage's contribution to the run.
     func run(
         reporter: @escaping ToolProgressReporter,
-        isCancelled: @escaping @Sendable () -> Bool
+        isCancelled: @escaping @Sendable () -> Bool,
+        policy: IndexConfig
     ) async throws -> IndexSourceRunReport
 
     /// Requests that a run in flight stop at its next safe point.
@@ -433,27 +442,33 @@ public extension IndexSourceStage {
 
 /// Closure-backed source stage, used to adapt the concrete indexers and to
 /// drive the coordinator against deterministic stubs in tests.
+///
+/// The body receives the coordinator's per-run policy snapshot as its leading
+/// argument so every value it builds from (effort, workers, caps, excludes,
+/// roots, windows) tracks the saved policy without a restart. An in-flight
+/// body keeps the snapshot it was invoked with, ignoring saves that land
+/// mid-run.
 public struct IndexClosureStage: IndexSourceStage {
     /// Source this stage indexes.
     public let kind: IndexSourceKind
-    /// Whether the stage should run for the active configuration.
+    /// Whether the stage was selected at boot for the active configuration.
     public let isEnabled: Bool
-    /// Body performing the work.
-    private let body: @Sendable (@escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
+    /// Body performing the work against one per-run policy snapshot.
+    private let body: @Sendable (IndexConfig, @escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
     /// Hook invoked when the coordinator cancels a run.
     private let onCancel: @Sendable () async -> Void
 
     /// Creates a closure-backed stage.
     /// - Parameters:
     ///   - kind: Source this stage indexes.
-    ///   - isEnabled: Whether the stage should run.
+    ///   - isEnabled: Whether the stage was selected at boot.
     ///   - onCancel: Cancellation hook; defaults to a no-op.
-    ///   - body: Work performed by the stage.
+    ///   - body: Work performed by the stage against the per-run policy.
     public init(
         kind: IndexSourceKind,
         isEnabled: Bool = true,
         onCancel: @escaping @Sendable () async -> Void = {},
-        body: @escaping @Sendable (@escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
+        body: @escaping @Sendable (IndexConfig, @escaping ToolProgressReporter, @Sendable () -> Bool) async throws -> IndexSourceRunReport
     ) {
         self.kind = kind
         self.isEnabled = isEnabled
@@ -461,16 +476,18 @@ public struct IndexClosureStage: IndexSourceStage {
         self.body = body
     }
 
-    /// Runs the closure-backed body.
+    /// Runs the closure-backed body against one per-run policy snapshot.
     /// - Parameters:
     ///   - reporter: Sink for liveness frames.
     ///   - isCancelled: Cooperative cancellation probe.
+    ///   - policy: Live index policy snapshot for this run.
     /// - Returns: The stage's contribution to the run.
     public func run(
         reporter: @escaping ToolProgressReporter,
-        isCancelled: @escaping @Sendable () -> Bool
+        isCancelled: @escaping @Sendable () -> Bool,
+        policy: IndexConfig
     ) async throws -> IndexSourceRunReport {
-        try await body(reporter, isCancelled)
+        try await body(policy, reporter, isCancelled)
     }
 
     /// Invokes the cancellation hook.
@@ -624,8 +641,26 @@ public actor IndexCoordinator {
 
     /// Lock-guarded cancellation flag shared with non-isolated stage closures.
     private let cancelFlag = IndexCancellationFlag()
-    /// Stage currently running, for cancellation propagation.
-    private var activeStage: (any IndexSourceStage)?
+    /// Stages currently running, for cancellation propagation.
+    ///
+    /// Holds one entry during sequential passes and two during the files plus
+    /// mail overlap so cancellation reaches every in-flight stage. Each stage
+    /// keeps its own budget, thermal, and battery gates, so sharing this list
+    /// never shares effort accounting.
+    private var activeStages: [any IndexSourceStage] = []
+    /// Completed scanned count observed when the overlap began, anchoring the summed live frame.
+    private var overlapBaseScanned = 0
+    /// Completed indexed count observed when the overlap began.
+    private var overlapBaseIndexed = 0
+    /// Per-stage scanned high-water marks feeding the single cumulative live frame.
+    ///
+    /// Keyed by the stage's index in the overlap batch, not by kind, so two
+    /// stages sharing one kind never overwrite each other's marks.
+    private var overlapScanned: [Int: Int] = [:]
+    /// Per-stage indexed high-water marks feeding the single cumulative live frame.
+    ///
+    /// Keyed by the stage's index in the overlap batch, not by kind.
+    private var overlapIndexed: [Int: Int] = [:]
     /// Handle for the run task in flight, so cancellation aborts in-flight awaits.
     ///
     /// Stored at run start and cleared alongside `running` so `cancel()` can
@@ -729,8 +764,14 @@ public actor IndexCoordinator {
     }
 
     /// Updates the live index policy so saved `[index]` values take effect without a restart.
-    /// The next run gates on the new policy; stages built at boot keep their existing enablement
-    /// until rebuilt, so source toggles apply to fresh coordinators while the enabled gate is immediate.
+    ///
+    /// The next run builds every indexer from the saved snapshot, so effort,
+    /// workers, caps, excludes, roots, and windows apply with no rebuilt
+    /// stages; a run already in flight keeps the snapshot it started with. A
+    /// source turned off after boot reports skipped on the next pass through
+    /// its policy guard, while a source turned on after boot stays parked
+    /// until stages are rebuilt because selection still consults the boot-time
+    /// flag.
     /// - Parameter newConfig: Persisted policy from the settings save.
     public func updateConfig(_ newConfig: IndexConfig) {
         config = newConfig
@@ -789,7 +830,7 @@ public actor IndexCoordinator {
         }
 
         cancelFlag.reset()
-        activeStage = nil
+        activeStages = []
         lastFrameAt = nil
         let startedAt = now()
         let sessionID = UUID()
@@ -841,6 +882,9 @@ public actor IndexCoordinator {
         startedAt: Date
     ) async -> IndexRunSummary {
         var totals = Totals()
+        // One snapshot for the whole run so a save landing mid-run cannot
+        // split stages across policies; the next run picks it up instead.
+        let runPolicy = config
         resetLiveState(trigger: trigger, startedAt: startedAt)
         await reporter.runStarted(IndexRunEvent(
             id: eventID,
@@ -852,8 +896,8 @@ public actor IndexCoordinator {
         ))
         await emit(phase: .discovering, totals: totals, startedAt: startedAt, force: true)
         let heartbeat = startHeartbeat(startedAt: startedAt)
-        let ranAny = await runEnabledStages(totals: &totals, startedAt: startedAt)
-        activeStage = nil
+        let ranAny = await runEnabledStages(totals: &totals, startedAt: startedAt, policy: runPolicy)
+        activeStages = []
         // Join the heartbeat before the committing frame so a stale wake
         // between the committing emit and clearLiveState cannot re-emit the
         // prior phase after it (phase regression/out-of-order frame). No defer
@@ -890,6 +934,10 @@ public actor IndexCoordinator {
         liveVectorChunks = 0
         liveKeywordChunks = 0
         liveCurrent = nil
+        overlapBaseScanned = 0
+        overlapBaseIndexed = 0
+        overlapScanned = [:]
+        overlapIndexed = [:]
     }
 
     /// Finalizes a run into its summary, watermark, and completion broadcast.
@@ -997,20 +1045,25 @@ public actor IndexCoordinator {
         liveVectorChunks = 0
         liveKeywordChunks = 0
         liveCurrent = nil
+        overlapBaseScanned = 0
+        overlapBaseIndexed = 0
+        overlapScanned = [:]
+        overlapIndexed = [:]
     }
 
     /// Requests cancellation of the run in flight.
     ///
-    /// The flag is set immediately, the active stage is asked to stop at its
+    /// The flag is set immediately, every active stage is asked to stop at its
     /// next safe point, and the stored run task is cancelled so in-flight
     /// awaits throw at their next checkpoint instead of running to stage end.
-    /// Work already committed by prior batches stays in place. Returns
-    /// immediately without awaiting the run; completion is observed via the
-    /// `run_completed` broadcast or the status probe.
+    /// Joining happens in the stage loop, so this stays immediate while the
+    /// run settles via broadcast. Work already committed by prior batches
+    /// stays in place. Returns immediately without awaiting the run;
+    /// completion is observed via the `run_completed` broadcast or the status probe.
     public func cancel() async {
         cancelFlag.set()
-        if let activeStage {
-            await activeStage.cancel()
+        for stage in activeStages {
+            await stage.cancel()
         }
         activeRunTask?.cancel()
     }
@@ -1031,22 +1084,119 @@ private extension IndexCoordinator {
         }.map(\.element)
     }
 
-    /// Runs every enabled stage in canonical order, folding reports into totals.
+    /// Runs every enabled stage, overlapping files plus mail and sequencing the rest.
     ///
-    /// A failing stage is counted and the pass continues so one bad source
-    /// never aborts remaining work; cancellation stops between stages with
-    /// committed batches kept for the next run to resume from.
+    /// Files waits on mailbox latency while mail waits on the network, so the
+    /// pair runs together in a task group and finishes near the slower peer
+    /// instead of the serial sum. Messages then vision follow sequentially to
+    /// keep chat-database isolation and vision enrichment deterministic, with
+    /// canonical order preserved everywhere else. One totals per concurrent
+    /// stage feeds a single cumulative live frame so polling surfaces stay
+    /// monotonic; warnings plus errors stay attributed per source. A failing
+    /// stage is counted and the pass continues, and cancellation joins every
+    /// active stage within one batch with committed work kept for resume.
+    /// Budgets stay per source because each stage builds its own indexer from
+    /// the shared policy snapshot, and thermal plus battery gates stay inside
+    /// those indexers untouched.
     /// - Parameters:
     ///   - totals: Running counts folded across stages.
     ///   - startedAt: Instant the run began.
+    ///   - policy: Per-run policy snapshot fixed at run entry; every stage
+    ///     builds from this snapshot so a save landing mid-run never splits
+    ///     one run across policies.
     /// - Returns: Whether any stage produced work or a counted failure.
-    func runEnabledStages(totals: inout Totals, startedAt: Date) async -> Bool {
+    func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
+        let enabled = orderedStages.filter(\.isEnabled)
+        let hasFiles = enabled.contains(where: { $0.kind == .files })
+        let hasMail = enabled.contains(where: { $0.kind == .mail })
+        guard hasFiles, hasMail else {
+            var ranAny = false
+            for stage in enabled {
+                if cancelFlag.isSet || Task.isCancelled {
+                    break
+                }
+                let didRun = await executeStage(stage, totals: &totals, startedAt: startedAt, policy: policy)
+                ranAny = ranAny || didRun
+                if cancelFlag.isSet || Task.isCancelled {
+                    break
+                }
+            }
+            return ranAny
+        }
+        let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail }
+        let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail }
         var ranAny = false
-        for stage in orderedStages where stage.isEnabled {
+        // The shared snapshot arrives as `policy` from the run entry, so a
+        // save landing mid-overlap cannot split the pair across policies;
+        // the next run picks it up instead.
+        let runPolicy = policy
+        let baseScanned = totals.scanned
+        let baseIndexed = totals.indexed
+        overlapBaseScanned = baseScanned
+        overlapBaseIndexed = baseIndexed
+        overlapScanned = [:]
+        overlapIndexed = [:]
+        for index in overlapStages.indices {
+            overlapScanned[index] = 0
+            overlapIndexed[index] = 0
+        }
+        // Register both upfront so a cancel racing stage start still reaches
+        // each peer; removal below pops exactly the appended slice so two
+        // stages sharing one kind never remove each other.
+        let overlapBaseCount = activeStages.count
+        activeStages.append(contentsOf: overlapStages)
+        livePhase = .extracting
+        // Nil stage marks the mixed pair: the single cumulative frame carries
+        // summed counts rather than attributing to one peer.
+        liveStage = nil
+        await emit(phase: .extracting, totals: totals, startedAt: startedAt, force: true)
+        let collected = await withTaskGroup(
+            of: OverlapStageOutcome.self,
+            returning: [Int: (Bool, Totals)].self
+        ) { group in
+            for (index, stage) in overlapStages.enumerated() {
+                group.addTask {
+                    let outcome = await self.executeStage(stage, index: index, policy: runPolicy, startedAt: startedAt)
+                    return OverlapStageOutcome(index: index, didRun: outcome.didRun, stageTotals: outcome.stageTotals)
+                }
+            }
+            var gathered: [Int: (Bool, Totals)] = [:]
+            for await outcome in group {
+                gathered[outcome.index] = (outcome.didRun, outcome.stageTotals)
+            }
+            return gathered
+        }
+        // Join plus summation in canonical order so watermarks and last-item
+        // match the serial pass exactly regardless of completion order.
+        // Pops exactly the appended slice by count so duplicate kinds cannot
+        // remove each other.
+        let expectedOverlapEnd = overlapBaseCount + overlapStages.count
+        if activeStages.count >= expectedOverlapEnd {
+            activeStages.removeSubrange(overlapBaseCount ..< expectedOverlapEnd)
+        }
+        for index in overlapStages.indices {
+            if let entry = collected[index] {
+                totals.add(entry.1)
+                ranAny = ranAny || entry.0
+            }
+        }
+        liveScanned = max(liveScanned, totals.scanned)
+        liveIndexed = max(liveIndexed, totals.indexed)
+        liveSkipped = totals.skipped
+        liveErrors = totals.errors
+        liveVectorChunks = totals.vectorChunks
+        liveKeywordChunks = totals.keywordChunks
+        if let item = totals.lastItem {
+            liveCurrent = item
+        }
+        if cancelFlag.isSet || Task.isCancelled {
+            return ranAny
+        }
+        for stage in remainder {
             if cancelFlag.isSet || Task.isCancelled {
                 break
             }
-            let didRun = await executeStage(stage, totals: &totals, startedAt: startedAt)
+            let didRun = await executeStage(stage, totals: &totals, startedAt: startedAt, policy: runPolicy)
             ranAny = ranAny || didRun
             if cancelFlag.isSet || Task.isCancelled {
                 break
@@ -1058,18 +1208,25 @@ private extension IndexCoordinator {
     /// Executes one source stage and folds its report into the running totals.
     ///
     /// Stage frames carry per-stage counts, so progress is offset by the totals
-    /// at stage start to keep the live snapshot cumulative and monotonic.
+    /// at stage start to keep the live snapshot cumulative and monotonic. The
+    /// policy arrives threaded from the run entry, never re-read here, so a
+    /// body keeps the snapshot it started with even when a settings save lands
+    /// mid-run, while the next run picks up the saved policy without rebuilt
+    /// stages.
     /// - Parameters:
     ///   - stage: Source stage to run.
     ///   - totals: Running counts to fold the report into.
     ///   - startedAt: Instant the run began.
+    ///   - policy: Per-run policy snapshot fixed at run entry.
     /// - Returns: Whether the stage contributed work or a counted failure.
     func executeStage(
         _ stage: any IndexSourceStage,
         totals: inout Totals,
-        startedAt: Date
+        startedAt: Date,
+        policy: IndexConfig
     ) async -> Bool {
-        activeStage = stage
+        let activeBaseCount = activeStages.count
+        activeStages.append(stage)
         let phase: IndexPhase = stage.kind == .vision ? .embedding : .extracting
         livePhase = phase
         liveStage = stage.kind
@@ -1083,9 +1240,23 @@ private extension IndexCoordinator {
             await self.observeStageProgress(frame, baseScanned: baseScanned, baseIndexed: baseIndexed)
             await sink(frame)
         }
-        defer { activeStage = nil }
+        // Removes exactly the appended entry by position so two stages
+        // sharing one kind never remove each other.
+        defer {
+            if activeStages.count > activeBaseCount {
+                activeStages.remove(at: activeBaseCount)
+            }
+        }
         do {
-            let report = try await stage.run(reporter: stageReporter, isCancelled: cancellationProbe)
+            // Per-run policy seam: every stage builds from the run-entry
+            // snapshot, never from a config captured at boot or re-read here,
+            // so saved effort, workers, caps, excludes, roots, and windows
+            // apply on the next run.
+            let report = try await stage.run(
+                reporter: stageReporter,
+                isCancelled: cancellationProbe,
+                policy: policy
+            )
             totals.add(report)
             liveScanned = max(liveScanned, totals.scanned)
             liveIndexed = max(liveIndexed, totals.indexed)
@@ -1105,6 +1276,107 @@ private extension IndexCoordinator {
             totals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
             liveErrors = totals.errors
             return true
+        }
+    }
+
+    /// Executes one overlapped stage against a shared run snapshot.
+    ///
+    /// Owns exactly one stage's totals so the pair never shares a counter:
+    /// files and mail budgets stay isolated because each indexer enforces its
+    /// own cap from the same snapshot. Progress funnels through the summed
+    /// observer keyed by the stage's index in the overlap batch, so duplicate
+    /// kinds never overwrite each other's high-water marks. The caller in
+    /// `runEnabledStages` is the only place that merges peers. Active-stage
+    /// registration stays with the caller so a cancel racing stage start
+    /// still reaches both peers.
+    /// - Parameters:
+    ///   - stage: Overlapped source stage to run.
+    ///   - index: Position in the overlap batch, owning the high-water slot.
+    ///   - policy: Shared run snapshot for the pair.
+    ///   - startedAt: Instant the run began.
+    /// - Returns: Whether the stage contributed work plus its per-stage totals.
+    func executeStage(
+        _ stage: any IndexSourceStage,
+        index: Int,
+        policy: IndexConfig,
+        startedAt: Date
+    ) async -> (didRun: Bool, stageTotals: Totals) {
+        var stageTotals = Totals()
+        let flag = cancelFlag
+        let cancellationProbe: @Sendable () -> Bool = { flag.isSet || Task.isCancelled }
+        let stageReporter: ToolProgressReporter = { frame in
+            await self.observeConcurrentProgress(index: index, frame: frame, startedAt: startedAt)
+        }
+        do {
+            let report = try await stage.run(
+                reporter: stageReporter,
+                isCancelled: cancellationProbe,
+                policy: policy
+            )
+            stageTotals.add(report)
+            await self.finalizeConcurrentProgress(index: index, report: report)
+            return (true, stageTotals)
+        } catch is CancellationError {
+            flag.set()
+            return (false, stageTotals)
+        } catch {
+            stageTotals.errors += 1
+            stageTotals.warnings.append("\(stage.kind.rawValue): \(error.localizedDescription)")
+            return (true, stageTotals)
+        }
+    }
+
+    /// Folds one overlapped frame into the single cumulative live snapshot.
+    ///
+    /// Each peer reports its own cumulative counts, so the per-stage
+    /// high-water mark absorbs late or duplicate frames and the sum of peers
+    /// plus the overlap base stays monotonic. Only the summed frame is
+    /// emitted, never the raw peer frame, so polling surfaces observe one
+    /// stream that matches serial watermark math.
+    /// - Parameters:
+    ///   - index: Overlap-batch position owning the high-water slot.
+    ///   - frame: Peer progress frame.
+    ///   - startedAt: Instant the run began.
+    func observeConcurrentProgress(index: Int, frame: ToolProgress, startedAt: Date) async {
+        let priorScanned = overlapScanned[index] ?? 0
+        let priorIndexed = overlapIndexed[index] ?? 0
+        overlapScanned[index] = max(priorScanned, frame.scanned)
+        overlapIndexed[index] = max(priorIndexed, frame.matched)
+        if let current = frame.current {
+            liveCurrent = current
+        }
+        let summedScanned = overlapBaseScanned + overlapScanned.values.reduce(0, +)
+        let summedIndexed = overlapBaseIndexed + overlapIndexed.values.reduce(0, +)
+        if summedScanned > liveScanned {
+            liveScanned = summedScanned
+        }
+        if summedIndexed > liveIndexed {
+            liveIndexed = summedIndexed
+        }
+        await emit(phase: .extracting, stage: nil, totals: liveSnapshot(), startedAt: startedAt, force: false)
+    }
+
+    /// Converges one peer's final report into the summed live marks.
+    ///
+    /// Interim frames can lag the committed report, so the final counts join
+    /// the high-water marks here; the caller merges full totals after the
+    /// group joins, keeping watermark order canonical.
+    /// - Parameters:
+    ///   - index: Overlap-batch position owning the high-water slot.
+    ///   - report: Final stage contribution.
+    func finalizeConcurrentProgress(index: Int, report: IndexSourceRunReport) async {
+        overlapScanned[index] = max(overlapScanned[index] ?? 0, report.scanned)
+        overlapIndexed[index] = max(overlapIndexed[index] ?? 0, report.indexed)
+        if let item = report.lastItem {
+            liveCurrent = item
+        }
+        let summedScanned = overlapBaseScanned + overlapScanned.values.reduce(0, +)
+        let summedIndexed = overlapBaseIndexed + overlapIndexed.values.reduce(0, +)
+        if summedScanned > liveScanned {
+            liveScanned = summedScanned
+        }
+        if summedIndexed > liveIndexed {
+            liveIndexed = summedIndexed
         }
     }
 
@@ -1178,7 +1450,7 @@ private extension IndexCoordinator {
 
 private extension IndexCoordinator {
     /// Running totals accumulated across source stages.
-    struct Totals {
+    struct Totals: Sendable {
         /// Items examined.
         var scanned = 0
         /// Documents written.
@@ -1203,19 +1475,77 @@ private extension IndexCoordinator {
         /// Adds one stage report into the running totals.
         /// - Parameter report: Stage contribution to fold in.
         mutating func add(_ report: IndexSourceRunReport) {
-            scanned += report.scanned
-            indexed += report.indexed
-            vectorChunks += report.vectorChunks
-            keywordChunks += report.keywordChunks
-            skipped += report.skipped
-            errors += report.errors
-            retired += report.retired
-            truncated += report.truncated
-            warnings.append(contentsOf: report.warnings)
-            if let item = report.lastItem {
+            merge(Totals(
+                scanned: report.scanned,
+                indexed: report.indexed,
+                vectorChunks: report.vectorChunks,
+                keywordChunks: report.keywordChunks,
+                skipped: report.skipped,
+                errors: report.errors,
+                retired: report.retired,
+                truncated: report.truncated,
+                warnings: report.warnings,
+                lastItem: report.lastItem
+            ))
+        }
+
+        /// Merges one stage's accumulated totals into the running totals.
+        /// - Parameter other: Per-stage totals to fold in.
+        mutating func add(_ other: Totals) {
+            merge(other)
+        }
+
+        /// Folds counted fields shared by reports and accumulated totals.
+        ///
+        /// Keeps warning attribution intact by appending in canonical order, so
+        /// a files warning never masks a mail warning and the watermark math
+        /// matches the serial pass exactly.
+        /// - Parameter other: Counted contribution to fold in.
+        private mutating func merge(_ other: Totals) {
+            scanned += other.scanned
+            indexed += other.indexed
+            vectorChunks += other.vectorChunks
+            keywordChunks += other.keywordChunks
+            skipped += other.skipped
+            errors += other.errors
+            retired += other.retired
+            truncated += other.truncated
+            warnings.append(contentsOf: other.warnings)
+            if let item = other.lastItem {
                 lastItem = item
             }
         }
+    }
+
+    /// One overlapped peer's outcome for the task-group join.
+    ///
+    /// Carries the peer's overlap-batch index so the join folds peers in
+    /// canonical order no matter which finishes first, keeping watermarks
+    /// identical to serial even when two stages share one kind.
+    struct OverlapStageOutcome: Sendable {
+        /// Overlap-batch position owning the high-water slot.
+        let index: Int
+        /// Whether the peer contributed work or a counted failure.
+        let didRun: Bool
+        /// Per-stage totals owned by `executeStage`.
+        let stageTotals: Totals
+    }
+
+    /// Builds the live totals snapshot from the cached counters.
+    ///
+    /// Single owner for the snapshot shape so the concurrent observer and
+    /// the heartbeat cannot drift apart.
+    /// - Returns: Totals carrying the current live counters.
+    func liveSnapshot() -> Totals {
+        var snapshot = Totals()
+        snapshot.scanned = liveScanned
+        snapshot.indexed = liveIndexed
+        snapshot.skipped = liveSkipped
+        snapshot.errors = liveErrors
+        snapshot.vectorChunks = liveVectorChunks
+        snapshot.keywordChunks = liveKeywordChunks
+        snapshot.lastItem = liveCurrent
+        return snapshot
     }
 
     /// Starts the stalled-run heartbeat re-emitting current totals.
@@ -1244,15 +1574,7 @@ private extension IndexCoordinator {
     /// - Parameter startedAt: Instant the run began.
     func emitHeartbeat(startedAt: Date) async {
         guard running, let phase = livePhase else { return }
-        var snapshot = Totals()
-        snapshot.scanned = liveScanned
-        snapshot.indexed = liveIndexed
-        snapshot.skipped = liveSkipped
-        snapshot.errors = liveErrors
-        snapshot.vectorChunks = liveVectorChunks
-        snapshot.keywordChunks = liveKeywordChunks
-        snapshot.lastItem = liveCurrent
-        await emit(phase: phase, stage: liveStage, totals: snapshot, startedAt: startedAt, force: true)
+        await emit(phase: phase, stage: liveStage, totals: liveSnapshot(), startedAt: startedAt, force: true)
     }
 
     /// Folds one stage progress frame into the cached live counters.

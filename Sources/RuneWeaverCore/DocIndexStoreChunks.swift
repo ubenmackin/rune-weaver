@@ -7,14 +7,74 @@
 // `DocIndexStoreDocuments.swift` and schema plus maintenance live beside it.
 
 import Foundation
+import os
 
 #if canImport(SQLite3)
     import SQLite3
 #endif
 
 #if canImport(SQLite3)
+    /// Decides whether a chunk write should fail, letting tests prove the
+    /// atomic commit rolls back instead of leaving a half-written document.
+    public typealias DocIndexChunkFailureHook = @Sendable (IndexedChunk) -> Bool
+
+    /// Lock guarding the injectable chunk-write failure hook so parallel
+    /// index workers and tests never race on the override.
+    private let docIndexChunkFailureLock = OSAllocatedUnfairLock(initialState: DocIndexChunkFailureHook?.none)
+
     /// Chunk persistence and keyword retrieval for the document index.
     extension SQLiteDocIndexStore {
+        /// Injectable hook forcing chunk writes to fail.
+        ///
+        /// Nil performs every write; a hook returning true for a chunk throws
+        /// before its row lands, so the surrounding transaction rolls back.
+        /// Tests use it to prove document, chunk, and stamp writes land or
+        /// roll back together instead of stranding partial state.
+        static var chunkInsertFailureHook: DocIndexChunkFailureHook? {
+            get { docIndexChunkFailureLock.withLock { $0 } }
+            set { docIndexChunkFailureLock.withLock { $0 = newValue } }
+        }
+
+        /// Inserts chunk rows inside the caller's transaction.
+        ///
+        /// Binding always uses the resolved document identifier so a rewrite
+        /// that preserved the stable row keeps its foreign keys valid without
+        /// a second lookup, and FTS entries follow through the insert
+        /// triggers in the same commit.
+        /// - Parameters:
+        ///   - documentID: Resolved document owning every chunk.
+        ///   - chunks: Chunks to store, in extraction order.
+        ///   - handle: Open database handle owning the transaction.
+        static func insertChunkRows(documentID: UUID, chunks: [IndexedChunk], handle: OpaquePointer?) throws {
+            guard !chunks.isEmpty else { return }
+            let hook = chunkInsertFailureHook
+            var statement: OpaquePointer?
+            let sql = "INSERT INTO indexed_chunks(id, document_id, ordinal, chunk_text, embedding, is_vector) "
+                + "VALUES(?, ?, ?, ?, ?, ?);"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare chunk insert")
+            }
+            defer { sqlite3_finalize(statement) }
+            for chunk in chunks {
+                // The hook fires inside the transaction so a failure after an
+                // earlier row proves the whole commit rolls back together.
+                if let hook, hook(chunk) {
+                    throw DocIndexError.persistenceFailed("Could not write chunk \(chunk.id)")
+                }
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+                SQLiteHelpers.bindText(statement, index: 1, value: chunk.id.uuidString)
+                SQLiteHelpers.bindText(statement, index: 2, value: documentID.uuidString)
+                sqlite3_bind_int(statement, 3, SQLiteHelpers.sqliteLimit(chunk.ordinal))
+                SQLiteHelpers.bindText(statement, index: 4, value: chunk.text)
+                bindEmbedding(statement, index: 5, value: chunk.embedding)
+                sqlite3_bind_int(statement, 6, chunk.isVector ? 1 : 0)
+                guard sqlite3_step(statement) == SQLITE_DONE else {
+                    throw DocIndexError.persistenceFailed("Could not write chunk \(chunk.id)")
+                }
+            }
+        }
+
         /// Replaces all chunks for a document.
         static func upsertChunks(documentID: UUID, chunks: [IndexedChunk], dbPath: String) throws -> Int {
             let handle = try open(dbPath: dbPath)
@@ -22,30 +82,7 @@ import Foundation
             try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
             do {
                 try deleteChunks(documentID: documentID, handle: handle)
-                guard !chunks.isEmpty else {
-                    try exec(handle: handle, sql: "COMMIT;")
-                    return 0
-                }
-                var statement: OpaquePointer?
-                let sql = "INSERT INTO indexed_chunks(id, document_id, ordinal, chunk_text, embedding, is_vector) "
-                    + "VALUES(?, ?, ?, ?, ?, ?);"
-                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-                    throw DocIndexError.persistenceFailed("Could not prepare chunk insert")
-                }
-                defer { sqlite3_finalize(statement) }
-                for chunk in chunks {
-                    sqlite3_reset(statement)
-                    sqlite3_clear_bindings(statement)
-                    SQLiteHelpers.bindText(statement, index: 1, value: chunk.id.uuidString)
-                    SQLiteHelpers.bindText(statement, index: 2, value: documentID.uuidString)
-                    sqlite3_bind_int(statement, 3, SQLiteHelpers.sqliteLimit(chunk.ordinal))
-                    SQLiteHelpers.bindText(statement, index: 4, value: chunk.text)
-                    bindEmbedding(statement, index: 5, value: chunk.embedding)
-                    sqlite3_bind_int(statement, 6, chunk.isVector ? 1 : 0)
-                    guard sqlite3_step(statement) == SQLITE_DONE else {
-                        throw DocIndexError.persistenceFailed("Could not write chunk \(chunk.id)")
-                    }
-                }
+                try insertChunkRows(documentID: documentID, chunks: chunks, handle: handle)
                 try exec(handle: handle, sql: "COMMIT;")
                 return chunks.count
             } catch {

@@ -47,11 +47,13 @@ public enum ServerIndexBoot {
     ///   - config: Root config carrying the `[index]` section plus source policies.
     ///   - embedder: Embeddings backend shared with recall, or nil for keyword-only.
     ///   - visionLLM: Active provider backing image description, or nil to skip vision.
+    ///   - makeEmbeddingsBackend: Per-slot backend factory for the files pool, or nil to share `embedder`.
     /// - Returns: Store plus coordinator, or nil when `[index] enabled` is false.
     public static func makeComponents(
         config: RuneWeaverConfig,
         embedder: (any EmbeddingsBackend)?,
-        visionLLM: (any LLMProvider)?
+        visionLLM: (any LLMProvider)?,
+        makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil
     ) -> ServerIndexComponents? {
         guard config.index.enabled else { return nil }
         let indexConfig = config.index
@@ -61,6 +63,7 @@ public enum ServerIndexBoot {
             config: indexConfig,
             store: store,
             embedder: embedder,
+            makeEmbeddingsBackend: makeEmbeddingsBackend,
             accessGuard: FilesIndexPolicyGuard(filesConfig: config.files)
         )
         let mailStage = IndexClosureStage.mail(

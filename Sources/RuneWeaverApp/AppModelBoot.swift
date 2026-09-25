@@ -147,10 +147,16 @@ extension AppModel {
         let memoryEngine = makeBootMemoryEngine(config: config)
         let conversations = await loadBootConversations(config: config)
         let embedder = makeBootEmbedder(config: config, providers: providers)
+        let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
+            EmbeddingsBackendFactory.makePoolFactory(
+                memoryEmbeddingBackend: config.memory.embeddingBackend,
+                providers: providers
+            )
         let indexComponents = ServerIndexBoot.makeComponents(
             config: config,
             embedder: embedder,
-            visionLLM: selectedProvider
+            visionLLM: selectedProvider,
+            makeEmbeddingsBackend: makeEmbeddingsBackend
         )
         let goalStore = GoalStore(dbPath: config.memory.episodesDBPath)
         let goalEngine = GoalEngine(store: goalStore, llm: selectedProvider, config: config.goals)

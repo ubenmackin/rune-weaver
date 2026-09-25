@@ -359,8 +359,13 @@ extension FilesIndexer {
     ) async {
         let filename = (pending.canonicalPath as NSString).lastPathComponent
         let vectors: [[Float]]?
-        if vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount), let embedder {
-            vectors = await embedChunks(of: pending.extraction, embedder: embedder)
+        if vectorPolicy.shouldEmbed(status: pending.extraction.status, byteCount: pending.byteCount),
+           embedder != nil || embeddingsPool != nil
+        {
+            // Prefers the pooled backend when one is configured so a
+            // single-worker run with a pool still uses its distinct backend
+            // instead of bypassing it.
+            vectors = await embedChunksResolvingPool(of: pending.extraction)
             // Honor cancellation per embedding batch: a cancelled batch stops
             // before its document commits, bounding overrun to one file.
             if isCancelled || cancelBox.isSet || Task.isCancelled {
@@ -392,10 +397,15 @@ extension FilesIndexer {
             indexedAt: Date()
         )
         let written: [IndexedChunk]
+        // Chunks bind the fresh identifier up front; the atomic commit remaps
+        // them onto the stable row when the path was already indexed.
+        let chunks = Self.makeChunks(extraction: pending.extraction, documentID: document.id, vectors: vectors)
         do {
-            let stored = try await store.upsertDocument(document)
-            let chunks = Self.makeChunks(extraction: pending.extraction, documentID: stored.id, vectors: vectors)
-            _ = try await store.upsertChunks(documentID: stored.id, chunks: chunks)
+            _ = try await store.upsertDocumentWithChunks(
+                document: document,
+                chunks: chunks,
+                runID: counters.runID
+            )
             written = chunks
         } catch is CancellationError {
             isCancelled = true
@@ -408,9 +418,6 @@ extension FilesIndexer {
             await fail(relative, counters: &counters, start: start, reason: "store write failed")
             return
         }
-        // New and rewritten rows land with a null stamp, so the reconcile
-        // would treat them as stale without this write.
-        await stampSeen(pending.canonicalPath, counters: &counters)
         counters.indexed += 1
         counters.chunks += written.count
         counters.vectors += written.reduce(0) { $0 + ($1.isVector ? 1 : 0) }
@@ -497,5 +504,48 @@ extension FilesIndexer {
         } catch {
             return nil
         }
+    }
+
+    /// Embeds a document's chunks preferring the pooled backend when present.
+    ///
+    /// Mirrors `embedChunks(of:embedder:)` including cancellation and
+    /// degrade-to-keyword-only semantics, but checks out a pooled backend
+    /// first so the sequential path never bypasses a configured pool. A pool
+    /// failure degrades the same way without falling back to the shared
+    /// backend, matching the parallel worker preference.
+    /// - Parameter extraction: Extracted document body.
+    /// - Returns: One vector per embedded chunk, or nil when keyword-only.
+    func embedChunksResolvingPool(of extraction: DocumentExtraction) async -> [[Float]]? {
+        if let pool = embeddingsPool {
+            guard !extraction.chunks.isEmpty else { return nil }
+            if isCancelled || cancelBox.isSet || Task.isCancelled {
+                isCancelled = true
+                cancelBox.set()
+                return nil
+            }
+            do {
+                let texts = FilesVectorPolicy.cappedEmbeddingTexts(
+                    extraction.chunks.map(\.text),
+                    cap: config.maxVectorChunksPerDocument
+                )
+                let vectors = try await pool.withBackend { backend in
+                    try await backend.embed(texts)
+                }
+                if isCancelled || cancelBox.isSet || Task.isCancelled {
+                    isCancelled = true
+                    cancelBox.set()
+                    return nil
+                }
+                return Self.validatedEmbedVectors(vectors, expectedCount: texts.count)
+            } catch is CancellationError {
+                isCancelled = true
+                cancelBox.set()
+                return nil
+            } catch {
+                return nil
+            }
+        }
+        guard let embedder else { return nil }
+        return await embedChunks(of: extraction, embedder: embedder)
     }
 }

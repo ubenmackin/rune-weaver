@@ -58,6 +58,30 @@ public actor DocIndexStore {
         }
     }
 
+    /// Commits one document with its chunks and run stamp in a single transaction.
+    ///
+    /// The document row, its replacement chunks (and their FTS entries via
+    /// triggers), and the `last_seen_run` stamp land or roll back together,
+    /// so an interrupted file never leaves a half-indexed document. Exactly
+    /// one document is handled per call to keep cancel, resume, and retire
+    /// accounting per-file.
+    /// - Parameters:
+    ///   - document: Document to persist; a stored row keeps its identifier.
+    ///   - chunks: Replacement chunks bound to the document.
+    ///   - runID: Opaque stamp recorded alongside the rows for reconcile.
+    /// - Returns: The persisted document carrying the stable identifier.
+    @discardableResult
+    public func upsertDocumentWithChunks(
+        document: IndexedDocument,
+        chunks: [IndexedChunk],
+        runID: String
+    ) async throws -> IndexedDocument {
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.upsertDocumentWithChunks(document: document, chunks: chunks, runID: runID, dbPath: dbPath)
+        }
+    }
+
     /// Deletes a document and its chunks. Missing rows are a no-op.
     /// - Parameter id: Document identifier.
     /// - Returns: True when a document row was removed.
@@ -248,6 +272,25 @@ enum DocIndexStoreIO {
     static func upsertChunks(documentID: UUID, chunks: [IndexedChunk], dbPath: String) throws -> Int {
         #if canImport(SQLite3)
             return try SQLiteDocIndexStore.upsertChunks(documentID: documentID, chunks: chunks, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Commits one document with its chunks and run stamp atomically.
+    static func upsertDocumentWithChunks(
+        document: IndexedDocument,
+        chunks: [IndexedChunk],
+        runID: String,
+        dbPath: String
+    ) throws -> IndexedDocument {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.upsertDocumentWithChunks(
+                document: document,
+                chunks: chunks,
+                runID: runID,
+                dbPath: dbPath
+            )
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
