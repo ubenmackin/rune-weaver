@@ -4997,10 +4997,17 @@ button.danger:hover:not(:disabled) {
   pointer-events: none;
 }
 
-.tools-search-input {
+/* Tools search reserves room for its overlaid icon: the element-plus-attribute
+ * selector outranks the global input[type="search"] padding so the 36px left
+ * inset survives at every width, and that inset equals the 12px icon offset
+ * plus the 16px icon plus an 8px gap so placeholder and typed text — including
+ * long queries at narrow widths — never slide under the icon. The icon itself
+ * stays click-through so focus always lands in the field. */
+input.tools-search-input[type="search"] {
   width: 100%;
   padding: 8px 12px 8px 36px;
   border-radius: 6px;
+  box-sizing: border-box;
   background-color: var(--bg-card, #1e2533);
   border: 1px solid var(--border-color, #2d3748);
   color: var(--text-primary, #ffffff);

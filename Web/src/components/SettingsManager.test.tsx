@@ -1,6 +1,6 @@
 // Rune Weaver Dashboard — Component tests for SettingsManager.
 
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SettingsManager from "./SettingsManager";
@@ -1105,7 +1105,7 @@ describe("SettingsManager", () => {
     expect((savedBody as unknown as Record<string, unknown>)?.maxToolIterations).toBe(15);
   });
 
-  it("opens browser and web configuration modal for browser.act without fallback error", async () => {
+  it("opens browser and web configuration modal from the combined Browser & Web header without fallback error", async () => {
     const user = userEvent.setup();
     vi.stubGlobal(
       "fetch",
@@ -1116,6 +1116,13 @@ describe("SettingsManager", () => {
               {
                 name: "browser.act",
                 description: "Perform an action",
+                isEnabled: true,
+                isBuiltIn: true,
+                hasConfig: true,
+              },
+              {
+                name: "web.fetch",
+                description: "Fetch a URL",
                 isEnabled: true,
                 isBuiltIn: true,
                 hasConfig: true,
@@ -1140,8 +1147,33 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    // Find the Configure button for browser.act
-    const configureButton = await screen.findByRole("button", { name: /Configure/i });
+    // Browser and web prefixes share one section, so both tools render under a
+    // single Browser & Web heading with no leftover split sections. The split
+    // would strand web.fetch away from the allowlist editor its calls need.
+    await waitFor(() => {
+      expect(screen.getByText("Browser & Web")).toBeDefined();
+    });
+    expect(screen.queryByText("Browser Automation")).toBeNull();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(1);
+    // Pills mirror sections: All plus one Browser pill, never a second Web pill.
+    // Scoped to the pills bar because the sidenav Web tab also renders /^Web$/.
+    expect(document.querySelectorAll(".tools-category-pill").length).toBe(2);
+    const pillsBar = document.querySelector(".tools-category-pills");
+    expect(pillsBar).not.toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Browser")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).queryByText(/^Web$/)).toBeNull();
+    expect(screen.getByText("browser.act")).toBeDefined();
+    expect(screen.getByText("web.fetch")).toBeDefined();
+
+    // Single header Configure owns the whole surface: it sits beside Enable
+    // All in the category actions, never inside a tool card, so one editor
+    // covers both prefixes without duplicated buttons.
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    const configureButton = configureButtons[0];
+    expect(configureButton.closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButton.closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
     await user.click(configureButton);
 
     // Should open "Configure Browser & Web Automation" modal
@@ -1606,8 +1638,15 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    const configureButtons = await screen.findAllByRole("button", { name: /Configure/i });
-    expect(configureButtons.length).toBe(2);
+    // One header Configure owns the whole Desktop surface: both tools share the
+    // same editor, so a second per-card button would duplicate the modal and
+    // drift from the server hasConfig authority.
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+    expect(screen.getByText("Desktop & Automation")).toBeDefined();
     await user.click(configureButtons[0]);
 
     // The unified modal carries both capture knobs and blocklist.
@@ -1637,7 +1676,7 @@ describe("SettingsManager", () => {
     expect(desktop).not.toHaveProperty("control_enabled");
   });
 
-  it("renders the unified Desktop Configure modal from desktop.action and saves edited blocklist without enable keys", async () => {
+  it("renders the unified Desktop Configure modal from the category header and saves edited blocklist without enable keys", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -1694,11 +1733,17 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    const configureButtons = await screen.findAllByRole("button", { name: /Configure/i });
-    expect(configureButtons.length).toBe(2);
-    await user.click(configureButtons[1]);
+    // Header placement covers both desktop tools at once: the category holds
+    // two cards but exposes one Configure, so editing the blocklist here proves
+    // the shared editor path without a per-tool entry point.
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+    await user.click(configureButtons[0]);
 
-    // The unified modal opens from desktop.action as well.
+    // The unified modal opens from the header as well.
     expect(screen.getByRole("heading", { name: /Configure Desktop Integration/i })).toBeDefined();
     const blockedTextarea = screen.getByLabelText(/Blocked Apps/i) as HTMLTextAreaElement;
     expect(blockedTextarea.value).toContain("Terminal");
@@ -1782,7 +1827,7 @@ describe("SettingsManager", () => {
     expect(putCalled).toBe(true);
   });
 
-  it("styles every Tools Configure button with accent-ghost", async () => {
+  it("styles every category Configure button with accent-ghost", async () => {
     const user = userEvent.setup();
     const configurableTools = [
       "media.arr",
@@ -1827,15 +1872,223 @@ describe("SettingsManager", () => {
     const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
     await user.click(toolsTabBtn);
 
-    const configureButtons = await screen.findAllByRole("button", {
-      name: /Configure/i,
+    // Seven configurable tools collapse to three header buttons (media,
+    // Browser & Web, desktop), so the count follows categories rather than
+    // tools. The combined section proves browser.* and web.* stay together.
+    await waitFor(() => {
+      expect(screen.getByText("Browser & Web")).toBeDefined();
     });
-    expect(configureButtons.length).toBe(configurableTools.length);
+    expect(screen.getByText("Desktop & Automation")).toBeDefined();
+    expect(screen.getByText("Media & Streaming")).toBeDefined();
+    expect(screen.queryByText("Browser Automation")).toBeNull();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(3);
+    expect(document.querySelectorAll(".tools-category-pill").length).toBe(4);
+    const configureButtons = await screen.findAllByRole("button", {
+      name: /^Configure$/,
+    });
+    expect(configureButtons.length).toBe(3);
     for (const btn of configureButtons) {
       expect(btn.classList.contains("accent-ghost")).toBe(true);
       expect(btn.classList.contains("icon-text-btn")).toBe(true);
+      expect(btn.classList.contains("tool-category-action-btn")).toBe(true);
+      expect(btn.classList.contains("configure")).toBe(true);
       expect(btn.classList.contains("ghost")).toBe(false);
+      // Header ownership, never a card child, keeps one editor per surface.
+      expect(btn.closest(".tool-category-actions")).not.toBeNull();
+      expect(btn.closest(".builtin-tool-card")).toBeNull();
     }
+    // No per-card Configure remains anywhere in the grid.
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+  });
+
+  it("opens the media category Configure and hides Configure on unconfigurable categories", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "media.arr",
+        description: "Search and manage media",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: false,
+      },
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Only the media row earns a header button: the server hasConfig flag is
+    // the sole authority, so email and files rows without a flagged tool stay
+    // clean even though their sections still render with bulk toggles.
+    await waitFor(() => {
+      expect(screen.getByText("Media & Streaming")).toBeDefined();
+    });
+    expect(screen.getByText("Email & Mailboxes")).toBeDefined();
+    expect(screen.getByText("Files & Workspace")).toBeDefined();
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+    // Bulk toggles stay beside the single Configure without interference.
+    expect(screen.getAllByRole("button", { name: /Enable All|Disable All/ }).length).toBe(3);
+    await user.click(configureButtons[0]);
+
+    // Media header opens the existing Sonarr & Radarr editor, never fallback.
+    expect(screen.getByRole("heading", { name: /Configure Media Automation/i })).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+  });
+
+  it("keeps search, pills, empty-state, and bulk toggles intact for the combined category", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "browser.navigate",
+        description: "Open a page",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "web.search",
+        description: "Search the web",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: false,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Combined pill and section stay singular: one Browser pill covers both
+    // prefixes, and the grid holds one Browser & Web section plus email.
+    await waitFor(() => {
+      expect(screen.getByText("Browser & Web")).toBeDefined();
+    });
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
+    expect(screen.getByText("browser.navigate")).toBeDefined();
+    expect(screen.getByText("web.search")).toBeDefined();
+    // Pills stay singular too: All plus one per visible category, with a single
+    // Browser pill and no standalone Web pill left behind. Scoped to the pills
+    // bar because the sidenav Web tab also renders /^Web$/.
+    expect(document.querySelectorAll(".tools-category-pill").length).toBe(3);
+    const pillsBar = document.querySelector(".tools-category-pills");
+    expect(pillsBar).not.toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Browser")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).queryByText(/^Web$/)).toBeNull();
+    // Search input keeps its accessible shape; pills keep counts.
+    const searchInput = document.querySelector("input.tools-search-input") as HTMLInputElement | null;
+    expect(searchInput).not.toBeNull();
+    expect(searchInput?.getAttribute("type")).toBe("search");
+    expect(screen.getAllByRole("button", { name: /All/i }).length).toBeGreaterThan(0);
+    // Bulk toggles render per visible category and stay interactive.
+    const bulkButtons = screen.getAllByRole("button", { name: /Enable All|Disable All/ });
+    expect(bulkButtons.length).toBe(2);
+    // One header Configure for the combined surface, none for email.
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+
+    // Unmatched filter renders the empty state with a reset that restores the
+    // grid, proving search and pill filtering never strand the pane.
+    const searchBox = screen.getByPlaceholderText(/Search tools by name or description/i);
+    await user.clear(searchBox);
+    await user.type(searchBox, "zzz-no-such-tool");
+    await waitFor(() => {
+      expect(screen.getByText(/No tools match your filter criteria/i)).toBeDefined();
+    });
+    await user.click(screen.getByRole("button", { name: /Reset filters/i }));
+    await waitFor(() => {
+      expect(screen.getByText("Browser & Web")).toBeDefined();
+    });
+    expect(screen.getByText("browser.navigate")).toBeDefined();
   });
 });
 

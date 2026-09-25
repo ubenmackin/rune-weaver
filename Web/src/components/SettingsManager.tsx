@@ -148,32 +148,57 @@ interface ToolCategoryMeta {
   icon: (props: { size?: number; className?: string }) => React.JSX.Element;
 }
 
+// Browser and web tools share one section because they dial the same [browser]
+// policy surface (SearXNG plus the homelab allowlist) and one Configure editor;
+// splitting them stranded web.fetch away from the allowlist UI its calls need.
+// The browser-web id is the sole grouping for both prefixes, so pills, search
+// filtering, and bulk toggles stay in lockstep and any future browser.* or
+// web.* tool lands here without a second pill or section.
 const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "desktop", name: "Desktop & Automation", description: "Screen capture, OCR, and approval-gated mouse/keyboard control", icon: MonitorIcon },
   { id: "messages", name: "Messages & SMS", description: "Search, read, and send macOS iMessages and text messages", icon: MessageSquareIcon },
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
-  { id: "browser", name: "Browser Automation", description: "Web page navigation, interaction, and page extraction", icon: GlobeIcon },
+  { id: "browser-web", name: "Browser & Web", description: "Web search, page fetch, navigation, and interaction", icon: GlobeIcon },
   { id: "files", name: "Files & Workspace", description: "Local filesystem reads, writes, listing, and search", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "media", name: "Media & Streaming", description: "Media search and client control", icon: WrenchIcon },
-  { id: "web", name: "Web Search", description: "Live web search and URL fetching", icon: SearchIcon },
   { id: "api", name: "API & Integrations", description: "External REST calls and webhook triggers", icon: WrenchIcon },
   { id: "other", name: "Other Tools", description: "General utility tools and external plugins", icon: WrenchIcon },
 ];
 
+// Prefix routing keeps the category vocabulary closed: every builtin lands in
+// exactly one section, with browser.* and web.* intentionally collapsed so the
+// single Browser & Web editor owns both. Bare names without a dot (including
+// the remember_fact/recall_memories aliases) fall through to their explicit
+// branches or to other, so a future unprefixed tool never joins a category
+// by accident.
 function getToolCategory(toolName: string): string {
   if (toolName.startsWith("desktop.")) return "desktop";
   if (toolName.startsWith("messages.")) return "messages";
   if (toolName.startsWith("email.")) return "email";
-  if (toolName.startsWith("browser.")) return "browser";
+  if (toolName.startsWith("browser.") || toolName.startsWith("web.")) return "browser-web";
   if (toolName.startsWith("files.")) return "files";
   if (toolName.startsWith("memories.") || toolName === "remember_fact" || toolName === "recall_memories") return "memories";
   if (toolName.startsWith("goal.")) return "goal";
   if (toolName.startsWith("media.")) return "media";
-  if (toolName.startsWith("web.")) return "web";
   if (toolName.startsWith("api.")) return "api";
   return "other";
+}
+
+// One Configure entry per integration surface keeps a single modal per editor:
+// desktop, media, and browser-web each own one existing modal, so the header
+// button opens that editor whenever any rendered tool in the category reports
+// hasConfig. The server hasConfig flag is the sole authority — a null key or
+// no flagged tool hides the button, which keeps unconfigurable categories
+// clean and avoids stale per-tool buttons when new tools gain editors later.
+// Edge case: a filtered view with zero flagged tools in a configurable
+// category still hides Configure, so search never offers a dead editor.
+function getCategoryConfigKey(categoryId: string): string | null {
+  if (categoryId === "desktop") return "desktop";
+  if (categoryId === "media") return "media.arr";
+  if (categoryId === "browser-web") return "browser.navigate";
+  return null;
 }
 
 interface ProviderEntry {
@@ -3664,6 +3689,19 @@ export default function SettingsManager() {
                     const anyEnabled = enabledCount > 0;
                     const isTogglingCat = togglingCategory === cat.id;
                     const Icon = cat.icon;
+                    // Header Configure resolves once per rendered category: the config key
+                    // must exist and at least one tool in this filtered view must report
+                    // hasConfig, so search or pill filtering never offers a dead editor.
+                    // Clearing all three modal errors first keeps a prior failed save
+                    // from lingering when a different category editor opens.
+                    const categoryConfigKey = getCategoryConfigKey(cat.id);
+                    const categoryHasConfig = cat.tools.some((t) => t.hasConfig);
+                    const categoryConfigTitle =
+                      categoryConfigKey === "desktop"
+                        ? "Configure Desktop Integration"
+                        : categoryConfigKey === "media.arr"
+                          ? "Configure Sonarr & Radarr"
+                          : "Configure Browser & Web Automation";
 
                     return (
                       <section key={cat.id} className="tool-category-section">
@@ -3688,13 +3726,29 @@ export default function SettingsManager() {
                             >
                               {isTogglingCat ? "Updating…" : allEnabled ? "Disable All" : "Enable All"}
                             </button>
+                            {categoryConfigKey !== null && categoryHasConfig ? (
+                              <button
+                                type="button"
+                                className="tool-category-action-btn configure accent-ghost icon-text-btn"
+                                title={categoryConfigTitle}
+                                onClick={() => {
+                                  setMediaModalError(null);
+                                  setBrowserModalError(null);
+                                  setDesktopModalError(null);
+                                  setConfiguringToolName(categoryConfigKey);
+                                }}
+                                style={{ padding: "4px 8px", fontSize: "0.78rem" }}
+                              >
+                                <SettingsIcon size={12} />
+                                <span>Configure</span>
+                              </button>
+                            ) : null}
                           </div>
                         </div>
 
                         <div className="builtin-tools-grid">
                           {cat.tools.map((tool) => {
                             const isToggling = togglingToolName === tool.name;
-                            const isDesktopTool = tool.name.startsWith("desktop.");
                             return (
                               <article key={tool.name} className="builtin-tool-card">
                                 <div className="builtin-tool-card-header">
@@ -3712,7 +3766,11 @@ export default function SettingsManager() {
                                     <p className="builtin-tool-details-body">{tool.description}</p>
                                   </details>
                                 )}
-                                <div className="builtin-tool-footer builtin-tool-footer--split">
+                                {/* Single-switch footer: configuration lives on the category
+                                    header so one editor owns the whole integration surface.
+                                    Per-card buttons duplicated editors and drifted from the
+                                    server hasConfig authority, so the switch stays alone here. */}
+                                <div className="builtin-tool-footer">
                                   <label
                                     className="toggle-label tool-switch"
                                     style={{ display: "flex", alignItems: "center", gap: "8px", flexShrink: 0, cursor: isToggling ? "wait" : "pointer" }}
@@ -3738,23 +3796,6 @@ export default function SettingsManager() {
                                       {isToggling ? "Updating…" : tool.isEnabled ? "Enabled" : "Disabled"}
                                     </span>
                                   </label>
-                                  {tool.hasConfig && (
-                                    <button
-                                      type="button"
-                                      className="accent-ghost icon-text-btn"
-                                      onClick={() => {
-                                        setMediaModalError(null);
-                                        setBrowserModalError(null);
-                                        setDesktopModalError(null);
-                                        setConfiguringToolName(isDesktopTool ? "desktop" : tool.name);
-                                      }}
-                                      style={{ padding: "4px 8px", fontSize: "0.78rem" }}
-                                      title={isDesktopTool ? "Configure Desktop Integration" : "Edit this tool's configuration"}
-                                    >
-                                      <SettingsIcon size={12} />
-                                      <span>Configure</span>
-                                    </button>
-                                  )}
                                 </div>
                               </article>
                             );

@@ -105,8 +105,14 @@ struct DashboardBundleTests {
         let root = bundle.response(for: "")
         #expect(root.status == .ok)
         #expect(root.headers.first(name: DashboardBundle.bundleHeader) == "bundle")
+        #expect(root.headers.first(name: "Cache-Control") == DashboardBundle.htmlCacheControl)
+        #expect(root.headers.first(name: "Pragma") == "no-cache")
+        #expect(root.headers.first(name: "Expires") == "0")
+
         let index = bundle.response(for: "index.html")
         #expect(index.status == .ok)
+        #expect(index.headers.first(name: "Cache-Control") == DashboardBundle.htmlCacheControl)
+        #expect(index.headers.first(name: "Pragma") == "no-cache")
     }
 
     @Test
@@ -119,7 +125,22 @@ struct DashboardBundleTests {
         #expect(response.status == .ok)
         #expect(response.headers.first(name: DashboardBundle.bundleHeader) == "bundle")
         #expect(response.headers.first(name: "Content-Type")?.contains("javascript") == true)
-        #expect(response.headers.first(name: "Cache-Control")?.contains("immutable") == true)
+        #expect(response.headers.first(name: "Cache-Control") == DashboardBundle.assetCacheControl)
+    }
+
+    @Test
+    func `Available bundle serves root unhashed files with revalidation caching`() throws {
+        let built = try makeBundleDirectory(assets: ["favicon.ico": "icon", "site.webmanifest": "{}"])
+        defer { try? FileManager.default.removeItem(at: built) }
+        let bundle = DashboardBundle(directoryURL: built)
+        let favicon = bundle.response(for: "favicon.ico")
+        #expect(favicon.status == .ok)
+        #expect(favicon.headers.first(name: "Cache-Control") == DashboardBundle.staticFileCacheControl)
+        #expect(favicon.headers.first(name: "Cache-Control")?.contains("immutable") == false)
+
+        let manifest = bundle.response(for: "site.webmanifest")
+        #expect(manifest.status == .ok)
+        #expect(manifest.headers.first(name: "Cache-Control") == DashboardBundle.staticFileCacheControl)
     }
 
     @Test
@@ -127,7 +148,10 @@ struct DashboardBundleTests {
         let built = try makeBundleDirectory(indexHTML: "<html>entry</html>")
         defer { try? FileManager.default.removeItem(at: built) }
         let bundle = DashboardBundle(directoryURL: built)
-        #expect(bundle.response(for: "approvals").status == .ok)
+        let response = bundle.response(for: "approvals")
+        #expect(response.status == .ok)
+        #expect(response.headers.first(name: "Cache-Control") == DashboardBundle.htmlCacheControl)
+        #expect(response.headers.first(name: "Pragma") == "no-cache")
     }
 
     @Test
