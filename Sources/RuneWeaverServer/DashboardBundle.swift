@@ -25,6 +25,17 @@ public struct DashboardBundle: Sendable, Equatable {
     /// bundle from the missing-build stub without parsing bodies.
     public static let bundleHeader = "X-RuneWeaver-Dashboard"
 
+    /// Cache-Control applied to HTML entry points (index.html, root, and SPA client-side routes).
+    /// Enforces no-store so new application builds and asset hashes are picked up immediately
+    /// without requiring users to clear browser caches.
+    public static let htmlCacheControl = "no-store, no-cache, must-revalidate, max-age=0"
+
+    /// Cache-Control applied to fingerprinted bundle assets in `assets/`.
+    public static let assetCacheControl = "public, max-age=31536000, immutable"
+
+    /// Cache-Control applied to non-fingerprinted static files (favicons, manifests, etc.).
+    public static let staticFileCacheControl = "no-cache, must-revalidate"
+
     /// Resolves the bundle directory without failing when Node/npm never ran.
     public static func resolve(
         fileManager: FileManager = .default,
@@ -221,6 +232,7 @@ public struct DashboardBundle: Sendable, Equatable {
                 req: req,
                 at: indexFileURL(fileManager: fileManager),
                 bundleState: "bundle",
+                cacheControl: Self.htmlCacheControl,
                 fileManager: fileManager
             )
         case let .file(url, cacheControl):
@@ -236,7 +248,7 @@ public struct DashboardBundle: Sendable, Equatable {
                 req: req,
                 at: indexFileURL(fileManager: fileManager),
                 bundleState: "bundle",
-                cacheControl: "no-cache",
+                cacheControl: Self.htmlCacheControl,
                 fileManager: fileManager
             )
         case .notFound:
@@ -257,11 +269,21 @@ public struct DashboardBundle: Sendable, Equatable {
         case .invalidPath:
             jsonError(status: .badRequest, message: "Invalid dashboard path", fileManager: fileManager)
         case .index:
-            fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", fileManager: fileManager)
+            fileResponse(
+                at: indexFileURL(fileManager: fileManager),
+                bundleState: "bundle",
+                cacheControl: Self.htmlCacheControl,
+                fileManager: fileManager
+            )
         case let .file(url, cacheControl):
             fileResponse(at: url, bundleState: "bundle", cacheControl: cacheControl, fileManager: fileManager)
         case .clientFallback:
-            fileResponse(at: indexFileURL(fileManager: fileManager), bundleState: "bundle", cacheControl: "no-cache", fileManager: fileManager)
+            fileResponse(
+                at: indexFileURL(fileManager: fileManager),
+                bundleState: "bundle",
+                cacheControl: Self.htmlCacheControl,
+                fileManager: fileManager
+            )
         case .notFound:
             jsonError(status: .notFound, message: "Not found", fileManager: fileManager)
         }
@@ -301,9 +323,10 @@ public struct DashboardBundle: Sendable, Equatable {
         if let file = localFileURL(for: requestPath, fileManager: fileManager) {
             let lastComponent = components.last ?? ""
             let hasExtension = !(lastComponent as NSString).pathExtension.isEmpty
-            // Hashed assets carry fingerprints so they can cache immutably;
-            // extensionless hits fall through to no-cache or the SPA fallback.
-            let cacheControl = hasExtension ? "public, max-age=31536000, immutable" : "no-cache"
+            // Only fingerprinted assets under assets/ carry content hashes and can cache immutably;
+            // unhashed root assets (favicons, manifests, etc.) require revalidation before reuse.
+            let isHashedAsset = components.first == "assets" && hasExtension
+            let cacheControl = isHashedAsset ? Self.assetCacheControl : Self.staticFileCacheControl
             return .file(file, cacheControl: cacheControl)
         }
         if Self.isClientRoute(requestPath) {
@@ -388,7 +411,7 @@ extension DashboardBundle {
         req: Request,
         at url: URL?,
         bundleState: String,
-        cacheControl: String = "no-cache",
+        cacheControl: String = htmlCacheControl,
         fileManager: FileManager = .default
     ) async throws -> Response {
         guard let url else {
@@ -397,6 +420,10 @@ extension DashboardBundle {
         let res = try await req.fileio.asyncStreamFile(at: url.path)
         res.headers.replaceOrAdd(name: "Content-Type", value: Self.contentType(for: url.lastPathComponent))
         res.headers.replaceOrAdd(name: "Cache-Control", value: cacheControl)
+        if cacheControl == Self.htmlCacheControl {
+            res.headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            res.headers.replaceOrAdd(name: "Expires", value: "0")
+        }
         res.headers.replaceOrAdd(name: Self.bundleHeader, value: bundleState)
         Self.applySecurityHeaders(to: &res.headers)
         return res
@@ -405,7 +432,12 @@ extension DashboardBundle {
     /// Reads a file URL into a 200 response (synchronous test-only fallback).
     /// Blocking file I/O stays confined to unit tests here; production routes use the streaming
     /// `fileResponse(req:at:bundleState:cacheControl:fileManager:)` above so the event loop never blocks.
-    private func fileResponse(at url: URL?, bundleState: String, cacheControl: String = "no-cache", fileManager: FileManager = .default) -> Response {
+    private func fileResponse(
+        at url: URL?,
+        bundleState: String,
+        cacheControl: String = htmlCacheControl,
+        fileManager: FileManager = .default
+    ) -> Response {
         guard let url, let data = try? Data(contentsOf: url) else {
             return jsonError(status: .internalServerError, message: "Dashboard bundle unreadable", fileManager: fileManager)
         }
@@ -414,6 +446,10 @@ extension DashboardBundle {
             ("Cache-Control", cacheControl),
             (Self.bundleHeader, bundleState)
         ])
+        if cacheControl == Self.htmlCacheControl {
+            headers.replaceOrAdd(name: "Pragma", value: "no-cache")
+            headers.replaceOrAdd(name: "Expires", value: "0")
+        }
         Self.applySecurityHeaders(to: &headers)
         return Response(
             status: .ok,
