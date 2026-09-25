@@ -323,7 +323,14 @@ export default function SchedulerManager() {
                         <span>Email Watcher ({job.pollAccount})</span>
                       </span>
                     ) : (
-                      <span className="trigger-badge cron font-mono">
+                      // Single-line cron badge: the visible text truncates with
+                      // ellipsis via CSS while title preserves the full schedule
+                      // for hover and assistive reading. Empty schedules fall
+                      // back to the "Cron" label so the badge never renders blank.
+                      <span
+                        className="trigger-badge cron font-mono"
+                        title={job.schedule || "Cron"}
+                      >
                         <ClockIcon size={12} />
                         <span>{job.schedule || "Cron"}</span>
                       </span>

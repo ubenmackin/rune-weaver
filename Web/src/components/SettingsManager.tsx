@@ -74,6 +74,7 @@ import {
   CloseIcon,
   MailIcon,
   MemoryIcon,
+  MenuIcon,
   MicIcon,
   PlusIcon,
   RefreshIcon,
@@ -91,6 +92,7 @@ import { ToastStack } from "./Toast";
 import { useRunningRuns } from "../hooks/useRunningRuns";
 import { useToastStack } from "../hooks/useToastStack";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
+import { useIsMobile } from "../hooks/useIsMobile";
 
 // Vertical navigation keeps every category visible without horizontal scrolling; sandbox
 // and file policy share one Security pane so the sidebar stays within the width budget as settings
@@ -108,6 +110,31 @@ type SettingsTab =
   | "email"
   | "network"
   | "indexing";
+
+// Closed tab vocabulary for fail-closed selection: an unknown id keeps the
+// current tab instead of blanking the content pane, so drifted callers can
+// never strand the form without a visible section.
+const SETTINGS_TABS: readonly SettingsTab[] = [
+  "providers",
+  "engine",
+  "tools",
+  "security",
+  "memory",
+  "voice",
+  "search",
+  "email",
+  "network",
+  "indexing",
+];
+
+// Narrows an unknown tab id to the known vocabulary without throwing, so
+// selection stays fail-closed on drifted or persisted values.
+function isSettingsTab(value: unknown): value is SettingsTab {
+  return (
+    typeof value === "string" &&
+    (SETTINGS_TABS as readonly string[]).includes(value)
+  );
+}
 
 interface ProviderEntry {
   id: string;
@@ -292,16 +319,69 @@ export default function SettingsManager() {
   // Shared run-log snapshot feeding the guard fallback when the fresh probe
   // fails; parked approvals never count because only running lights the guard.
   const { runs: sharedRuns } = useRunningRuns();
+  // Handheld drawer visibility for the settings sidenav. Closed by default so
+  // the form keeps the screen on first paint; desktop renders the same sidenav
+  // inline via stylesheet alone, so this flag only moves the handheld drawer.
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
+  // Trigger that opens the settings drawer. Dismissals return focus here so
+  // keyboard users land back on the control that opened the drawer instead of
+  // losing focus to the document body.
+  const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Live handheld flag from the shared breakpoint so tab selection can close
+  // the drawer on mobile while leaving the desktop inline sidenav untouched.
+  const isMobile = useIsMobile();
+
+  // Returns focus to the hamburger after a drawer dismissal. The trigger stays
+  // mounted in both drawer states (stylesheet hides it on desktop), so focus
+  // can move synchronously without waiting for a post-close mount.
+  const returnFocusToMenuButton = useCallback(() => {
+    menuButtonRef.current?.focus();
+  }, []);
+
+  // Close-only dismissal shared by backdrop, Escape, and tab-select paths so
+  // those callers can never reopen a closed drawer by reusing a toggle.
+  const closeSettingsMenu = useCallback(() => {
+    setSettingsMenuOpen(false);
+  }, []);
+
+  // Backdrop dismissal for the handheld drawer. Desktop never renders a
+  // backdrop, so this handler only fires on handheld widths.
+  const handleSettingsBackdropClick = useCallback(() => {
+    closeSettingsMenu();
+    returnFocusToMenuButton();
+  }, [closeSettingsMenu, returnFocusToMenuButton]);
 
   // Selects a settings tab while clearing any transient toasts so they
   // never follow navigation. Contextual errors stay as persistent banners.
+  // Fail-closed on unknown ids: an invalid tab keeps the current tab instead
+  // of blanking the pane. On handheld widths a valid select also dismisses
+  // the drawer and returns focus to the hamburger; desktop keeps the inline
+  // sidenav open across switches.
   const selectSettingsTab = useCallback(
     (tab: SettingsTab) => {
+      if (!isSettingsTab(tab)) return;
       clearToasts();
       setActiveTab(tab);
+      if (isMobile && settingsMenuOpen) {
+        closeSettingsMenu();
+        returnFocusToMenuButton();
+      }
     },
-    [clearToasts]
+    [clearToasts, isMobile, settingsMenuOpen, closeSettingsMenu, returnFocusToMenuButton]
   );
+
+  // Escape dismissal for the handheld drawer. Registered only while the drawer
+  // is open so unrelated Escape handling elsewhere never double-fires.
+  useEffect(() => {
+    if (!settingsMenuOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      closeSettingsMenu();
+      returnFocusToMenuButton();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [settingsMenuOpen, closeSettingsMenu, returnFocusToMenuButton]);
 
   // Clears toasts whenever the tab changes through any path so a save
   // notice never lingers across navigation.
@@ -2414,6 +2494,19 @@ export default function SettingsManager() {
   return (
     <section className="panel settings-panel" aria-label="Settings and configuration">
       <div className="panel-header-row">
+        {/* Handheld drawer trigger at the top-left of the header. Stylesheet
+            reveals it only on narrow widths; desktop keeps the inline sidenav
+            with no duplicate control. */}
+        <button
+          type="button"
+          ref={menuButtonRef}
+          className="settings-menu-btn"
+          aria-label="Open settings menu"
+          aria-expanded={settingsMenuOpen}
+          onClick={() => setSettingsMenuOpen((previous) => !previous)}
+        >
+          <MenuIcon size={20} />
+        </button>
         <div>
           <h2>Settings & Configuration</h2>
           <p className="muted text-sm">
@@ -2445,9 +2538,24 @@ export default function SettingsManager() {
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       {/* Vertical sidenav: stacked categories beside the content pane so every
-          section stays visible without horizontal scrolling. */}
+          section stays visible without horizontal scrolling. On handheld
+          widths the same list becomes a fixed drawer above a dim backdrop,
+          mirroring the chat history drawer interaction. */}
       <div className="settings-layout">
-        <nav className="settings-sidenav" aria-label="Settings categories" role="tablist">
+        {settingsMenuOpen ? (
+          <button
+            type="button"
+            className="settings-backdrop"
+            data-testid="settings-backdrop"
+            aria-label="Close settings menu"
+            onClick={handleSettingsBackdropClick}
+          />
+        ) : null}
+        <nav
+          className={`settings-sidenav${settingsMenuOpen ? " open" : ""}`}
+          aria-label="Settings categories"
+          role="tablist"
+        >
           <button
             type="button"
             role="tab"
@@ -4817,12 +4925,15 @@ export default function SettingsManager() {
         )}
 
         <div className="settings-footer">
+          {/* Short Save copy keeps the sticky footer compact on handheld
+              widths; the disabled plus submit wiring stays unchanged so the
+              busy state still blocks double submits. */}
           <button
             type="submit"
             className="primary-button save-button"
             disabled={saving}
           >
-            {saving ? "Saving Changes..." : "Save Settings to config.toml"}
+            {saving ? "Saving…" : "Save"}
           </button>
         </div>
           </form>

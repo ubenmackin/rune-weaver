@@ -75,7 +75,7 @@ const INDEX_SOURCES: Array<{ kind: string; label: string; hint?: string }> = [
   {
     kind: "messages",
     label: "Messages",
-    hint: "Requires Full Disk Access — RuneWeaver.app, or your terminal emulator when running rune-weaver serve — then run Rebuild / Run Now.",
+    hint: "Requires Full Disk Access — RuneWeaver.app, or your terminal emulator when running rune-weaver serve — then press Run.",
   },
 ];
 
@@ -1489,7 +1489,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
             }
           >
             <span>
-              {action === "run" ? "Indexing…" : "Rebuild / Run Now"}
+              {action === "run" ? "Indexing…" : "Run"}
             </span>
           </button>
 
@@ -1895,7 +1895,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       Messages indexing needs Full Disk Access. Grant it to
                       RuneWeaver.app — or to your terminal emulator (for example
                       Terminal.app or iTerm2) when you run rune-weaver serve —
-                      then restart and run Rebuild / Run Now.
+                       then restart and press Run.
                     </p>
                     <button
                       type="button"
@@ -1910,7 +1910,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
                       <li>Click + and add RuneWeaver.app — or your terminal emulator (for example Terminal.app or iTerm2) when you run rune-weaver serve.</li>
                       <li>Toggle the added entry ON and authenticate when prompted.</li>
-                      <li>Quit and restart the app or terminal, then run Rebuild / Run Now.</li>
+                      <li>Quit and restart the app or terminal, then press Run.</li>
                     </ol>
                   </div>
                 ) : null}

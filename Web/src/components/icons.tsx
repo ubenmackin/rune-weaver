@@ -477,6 +477,31 @@ export function StopIcon({ size = 14, className = "", ...props }: IconProps) {
   );
 }
 
+// Hamburger trigger for the handheld settings drawer. Three bars share the
+// dashboard stroke tokens so the trigger reads as native chrome; the drawer
+// owns open state while this glyph stays stateless.
+export function MenuIcon({ size = 20, className = "", ...props }: IconProps) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <line x1="4" y1="6" x2="20" y2="6" />
+      <line x1="4" y1="12" x2="20" y2="12" />
+      <line x1="4" y1="18" x2="20" y2="18" />
+    </svg>
+  );
+}
+
 // Keeps the Voice settings entry visually consistent with sibling sidenav tabs.
 export function MicIcon({ size = 18, className = "", ...props }: IconProps) {
   return (

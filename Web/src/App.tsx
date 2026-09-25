@@ -160,6 +160,7 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
 
   const {
     notificationsEnabled,
+    permission,
     requestPermission,
     runsBadge,
     clearRunsBadge,
@@ -197,12 +198,50 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
     if (selected === "chat") clearWarningsBadge();
   }
 
-  // Bell doubles as the warnings badge: opening notifications means the operator saw the
-  // count, so clear the badge alongside the permission prompt instead of letting it grow
-  // while the banner already informs on the chat tab.
-  function handleRequestNotifications() {
-    clearWarningsBadge();
-    void requestPermission();
+  // Bell wiring owns badge clearing plus the permission prompt, while the bell
+  // button itself owns the visible toast. Clearing happens only by showing chat:
+  // the warnings banner already informs there, so navigating there is the single
+  // acknowledgment. Denied and unsupported taps never clear and never re-prompt,
+  // keeping the count until the operator actually views chat. The resolved
+  // outcome is returned so the bell can toast granted versus guidance without
+  // re-reading globals.
+  async function handleRequestNotifications(): Promise<
+    NotificationPermission | "unsupported"
+  > {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return "unsupported";
+    }
+    // Prefer the hook-owned permission but fall back to the live global so
+    // older test doubles without the new field still resolve honestly.
+    const current =
+      typeof permission === "string"
+        ? (permission as NotificationPermission)
+        : Notification.permission;
+    // Fail-closed: a blocked choice stays blocked until site settings change;
+    // never fire a silent re-prompt and never clear unseen warnings.
+    if (current === "denied") {
+      return "denied";
+    }
+    if (current === "granted") {
+      if (warningsBadge > 0) {
+        handleSelectTab("chat");
+      }
+      return "granted";
+    }
+    try {
+      const outcome = (await requestPermission()) as
+        | NotificationPermission
+        | "unsupported"
+        | void;
+      const resolved =
+        typeof outcome === "string" ? outcome : Notification.permission;
+      if (resolved === "granted" && warningsBadge > 0) {
+        handleSelectTab("chat");
+      }
+      return resolved as NotificationPermission | "unsupported";
+    } catch {
+      return Notification.permission;
+    }
   }
 
   if (isStandalone) {
