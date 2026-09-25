@@ -67,10 +67,13 @@ public extension MemoryEngine {
         let candidates = Self.docIndexCandidates(keyword: keyword, vectors: vectors, queryEmbedding: queryEmbedding)
         guard !candidates.isEmpty else { return [] }
         let stats = try? await docIndexStore.stats()
+        let docIDs = Set(candidates.map(\.chunk.documentID))
+        let documents = await (try? docIndexStore.documents(ids: docIDs)) ?? [:]
         let ranked = Self.rankedDocIndexResults(
             candidates,
             query: trimmed,
             queryTokens: Tokenization.tokenize(trimmed),
+            documents: documents,
             indexAsOf: stats?.indexAsOf
         )
         return Array(ranked.prefix(clamped))
@@ -255,11 +258,12 @@ extension MemoryEngine {
         return candidates
     }
 
-    /// Calibrates and reranks doc-index candidates, stamping the index watermark.
+    /// Calibrates and reranks doc-index candidates, stamping the index watermark and document metadata.
     private static func rankedDocIndexResults(
         _ candidates: [DocIndexCandidate],
         query: String,
         queryTokens: Set<String>,
+        documents: [UUID: IndexedDocument] = [:],
         indexAsOf: Date?
     ) -> [MemoryResult] {
         let total = candidates.count
@@ -276,6 +280,19 @@ extension MemoryEngine {
                 "document_id": candidate.chunk.documentID.uuidString,
                 "ordinal": "\(candidate.chunk.ordinal)"
             ]
+            if let doc = documents[candidate.chunk.documentID] {
+                metadata["display_name"] = doc.displayName
+                metadata["document_source"] = doc.source.rawValue
+                if let path = doc.path {
+                    metadata["path"] = path
+                }
+                if let mailbox = doc.mailbox {
+                    metadata["mailbox"] = mailbox
+                }
+                if let messageID = doc.messageID {
+                    metadata["message_id"] = messageID
+                }
+            }
             if let watermark {
                 metadata["index_as_of"] = watermark
             }

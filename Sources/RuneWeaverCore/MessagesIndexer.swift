@@ -442,9 +442,11 @@ public actor MessagesIndexer {
     /// snapshot is internally consistent even when the live connection has not
     /// checkpointed. The returned directory is owned by the caller and must be
     /// removed; ``indexNewMessages(limit:)`` does so automatically.
+    /// Copies the live database and its sidecars into an isolated temporary snapshot.
+    /// - Parameter chatDatabasePath: Source path to `chat.db`.
     /// - Returns: Temporary directory holding the copied database.
     /// - Throws: ``MessagesIndexError`` when the source is missing or unreadable.
-    public func snapshotDatabase() throws -> URL {
+    public static func snapshotDatabase(chatDatabasePath: String = defaultChatDatabasePath) throws -> URL {
         let source = (chatDatabasePath as NSString).expandingTildeInPath
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: source, isDirectory: &isDirectory), !isDirectory.boolValue else {
@@ -454,12 +456,12 @@ public actor MessagesIndexer {
             .appendingPathComponent("runeweaver-messages-\(UUID().uuidString)", isDirectory: true)
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try Self.copySnapshotItem(
+            try copySnapshotItem(
                 atPath: source,
                 to: directory.appendingPathComponent("chat.db")
             )
             for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: source + suffix) {
-                try Self.copySnapshotItem(
+                try copySnapshotItem(
                     atPath: source + suffix,
                     to: directory.appendingPathComponent("chat.db" + suffix)
                 )
@@ -469,6 +471,18 @@ public actor MessagesIndexer {
             throw error
         }
         return directory
+    }
+
+    /// Copies the live database and its sidecars into an isolated snapshot.
+    ///
+    /// The write-ahead log and shared-memory file travel with the database so a
+    /// snapshot is internally consistent even when the live connection has not
+    /// checkpointed. The returned directory is owned by the caller and must be
+    /// removed; ``indexNewMessages(limit:)`` does so automatically.
+    /// - Returns: Temporary directory holding the copied database.
+    /// - Throws: ``MessagesIndexError`` when the source is missing or unreadable.
+    public func snapshotDatabase() throws -> URL {
+        try Self.snapshotDatabase(chatDatabasePath: chatDatabasePath)
     }
 
     /// The persisted ROWID watermark, or zero when no pass has run.
@@ -620,7 +634,7 @@ public actor MessagesIndexer {
     /// - Parameter snapshotPath: Snapshot database path.
     /// - Returns: Open handle; the caller closes it.
     /// - Throws: ``MessagesIndexError`` when the handle cannot be opened.
-    static func openHandle(snapshotPath: String) throws -> OpaquePointer {
+    public static func openHandle(snapshotPath: String) throws -> OpaquePointer {
         #if canImport(SQLite3)
             var handle: OpaquePointer?
             let status = snapshotPath.withCString { sqlite3_open_v2($0, &handle, SQLITE_OPEN_READWRITE, nil) }
@@ -753,7 +767,7 @@ extension MessagesIndexer {
     /// Resolves a message body from its plain text, attributed body, or reaction.
     /// - Parameter row: Message read from the snapshot.
     /// - Returns: Resolved body text plus an honest extraction status.
-    static func resolveText(for row: MessagesDatabaseRow) -> (text: String?, status: ExtractStatus) {
+    public static func resolveText(for row: MessagesDatabaseRow) -> (text: String?, status: ExtractStatus) {
         if let plain = NormalizedText.value(row.text) {
             return (plain, .extracted)
         }
@@ -860,7 +874,7 @@ extension MessagesIndexer {
     ///   - row: Message read from the snapshot.
     ///   - names: Resolved contact names keyed by normalized handle.
     /// - Returns: Best available label; never empty.
-    static func displayName(for row: MessagesDatabaseRow, names: [String: String]) -> String {
+    public static func displayName(for row: MessagesDatabaseRow, names: [String: String]) -> String {
         NormalizedText.value(row.chatDisplayName)
             ?? NormalizedText.value(row.chatIdentifier)
             ?? friendlyName(for: row.handle, names: names)
@@ -874,7 +888,7 @@ extension MessagesIndexer {
     ///   - handle: Raw handle from the message.
     ///   - names: Resolved contact names keyed by normalized handle.
     /// - Returns: Friendly name, or nil when the handle is unknown.
-    static func friendlyName(for handle: String?, names: [String: String]) -> String? {
+    public static func friendlyName(for handle: String?, names: [String: String]) -> String? {
         guard let handle = NormalizedText.value(handle),
               let key = MessagesContactNameResolver.normalizedHandle(handle)
         else { return nil }
@@ -884,7 +898,7 @@ extension MessagesIndexer {
     /// Picks the display name for an attachment.
     /// - Parameter attachment: Attachment read from the snapshot.
     /// - Returns: Transfer name, else the file's last path component.
-    static func attachmentName(for attachment: MessagesAttachmentRow) -> String {
+    public static func attachmentName(for attachment: MessagesAttachmentRow) -> String {
         if let transfer = NormalizedText.value(attachment.transferName) {
             return transfer
         }
@@ -901,7 +915,7 @@ extension MessagesIndexer {
     /// reach the nanosecond lower bound within any realistic date range.
     /// - Parameter raw: Raw `message.date` value relative to 2001-01-01.
     /// - Returns: Converted date.
-    static func date(fromMacEpoch raw: Int64) -> Date {
+    public static func date(fromMacEpoch raw: Int64) -> Date {
         let seconds = raw > 1_000_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
         return Date(timeIntervalSinceReferenceDate: seconds)
     }
@@ -944,50 +958,92 @@ extension MessagesIndexer {
 // MARK: - Snapshot rows
 
 /// One `message` row joined to its chat and handle provenance.
-struct MessagesDatabaseRow: Sendable, Equatable {
+public struct MessagesDatabaseRow: Sendable, Equatable {
     /// `message.ROWID`, the incremental watermark key.
-    let rowID: Int64
+    public let rowID: Int64
     /// Message GUID used as the source-scoped external identifier.
-    let guid: String?
+    public let guid: String?
     /// Plain body text, when Messages populated it.
-    let text: String?
+    public let text: String?
     /// Serialized attributed body, when the plain column is empty.
-    let attributedBody: Data?
+    public let attributedBody: Data?
     /// Raw Mac-epoch tick from `message.date`.
-    let date: Int64?
+    public let date: Int64?
     /// Whether the signed-in account sent the message.
-    let isFromMe: Bool
+    public let isFromMe: Bool
     /// Raw `associated_message_type`, zero for a normal message.
-    let associatedMessageType: Int?
+    public let associatedMessageType: Int?
     /// Reply target GUID from `thread_originator_guid`.
-    let threadOriginatorGUID: String?
+    public let threadOriginatorGUID: String?
     /// Sending or receiving handle identifier.
-    let handle: String?
+    public let handle: String?
     /// Owning `chat.ROWID`.
-    let chatID: Int64?
+    public let chatID: Int64?
     /// Owning chat GUID.
-    let chatGUID: String?
+    public let chatGUID: String?
     /// Group chat display name, when set.
-    let chatDisplayName: String?
+    public let chatDisplayName: String?
     /// Chat identifier (the other participant or group id).
-    let chatIdentifier: String?
+    public let chatIdentifier: String?
 
     /// Source-scoped identifier: the GUID, or the ROWID when a GUID is absent.
-    var externalID: String {
+    public var externalID: String {
         NormalizedText.value(guid) ?? "rowid:\(rowID)"
+    }
+
+    public init(
+        rowID: Int64,
+        guid: String? = nil,
+        text: String? = nil,
+        attributedBody: Data? = nil,
+        date: Int64? = nil,
+        isFromMe: Bool = false,
+        associatedMessageType: Int? = nil,
+        threadOriginatorGUID: String? = nil,
+        handle: String? = nil,
+        chatID: Int64? = nil,
+        chatGUID: String? = nil,
+        chatDisplayName: String? = nil,
+        chatIdentifier: String? = nil
+    ) {
+        self.rowID = rowID
+        self.guid = guid
+        self.text = text
+        self.attributedBody = attributedBody
+        self.date = date
+        self.isFromMe = isFromMe
+        self.associatedMessageType = associatedMessageType
+        self.threadOriginatorGUID = threadOriginatorGUID
+        self.handle = handle
+        self.chatID = chatID
+        self.chatGUID = chatGUID
+        self.chatDisplayName = chatDisplayName
+        self.chatIdentifier = chatIdentifier
     }
 }
 
 /// One `attachment` row joined to a message.
-struct MessagesAttachmentRow: Sendable, Equatable {
+public struct MessagesAttachmentRow: Sendable, Equatable {
     /// On-disk filename as stored by Messages (may be `~`-relative).
-    let fileName: String?
+    public let fileName: String?
     /// User-facing transfer name.
-    let transferName: String?
+    public let transferName: String?
     /// Declared MIME type.
-    let mimeType: String?
+    public let mimeType: String?
     /// Declared total byte count.
-    let totalBytes: Int64?
+    public let totalBytes: Int64?
+
+    public init(
+        fileName: String? = nil,
+        transferName: String? = nil,
+        mimeType: String? = nil,
+        totalBytes: Int64? = nil
+    ) {
+        self.fileName = fileName
+        self.transferName = transferName
+        self.mimeType = mimeType
+        self.totalBytes = totalBytes
+    }
 }
 
 #if canImport(SQLite3)
@@ -995,7 +1051,7 @@ struct MessagesAttachmentRow: Sendable, Equatable {
     // MARK: - Snapshot reads
 
     /// Read-only queries against an opened Messages snapshot.
-    enum MessagesDatabaseIO {
+    public enum MessagesDatabaseIO {
         /// Reads messages past a ROWID watermark in ascending order.
         /// - Parameters:
         ///   - handle: Open snapshot handle.
@@ -1003,7 +1059,7 @@ struct MessagesAttachmentRow: Sendable, Equatable {
         ///   - limit: Maximum rows returned.
         /// - Returns: Joined message rows.
         /// - Throws: ``MessagesIndexError`` when the statement cannot be prepared.
-        static func messages(handle: OpaquePointer?, afterRowID: Int64, limit: Int) throws -> [MessagesDatabaseRow] {
+        public static func messages(handle: OpaquePointer?, afterRowID: Int64, limit: Int) throws -> [MessagesDatabaseRow] {
             guard limit > 0 else { return [] }
             let sql = """
             SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
@@ -1032,12 +1088,128 @@ struct MessagesAttachmentRow: Sendable, Equatable {
             return rows
         }
 
+        /// Searches messages matching an optional query text and optional recipient handle.
+        public static func searchMessages(
+            handle: OpaquePointer?,
+            query: String? = nil,
+            recipient: String? = nil,
+            limit: Int = 20
+        ) throws -> [MessagesDatabaseRow] {
+            guard limit > 0 else { return [] }
+            var conditions: [String] = []
+            var bindStrings: [String] = []
+
+            let trimmedRecipient = recipient?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedRecipient.isEmpty {
+                conditions.append("(h.id LIKE ? OR c.chat_identifier LIKE ? OR c.display_name LIKE ?)")
+                let pat = "%\(trimmedRecipient)%"
+                bindStrings.append(pat)
+                bindStrings.append(pat)
+                bindStrings.append(pat)
+            }
+
+            let trimmedQuery = query?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmedQuery.isEmpty && trimmedQuery != "*" {
+                conditions.append("(m.text LIKE ? OR (m.text IS NULL AND m.attributedBody IS NOT NULL))")
+                bindStrings.append("%\(trimmedQuery)%")
+            }
+
+            let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+            let sql = """
+            SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
+                   m.associated_message_type, m.thread_originator_guid,
+                   h.id,
+                   c.ROWID, c.guid, c.display_name, c.chat_identifier
+            FROM message m
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+            \(whereClause)
+            ORDER BY m.date DESC
+            LIMIT ?;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw MessagesIndexError.databaseUnavailable("Could not read the Messages snapshot.")
+            }
+            defer { sqlite3_finalize(statement) }
+            var bindIndex: Int32 = 1
+            for text in bindStrings {
+                SQLiteHelpers.bindText(statement, index: bindIndex, value: text)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
+            var rows: [MessagesDatabaseRow] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append(readRow(statement))
+            }
+            return rows
+        }
+
+        /// Fetches conversation messages for a chat ID or recipient.
+        public static func conversationMessages(
+            handle: OpaquePointer?,
+            chatID: String? = nil,
+            recipient: String? = nil,
+            limit: Int = 20
+        ) throws -> [MessagesDatabaseRow] {
+            guard limit > 0 else { return [] }
+            var conditions: [String] = []
+            var bindStrings: [String] = []
+
+            let trimmedChatID = chatID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let trimmedRecipient = recipient?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if !trimmedChatID.isEmpty {
+                conditions.append("(c.chat_identifier = ? OR c.guid = ? OR CAST(c.ROWID AS TEXT) = ?)")
+                bindStrings.append(trimmedChatID)
+                bindStrings.append(trimmedChatID)
+                bindStrings.append(trimmedChatID)
+            } else if !trimmedRecipient.isEmpty {
+                conditions.append("(h.id LIKE ? OR c.chat_identifier LIKE ?)")
+                let pat = "%\(trimmedRecipient)%"
+                bindStrings.append(pat)
+                bindStrings.append(pat)
+            }
+
+            let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
+            let sql = """
+            SELECT m.ROWID, m.guid, m.text, m.attributedBody, m.date, m.is_from_me,
+                   m.associated_message_type, m.thread_originator_guid,
+                   h.id,
+                   c.ROWID, c.guid, c.display_name, c.chat_identifier
+            FROM message m
+            LEFT JOIN handle h ON h.ROWID = m.handle_id
+            LEFT JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+            LEFT JOIN chat c ON c.ROWID = cmj.chat_id
+            \(whereClause)
+            ORDER BY m.date DESC
+            LIMIT ?;
+            """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw MessagesIndexError.databaseUnavailable("Could not read the Messages snapshot.")
+            }
+            defer { sqlite3_finalize(statement) }
+            var bindIndex: Int32 = 1
+            for text in bindStrings {
+                SQLiteHelpers.bindText(statement, index: bindIndex, value: text)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
+            var rows: [MessagesDatabaseRow] = []
+            while sqlite3_step(statement) == SQLITE_ROW {
+                rows.append(readRow(statement))
+            }
+            return rows
+        }
+
         /// Reads attachments joined to one message, in attachment order.
         /// - Parameters:
         ///   - handle: Open snapshot handle.
         ///   - messageID: Owning `message.ROWID`.
         /// - Returns: Attachment rows; empty when the statement cannot be prepared.
-        static func attachments(handle: OpaquePointer?, messageID: Int64) throws -> [MessagesAttachmentRow] {
+        public static func attachments(handle: OpaquePointer?, messageID: Int64) throws -> [MessagesAttachmentRow] {
             let sql = """
             SELECT a.filename, a.transfer_name, a.mime_type, a.total_bytes
             FROM message_attachment_join maj

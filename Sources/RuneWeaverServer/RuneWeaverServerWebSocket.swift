@@ -686,6 +686,11 @@ private func finishWebSocketSuccessfulTurn(
     } else {
         "ok"
     }
+    // Release the tracker slot before publishing the terminal row so observers
+    // polling the run log never see a settled row with a stale active slot.
+    // Stale tokens are ignored, keeping replacement turns intact, matching the
+    // REST turn ordering.
+    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
     let entry = await context.runs.update(
         id: params.initialEntry.id,
         status: parkedStatus,
@@ -700,7 +705,6 @@ private func finishWebSocketSuccessfulTurn(
     if let frame = encodeWSFrame(done) {
         await context.hub.broadcast(text: frame)
     }
-    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
 }
 
 /// Persists a failed WebSocket turn keeping the same audit shape as success.
@@ -721,6 +725,10 @@ private func finishWebSocketFailedTurn(
     let context = params.context
     let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
     let auditResponse = audit.partialText.isEmpty ? error.localizedDescription : audit.partialText
+    // Release the tracker slot before publishing the terminal row so observers
+    // polling the run log never see a settled row with a stale active slot,
+    // matching the REST turn ordering.
+    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
     let entry = await context.runs.update(
         id: params.initialEntry.id,
         status: "error",
@@ -739,7 +747,6 @@ private func finishWebSocketFailedTurn(
     if let frame = encodeWSFrame(WSErrorFrame(message: error.localizedDescription, sessionID: params.sessionID)) {
         await context.hub.broadcast(text: frame)
     }
-    await context.activeTurns.unregister(sessionID: params.sessionID, token: params.registration.token)
 }
 
 /// Settles a cancelled WebSocket turn and notifies every viewer.
@@ -757,6 +764,10 @@ private func handleWebSocketTurnCancellation(
     startTime: Date
 ) async {
     let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+    // Release the tracker slot before publishing the terminal row so observers
+    // polling the run log never see a settled row with a stale active slot.
+    // Stale tokens are ignored, keeping a same-session replacement intact.
+    await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
     let entry = await context.runs.update(
         id: initialEntry.id,
         status: "cancelled",
@@ -775,7 +786,6 @@ private func handleWebSocketTurnCancellation(
             await hub.broadcast(text: frame)
         }
     }.value
-    await context.activeTurns.unregister(sessionID: sessionID, token: registrationToken)
     await context.steeringQueue.clear(for: sessionID)
 }
 

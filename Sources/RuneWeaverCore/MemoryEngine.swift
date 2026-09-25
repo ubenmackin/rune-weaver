@@ -960,7 +960,16 @@ public extension MemoryEngine {
             let compact = singleLine.count > 500 ? String(singleLine.prefix(500)) + "…" : singleLine
             if labelingEnabled, shouldLabelRecallResult(result) {
                 if isUntrustedRecallSource(result.source) {
-                    let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
+                    let sourceTag: String = {
+                        if let name = result.metadata["display_name"], !name.isEmpty {
+                            if let path = result.metadata["path"], !path.isEmpty {
+                                return "recall:\(result.source.rawValue):\(name) (\(path))"
+                            }
+                            return "recall:\(result.source.rawValue):\(name)"
+                        }
+                        return "recall:\(result.source.rawValue)"
+                    }()
+                    let labeled = ContentTrustLabeler.label(toolName: sourceTag, content: compact)
                     return "[\(result.source.rawValue)] \(labeled)"
                 }
                 if !isAlreadyLabeledRecallPayload(compact) {

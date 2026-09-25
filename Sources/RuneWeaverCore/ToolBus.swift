@@ -224,6 +224,8 @@ private struct ToolCallKey: Hashable {
 public actor ToolBus {
     /// Tools indexed by name.
     private var tools: [String: any Tool] = [:]
+    /// Aliases mapping alternative tool names to primary registered tool names.
+    private var aliases: [String: String] = [:]
     /// Enablement state indexed by tool name. Absent entries default to true.
     private var enabledStates: [String: Bool] = [:]
     /// Approval hook for `requiresApproval` tools.
@@ -280,19 +282,29 @@ public actor ToolBus {
         enabledStates[tool.name] = isEnabled
     }
 
-    /// Enables a registered tool by name.
+    /// Registers an alias name pointing to a primary registered tool name.
+    /// - Parameters:
+    ///   - aliasName: Alias name that callers might invoke (e.g. legacy tool names).
+    ///   - targetToolName: Primary registered tool name.
+    public func registerAlias(from aliasName: String, to targetToolName: String) {
+        aliases[aliasName] = targetToolName
+    }
+
+    /// Enables a registered tool by name or alias.
     /// - Parameter name: Tool name to enable.
     public func enableTool(named name: String) {
-        if tools[name] != nil {
-            enabledStates[name] = true
+        let target = aliases[name] ?? name
+        if tools[target] != nil {
+            enabledStates[target] = true
         }
     }
 
-    /// Disables a registered tool by name without unregistering its definition.
+    /// Disables a registered tool by name or alias without unregistering its definition.
     /// - Parameter name: Tool name to disable.
     public func disableTool(named name: String) {
-        if tools[name] != nil {
-            enabledStates[name] = false
+        let target = aliases[name] ?? name
+        if tools[target] != nil {
+            enabledStates[target] = false
         }
     }
 
@@ -300,15 +312,19 @@ public actor ToolBus {
     /// - Parameter name: Tool name.
     /// - Returns: True if registered and enabled.
     public func isToolEnabled(named name: String) -> Bool {
-        guard tools[name] != nil else { return false }
-        return enabledStates[name] ?? true
+        let target = aliases[name] ?? name
+        guard tools[target] != nil else { return false }
+        return enabledStates[target] ?? true
     }
 
     /// Removes the tool with the given name. Missing names are a no-op.
+    /// Alias entries pointing at or from the removed name are dropped as well
+    /// so a stale legacy alias can never resolve past an unregister.
     /// - Parameter name: Name of the tool to remove.
     public func unregister(toolNamed name: String) {
         tools.removeValue(forKey: name)
         enabledStates.removeValue(forKey: name)
+        aliases = aliases.filter { $0.key != name && $0.value != name }
     }
 
     /// Returns the registered tools that are currently enabled.
@@ -329,11 +345,12 @@ public actor ToolBus {
         Array(tools.keys)
     }
 
-    /// Looks up a tool by name.
+    /// Looks up a tool by name or alias.
     /// - Parameter name: Tool name.
     /// - Returns: The tool, or nil when not registered.
     public func tool(named name: String) -> (any Tool)? {
-        tools[name]
+        let target = aliases[name] ?? name
+        return tools[target]
     }
 
     /// Records graduated trust for an action via the attached gate.
@@ -343,7 +360,8 @@ public actor ToolBus {
 
     /// Executes a tool call with permission checking.
     public func execute(toolCall: ToolInput, context: ToolContext) async -> ToolResult {
-        guard let tool = tools[toolCall.toolName] else {
+        let resolvedName = aliases[toolCall.toolName] ?? toolCall.toolName
+        guard let tool = tools[resolvedName] else {
             let available = availableTools().map(\.name).sorted()
             let hint = available.isEmpty ? "No tools are currently registered." : "Available tools: \(available.joined(separator: ", "))"
             return .failure(
@@ -352,13 +370,16 @@ public actor ToolBus {
                 errorKind: .invalidTool
             )
         }
-        guard isToolEnabled(named: toolCall.toolName) else {
+        guard isToolEnabled(named: resolvedName) else {
             return .failure(
                 toolCallID: toolCall.callID,
                 content: "Error: Tool '\(toolCall.toolName)' is currently disabled.",
                 errorKind: .invalidTool
             )
         }
+        let effectiveCall = (resolvedName == toolCall.toolName)
+            ? toolCall
+            : ToolInput(toolName: resolvedName, argumentsJSON: toolCall.argumentsJSON, callID: toolCall.callID)
         let trimmedArgs = toolCall.argumentsJSON.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedArgs.isEmpty, trimmedArgs != "{}" {
             guard let data = trimmedArgs.data(using: .utf8),
@@ -374,7 +395,7 @@ public actor ToolBus {
         switch tool.permissionLevel {
         case .readOnly, .trusted:
             if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
+                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool) {
                 case .allowed:
                     break
                 case let .denied(reason):
@@ -387,7 +408,7 @@ public actor ToolBus {
                     // Defense in depth: the gate never returns this verdict for these levels today,
                     // but a future gate change must not silently bypass approval, so honor it
                     // through the same handler path as gated writes.
-                    if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
+                    if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                         return denial
                     }
                 }
@@ -397,7 +418,7 @@ public actor ToolBus {
             // through the tool's dryRun path instead of filing; only the side
             // effect is skipped via the flag the tool already receives.
             if let gate = permissionGate {
-                switch await gate.checkPermission(toolCall: toolCall, tool: tool) {
+                switch await gate.checkPermission(toolCall: effectiveCall, tool: tool) {
                 case .allowed:
                     // Attribute this run to the covering grant so later review
                     // can see which trust is actually exercised. Persistence
@@ -405,7 +426,7 @@ public actor ToolBus {
                     // never blocks the already-authorized tool call. Dry-run
                     // previews never execute, so they leave counters alone.
                     if !context.dryRun {
-                        let descriptor = ActionDescriptor.descriptor(for: toolCall, tool: tool)
+                        let descriptor = ActionDescriptor.descriptor(for: effectiveCall, tool: tool)
                         await gate.recordUse(for: descriptor)
                     }
                 case let .denied(reason):
@@ -415,16 +436,16 @@ public actor ToolBus {
                         errorKind: .executionError
                     )
                 case .requiresApproval:
-                    if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
+                    if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                         return denial
                     }
                 }
-            } else if let denial = await resolveApproval(tool: tool, call: toolCall, context: context) {
+            } else if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                 return denial
             }
         }
-        let effectiveContext = progressContext(for: toolCall, base: context)
-        return await runRegisteredTool(tool: tool, call: toolCall, context: effectiveContext)
+        let effectiveContext = progressContext(for: effectiveCall, base: context)
+        return await runRegisteredTool(tool: tool, call: effectiveCall, context: effectiveContext)
     }
 
     /// Runs one admitted tool call under its per-call cancellation slot.

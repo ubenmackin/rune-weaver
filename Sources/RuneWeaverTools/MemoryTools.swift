@@ -265,13 +265,18 @@ public enum MemoryToolEncoding {
     }
 }
 
-/// `remember_fact` tool: persists one fact to long-lived memory.
+/// `memories.store` (alias `remember_fact`) tool: persists one fact to long-lived memory.
 public struct RememberFactTool: Tool, Sendable {
+    /// Primary tool name referenced by the LLM and memory.
+    public static let primaryName = "memories.store"
+    /// Legacy alias name.
+    public static let legacyName = "remember_fact"
+
     /// Stable tool name referenced by the LLM and memory.
-    public let name = "remember_fact"
+    public let name: String
     /// When the LLM should use this tool.
     public let description =
-        "Remembers one fact about the user for later. "
+        "Stores one fact about the user for later. "
             + "Use when the user asks to remember something or states a durable preference or fact. "
             + "Returns the stored fact id and source."
     /// Function-calling contract for `text` and optional `category`.
@@ -292,7 +297,8 @@ public struct RememberFactTool: Tool, Sendable {
     private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a remember tool.
-    public init(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) {
+    public init(name: String = primaryName, engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) {
+        self.name = name
         self.engine = engine
         self.audit = audit
         self.embedder = embedder
@@ -304,14 +310,14 @@ public struct RememberFactTool: Tool, Sendable {
         do {
             args = try JSONDecoder().decode(RememberFactArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
-            return .failure("Invalid remember_fact arguments: expected {\"text\": \"<fact>\", \"category\": \"<optional>\"}.", callID: input.callID)
+            return .failure("Invalid memories.store arguments: expected {\"text\": \"<fact>\", \"category\": \"<optional>\"}.", callID: input.callID)
         }
         let text = args.trimmedText
         guard !text.isEmpty else {
-            return .failure("Invalid remember_fact arguments: 'text' must not be empty.", callID: input.callID)
+            return .failure("Invalid memories.store arguments: 'text' must not be empty.", callID: input.callID)
         }
         guard MemoryEngine.isStorableFact(text) else {
-            return .failure("Invalid remember_fact arguments: 'text' must contain alphanumeric characters.", callID: input.callID)
+            return .failure("Invalid memories.store arguments: 'text' must contain alphanumeric characters.", callID: input.callID)
         }
         let category = args.trimmedCategory
         let source = category ?? "tool"
@@ -353,20 +359,25 @@ public struct RememberFactTool: Tool, Sendable {
     }
 }
 
-/// `recall_memories` tool: searches episodic, semantic, and profile memory.
+/// `memories.recall` (alias `recall_memories`) tool: searches episodic, semantic, profile, and indexed document memory.
 public struct RecallMemoriesTool: Tool, Sendable {
+    /// Primary tool name referenced by the LLM and memory.
+    public static let primaryName = "memories.recall"
+    /// Legacy alias name.
+    public static let legacyName = "recall_memories"
+
     /// Stable tool name referenced by the LLM and memory.
-    public let name = "recall_memories"
+    public let name: String
     /// When the LLM should use this tool.
     public let description =
-        "Recalls what is known about a topic from past conversations and stored facts. "
-            + "Use when the user asks what you remember or references earlier context. "
-            + "Returns ranked memories best first."
+        "Recalls what is known about a topic from past conversations, stored facts, and indexed documents (files, mail, messages). "
+            + "Use when the user asks what you remember, references earlier context, or asks about indexed emails, messages, or files. "
+            + "Returns ranked memories and document excerpts best first."
     /// Function-calling contract for `query` and `limit`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"query":{"type":"string","description":"Free-text query "#
-                + #"matched against past turns and stored facts"},"limit":{"type":"integer","description":"Maximum "#
+                + #"matched against past turns, stored facts, and indexed documents"},"limit":{"type":"integer","description":"Maximum "#
                 + #"memories (1-50, default 5)","minimum":1,"maximum":50}},"required":["query"],"additionalProperties":false}"#
         )
     /// Auto-allowed per the owner memory-write trust ruling; no approval prompts.
@@ -378,7 +389,8 @@ public struct RecallMemoriesTool: Tool, Sendable {
     private let embedder: (any EmbeddingsBackend)?
 
     /// Creates a recall tool.
-    public init(engine: MemoryEngine, embedder: (any EmbeddingsBackend)? = nil) {
+    public init(name: String = primaryName, engine: MemoryEngine, embedder: (any EmbeddingsBackend)? = nil) {
+        self.name = name
         self.engine = engine
         self.embedder = embedder
     }
@@ -389,11 +401,11 @@ public struct RecallMemoriesTool: Tool, Sendable {
         do {
             args = try JSONDecoder().decode(RecallMemoriesArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
-            return .failure("Invalid recall_memories arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>}.", callID: input.callID)
+            return .failure("Invalid memories.recall arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>}.", callID: input.callID)
         }
         let query = args.trimmedQuery
         guard !query.isEmpty else {
-            return .failure("Invalid recall_memories arguments: 'query' must not be empty.", callID: input.callID)
+            return .failure("Invalid memories.recall arguments: 'query' must not be empty.", callID: input.callID)
         }
         // Embed the query best-effort when a producer is configured: vector hits then rank by
         // cosine similarity while keyword tiers stay unchanged, and any embedding failure keeps
@@ -421,7 +433,7 @@ public struct RecallMemoriesTool: Tool, Sendable {
 /// Factory registering the LLM-invokable memory tools on a `ToolBus`.
 public enum MemoryTools {
     /// Tool names in registration order.
-    public static let toolNames = ["remember_fact", "recall_memories"]
+    public static let toolNames = [RememberFactTool.primaryName, RecallMemoriesTool.primaryName]
 
     /// Builds the memory tools for a shared engine.
     public static func makeTools(engine: MemoryEngine, audit: MemoryAuditHandler? = nil, embedder: (any EmbeddingsBackend)? = nil) -> [any Tool] {
@@ -435,5 +447,15 @@ public enum MemoryTools {
         for tool in makeTools(engine: engine, audit: audit, embedder: embedder) {
             await bus.register(tool: tool)
         }
+        await registerMemoryAliases(on: bus)
+    }
+
+    /// Registers the legacy memory aliases on a bus whose memory tools were
+    /// built through `makeTools`/`makeAllTools` instead of `register`.
+    /// Single-sources the alias pair so boot paths cannot drift.
+    /// - Parameter bus: Bus receiving the `remember_fact` and `recall_memories` aliases.
+    public static func registerMemoryAliases(on bus: ToolBus) async {
+        await bus.registerAlias(from: RememberFactTool.legacyName, to: RememberFactTool.primaryName)
+        await bus.registerAlias(from: RecallMemoriesTool.legacyName, to: RecallMemoriesTool.primaryName)
     }
 }

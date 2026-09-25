@@ -212,7 +212,8 @@ struct ChatCommand: AsyncParsableCommand {
         }
 
         let sessionID = try resolveSessionID(session)
-        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory)
+        let docIndexDBPath: String? = loaded.config.index.enabled ? loaded.config.index.dbPath : nil
+        let memoryEngine = CLIShared.memoryEngine(for: loaded.config.memory, docIndexDBPath: docIndexDBPath)
         var active = selected
         // Tag cloud requests with the chat session when the backend supports it.
         // Local providers never send the session header, so they are left untouched.

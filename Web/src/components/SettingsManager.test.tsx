@@ -1549,7 +1549,7 @@ describe("SettingsManager", () => {
     expect(sentPayload).toBeDefined();
   });
 
-  it("renders a screenshot-only Configure modal that saves knobs without enable keys", async () => {
+  it("renders a unified Desktop Configure modal that saves capture knobs and blocklist without enable keys", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -1610,13 +1610,11 @@ describe("SettingsManager", () => {
     expect(configureButtons.length).toBe(2);
     await user.click(configureButtons[0]);
 
-    // The screenshot modal carries only its capture knobs.
-    expect(screen.getByRole("heading", { name: /Configure Desktop Screenshot/i })).toBeDefined();
-    expect(screen.queryByRole("heading", { name: /Configure Desktop Control/i })).toBeNull();
+    // The unified modal carries both capture knobs and blocklist.
+    expect(screen.getByRole("heading", { name: /Configure Desktop Integration/i })).toBeDefined();
     expect(screen.getByLabelText(/Max Image Dimension/i)).toBeDefined();
     expect(screen.getByLabelText(/JPEG Quality/i)).toBeDefined();
-    expect(screen.queryByLabelText(/Blocked Apps/i)).toBeNull();
-    expect(screen.queryByText(/Both tools always/i)).toBeNull();
+    expect(screen.getByLabelText(/Blocked Apps/i)).toBeDefined();
     // No in-modal Enabled toggle: the modal holds no checkboxes at all.
     const modal = document.querySelector(".modal-container");
     expect(modal).not.toBeNull();
@@ -1634,12 +1632,12 @@ describe("SettingsManager", () => {
     expect(desktop).toBeDefined();
     expect(desktop).toHaveProperty("max_image_dimension");
     expect(desktop).toHaveProperty("jpeg_quality");
+    expect(desktop).toHaveProperty("blocked_apps");
     expect(desktop).not.toHaveProperty("screen_capture_enabled");
     expect(desktop).not.toHaveProperty("control_enabled");
-    expect(desktop).not.toHaveProperty("blocked_apps");
   });
 
-  it("renders a control-only Configure modal that saves the blocklist without enable keys", async () => {
+  it("renders the unified Desktop Configure modal from desktop.action and saves edited blocklist without enable keys", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -1700,15 +1698,13 @@ describe("SettingsManager", () => {
     expect(configureButtons.length).toBe(2);
     await user.click(configureButtons[1]);
 
-    // The control modal carries only the blocked-apps editor with its count.
-    expect(screen.getByRole("heading", { name: /Configure Desktop Control/i })).toBeDefined();
-    expect(screen.queryByRole("heading", { name: /Configure Desktop Screenshot/i })).toBeNull();
+    // The unified modal opens from desktop.action as well.
+    expect(screen.getByRole("heading", { name: /Configure Desktop Integration/i })).toBeDefined();
     const blockedTextarea = screen.getByLabelText(/Blocked Apps/i) as HTMLTextAreaElement;
     expect(blockedTextarea.value).toContain("Terminal");
     expect(screen.getByText(/7 apps/i)).toBeDefined();
-    expect(screen.queryByLabelText(/Max Image Dimension/i)).toBeNull();
-    expect(screen.queryByLabelText(/JPEG Quality/i)).toBeNull();
-    expect(screen.queryByText(/Both tools always/i)).toBeNull();
+    expect(screen.getByLabelText(/Max Image Dimension/i)).toBeDefined();
+    expect(screen.getByLabelText(/JPEG Quality/i)).toBeDefined();
     // No in-modal Enabled toggle: the modal holds no checkboxes at all.
     const modal = document.querySelector(".modal-container");
     expect(modal).not.toBeNull();
@@ -1727,7 +1723,11 @@ describe("SettingsManager", () => {
       string,
       unknown
     >;
-    expect(desktop).toEqual({ blocked_apps: ["Terminal", "1Password"] });
+    expect(desktop.blocked_apps).toEqual(["Terminal", "1Password"]);
+    expect(desktop).toHaveProperty("max_image_dimension");
+    expect(desktop).toHaveProperty("jpeg_quality");
+    expect(desktop).not.toHaveProperty("screen_capture_enabled");
+    expect(desktop).not.toHaveProperty("control_enabled");
   });
 
   it("does not guard parked approvals awaiting human review", async () => {

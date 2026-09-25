@@ -323,6 +323,9 @@ enum CLIShared {
         ) {
             await bus.register(tool: tool, isEnabled: !desktopNames.contains(tool.name))
         }
+        if memoryEngine != nil {
+            await MemoryTools.registerMemoryAliases(on: bus)
+        }
         let rawDBPath = episodesDBPath ?? "~/.runeweaver/episodes.db"
         let dbPath = (rawDBPath as NSString).expandingTildeInPath
         if let pluginConfig {

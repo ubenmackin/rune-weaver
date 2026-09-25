@@ -252,6 +252,38 @@ import Foundation
             return try loadDocument(handle: handle, source: source, externalID: externalID)
         }
 
+        /// Reads multiple documents by their identifiers.
+        static func documents(ids: Set<UUID>, dbPath: String) throws -> [UUID: IndexedDocument] {
+            guard !ids.isEmpty else { return [:] }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [:] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var result: [UUID: IndexedDocument] = [:]
+            for id in ids {
+                if let doc = try loadDocument(handle: handle, id: id) {
+                    result[id] = doc
+                }
+            }
+            return result
+        }
+
+        /// Loads a document row by primary UUID inside an open handle.
+        private static func loadDocument(
+            handle: OpaquePointer?,
+            id: UUID
+        ) throws -> IndexedDocument? {
+            var statement: OpaquePointer?
+            let sql = "SELECT " + documentColumnList + " FROM indexed_documents WHERE id = ?;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare document read by id")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: id.uuidString)
+            guard sqlite3_step(statement) == SQLITE_ROW else { return nil }
+            return readDocument(statement)
+        }
+
         /// Loads a document row inside an open handle.
         private static func loadDocument(
             handle: OpaquePointer?,

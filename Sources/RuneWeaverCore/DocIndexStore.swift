@@ -104,6 +104,17 @@ public actor DocIndexStore {
         }
     }
 
+    /// Looks up multiple documents by their identifiers.
+    /// - Parameter ids: Document identifiers to resolve.
+    /// - Returns: Map from document ID to stored document.
+    public func documents(ids: Set<UUID>) async throws -> [UUID: IndexedDocument] {
+        guard !ids.isEmpty else { return [:] }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.documents(ids: ids, dbPath: dbPath)
+        }
+    }
+
     /// Reports whether a source must be re-extracted.
     ///
     /// True when the document is unknown, its content hash changed, or a prior
@@ -309,6 +320,15 @@ enum DocIndexStoreIO {
     static func document(source: IndexSource, externalID: String, dbPath: String) throws -> IndexedDocument? {
         #if canImport(SQLite3)
             return try SQLiteDocIndexStore.document(source: source, externalID: externalID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads multiple documents by their identifiers.
+    static func documents(ids: Set<UUID>, dbPath: String) throws -> [UUID: IndexedDocument] {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.documents(ids: ids, dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
