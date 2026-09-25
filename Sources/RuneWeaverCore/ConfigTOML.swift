@@ -527,6 +527,7 @@ extension RuneWeaverConfig {
             providerType: node.strictString("provider_type", field: "\(prefix).provider_type"),
             apiStyle: apiStyle,
             contextLength: node.strictInt("context_length", field: "\(prefix).context_length"),
+            supportsVision: node.strictBool("supports_vision", field: "\(prefix).supports_vision"),
             slotCount: node.strictInt("slot_count", field: "\(prefix).slot_count"),
             cachePrompt: node.strictBool("cache_prompt", field: "\(prefix).cache_prompt")
         )

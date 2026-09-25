@@ -1316,6 +1316,8 @@ export default function SettingsManager() {
           slotCount: cfg.slot_count ?? cfg.slotCount,
           cache_prompt: cfg.cache_prompt ?? cfg.cachePrompt,
           cachePrompt: cfg.cache_prompt ?? cfg.cachePrompt,
+          supports_vision: cfg.supports_vision ?? cfg.supportsVision,
+          supportsVision: cfg.supports_vision ?? cfg.supportsVision,
         },
       })
     );
@@ -1713,6 +1715,28 @@ export default function SettingsManager() {
         return;
       }
 
+      const visionRaw =
+        entry.config.supports_vision ?? entry.config.supportsVision;
+      let vision: boolean | undefined;
+      if (
+        visionRaw === undefined ||
+        visionRaw === null ||
+        (visionRaw as unknown) === ""
+      ) {
+        vision = undefined;
+      } else if (visionRaw === true || (visionRaw as unknown) === "true") {
+        vision = true;
+      } else if (visionRaw === false || (visionRaw as unknown) === "false") {
+        vision = false;
+      } else {
+        const label = trimmedName || "(unnamed)";
+        setError(
+          `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+        );
+        setSaving(false);
+        return;
+      }
+
       providersMap[trimmedName] = {
         enabled: entry.config.enabled,
         model: entry.config.model?.trim() || undefined,
@@ -1730,6 +1754,8 @@ export default function SettingsManager() {
         slotCount: slot != null ? Number(slot) : undefined,
         cache_prompt: cache,
         cachePrompt: cache,
+        supports_vision: vision,
+        supportsVision: vision,
       };
     }
 
@@ -2217,6 +2243,8 @@ export default function SettingsManager() {
           slotCount: undefined,
           cache_prompt: undefined,
           cachePrompt: undefined,
+          supports_vision: undefined,
+          supportsVision: undefined,
         },
       },
     ]);
@@ -2257,6 +2285,28 @@ export default function SettingsManager() {
     field: keyof ProviderConfigData,
     val: string | boolean | number | undefined
   ) => {
+    // Resolve the vision tri-state before touching list state so unexpected
+    // values block the edit instead of collapsing to false inside the updater.
+    let visionNext: boolean | undefined = undefined;
+    const isVisionField =
+      field === "supports_vision" || field === "supportsVision";
+    if (isVisionField) {
+      if (val === "" || val === undefined) {
+        visionNext = undefined;
+      } else if (val === true || val === "true") {
+        visionNext = true;
+      } else if (val === false || val === "false") {
+        visionNext = false;
+      } else {
+        const label =
+          (providersList.find((item) => item.id === id)?.name ?? "").trim() ||
+          "(unnamed)";
+        setError(
+          `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+        );
+        return;
+      }
+    }
     setProvidersList((prev) =>
       prev.map((item) => {
         if (item.id === id) {
@@ -2325,6 +2375,10 @@ export default function SettingsManager() {
                     : (val as unknown as boolean | undefined);
             updated.cache_prompt = next;
             updated.cachePrompt = next;
+          }
+          if (field === "supports_vision" || field === "supportsVision") {
+            updated.supports_vision = visionNext;
+            updated.supportsVision = visionNext;
           }
           return { ...item, config: updated };
         }
@@ -3007,6 +3061,60 @@ export default function SettingsManager() {
                             <option value="false">Disabled</option>
                           </select>
                         </div>
+                      </div>
+
+                      <div className="form-group">
+                        <label htmlFor={`vision-${item.id}`}>Supports Vision</label>
+                        <select
+                          id={`vision-${item.id}`}
+                          className="input-field"
+                          value={
+                            (entry.supports_vision ?? entry.supportsVision) === undefined
+                              ? ""
+                              : (entry.supports_vision ?? entry.supportsVision)
+                                ? "true"
+                                : "false"
+                          }
+                          onChange={(e) => {
+                            // Map the locked tri-state explicitly so an
+                            // unexpected option blocks the edit instead of
+                            // collapsing to text-only.
+                            const raw = e.target.value;
+                            if (raw === "") {
+                              handleProviderFieldChange(
+                                item.id,
+                                "supports_vision",
+                                undefined
+                              );
+                              return;
+                            }
+                            if (raw === "true") {
+                              handleProviderFieldChange(
+                                item.id,
+                                "supports_vision",
+                                true
+                              );
+                              return;
+                            }
+                            if (raw === "false") {
+                              handleProviderFieldChange(
+                                item.id,
+                                "supports_vision",
+                                false
+                              );
+                              return;
+                            }
+                            const label =
+                              (item.name ?? "").trim() || "(unnamed)";
+                            setError(
+                              `Invalid supports_vision for provider "${label}": supports_vision must be true, false, or empty (unset).`
+                            );
+                          }}
+                        >
+                          <option value="">Default (Auto from provider)</option>
+                          <option value="true">Enabled (Accepts images/screenshots)</option>
+                          <option value="false">Disabled (Text-only)</option>
+                        </select>
                       </div>
                     </div>
                   </div>

@@ -128,6 +128,9 @@ extension RuneWeaverConfig {
             }
             // Persist prefix-reuse knobs only when set so older files round-trip
             // without new keys and small `--parallel` servers keep auto-assign.
+            if let supportsVision = entry.supportsVision {
+                lines.append("supports_vision = \(supportsVision ? "true" : "false")")
+            }
             if let slotCount = entry.slotCount {
                 lines.append("slot_count = \(slotCount)")
             }

@@ -682,9 +682,11 @@ public actor MessagesIndexer {
         }
         return false
     }
+}
 
-    // MARK: - Payload assembly
+// MARK: - Payload Assembly and Helpers
 
+extension MessagesIndexer {
     /// Document plus resolved body text for one message.
     struct MessagesPayload: Sendable {
         /// Document written to the retrieval store.

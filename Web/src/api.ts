@@ -1492,6 +1492,8 @@ export interface ProviderConfigData {
   slotCount?: number;
   cache_prompt?: boolean;
   cachePrompt?: boolean;
+  supports_vision?: boolean;
+  supportsVision?: boolean;
 }
 
 export interface EmailAccountData {

@@ -329,20 +329,15 @@ extension ServeCommand {
         // run reporter writes into the same run store the status probe reads
         // plus the same hub the sockets fan out from, so a manual run leaves
         // one start row updated in place by its completion.
-        let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
-            EmbeddingsBackendFactory.makePoolFactory(
-                memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
-                providers: allProviders
-            )
         let runs = await RunLogStore.load(dbPath: loaded.config.memory.episodesDBPath)
         let hub = WSHub()
-        let indexComponents = ServerIndexBoot.makeComponents(
-            config: loaded.config,
+        let indexComponents = makeIndexComponents(
+            loaded: loaded,
+            allProviders: allProviders,
+            selected: selected,
             runs: runs,
             hub: hub,
-            embedder: embedder,
-            visionLLM: selected,
-            makeEmbeddingsBackend: makeEmbeddingsBackend
+            embedder: embedder
         )
         // Resolve the media section once so the preview registry, the prompt
         // snapshot, and the served context register the same media tools.
@@ -356,25 +351,6 @@ extension ServeCommand {
             goalsConfig: loaded.config.goals,
             selected: selected
         )
-        // Compose the default system prompt from the live registry so the
-        // served model sees every registered tool; an explicit
-        // --system-prompt still overrides it verbatim.
-        let plugins = CLIShared.pluginTools(
-            emailConfig: loaded.config.email,
-            filesConfig: loaded.config.files,
-            memoryEngine: memoryEngine,
-            sandboxConfig: loaded.config.sandbox,
-            embedder: embedder,
-            browserConfig: loaded.config.browser,
-            llmConfig: loaded.config.llm,
-            mediaConfig: resolvedMediaConfig,
-            securityConfig: loaded.config.security,
-            secrets: sharedSecrets,
-            goalEngine: goalEngine,
-            goalStore: goalStore,
-            goalConversations: conversations,
-            goalsConfig: loaded.config.goals
-        )
         let deps = ToolBootstrapDependencies(
             memoryEngine: memoryEngine,
             embedder: embedder,
@@ -382,22 +358,25 @@ extension ServeCommand {
             goalEngine: goalEngine,
             conversations: conversations
         )
+        // Compose the default system prompt from the live registry so the
+        // served model sees every registered tool; an explicit
+        // --system-prompt still overrides it verbatim.
+        let plugins = makePlugins(
+            loaded: loaded,
+            deps: deps,
+            resolvedMediaConfig: resolvedMediaConfig,
+            sharedSecrets: sharedSecrets
+        )
         // Snapshot discovered runes before the service owns the registry so
         // external tools reach the served prompt; the service syncs the same
         // directory again on boot, keeping both views consistent.
-        let previewBus = await makePreviewBus(
+        let effectiveSystemPrompt = await resolveEffectiveSystemPrompt(
             loaded: loaded,
             selected: selected,
-            mediaConfig: resolvedMediaConfig,
+            resolvedMediaConfig: resolvedMediaConfig,
             sharedSecrets: sharedSecrets,
             permissionGate: permissionGate,
             deps: deps
-        )
-        let effectiveSystemPrompt = await SystemPromptComposer.resolve(
-            flag: systemPrompt,
-            toolBus: previewBus,
-            supportsVision: selected.modelInfo.supportsVision,
-            includeToolSchemas: !selected.modelInfo.supportsTools
         )
         let context = await ServerContext.make(
             config: serverConfig,
@@ -435,6 +414,77 @@ extension ServeCommand {
             effectiveSystemPrompt: effectiveSystemPrompt
         )
         return (context, permissionGate)
+    }
+
+    private func makeIndexComponents(
+        loaded: CLIConfigLoader.LoadedConfig,
+        allProviders: [any LLMProvider],
+        selected: any LLMProvider,
+        runs: RunLogStore,
+        hub: WSHub,
+        embedder: (any EmbeddingsBackend)?
+    ) -> ServerIndexComponents? {
+        let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
+            EmbeddingsBackendFactory.makePoolFactory(
+                memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
+                providers: allProviders
+            )
+        return ServerIndexBoot.makeComponents(
+            config: loaded.config,
+            runs: runs,
+            hub: hub,
+            embedder: embedder,
+            visionLLM: selected,
+            makeEmbeddingsBackend: makeEmbeddingsBackend
+        )
+    }
+
+    private func makePlugins(
+        loaded: CLIConfigLoader.LoadedConfig,
+        deps: ToolBootstrapDependencies,
+        resolvedMediaConfig: MediaConfig,
+        sharedSecrets: SecretsManager
+    ) -> [any Tool] {
+        CLIShared.pluginTools(
+            emailConfig: loaded.config.email,
+            filesConfig: loaded.config.files,
+            memoryEngine: deps.memoryEngine,
+            sandboxConfig: loaded.config.sandbox,
+            embedder: deps.embedder,
+            browserConfig: loaded.config.browser,
+            llmConfig: loaded.config.llm,
+            mediaConfig: resolvedMediaConfig,
+            securityConfig: loaded.config.security,
+            secrets: sharedSecrets,
+            goalEngine: deps.goalEngine,
+            goalStore: deps.goalStore,
+            goalConversations: deps.conversations,
+            goalsConfig: loaded.config.goals
+        )
+    }
+
+    private func resolveEffectiveSystemPrompt(
+        loaded: CLIConfigLoader.LoadedConfig,
+        selected: any LLMProvider,
+        resolvedMediaConfig: MediaConfig,
+        sharedSecrets: SecretsManager,
+        permissionGate: PermissionGate,
+        deps: ToolBootstrapDependencies
+    ) async -> String {
+        let previewBus = await makePreviewBus(
+            loaded: loaded,
+            selected: selected,
+            mediaConfig: resolvedMediaConfig,
+            sharedSecrets: sharedSecrets,
+            permissionGate: permissionGate,
+            deps: deps
+        )
+        return await SystemPromptComposer.resolve(
+            flag: systemPrompt,
+            toolBus: previewBus,
+            supportsVision: selected.modelInfo.supportsVision,
+            includeToolSchemas: !selected.modelInfo.supportsTools
+        )
     }
 
     private func runServerLoop(

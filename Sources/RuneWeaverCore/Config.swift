@@ -222,6 +222,9 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
     public var apiStyle: APIStyle
     /// Context window in tokens, when explicitly configured.
     public var contextLength: Int?
+    /// Whether the model accepts vision input (screenshots, images).
+    /// Nil uses backend defaults (true for cloud endpoints, false for local servers).
+    public var supportsVision: Bool?
     /// Sticky slot pool size for llama.cpp prefix reuse. Nil keeps server
     /// auto-assignment so small `--parallel` servers never see an out-of-range
     /// id; set it to the server's `--parallel` value to opt into pinning.
@@ -240,6 +243,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         providerType: String? = nil,
         apiStyle: APIStyle = .chatCompletions,
         contextLength: Int? = nil,
+        supportsVision: Bool? = nil,
         slotCount: Int? = LlamaPrefixReuse.defaultSlotCount,
         cachePrompt: Bool? = LlamaPrefixReuse.defaultCachePrompt
     ) {
@@ -250,6 +254,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.providerType = providerType
         self.apiStyle = apiStyle
         self.contextLength = contextLength
+        self.supportsVision = supportsVision
         self.slotCount = slotCount
         self.cachePrompt = cachePrompt
     }
@@ -266,6 +271,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         case providerType = "provider_type"
         case apiStyle = "api_style"
         case contextLength = "context_length"
+        case supportsVision = "supports_vision"
         case slotCount = "slot_count"
         case cachePrompt = "cache_prompt"
     }
@@ -279,6 +285,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         self.providerType = try container.decodeIfPresent(String.self, forKey: .providerType)
         self.apiStyle = try container.decodeIfPresent(APIStyle.self, forKey: .apiStyle) ?? .chatCompletions
         self.contextLength = try container.decodeIfPresent(Int.self, forKey: .contextLength)
+        self.supportsVision = try container.decodeIfPresent(Bool.self, forKey: .supportsVision)
         self.slotCount = try container.decodeIfPresent(Int.self, forKey: .slotCount)
         self.cachePrompt = try container.decodeIfPresent(Bool.self, forKey: .cachePrompt)
     }
@@ -292,6 +299,7 @@ public struct ProviderConfig: Sendable, Codable, Equatable {
         try container.encodeIfPresent(providerType, forKey: .providerType)
         try container.encode(apiStyle, forKey: .apiStyle)
         try container.encodeIfPresent(contextLength, forKey: .contextLength)
+        try container.encodeIfPresent(supportsVision, forKey: .supportsVision)
         try container.encodeIfPresent(slotCount, forKey: .slotCount)
         try container.encodeIfPresent(cachePrompt, forKey: .cachePrompt)
     }

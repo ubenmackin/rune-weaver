@@ -152,6 +152,9 @@ struct ConfigShowCommand: AsyncParsableCommand {
             if let contextLength = entry.contextLength {
                 print("context_length = \(contextLength)")
             }
+            if let supportsVision = entry.supportsVision {
+                print("supports_vision = \(supportsVision)")
+            }
         }
     }
 
@@ -369,13 +372,14 @@ private func providerTOMLAssignment(key: String, lower: String, value: String) t
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
                 + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
-                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length)."
+                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length|supports_vision)."
         )
     }
     let section = "llm.providers.\(parts[2])"
     guard let field = try providerFieldAssignment(section: section, field: parts[3], key: key, value: value) else {
         throw ValidationError(
-            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style, context_length."
+            "Unknown provider field '\(parts[3])'. Supported: "
+                + "enabled, model, server_url, api_key_env, provider_type, api_style, context_length, supports_vision."
         )
     }
     return field
@@ -403,6 +407,8 @@ private func providerFieldAssignment(section: String, field: String, key: String
     case "context_length":
         let length = try providerContextLengthValue(key: key, value: value)
         return TOMLAssignment(section: section, key: "context_length", rendered: String(length))
+    case "supports_vision":
+        return try TOMLAssignment(section: section, key: "supports_vision", rendered: tomlBool(value, key: key))
     default:
         return nil
     }
@@ -552,7 +558,7 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
         throw ValidationError(
             "Unknown config key '\(key)'. Supported: engine.name, engine.log_level, llm.default_provider, "
                 + "llm.fallback_provider, memory.*, voice.*, sandbox.*, browser.*, "
-                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length). "
+                + "llm.providers.<name>.(enabled|model|server_url|api_key_env|provider_type|api_style|context_length|supports_vision). "
                 + "Run 'rune-weaver config show' for supported keys."
         )
     }
@@ -577,9 +583,12 @@ private func applyProviderValue(key: String, lower: String, value: String, confi
         entry.apiStyle = style
     case "context_length":
         entry.contextLength = try providerContextLengthValue(key: key, value: value)
+    case "supports_vision":
+        entry.supportsVision = try tomlBool(value, key: key) == "true"
     default:
         throw ValidationError(
-            "Unknown provider field '\(parts[3])'. Supported: enabled, model, server_url, api_key_env, provider_type, api_style, context_length."
+            "Unknown provider field '\(parts[3])'. Supported: "
+                + "enabled, model, server_url, api_key_env, provider_type, api_style, context_length, supports_vision."
         )
     }
     config.llm.providers[parts[2]] = entry
