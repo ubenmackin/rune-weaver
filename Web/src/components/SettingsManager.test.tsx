@@ -173,7 +173,7 @@ describe("SettingsManager", () => {
     expect(screen.getByDisplayValue("provider_3")).toBeDefined();
 
     // Save settings
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -273,7 +273,7 @@ describe("SettingsManager", () => {
     expect(backendSelect.value).toBe("provider");
 
     // Save settings
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -823,7 +823,7 @@ describe("SettingsManager", () => {
     await user.clear(maxMachinesInput);
     await user.type(maxMachinesInput, "7");
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -891,7 +891,7 @@ describe("SettingsManager", () => {
     await user.type(denyTextarea, "  .env*  \n\n*.pem\n   \n.ssh/*  ");
     expect(screen.getByText(/3 patterns/i)).toBeDefined();
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1097,7 +1097,7 @@ describe("SettingsManager", () => {
     expect(input).toHaveValue(15);
 
     // Save
-    await user.click(screen.getByRole("button", { name: /Save Settings/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(savedBody).not.toBeNull();
@@ -1375,7 +1375,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1416,7 +1416,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1469,7 +1469,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1530,7 +1530,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     await waitFor(() => {
@@ -1767,7 +1767,7 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const saveButton = screen.getByRole("button", { name: /Save Settings/i });
+    const saveButton = screen.getByRole("button", { name: "Save" });
     await user.click(saveButton);
 
     // Parked work saves directly with no confirm modal.

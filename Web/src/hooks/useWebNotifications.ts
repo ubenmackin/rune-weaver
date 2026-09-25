@@ -108,13 +108,39 @@ export function useWebNotifications() {
 
   useSharedWebSocket(handleMessage);
 
-  const requestPermission = useCallback(async () => {
-    if (typeof window === "undefined" || !("Notification" in window)) return;
+  // Support probe kept beside permission so callers never have to sniff the
+  // global directly; an absent API is a capability gap, not a denied choice,
+  // and must surface its own guidance instead of a permission prompt.
+  const isNotificationSupported =
+    typeof window !== "undefined" && "Notification" in window;
+
+  // Permission request owned here so every bell tap shares one fail-closed
+  // path. A denied permission never re-prompts: browsers ignore silent retries
+  // and the operator must change site settings, so return early with guidance
+  // instead of firing a no-op prompt. An absent API returns unsupported so the
+  // bell can still acknowledge the tap with honest copy. The resolved outcome
+  // is returned (not just stored) so the bell can toast granted versus denied
+  // without re-reading globals that test doubles may not have mutated.
+  const requestPermission = useCallback(async (): Promise<
+    NotificationPermission | "unsupported"
+  > => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return "unsupported";
+    }
+    // Fail-closed: a blocked choice stays blocked until the operator changes
+    // site settings; re-requesting would resolve without UI and look silent.
+    if (Notification.permission === "denied") {
+      setPermission("denied");
+      return "denied";
+    }
     try {
       const outcome = await Notification.requestPermission();
       setPermission(outcome);
+      return outcome;
     } catch {
-      // Ignore
+      // A throwing prompt leaves no new grant behind; report the live state
+      // so the bell falls back to guidance instead of claiming success.
+      return Notification.permission;
     }
   }, []);
 
@@ -134,6 +160,7 @@ export function useWebNotifications() {
   return {
     notificationsEnabled: permission === "granted",
     permission,
+    isNotificationSupported,
     requestPermission,
     runsBadge,
     clearRunsBadge,

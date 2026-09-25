@@ -1272,6 +1272,32 @@ a {
   margin-top: 2px;
 }
 
+/* Index run actions stay inside narrow cards without sideways scrolling. Five
+ * controls share one card, so the row wraps to a second line on a 320px card
+ * instead of pushing the shortest label off the edge. Buttons keep touch size
+ * without growing because flex-grow stays zero, letting short labels sit
+ * compactly while long ones shrink within the card. */
+.index-actions-section {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.index-actions-section .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.index-actions-section .row button {
+  min-height: 44px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 /* Per-call cancel control. It sits beside the toggle in the pill header and
  * opens a reason popover; the optimistic "Cancelling…" mark replaces it until
  * the engine's terminal frame confirms the stop. */
@@ -1949,11 +1975,19 @@ a {
   flex-wrap: wrap;
 }
 
+/* Flex ancestors must allow shrinking below content width, otherwise a long
+ * cron string forces the card wider instead of letting the badge truncate. */
+.schedule-card-identity {
+  min-width: 0;
+}
+
 .schedule-card-title-row {
   display: flex;
   align-items: center;
   gap: 10px;
   margin-bottom: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .schedule-card-name {
@@ -1970,9 +2004,29 @@ a {
   font-weight: 500;
 }
 
+/* Cron badge stays on one line inside the card: it shrinks with the title row
+ * and truncates with an ellipsis instead of wrapping or stretching the card.
+ * The full expression remains available via the title attribute for hover and
+ * assistive reading. The poll variant intentionally keeps its default wrapping.
+ * Bounds: max-width keeps the badge within the card on mobile and desktop. */
 .trigger-badge.cron {
   background: rgba(139, 92, 246, 0.15);
   color: #a78bfa;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+/* Inner text carries the truncation so the leading icon keeps its size while
+ * only the schedule string clips. */
+.trigger-badge.cron > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .trigger-badge.poll {
@@ -2618,6 +2672,133 @@ button:disabled {
 
   .settings-content {
     width: 100%;
+  }
+}
+
+/* Settings drawer trigger sits top-left of the panel header. Hidden by
+ * default so desktop keeps the inline sidenav with no duplicate control;
+ * the handheld query below is the sole path that reveals it. The 44px box
+ * keeps the trigger above the minimum touch size without growing the header. */
+.settings-menu-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.settings-menu-btn:hover {
+  color: #ffffff;
+  border-color: var(--border-focus);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.settings-menu-btn:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Dim layer behind the handheld settings drawer. Hidden by default so the
+ * desktop inline sidenav keeps zero backdrop; the mobile query below is the
+ * sole path that reveals it while the drawer is open. */
+.settings-backdrop {
+  display: none;
+  border: none;
+  padding: 0;
+}
+
+/* Handheld settings drawer sits between the 52px top nav and the 64px bottom
+ * bar with safe-area clearance, sliding in from the left above a dim
+ * backdrop. The fixed offsets keep the nav surfaces tappable while the drawer
+ * is open, and the width bound keeps the form partially visible on wide
+ * phones so the backdrop remains the single dismiss affordance alongside
+ * Escape. */
+@media (max-width: 640px) {
+  .settings-menu-btn {
+    display: inline-flex;
+  }
+
+  .settings-sidenav {
+    position: fixed;
+    top: 52px;
+    bottom: calc(64px + env(safe-area-inset-bottom));
+    left: 0;
+    width: min(300px, 85vw);
+    z-index: 50;
+    border-radius: 0;
+    border-right: 1px solid var(--border-color);
+    overflow-y: auto;
+    transform: translateX(-100%);
+    visibility: hidden;
+    pointer-events: none;
+    transition: transform 200ms ease, visibility 200ms ease;
+  }
+
+  /* Open drawer rests flush with the viewport edge with the same 200ms ease
+   * as the close path so both directions feel symmetric. */
+  .settings-sidenav.open {
+    transform: translateX(0);
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  /* Tab rows keep the minimum touch size once the drawer narrows the column
+   * so thumb targets never shrink below the handheld floor. */
+  .settings-sidenav .settings-tab-btn {
+    min-height: 44px;
+  }
+
+  /* Dim sibling behind the drawer. One layer below the drawer but above the
+   * content so a tap anywhere outside the drawer dismisses it; the drawer
+   * itself never bubbles into this layer because the two are siblings. */
+  .settings-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+  }
+}
+
+/* Wide viewports keep the settings list as a static flex child with zero
+ * backdrop. The explicit query mirrors the handheld ceiling above so exactly
+ * one layout owns the 640px boundary and the drawer rules can never leak
+ * onto desktop. The row direction re-affirms the inline layout inside the
+ * older 800px stacking range so 641-800px stays side-by-side, not stacked. */
+@media (min-width: 641px) {
+  .settings-menu-btn {
+    display: none;
+  }
+
+  .settings-layout {
+    flex-direction: row;
+  }
+
+  .settings-sidenav {
+    position: static;
+    width: 220px;
+    transform: none;
+    visibility: visible;
+    pointer-events: auto;
+  }
+
+  .settings-content {
+    width: auto;
+  }
+
+  .settings-backdrop {
+    display: none;
   }
 }
 
@@ -4597,5 +4778,30 @@ button.danger:hover:not(:disabled) {
 .index-stepper .index-stepper-input {
   -moz-appearance: textfield;
   appearance: textfield;
+}
+
+/* ==========================================================================
+   Mobile Input Auto-Zoom Guard (max-width 640px)
+   ========================================================================== */
+
+/* iOS Safari auto-zooms the viewport whenever a focused field renders below
+ * 16px, and the zoom sticks after blur on chat-length flows. Raising only the
+ * type size on handhelds keeps focus at a 1:1 viewport scale while heights,
+ * padding, and colors stay on the desktop tokens above, so geometry never
+ * shifts across the breakpoint. Desktop keeps the 14px scale untouched, and
+ * the viewport meta carries no maximum-scale so pinch zoom stays available. */
+@media (max-width: 640px) {
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  .input-field,
+  select,
+  textarea,
+  textarea.input-field {
+    font-size: 16px;
+    line-height: 24px;
+  }
 }
 

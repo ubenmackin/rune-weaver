@@ -13,6 +13,8 @@ import {
   searchStageCopy,
 } from "../api";
 import { useSearchStartProgress } from "../hooks/useSearchStartProgress";
+import { useToastStack } from "../hooks/useToastStack";
+import { ToastStack } from "./Toast";
 import {
   BellIcon,
   ChevronDownIcon,
@@ -41,7 +43,12 @@ interface TopNavProps {
   approvalsBadge?: number;
   warningsBadge?: number;
   notificationsEnabled: boolean;
-  onRequestNotifications: () => void;
+  // Wiring owned upstream (badge clearing plus permission prompt); the bell
+  // awaits it for the resolved outcome but toasts and navigates locally so an
+  // isolated no-op double still shows honest feedback from live globals.
+  onRequestNotifications: () =>
+    | void
+    | Promise<NotificationPermission | "unsupported" | void>;
 }
 
 export default function TopNav({
@@ -110,6 +117,119 @@ export default function TopNav({
   // accessible name so fractional inputs announce what they render.
   const normalizedWarnings = normalizeBadgeCount(warningsBadge);
   const warningsDisplay = formatBadgeCount(normalizedWarnings);
+
+  // Local transient feedback for the bell: the shared stack owns timers plus
+  // the dismiss surface, so this nav never invents a second toast system and
+  // badge counting stays untouched upstream. One handler covers both
+  // breakpoints because the bell stays mounted while only the tab links hide
+  // on handheld widths, keeping desktop and mobile behavior identical.
+  const { toasts, pushSuccessToast, pushErrorToast, dismissToast } =
+    useToastStack();
+
+  // Every tap acknowledges with a toast, even when the Notification API is
+  // missing or blocked. Granted taps with pending warnings route to chat (the
+  // banner there already explains each skip) while zero-warning taps simply
+  // confirm the toggle; denied taps never re-prompt silently and instead point
+  // at site settings. All copy stays well under the transient-toast bound.
+  const handleBellClick = useCallback(async () => {
+    const unsupportedCopy = "Notifications not supported in this browser.";
+    const blockedCopy =
+      "Notifications blocked. Enable in browser site settings.";
+    const enabledCopy = "Notifications on. Zero unread warnings.";
+    const warningsCopy = (count: number) =>
+      `${count} ${count === 1 ? "warning" : "warnings"} shown in chat.`;
+
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      pushErrorToast(unsupportedCopy);
+      try {
+        await onRequestNotifications();
+      } catch {
+        // Wiring failures never swallow the acknowledgment toast above.
+      }
+      return;
+    }
+
+    const prePermission: NotificationPermission = Notification.permission;
+    if (prePermission === "denied") {
+      pushErrorToast(blockedCopy);
+      try {
+        await onRequestNotifications();
+      } catch {
+        // Denied stays fail-closed; the toast already explained the fix.
+      }
+      return;
+    }
+
+    if (prePermission === "granted") {
+      try {
+        await onRequestNotifications();
+      } catch {
+        // Upstream clearing failures must not block local feedback.
+      }
+      const count = normalizeBadgeCount(warningsBadge);
+      if (count > 0) {
+        onSelectTab("chat");
+        pushSuccessToast(warningsCopy(count));
+      } else {
+        pushSuccessToast(enabledCopy);
+      }
+      return;
+    }
+
+    // Default: delegate the prompt to the owner wiring, then toast the
+    // resolved outcome. Prefer the wiring return when it names one so test
+    // doubles that never mutate the global still resolve honestly; otherwise
+    // read the live permission. A still-default outcome means the prompt was
+    // dismissed, which fails closed to guidance rather than retrying.
+    let outcome: unknown;
+    try {
+      outcome = await onRequestNotifications();
+    } catch {
+      outcome = undefined;
+    }
+    const post =
+      typeof outcome === "string" ? outcome : Notification.permission;
+    if (post === "granted") {
+      const count = normalizeBadgeCount(warningsBadge);
+      if (count > 0) {
+        onSelectTab("chat");
+        pushSuccessToast(warningsCopy(count));
+      } else {
+        pushSuccessToast(enabledCopy);
+      }
+    } else if (post === "unsupported") {
+      pushErrorToast(unsupportedCopy);
+    } else if (post === "denied") {
+      pushErrorToast(blockedCopy);
+    } else {
+      // Covers dismissed prompts that leave permission at default: guidance,
+      // never a silent retry loop.
+      if (Notification.permission === "default" && typeof outcome === "undefined") {
+        try {
+          const direct = await Notification.requestPermission();
+          if (direct === "granted") {
+            const count = normalizeBadgeCount(warningsBadge);
+            if (count > 0) {
+              onSelectTab("chat");
+              pushSuccessToast(warningsCopy(count));
+            } else {
+              pushSuccessToast(enabledCopy);
+            }
+            return;
+          }
+        } catch {
+          // A throwing fallback still lands on guidance below.
+        }
+      }
+      pushErrorToast(blockedCopy);
+    }
+  }, [
+    warningsBadge,
+    onRequestNotifications,
+    onSelectTab,
+    pushSuccessToast,
+    pushErrorToast,
+  ]);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -260,7 +380,8 @@ export default function TopNav({
   }, [searchBusyAction, searchRunning, searchURL, beginSearchStartProgress, endSearchStartProgress]);
 
   return (
-    <header className="top-nav" aria-label="Main navigation">
+    <>
+      <header className="top-nav" aria-label="Main navigation">
       <div className="top-nav-brand">
         <RuneGlyph size={24} className="rune-glyph-icon" />
         <span className="app-brand-title">RUNE WEAVER</span>
@@ -308,7 +429,10 @@ export default function TopNav({
       <div className="top-nav-right">
         {/* Bell doubles as the warnings badge: degraded-tool skips have no tab,
             so the unread count sits on the notification toggle in amber and
-            clears when the chat view is shown. */}
+            clears when the chat view is shown. The click always toasts (even
+            when unsupported or blocked) through the shared stack beside this
+            button; badge counting itself stays upstream so this handler only
+            reads the normalized count. */}
         <button
           type="button"
           className={`icon-button ${notificationsEnabled ? "active" : ""}`}
@@ -318,7 +442,7 @@ export default function TopNav({
               ? "Web notifications enabled"
               : "Enable browser notifications"
           }
-          onClick={onRequestNotifications}
+          onClick={() => void handleBellClick()}
           aria-label={
             normalizedWarnings > 0
               ? `Browser notifications, ${normalizedWarnings} unread warnings`
@@ -553,6 +677,11 @@ export default function TopNav({
           )}
         </div>
       </div>
-    </header>
+      </header>
+      {/* Shared transient stack anchors top-right with independent timers; the
+          existing dismiss surface keeps the minimum touch target so the 375px
+          handheld tap always lands an acknowledged, dismissible notice. */}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+    </>
   );
 }

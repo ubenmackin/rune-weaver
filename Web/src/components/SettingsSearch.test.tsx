@@ -135,7 +135,7 @@ describe("SettingsManager search", () => {
     await user.clear(urlInput);
     await user.type(urlInput, ENGINE_SEARCH_URL);
     const saveButton = screen.getByRole("button", {
-      name: /Save Settings/i,
+      name: "Save",
     });
     await user.click(saveButton);
     await waitFor(() => {

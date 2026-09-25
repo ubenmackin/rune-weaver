@@ -469,7 +469,7 @@ describe("IndexingPanel", () => {
     ).toBe(true);
     expect(
       appearsBefore(
-        screen.getByRole("button", { name: "Rebuild / Run Now" }),
+        screen.getByRole("button", { name: "Run" }),
         screen.getByText("Documents"),
       ),
     ).toBe(true);
@@ -730,7 +730,7 @@ describe("IndexingPanel", () => {
     // The policy form owns no status surface: run controls live on the Memory
     // tab instead of being duplicated here.
     expect(
-      screen.queryByRole("button", { name: "Rebuild / Run Now" }),
+      screen.queryByRole("button", { name: "Run" }),
     ).toBeNull();
 
     // Master enable unlocks the source toggles; enabling Mail then saving must
@@ -1028,7 +1028,7 @@ describe("IndexingPanel", () => {
       expect(screen.getByText("Enabled")).toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Rebuild / Run Now" }));
+    await user.click(screen.getByRole("button", { name: "Run" }));
 
     // The top notice shares the strip formatter, so it reads as the same
     // one-line outcome the strip renders. Both surfaces carry the status, so
@@ -1053,7 +1053,7 @@ describe("IndexingPanel", () => {
       expect(screen.getByText("Disabled")).toBeInTheDocument();
     });
     // Run stays disabled while prune/reset stay independent of the flag.
-    expect(screen.getByRole("button", { name: "Rebuild / Run Now" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Run" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Prune" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Reset Index" })).toBeEnabled();
     expect(
@@ -1074,7 +1074,7 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByText("Enabled")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "Rebuild / Run Now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
     expect(
       screen.queryByText(
         "Indexing is off — turn it on in Settings → Indexing to run a pass.",
@@ -1327,7 +1327,7 @@ describe("IndexingPanel", () => {
     // Run stays disabled while a run is active and only re-enables once the
     // run fully stops; Cancel stays enabled until it is clicked.
     expect(
-      screen.getByRole("button", { name: "Rebuild / Run Now" }),
+      screen.getByRole("button", { name: "Run" }),
     ).toBeDisabled();
     expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
 
@@ -1344,7 +1344,7 @@ describe("IndexingPanel", () => {
       "Cancelling…",
     );
     expect(
-      screen.getByRole("button", { name: "Rebuild / Run Now" }),
+      screen.getByRole("button", { name: "Run" }),
     ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "Cancelling…" }),
@@ -1399,7 +1399,7 @@ describe("IndexingPanel", () => {
     });
     expect(screen.queryByText("Cancelling")).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Rebuild / Run Now" }),
+      screen.getByRole("button", { name: "Run" }),
     ).toBeEnabled();
   });
 
@@ -2685,5 +2685,275 @@ describe("IndexPolicyPanel index scope", () => {
     expect(screen.getByTestId("index-always-skipped-block")).toHaveTextContent(
       /Credential and key files blocked by your file access rules are never indexed either/,
     );
+  });
+});
+
+describe("IndexingPanel run actions wrap", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("keeps the wrap geometry in the stylesheet with zero overflow", () => {
+    // The five run controls share one narrow card, so the regression pins the
+    // single stylesheet owner: a wrapping flex row plus touch-size buttons
+    // that shrink within the card instead of pushing past the viewport.
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s*\{[^}]*display:\s*flex/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s*\{[^}]*flex-wrap:\s*wrap/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s*\{[^}]*gap:\s*8px/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s*\{[^}]*max-width:\s*100%/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s+button\s*\{[^}]*min-height:\s*44px/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s+button\s*\{[^}]*flex:\s*0\s+1\s+auto/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-actions-section\s+\.row\s+button\s*\{[^}]*max-width:\s*100%/,
+    );
+  });
+
+  it("wraps the action row inside the card with five compact controls", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+      settings: { ...indexConfig, enabled: true },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+    });
+    // All five controls share one wrapping row so a 320px card falls to two
+    // lines instead of overflowing; the row lives inside the actions section
+    // so the card owns the wrap boundary.
+    const section = document.querySelector(".index-actions-section");
+    expect(section).not.toBeNull();
+    const row = section?.querySelector(".row");
+    expect(row).not.toBeNull();
+    const buttons = row?.querySelectorAll("button") ?? [];
+    expect(buttons.length).toBe(5);
+    expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prune" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reclaim space" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Index" })).toBeInTheDocument();
+  });
+
+  it("reads Run on both widths with the run title and section heading", async () => {
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+      settings: { ...indexConfig, enabled: true },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+    });
+    // The short label is width-independent: the same accessible name renders
+    // on a phone and on desktop with no viewport branch in the component.
+    const runButton = screen.getByRole("button", { name: "Run" });
+    expect(runButton).toHaveTextContent("Run");
+    expect(runButton).toHaveAttribute("title", "Run an on-demand index pass");
+    expect(screen.getByRole("heading", { name: "Run" })).toBeInTheDocument();
+    // The long label is gone from the live surface entirely.
+    expect(screen.queryByText("Rebuild / Run Now")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Rebuild \/ Run Now/);
+  });
+
+  it("reads Indexing with a single ellipsis character while busy", async () => {
+    const user = userEvent.setup();
+    let resolveRun!: (value: Response) => void;
+    const gatedRun = new Promise<Response>((resolve) => {
+      resolveRun = resolve;
+    });
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+      settings: { ...indexConfig, enabled: true },
+    });
+    const fetchWithGate = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/index/run") return gatedRun;
+      return fetchMock(input, init);
+    });
+    vi.stubGlobal("fetch", fetchWithGate);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeEnabled();
+    });
+    await user.click(screen.getByRole("button", { name: "Run" }));
+
+    // The busy copy holds the pass with one ellipsis glyph so the button
+    // never falls back to three ASCII dots.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Indexing…" })).toBeInTheDocument();
+    });
+    const busyButton = screen.getByRole("button", { name: "Indexing…" });
+    expect(busyButton.textContent).toContain("Indexing…");
+    expect(busyButton.textContent).not.toMatch(/Indexing\.\.\./);
+
+    resolveRun(
+      jsonResponse({
+        sessionID: "s1",
+        trigger: "onDemand",
+        status: "ok",
+        documentsIndexed: 3,
+        vectorChunks: 2,
+        keywordChunks: 1,
+        scanned: 5,
+        skipped: 0,
+        errors: 0,
+        warnings: [],
+        startedAt: 0,
+        finishedAt: 1,
+        indexAsOf: 1,
+        skippedReason: null,
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+    });
+  });
+
+  it("points the Messages hint at press Run", async () => {
+    const { fetchMock } = stubFetch();
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Requires Full Disk Access/)).toBeInTheDocument();
+    });
+    // The source hint names the short action so owners know which control to
+    // press after granting the system privilege.
+    expect(screen.getByText(/Requires Full Disk Access/)).toHaveTextContent(
+      "then press Run.",
+    );
+    expect(document.body.textContent).not.toMatch(/Rebuild \/ Run Now/);
+  });
+
+  it("points guidance copy at press Run", async () => {
+    const denial = "messages: Full Disk Access required to read chat.db";
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: [denial] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    });
+    // Both the paragraph and the restart step name the short action so the
+    // recovery path matches the button label exactly.
+    expect(screen.getByTestId("index-fda-guidance")).toHaveTextContent(
+      "then press Run.",
+    );
+    expect(screen.getByTestId("index-fda-guidance").textContent).not.toMatch(
+      /Rebuild \/ Run Now/,
+    );
+  });
+
+  it("keeps all five actions wired and drops the long label", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      status: { ...statusPayload, enabled: true },
+      settings: { ...indexConfig, enabled: true },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Run" })).toBeInTheDocument();
+    });
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Prune" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reclaim space" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset Index" })).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/Rebuild \/ Run Now/);
+
+    // Run starts an on-demand pass through the run route.
+    await user.click(screen.getByRole("button", { name: "Run" }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/index/run")).toBe(true);
+    });
+
+    // Reclaim compacts without a modal.
+    await user.click(screen.getByRole("button", { name: "Reclaim space" }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/index/reclaim")).toBe(true);
+    });
+
+    // Prune stays behind its cutoff modal before calling the route.
+    await user.click(screen.getByRole("button", { name: "Prune" }));
+    expect(
+      screen.getByRole("dialog", { name: "Confirm prune index" }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/Cutoff date/), {
+      target: { value: "2024-01-01" },
+    });
+    await user.click(screen.getByRole("button", { name: "Confirm prune index" }));
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/index/prune")).toBe(true);
+    });
+
+    // Reset stays behind its confirm modal before calling the route.
+    await user.click(screen.getByRole("button", { name: "Reset Index" }));
+    const resetDialog = screen.getByRole("dialog", { name: "Confirm reset index" });
+    expect(resetDialog).toBeInTheDocument();
+    await user.click(
+      within(resetDialog).getByRole("button", { name: "Confirm reset index" }),
+    );
+    await waitFor(() => {
+      expect(calls.some((call) => call.url === "/index/reset")).toBe(true);
+    });
+  });
+
+  it("keeps Cancel wired while a run is in flight", async () => {
+    const user = userEvent.setup();
+    let running = true;
+    const fetchMock = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse({ ...statusPayload, enabled: true, running, live: null });
+      }
+      if (url === "/index/cancel") {
+        return jsonResponse({ cancelled: true });
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: indexConfig,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByText("Running")).toBeInTheDocument();
+    });
+    // Cancel stays enabled for the remote run and reaches the cancel route.
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) => String(url) === "/index/cancel"),
+      ).toBe(true);
+    });
   });
 });
