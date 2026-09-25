@@ -460,6 +460,8 @@ private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws
 
 /// Builds boot-parity index components for the saved config and probes the new
 /// store so an unwritable `db_path` fails before the live context is touched.
+/// The rebuilt coordinator reports through the live run store plus hub so a
+/// settings-enabled run lands where the status probe reads it.
 /// - Parameters:
 ///   - savedConfig: Persisted config to build from.
 ///   - context: Live context supplying the shared embedder and vision provider.
@@ -468,6 +470,8 @@ private func cancelAndJoinIndexRun(_ coordinator: IndexCoordinator) async throws
 private func probedIndexComponents(savedConfig: RuneWeaverConfig, context: ServerContext) async throws -> ServerIndexComponents {
     guard let components = ServerIndexBoot.makeComponents(
         config: savedConfig,
+        runs: context.runs,
+        hub: context.hub,
         embedder: context.embedder,
         visionLLM: context.servingLLM
     ) else {

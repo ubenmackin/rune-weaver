@@ -514,7 +514,12 @@ private enum EmailIMAPBridgeScriptTail {
                     limit = 10
                 limit = max(1, min(limit, 50))
                 try:
-                    if not query or query == "*":
+                    if re.fullmatch(r"UID 1:\d+", query):
+                        # Backfill paging uses a verbatim UID range so the newest page inside
+                        # 1:N surfaces without free-text wrapping; the bound is integers-only
+                        # from the adapter, and the shared limit slice below keeps it to one page.
+                        typ, data = conn.uid("search", None, query)
+                    elif not query or query == "*":
                         typ, data = conn.uid("search", None, "ALL")
                     else:
                         esc = query.replace("\\", "\\\\").replace('"', '\\"')

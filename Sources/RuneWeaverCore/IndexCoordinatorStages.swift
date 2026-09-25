@@ -201,7 +201,10 @@ public extension IndexClosureStage {
                     statePath: statePath,
                     batchLimit: batchLimit
                 )
-                let result = try await indexer.indexNewMessages()
+                // The looping entry snapshots once and drains every pending
+                // batch, so the stage folds its accumulated totals straight
+                // into the report while per-batch memory stays bounded.
+                let result = try await indexer.indexAllNewMessages()
                 return IndexSourceRunReport(
                     kind: .messages,
                     scanned: result.scanned,

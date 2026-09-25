@@ -9,6 +9,7 @@
 
 import Foundation
 @testable import RuneWeaverCore
+@testable import RuneWeaverTools
 import Testing
 
 // MARK: - Fixtures
@@ -75,6 +76,66 @@ private actor ProgressRecorder {
     }
 }
 
+/// Records the exclusive upper bound of every message page in call order.
+///
+/// A nil entry is the newest window; a non-nil entry is a downward backfill
+/// page requesting only UIDs below the bound. The count doubles as the page
+/// count for steady-state and repeated-page assertions.
+private actor BoundRecorder {
+    /// Bounds observed in call order.
+    private var bounds: [Int?] = []
+
+    /// Records one page bound.
+    /// - Parameter bound: Exclusive upper bound, or nil for the newest window.
+    func record(_ bound: Int?) {
+        bounds.append(bound)
+    }
+
+    /// Returns the observed bounds.
+    /// - Returns: Bounds in call order.
+    func snapshot() -> [Int?] {
+        bounds
+    }
+
+    /// Returns the number of pages fetched.
+    /// - Returns: Page count.
+    func count() -> Int {
+        bounds.count
+    }
+}
+
+/// Records search queries and limits seen by the adapter double.
+///
+/// Capturing the verbatim query proves the adapter emits the exact `UID 1:N`
+/// shape without free text, while the limit proves the 50-per-page clamp.
+private actor SearchCapture {
+    /// Queries observed in call order.
+    private var queries: [String] = []
+    /// Limits observed in call order.
+    private var limits: [Int] = []
+
+    /// Records one search.
+    /// - Parameters:
+    ///   - query: Verbatim query passed to the bridge.
+    ///   - limit: Limit passed to the bridge.
+    func record(query: String, limit: Int) {
+        queries.append(query)
+        limits.append(limit)
+    }
+
+    /// Returns the observed queries.
+    /// - Returns: Queries in call order.
+    func queriesSnapshot() -> [String] {
+        queries
+    }
+
+    /// Returns the observed limits.
+    /// - Returns: Limits in call order.
+    func limitsSnapshot() -> [Int] {
+        limits
+    }
+}
+
 /// Error raised when a stub attachment index has no canned part.
 private enum StubGatewayError: Error {
     /// No attachment is configured for the requested index.
@@ -93,6 +154,8 @@ private struct StubMailGateway: MailIndexGateway {
     let recorder: ModeRecorder
     /// Attachment-call counter shared with the test.
     let attachmentCalls: CallRecorder
+    /// Page-bound recorder shared with the test.
+    let bounds: BoundRecorder
 
     /// Creates a stub gateway.
     /// - Parameters:
@@ -101,18 +164,21 @@ private struct StubMailGateway: MailIndexGateway {
     ///   - attachments: Canned attachment bytes.
     ///   - recorder: Mode recorder shared with the test.
     ///   - attachmentCalls: Attachment-call counter shared with the test.
+    ///   - bounds: Page-bound recorder shared with the test.
     init(
         mailboxNames: [String] = ["INBOX"],
         messages: [MailIndexMessage],
         attachments: [MailIndexAttachmentData] = [],
         recorder: ModeRecorder = ModeRecorder(),
-        attachmentCalls: CallRecorder = CallRecorder()
+        attachmentCalls: CallRecorder = CallRecorder(),
+        bounds: BoundRecorder = BoundRecorder()
     ) {
         self.mailboxNames = mailboxNames
         self.messages = messages
         self.attachments = attachments
         self.recorder = recorder
         self.attachmentCalls = attachmentCalls
+        self.bounds = bounds
     }
 
     /// Returns the canned mailbox list.
@@ -120,14 +186,30 @@ private struct StubMailGateway: MailIndexGateway {
         mailboxNames
     }
 
-    /// Returns the canned newest message page and records the fetch mode.
+    /// Returns the canned page for one downward bound and records the fetch mode.
+    ///
+    /// A nil bound returns the newest window; a present bound returns only
+    /// numeric UIDs at or below bound minus one, preserving newest-first order,
+    /// so the stub models a bridge that honors `UID 1:N` paging clamped to the
+    /// requested limit. A bound at the mailbox start is already exhausted.
     func messages(
         credentials _: MailIndexCredentials,
         mailbox _: String,
         limit: Int,
-        mode: MailFetchMode
+        mode: MailFetchMode,
+        beforeUID: Int? = nil
     ) async throws -> [MailIndexMessage] {
         await recorder.record(mode)
+        await bounds.record(beforeUID)
+        if let beforeUID {
+            let upper = beforeUID - 1
+            guard upper >= 1 else { return [] }
+            let filtered = messages.filter {
+                let uid = MailIndexer.uid(of: $0.id)
+                return uid > 0 && uid <= upper
+            }
+            return Array(filtered.prefix(limit))
+        }
         return Array(messages.prefix(limit))
     }
 
@@ -148,33 +230,196 @@ private struct StubMailGateway: MailIndexGateway {
     }
 }
 
-/// Gateway stub modelling a live bridge that clamps every page to one newest window.
+/// Gateway stub modelling a bridge that ignores the downward bound and clamps to one newest window.
 ///
-/// Regardless of the requested `limit`, at most `cap` newest messages surface,
-/// so a burst larger than the cap leaves an unfetched middle the indexer must
-/// hold its watermark over instead of jumping.
+/// Regardless of the requested `limit` or `beforeUID`, at most `cap` newest
+/// messages surface, so a burst larger than the cap leaves an unfetched middle
+/// the indexer must hold its watermark over instead of jumping. The ignored
+/// bound is what makes the second page repeat the first, exercising the
+/// repeated-page stop without duplicate indexing.
 private struct ClampedMailGateway: MailIndexGateway {
     /// Canned messages in newest-first order.
     let messages: [MailIndexMessage]
     /// Widest page ever surfaced, regardless of `limit`.
     let cap: Int
+    /// Page-bound recorder shared with the test.
+    let bounds: BoundRecorder
+
+    /// Creates a clamped gateway.
+    /// - Parameters:
+    ///   - messages: Canned messages in newest-first order.
+    ///   - cap: Widest page ever surfaced.
+    ///   - bounds: Page-bound recorder shared with the test.
+    init(messages: [MailIndexMessage], cap: Int, bounds: BoundRecorder = BoundRecorder()) {
+        self.messages = messages
+        self.cap = cap
+        self.bounds = bounds
+    }
 
     /// Returns at most `cap` newest canned messages.
     func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
         ["INBOX"]
     }
 
-    /// Returns the clamped newest window.
+    /// Returns the clamped newest window, ignoring the downward bound.
     func messages(
         credentials _: MailIndexCredentials,
         mailbox _: String,
         limit: Int,
-        mode _: MailFetchMode
+        mode _: MailFetchMode,
+        beforeUID: Int? = nil
     ) async throws -> [MailIndexMessage] {
-        Array(messages.prefix(min(limit, cap)))
+        await bounds.record(beforeUID)
+        return Array(messages.prefix(min(limit, cap)))
     }
 
     /// Never serves attachment bytes; the hold test uses attachment-free mail.
+    func attachment(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int,
+        mode _: MailFetchMode
+    ) async throws -> MailIndexAttachmentData {
+        throw StubGatewayError.missingAttachment
+    }
+}
+
+/// Gateway double capturing the verbatim search query the adapter emits.
+///
+/// Proves the adapter's `UID 1:N` shape reaches the bridge without free text
+/// while still clamping to one page. Hits are canned newest-first; the fetch
+/// path returns a synthesized body so the adapter can complete the page.
+private struct CapturingIMAPGateway: EmailIMAPGateway, Sendable {
+    /// Hits returned by `search`, already newest-first.
+    let hits: [EmailSearchHit]
+    /// Capture box for queries and limits.
+    let capture: SearchCapture
+
+    /// Creates a capturing gateway.
+    /// - Parameters:
+    ///   - hits: Canned hits in newest-first order.
+    ///   - capture: Box receiving queries and limits.
+    init(hits: [EmailSearchHit] = [], capture: SearchCapture) {
+        self.hits = hits
+        self.capture = capture
+    }
+
+    /// Lists one mailbox without touching the network.
+    func mailboxListing(credentials _: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
+        EmailMailboxListing(mailboxes: ["INBOX"], delimiter: "/")
+    }
+
+    /// Records the verbatim query and returns the clamped newest slice.
+    func search(
+        credentials _: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int
+    ) async throws -> [EmailSearchHit] {
+        await capture.record(query: query, limit: limit)
+        return Array(hits.prefix(limit)).map {
+            EmailSearchHit(
+                id: $0.id,
+                subject: $0.subject,
+                from: $0.from,
+                date: $0.date,
+                snippet: $0.snippet,
+                mailbox: mailbox,
+                hasAttachments: $0.hasAttachments,
+                attachmentCount: $0.attachmentCount
+            )
+        }
+    }
+
+    /// Records the verbatim query for the filtered overload as well.
+    func search(
+        credentials _: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?
+    ) async throws -> [EmailSearchHit] {
+        await capture.record(query: query, limit: limit)
+        let filtered = hits.filter { $0.matches(hasAttachment: hasAttachment) }
+        return Array(filtered.prefix(limit)).map {
+            EmailSearchHit(
+                id: $0.id,
+                subject: $0.subject,
+                from: $0.from,
+                date: $0.date,
+                snippet: $0.snippet,
+                mailbox: mailbox,
+                hasAttachments: $0.hasAttachments,
+                attachmentCount: $0.attachmentCount
+            )
+        }
+    }
+
+    /// Returns a synthesized body for every hit so the adapter completes.
+    func fetch(credentials _: ResolvedEmailCredentials, mailbox _: String, messageID: String) async throws -> EmailFullMessage {
+        EmailFullMessage(
+            id: messageID,
+            subject: "Subject \(messageID)",
+            from: "sender@example.com",
+            to: "you@example.com",
+            date: "Mon, 01 Sep 2025 09:00:00 +0000",
+            body: "Body \(messageID)"
+        )
+    }
+
+    /// Never serves attachment bytes; the criterion tests use attachment-free mail.
+    func attachment(
+        credentials _: ResolvedEmailCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int
+    ) async throws -> EmailAttachmentData {
+        throw EmailIMAPError.bridgeFailed("no attachment")
+    }
+
+    /// Append stub satisfying the gateway contract; the adapter tests never append.
+    func append(credentials _: ResolvedEmailCredentials, mailbox _: String, rawMessage _: Data) async throws {}
+}
+
+/// Paging gateway whose second page sleeps cancellably so a mid-backfill cancel lands deterministically.
+///
+/// The first page returns immediately; the second page parks in a cancellable
+/// sleep that the test aborts, proving the downward loop stops at the next
+/// checkpoint instead of draining the mailbox.
+private struct CancellablePagingGateway: MailIndexGateway {
+    /// Messages backing every page, already newest-first.
+    let messages: [MailIndexMessage]
+
+    /// Returns the first page immediately and parks cancellably on later pages.
+    func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+        ["INBOX"]
+    }
+
+    /// Serves the downward page, sleeping cancellably past the first window.
+    func messages(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        limit: Int,
+        mode _: MailFetchMode,
+        beforeUID: Int? = nil
+    ) async throws -> [MailIndexMessage] {
+        if beforeUID != nil {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+        if let beforeUID {
+            let upper = beforeUID - 1
+            guard upper >= 1 else { return [] }
+            let filtered = messages.filter {
+                let uid = MailIndexer.uid(of: $0.id)
+                return uid > 0 && uid <= upper
+            }
+            return Array(filtered.prefix(limit))
+        }
+        return Array(messages.prefix(limit))
+    }
+
+    /// Never serves attachment bytes; the cancellation test uses attachment-free mail.
     func attachment(
         credentials _: MailIndexCredentials,
         mailbox _: String,
@@ -650,5 +895,253 @@ struct MailIndexerTests {
             MailVectorWindow(token: "2y").cutoff(now: fixedNow)
                 == fixedNow.addingTimeInterval(-730 * 86400)
         )
+    }
+
+    @Test
+    func `Adapter builds UID 1:N from integers only`() {
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 51) == "UID 1:50")
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 2) == "UID 1:1")
+        // A bound at the mailbox start holds no UIDs, so there is no criterion to issue.
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 1) == nil)
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 0) == nil)
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: -4) == nil)
+    }
+
+    @Test
+    func `Adapter issues verbatim UID range with clamped page`() async throws {
+        let capture = SearchCapture()
+        let hits = (1 ... 5).map {
+            EmailSearchHit(
+                id: "\($0)",
+                subject: "Subject",
+                from: "sender@example.com",
+                date: "Mon, 01 Sep 2025 09:00:00 +0000",
+                snippet: "snippet"
+            )
+        }
+        let gateway = CapturingIMAPGateway(hits: hits, capture: capture)
+        let adapter = EmailIMAPMailIndexGateway(gateway: gateway)
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+        // A present bound must reach the bridge as the exact range shape with
+        // no free text, still clamped to one newest page.
+        _ = try await adapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 50,
+            mode: .peek,
+            beforeUID: 51
+        )
+        let queries = await capture.queriesSnapshot()
+        let limits = await capture.limitsSnapshot()
+        #expect(queries == ["UID 1:50"])
+        #expect(limits == [50])
+        // An oversized limit stays clamped to the bridge page cap.
+        _ = try await adapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 500,
+            mode: .peek,
+            beforeUID: 11
+        )
+        let queriesAfter = await capture.queriesSnapshot()
+        let limitsAfter = await capture.limitsSnapshot()
+        #expect(queriesAfter.count == 2)
+        #expect(queriesAfter[1] == "UID 1:10")
+        #expect(limitsAfter[1] == EmailSearchArgs.maxLimit)
+    }
+
+    @Test
+    func `Adapter fetches newest window when no bound is given`() async throws {
+        let capture = SearchCapture()
+        let gateway = CapturingIMAPGateway(hits: [], capture: capture)
+        let adapter = EmailIMAPMailIndexGateway(gateway: gateway)
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+        _ = try await adapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 10,
+            mode: .peek,
+            beforeUID: nil
+        )
+        let queries = await capture.queriesSnapshot()
+        #expect(queries == [""])
+    }
+
+    @Test
+    func `Adapter returns empty without dialing at mailbox start`() async throws {
+        let capture = SearchCapture()
+        let gateway = CapturingIMAPGateway(hits: [], capture: capture)
+        let adapter = EmailIMAPMailIndexGateway(gateway: gateway)
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+        // UID 1:0 is not a valid range; the adapter short-circuits instead.
+        let messages = try await adapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 50,
+            mode: .peek,
+            beforeUID: 1
+        )
+        #expect(messages.isEmpty)
+        let queries = await capture.queriesSnapshot()
+        #expect(queries.isEmpty)
+    }
+
+    @Test
+    func `Backfill over 200 messages converges with watermark at maximum`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let all = Array((1 ... 200).map {
+            makeMessage(id: "\($0)", body: "backfill body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: StubMailGateway(messages: all, bounds: bounds),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesSeen == 200)
+            #expect(report.messagesIndexed == 200)
+            let watermark = await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX")
+            #expect(watermark == 200)
+            let stats = try await store.stats()
+            #expect(stats.documents == 200)
+            // Four clamped pages cover the mailbox: each bound is the lowest
+            // UID already fetched, so pages never overlap and never skip.
+            let observed = await bounds.snapshot()
+            #expect(observed.count == 4)
+            #expect(observed[0] == nil)
+            #expect(observed[1] == 151)
+            #expect(observed[2] == 101)
+            #expect(observed[3] == 51)
+        }
+    }
+
+    @Test
+    func `Steady state with no new mail fetches exactly one page`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let all = Array((1 ... 200).map {
+            makeMessage(id: "\($0)", body: "steady body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            let first = makeIndexer(
+                gateway: StubMailGateway(messages: all),
+                store: store,
+                checkpoints: checkpoints
+            )
+            _ = try await first.run()
+            let watermark = await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX")
+            #expect(watermark == 200)
+
+            // No arrivals: the newest page already reaches the watermark, so
+            // the run stops after one page with nothing to index.
+            let steadyBounds = BoundRecorder()
+            let steady = makeIndexer(
+                gateway: StubMailGateway(messages: all, bounds: steadyBounds),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await steady.run()
+            #expect(report.messagesSeen == 0)
+            #expect(report.messagesIndexed == 0)
+            let pages = await steadyBounds.count()
+            #expect(pages == 1)
+            let observed = await steadyBounds.snapshot()
+            #expect(observed.count == 1)
+            #expect(observed[0] == nil)
+        }
+    }
+
+    @Test
+    func `Repeated page stops without duplicate indexing`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let all = Array((1 ... 60).map {
+            makeMessage(id: "\($0)", body: "repeat body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            // The double ignores the downward bound, so the second page repeats
+            // the first. The loop must stop there with one page of unique mail.
+            let indexer = makeIndexer(
+                gateway: ClampedMailGateway(messages: all, cap: MailIndexer.pageLimit, bounds: bounds),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesSeen == 50)
+            #expect(report.messagesIndexed == 50)
+            let stats = try await store.stats()
+            #expect(stats.documents == 50)
+            let pages = await bounds.count()
+            #expect(pages == 2)
+            let observed = await bounds.snapshot()
+            #expect(observed.count == 2)
+            #expect(observed[0] == nil)
+            // The second bound is the lowest UID of the first page, proving
+            // the loop lowered the bound before observing the repeat.
+            #expect(observed[1] == 11)
+        }
+    }
+
+    @Test
+    func `Cancellation mid-backfill stops at the next checkpoint`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let all = Array((1 ... 200).map {
+            makeMessage(id: "\($0)", body: "cancel body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: CancellablePagingGateway(messages: all),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let runTask = Task { try await indexer.run() }
+            // Let the first page return, then cancel while the second page
+            // parks in its cancellable sleep.
+            try await Task.sleep(nanoseconds: 200_000_000)
+            runTask.cancel()
+            do {
+                _ = try await runTask.value
+                Issue.record("Expected CancellationError from mid-backfill cancel")
+            } catch is CancellationError {
+                // The downward loop stopped at the next checkpoint as required.
+            } catch {
+                Issue.record("Expected CancellationError, got \(error)")
+            }
+        }
     }
 }

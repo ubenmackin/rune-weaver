@@ -325,14 +325,21 @@ extension ServeCommand {
         )
         // Build the document index pipeline once so served recall, the nightly
         // trigger, and the `/index` routes share one store and coordinator; nil
-        // when disabled keeps routes failing closed and recall unchanged.
+        // when disabled keeps routes failing closed and recall unchanged. The
+        // run reporter writes into the same run store the status probe reads
+        // plus the same hub the sockets fan out from, so a manual run leaves
+        // one start row updated in place by its completion.
         let makeEmbeddingsBackend: @Sendable () -> (any EmbeddingsBackend)? =
             EmbeddingsBackendFactory.makePoolFactory(
                 memoryEmbeddingBackend: loaded.config.memory.embeddingBackend,
                 providers: allProviders
             )
+        let runs = await RunLogStore.load(dbPath: loaded.config.memory.episodesDBPath)
+        let hub = WSHub()
         let indexComponents = ServerIndexBoot.makeComponents(
             config: loaded.config,
+            runs: runs,
+            hub: hub,
             embedder: embedder,
             visionLLM: selected,
             makeEmbeddingsBackend: makeEmbeddingsBackend
@@ -417,7 +424,9 @@ extension ServeCommand {
             goalsConfig: loaded.config.goals,
             auth: auth,
             mediaSecrets: sharedSecrets,
-            secrets: sharedSecrets
+            secrets: sharedSecrets,
+            runs: runs,
+            hub: hub
         )
         await registerAndVerifyTools(
             context: context,

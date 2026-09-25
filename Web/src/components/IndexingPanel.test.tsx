@@ -239,17 +239,27 @@ describe("IndexingPanel helpers", () => {
     expect(isIndexProgressFrame({ toolName: "" }, false)).toBe(false);
   });
 
-  it("scales source bars by document share instead of binary on/off", () => {
+  it("scales source bars by share of the displayed total", () => {
     expect(indexSourceBarWidth(30, 30)).toBe("100%");
-    expect(indexSourceBarWidth(15, 30)).toBe("50%");
+    expect(indexSourceBarWidth(30, 45)).toBe("67%");
+    expect(indexSourceBarWidth(15, 45)).toBe("33%");
     expect(indexSourceBarWidth(0, 30)).toBe("0%");
     expect(indexSourceBarWidth(5, 0)).toBe("0%");
-    // Tiny buckets stay visible on the track but label honestly: a 1/100
-    // share paints at the 4% floor while the label reads the true 1%.
-    expect(indexSourceBarWidth(1, 100)).toBe("4%");
+    // No visibility floor remains: a 1/100 share paints as a 1% sliver while
+    // the label reads the same true share.
+    expect(indexSourceBarWidth(1, 100)).toBe("1%");
     expect(indexSourceBarPercent(1, 100)).toBe("1%");
     expect(indexSourceBarPercent(30, 30)).toBe("100%");
-    expect(indexSourceBarPercent(15, 30)).toBe("50%");
+    expect(indexSourceBarPercent(30, 45)).toBe("67%");
+    expect(indexSourceBarPercent(15, 45)).toBe("33%");
+    // Large skewed totals keep every row honest: 25529 plus 163 plus 1440
+    // across a 27132 total reads 94 plus 1 plus 5.
+    expect(indexSourceBarPercent(25529, 27132)).toBe("94%");
+    expect(indexSourceBarPercent(163, 27132)).toBe("1%");
+    expect(indexSourceBarPercent(1440, 27132)).toBe("5%");
+    expect(indexSourceBarWidth(25529, 27132)).toBe("94%");
+    expect(indexSourceBarWidth(163, 27132)).toBe("1%");
+    expect(indexSourceBarWidth(1440, 27132)).toBe("5%");
   });
 
   it("resolves canonical source rows with real totals", () => {
@@ -277,6 +287,33 @@ describe("IndexingPanel helpers", () => {
     expect(
       describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
     ).toContain("3 indexed");
+  });
+
+  it("folds ok-with-errors into the head without duplicating the count", () => {
+    // An ok run that still recorded errors names the count once in the head
+    // instead of reading as a clean ok plus a trailing duplicate.
+    const text = describeIndexRun({
+      status: "ok",
+      indexed: 3,
+      scanned: 5,
+      errors: 12,
+      finishedAt: 1,
+      trigger: "onDemand",
+    });
+    expect(text).toContain("Last run finished with 12 errors");
+    expect(text).toContain("Manual Run");
+    expect(text.match(/12 errors/g) ?? []).toHaveLength(1);
+    // A clean ok run keeps the existing head plus its counts.
+    const clean = describeIndexRun({
+      status: "ok",
+      indexed: 3,
+      scanned: 5,
+      errors: 0,
+      finishedAt: 1,
+    });
+    expect(clean).toContain("Last run ok");
+    expect(clean).toContain("0 errors");
+    expect(describeIndexRun(null)).toBe("No runs yet");
   });
 
   it("shares one run formatter across the notice and the strip", () => {
@@ -578,10 +615,10 @@ describe("IndexingPanel", () => {
       "aria-label",
       "80 vector chunks, 20 keyword chunks",
     );
-    // Bars scale by real document share: the largest source fills the track
-    // while the half-size source renders at half width — never binary on/off.
-    expect(screen.getByTestId("index-bar-files")).toHaveStyle({ width: "100%" });
-    expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "50%" });
+    // Bars scale by share of the displayed total (30 plus 15 across a 45
+    // total): the rows read as 67% and 33% — never binary on/off.
+    expect(screen.getByTestId("index-bar-files")).toHaveStyle({ width: "67%" });
+    expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "33%" });
     expect(screen.getByTestId("index-bar-mail")).not.toHaveStyle({ width: "0%" });
     // Each row names its real totals instead of an On/Off token.
     expect(screen.getByText("30 docs · 70 chunks · 1.5 KB")).toBeInTheDocument();
@@ -590,10 +627,10 @@ describe("IndexingPanel", () => {
     expect(screen.getByText("Mail · Off")).toBeInTheDocument();
     // The extraction-outcome breakdown renders one scaled bar per status.
     expect(screen.getByTestId("index-extract-bar-extracted")).toHaveStyle({
-      width: "100%",
+      width: "67%",
     });
     expect(screen.getByTestId("index-extract-bar-partial")).toHaveStyle({
-      width: "50%",
+      width: "33%",
     });
     // The last-run strip distills status, counts, and finish time.
     expect(screen.getByTestId("index-last-run")).toHaveTextContent("Last run ok");
@@ -603,7 +640,7 @@ describe("IndexingPanel", () => {
     expect(screen.getByTestId("index-watermark-card")).toBeInTheDocument();
   });
 
-  it("titles both bar groups with their share-of-largest contract", async () => {
+  it("titles both bar groups with their share-of-index contract", async () => {
     const { fetchMock } = stubFetch();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -612,17 +649,17 @@ describe("IndexingPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-donut-chart")).toBeInTheDocument();
     });
-    // Headings name the scaling so a half-width bar reads as half of the
-    // largest bucket rather than half of the total.
+    // Headings name the scaling so each bar reads as its fraction of the
+    // displayed total rather than of the largest bucket.
     expect(
-      screen.getByText("Documents by source — share of largest"),
+      screen.getByText("Documents by source — share of index"),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("Extraction outcomes — share of largest"),
+      screen.getByText("Extraction outcomes — share of index"),
     ).toBeInTheDocument();
   });
 
-  it("labels every bar with its share-of-largest percent", async () => {
+  it("labels every bar with its share-of-index percent", async () => {
     const { fetchMock } = stubFetch({
       status: {
         ...statusPayload,
@@ -644,13 +681,13 @@ describe("IndexingPanel", () => {
       expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
     });
     // Percent labels reuse the track scale so the copy and the paint agree.
-    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("100%");
-    expect(screen.getByTestId("index-bar-pct-mail")).toHaveTextContent("50%");
+    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("67%");
+    expect(screen.getByTestId("index-bar-pct-mail")).toHaveTextContent("33%");
     expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
-      "100%",
+      "67%",
     );
     expect(screen.getByTestId("index-extract-pct-partial")).toHaveTextContent(
-      "50%",
+      "33%",
     );
   });
 
@@ -2955,5 +2992,245 @@ describe("IndexingPanel run actions wrap", () => {
         fetchMock.mock.calls.some(([url]) => String(url) === "/index/cancel"),
       ).toBe(true);
     });
+  });
+});
+
+describe("IndexingPanel vertical chart rows", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("stacks each source row as label line, full-width track, stats line", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    });
+    // Row geometry pins the reading order: the name plus share line owns the
+    // top, the paint owns the middle, and the totals own the bottom, so a long
+    // name or long counts can never push the bar origin.
+    const sourceGroup = screen.getByTestId("index-source-bars");
+    const label = within(sourceGroup).getByText("Files");
+    const bar = screen.getByTestId("index-bar-files");
+    const pct = screen.getByTestId("index-bar-pct-files");
+    const stats = within(sourceGroup).getByText("30 docs · 70 chunks · 1.5 KB");
+    expect(appearsBefore(label, pct)).toBe(true);
+    expect(appearsBefore(pct, bar)).toBe(true);
+    expect(appearsBefore(bar, stats)).toBe(true);
+    // The stacked row owns the column while the label line owns the
+    // space-between, so the percent hugs the right edge above the track.
+    const row = bar.parentElement?.parentElement as HTMLElement | null;
+    expect(row).not.toBeNull();
+    expect(row).toHaveStyle({ display: "flex", flexDirection: "column" });
+    const labelLine = label.parentElement as HTMLElement | null;
+    expect(labelLine).not.toBeNull();
+    expect(labelLine).toHaveStyle({ justifyContent: "space-between" });
+  });
+
+  it("mirrors the stacked order on extraction outcomes", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-extract-bar-extracted")).toBeInTheDocument();
+    });
+    // Both charts share one row contract, so the outcome rows stack in the
+    // same label, track, stats order as the source rows.
+    const extractGroup = screen.getByTestId("index-extract-bars");
+    const label = within(extractGroup).getByText("extracted");
+    const bar = screen.getByTestId("index-extract-bar-extracted");
+    const pct = screen.getByTestId("index-extract-pct-extracted");
+    const stats = within(extractGroup).getByText("30 docs");
+    expect(appearsBefore(label, pct)).toBe(true);
+    expect(appearsBefore(pct, bar)).toBe(true);
+    expect(appearsBefore(bar, stats)).toBe(true);
+    const row = bar.parentElement?.parentElement as HTMLElement | null;
+    expect(row).not.toBeNull();
+    expect(row).toHaveStyle({ display: "flex", flexDirection: "column" });
+  });
+
+  it("shares one full-width track width regardless of label length", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    });
+    // Every track spans its row edge to edge on its own line, so a short
+    // Files label and a longer outcome label still start paint at the same x
+    // and share one width while counts sit below the paint.
+    for (const testId of [
+      "index-bar-files",
+      "index-bar-mail",
+      "index-extract-bar-extracted",
+      "index-extract-bar-partial",
+    ]) {
+      const fill = screen.getByTestId(testId);
+      const track = fill.parentElement as HTMLElement | null;
+      expect(track).not.toBeNull();
+      expect(track).toHaveStyle({ width: "100%" });
+      // Track geometry stays put: the same height and corner radius the bars
+      // always carried, with the fill rounding to match.
+      expect(track).toHaveStyle({ height: "10px", borderRadius: "5px" });
+      expect(fill).toHaveStyle({ height: "100%", borderRadius: "5px" });
+    }
+    expect(screen.getByTestId("index-bar-files")).toHaveStyle({ width: "67%" });
+    expect(screen.getByTestId("index-bar-mail")).toHaveStyle({ width: "33%" });
+    expect(screen.getByTestId("index-extract-bar-extracted")).toHaveStyle({
+      width: "67%",
+    });
+    expect(screen.getByTestId("index-extract-bar-partial")).toHaveStyle({
+      width: "33%",
+    });
+  });
+
+  it("preserves test ids and aria labels on both charts", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 30, chunks: 70, bytes: 1500 },
+          { kind: "mail", documents: 15, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 30 },
+          { status: "partial", documents: 15 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    });
+    // The stacked rows keep the same query surface and accessible names the
+    // horizontal rows carried, with the muted small-type styling intact.
+    expect(screen.getByTestId("index-bar-files")).toHaveAttribute(
+      "aria-label",
+      "Files 30 documents",
+    );
+    expect(screen.getByTestId("index-bar-mail")).toHaveAttribute(
+      "aria-label",
+      "Mail 15 documents",
+    );
+    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("67%");
+    expect(screen.getByTestId("index-bar-pct-mail")).toHaveTextContent("33%");
+    expect(screen.getByTestId("index-extract-bar-extracted")).toHaveAttribute(
+      "aria-label",
+      "extracted 30 documents",
+    );
+    expect(screen.getByTestId("index-extract-bar-partial")).toHaveAttribute(
+      "aria-label",
+      "partial 15 documents",
+    );
+    expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
+      "67%",
+    );
+    expect(screen.getByTestId("index-extract-pct-partial")).toHaveTextContent(
+      "33%",
+    );
+    for (const testId of [
+      "index-bar-pct-files",
+      "index-bar-pct-mail",
+      "index-extract-pct-extracted",
+      "index-extract-pct-partial",
+    ]) {
+      expect(screen.getByTestId(testId)).toHaveClass("text-xs");
+      expect(screen.getByTestId(testId)).toHaveClass("muted");
+    }
+  });
+
+  it("renders No data yet for zero-document rows on both charts", async () => {
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        bySource: [
+          { kind: "files", documents: 20, chunks: 40, bytes: 1000 },
+          { kind: "mail", documents: 0, chunks: 0, bytes: 0 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 10 },
+          { status: "failed", documents: 0 },
+        ],
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-source-bars")).toBeInTheDocument();
+    });
+    // A zero-document source keeps its name and totals but paints no track:
+    // the gap copy sits where the track would paint while the populated row
+    // keeps its bar and share.
+    const sourceGroup = screen.getByTestId("index-source-bars");
+    const mailLabel = within(sourceGroup).getByText("Mail");
+    const mailEmpty = screen.getByTestId("index-bar-empty-mail");
+    expect(mailEmpty).toHaveTextContent("No data yet");
+    expect(screen.queryByTestId("index-bar-mail")).toBeNull();
+    expect(screen.queryByTestId("index-bar-pct-mail")).toBeNull();
+    expect(appearsBefore(mailLabel, mailEmpty)).toBe(true);
+    expect(screen.getByTestId("index-bar-files")).toBeInTheDocument();
+    expect(screen.getByTestId("index-bar-pct-files")).toHaveTextContent("100%");
+    // The same gap contract holds for outcomes: the empty bucket names its
+    // gap while the populated bucket keeps paint plus share.
+    const extractGroup = screen.getByTestId("index-extract-bars");
+    const failedLabel = within(extractGroup).getByText("failed");
+    const failedEmpty = screen.getByTestId("index-extract-empty-failed");
+    expect(failedEmpty).toHaveTextContent("No data yet");
+    expect(screen.queryByTestId("index-extract-bar-failed")).toBeNull();
+    expect(screen.queryByTestId("index-extract-pct-failed")).toBeNull();
+    expect(appearsBefore(failedLabel, failedEmpty)).toBe(true);
+    expect(screen.getByTestId("index-extract-bar-extracted")).toBeInTheDocument();
+    expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
+      "100%",
+    );
   });
 });
