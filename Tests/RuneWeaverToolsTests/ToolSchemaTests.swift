@@ -1,7 +1,7 @@
 // Rune Weaver Tools Tests — Exhaustive JSON schema validation across every builtin.
 
 // Every builtin must survive strict backends, so this suite pins the full
-// registry (email plus memory plus files plus web and browser) to strict
+// registry (email plus messages plus memory plus files plus web and browser) to strict
 // objects and proves one corrupt schema degrades instead of failing turns.
 
 import Foundation
@@ -26,11 +26,12 @@ private struct BrokenSchemaTool: Tool, Sendable {
 @Suite("Tool Schemas")
 struct ToolSchemaTests {
     /// Single-sources the production registry so prompt and wire agree on the
-    /// same sixteen tools; isolated memory keeps the suite hermetic.
+    /// same nineteen tools; isolated memory keeps the suite hermetic.
     private func makeFullBuiltinTools(engine: MemoryEngine) -> [any Tool] {
         EmailTools.makeTools(emailConfig: ToolsTestSupport.testEmailConfig())
             + MemoryTools.makeTools(engine: engine)
             + FilesTools.makeTools()
+            + MessagesTools.makeTools()
             + BuiltinToolPlugins.makeTools()
     }
 
@@ -39,6 +40,7 @@ struct ToolSchemaTests {
             EmailTools.toolNames
                 + MemoryTools.toolNames
                 + FilesTools.toolNames
+                + MessagesTools.toolNames
                 + BuiltinToolPlugins.toolNames
         )
     }
@@ -307,5 +309,49 @@ struct ToolSchemaTests {
             #expect(properties[key] != nil, "Missing property \(key)")
         }
         #expect(parsed["additionalProperties"] as? Bool == false)
+    }
+
+    @Test
+    func `Messages schemas partition cleanly and encode strictly`() throws {
+        // The shared partition is the single gate deciding which schemas reach
+        // the prompt and the wire, so an unparseable messages schema must show
+        // up here as a skip instead of failing the whole turn downstream.
+        let tools = MessagesTools.makeTools()
+        #expect(Set(tools.map(\.name)) == Set(MessagesTools.toolNames))
+        let partitioned = VisionSchemaFilter.partitionValidSchemas(
+            entries: tools,
+            name: { $0.name },
+            rawSchema: { $0.inputSchema.rawValue },
+            logSkips: false
+        )
+        #expect(partitioned.skipped.isEmpty, "Unexpected messages skips: \(partitioned.skipped)")
+        #expect(partitioned.valid.count == MessagesTools.toolNames.count)
+        // Strict backends reject non-object roots, so each messages schema must
+        // decode to a strict object; per-tool property checks pin the alias
+        // groups callers rely on, with send keeping both canonical keys required
+        // so recipient and text aliases cannot drift out of the contract.
+        for tool in tools {
+            let parsed = try encodeToolParameters(ToolDefinition(tool))
+            #expect(parsed["type"] as? String == "object", "Tool \(tool.name) must declare type object")
+            #expect(parsed["additionalProperties"] as? Bool == false, "Tool \(tool.name) must opt into strict mode")
+            let properties = try #require(parsed["properties"] as? [String: Any], "Missing properties for \(tool.name)")
+            switch tool.name {
+            case "messages.search":
+                for key in ["query", "recipient", "limit"] {
+                    #expect(properties[key] != nil, "messages.search missing property \(key)")
+                }
+            case "messages.read":
+                for key in ["chatId", "chat_id", "recipient", "limit"] {
+                    #expect(properties[key] != nil, "messages.read missing property \(key)")
+                }
+            case "messages.send":
+                for key in ["recipient", "to", "text", "message"] {
+                    #expect(properties[key] != nil, "messages.send missing property \(key)")
+                }
+                #expect(tool.inputSchema.rawValue.contains(#""required":["recipient","text"]"#))
+            default:
+                Issue.record("Unexpected messages tool \(tool.name)")
+            }
+        }
     }
 }
