@@ -1256,3 +1256,248 @@ struct FilesEmbeddingPoolTests {
         #expect(vectors == [[Float(7)]])
     }
 }
+
+// MARK: - Boot reporter wiring
+
+/// Covers the boot-owned run reporter: `ServerIndexBoot` threads the live run
+/// store plus hub into the coordinator, so a manual run appends one running
+/// row on start and updates that same row on completion, and the status probe
+/// renders the newest index row while a fresh store reports no runs yet.
+@Suite("Index Boot Reporter Wiring")
+struct IndexBootReporterWiringTests {
+    @Test
+    func `Boot components report start then completion into the same run row`() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let dbPath = directory.appendingPathComponent("index.db").path
+        // Stub collaborators: an in-memory run store plus an empty hub so the
+        // test observes durable rows without binding a socket.
+        let runs = RunLogStore()
+        let hub = WSHub()
+        var config = RuneWeaverConfig.default
+        // All sources off keeps the pass honest and empty with no filesystem
+        // or network touch, while still exercising the start plus completion
+        // reporter path through the real boot construction.
+        config.index = IndexConfig(enabled: true, files: false, mail: false, messages: false, roots: [], dbPath: dbPath)
+        let components = ServerIndexBoot.makeComponents(
+            config: config,
+            runs: runs,
+            hub: hub,
+            embedder: nil,
+            visionLLM: nil
+        )
+        #expect(components != nil)
+        guard let components else { return }
+        let summary = await components.coordinator.run(trigger: .onDemand)
+        #expect(summary.status == .ok)
+        // Start appended one running row and completion updated that same row
+        // in place, so exactly one index row remains instead of two.
+        let rows = await runs.list(kind: ServerIndexRunReporter.kind)
+        #expect(rows.count == 1)
+        let row = try #require(rows.first)
+        #expect(row.kind == ServerIndexRunReporter.kind)
+        // The message stays the start line while the status advances to the
+        // terminal state, proving the completion updated the start row rather
+        // than appending a second one.
+        #expect(row.message.contains("Index run started"))
+        #expect(row.status == IndexRunStatus.ok.rawValue)
+    }
+
+    @Test
+    func `Status derives lastRun from the newest index row`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // Older index row carrying one set of counts.
+            let olderMessage = "Index run ok: 7 indexed, 1 vectors, 6 keyword-only, 10 scanned, 0 errors"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: olderMessage,
+                response: olderMessage + "\nTrigger: onDemand"
+            )
+            // Newer index row carrying distinct counts; the strip must render
+            // this one, not the older pass.
+            let newerMessage = "Index run ok: 3 indexed, 1 vectors, 2 keyword-only, 5 scanned, 0 errors"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: newerMessage,
+                response: newerMessage + "\nTrigger: onDemand"
+            )
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastRun = try status.content.decode(IndexStatusResponse.self).lastRun
+            #expect(lastRun != nil)
+            #expect(lastRun?.indexed == 3)
+            #expect(lastRun?.scanned == 5)
+            #expect(lastRun?.errors == 0)
+            #expect(lastRun?.trigger == IndexRunTrigger.onDemand.rawValue)
+        }
+    }
+
+    @Test
+    func `Fresh store reports no last run`() async throws {
+        try await withIndexTestApp { app in
+            // No runs appended: the probe renders an honest empty strip.
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            #expect(try status.content.decode(IndexStatusResponse.self).lastRun == nil)
+        }
+    }
+}
+
+// MARK: - Last errors with warnings
+
+/// Covers the failure list surfacing per-file warnings beneath run-level
+/// errors: errors stay newest-first at the head while the newest run's
+/// `Warning:` detail lines fill the remaining slots up to the shared cap,
+/// so a finished pass with many skipped files still renders a bounded block
+/// and a clean pass renders none.
+@Suite("Index Status Last Errors")
+struct IndexStatusLastErrorsTests {
+    /// Builds a completion response carrying the given warning lines.
+    /// - Parameters:
+    ///   - message: Summary line the strip also parses.
+    ///   - warnings: Warning lines in run order, oldest first.
+    /// - Returns: Detail text matching the coordinator's detail contract.
+    private func warningResponse(message: String, warnings: [String]) -> String {
+        ([message, "Trigger: onDemand"] + warnings).joined(separator: "\n")
+    }
+
+    @Test
+    func `Error rows lead warnings from the newest run`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // Older run-level failure: must head the block even though the
+            // warning-carrying pass finished after it.
+            let errorDetail = "mail gateway timeout"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.error.rawValue,
+                message: "Index run error: 0 indexed, 0 scanned, 1 errors",
+                response: errorDetail
+            )
+            // Newer finished pass carrying two per-file warnings.
+            let okMessage = "Index run ok: 5 indexed, 0 vectors, 5 keyword-only, 10 scanned, 0 errors"
+            let warningA = "Warning: files: skipped 1 (unreadable)"
+            let warningB = "Warning: files: skipped 1 (evicted)"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: okMessage,
+                response: warningResponse(message: okMessage, warnings: [warningA, warningB])
+            )
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastErrors = try status.content.decode(IndexStatusResponse.self).lastErrors
+            // Prefix comparison keeps the assertion honest when the optional
+            // pre-run access hint trails the run-derived entries.
+            #expect(lastErrors.count >= 3)
+            #expect(Array(lastErrors.prefix(3)) == [errorDetail, warningA, warningB])
+        }
+    }
+
+    @Test
+    func `Newest errors come first`() {
+        // Newest-first input proves the head ordering independent of the
+        // warning tail, so a later failure never hides behind an older one.
+        let older = RunLogEntry(
+            kind: ServerIndexRunReporter.kind,
+            status: IndexRunStatus.error.rawValue,
+            message: "older failure",
+            response: "older detail"
+        )
+        let newer = RunLogEntry(
+            kind: ServerIndexRunReporter.kind,
+            status: IndexRunStatus.error.rawValue,
+            message: "newer failure",
+            response: "newer detail"
+        )
+        #expect(recentIndexErrors(from: [newer, older]) == ["newer detail", "older detail"])
+    }
+
+    @Test
+    func `Warning tail caps at five entries dropping oldest first`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // One run-level failure plus a finished pass with twelve per-file
+            // warnings: only five entries may surface, so the oldest warnings
+            // drop and the newest tail survives.
+            let errorDetail = "mail gateway timeout"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.error.rawValue,
+                message: "Index run error: 0 indexed, 0 scanned, 1 errors",
+                response: errorDetail
+            )
+            let okMessage = "Index run ok: 5 indexed, 0 vectors, 5 keyword-only, 20 scanned, 0 errors"
+            let warnings = (1 ... 12).map { "Warning: files failure \($0)" }
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: okMessage,
+                response: warningResponse(message: okMessage, warnings: warnings)
+            )
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastErrors = try status.content.decode(IndexStatusResponse.self).lastErrors
+            let expected = [errorDetail] + Array(warnings.suffix(4))
+            #expect(Array(lastErrors.prefix(5)) == expected)
+            #expect(!Array(lastErrors.prefix(5)).contains(warnings[0]))
+
+            // Without any run-level failure the same twelve warnings still
+            // collapse to the newest five, since the cap counts entries.
+            let okOnly = RunLogEntry(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: okMessage,
+                response: warningResponse(message: okMessage, warnings: warnings)
+            )
+            #expect(recentIndexErrors(from: [okOnly]) == Array(warnings.suffix(5)))
+        }
+    }
+
+    @Test
+    func `Empty history and warning-free runs render no errors`() async throws {
+        // No rows at all yields no block, matching the long-standing empty state.
+        #expect(recentIndexErrors(from: []) == [])
+
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            // A finished pass without `Warning:` lines contributes no tail,
+            // so the block stays absent exactly as before.
+            let okMessage = "Index run ok: 5 indexed, 0 vectors, 5 keyword-only, 10 scanned, 0 errors"
+            _ = await context.runs.append(
+                kind: ServerIndexRunReporter.kind,
+                status: IndexRunStatus.ok.rawValue,
+                message: okMessage,
+                response: warningResponse(message: okMessage, warnings: [])
+            )
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastErrors = try status.content.decode(IndexStatusResponse.self).lastErrors
+            #expect(lastErrors.filter { $0.lowercased().hasPrefix("warning:") }.isEmpty)
+        }
+    }
+}

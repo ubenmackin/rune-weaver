@@ -528,4 +528,241 @@ struct MessagesIndexerTests {
             Issue.record("Expected MessagesIndexError, got \(error)")
         }
     }
+
+    @Test
+    func `IndexAll converges a multi-batch backlog in one call`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... 7 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-all-\(rowID)",
+                text: "Backlog message \(rowID)",
+                date: 700_000_000_000_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        // One call drains every ROWID-ordered page, so a backlog deeper
+        // than a single batch still finishes inside the same run.
+        let result = try await indexer.indexAllNewMessages()
+        #expect(result.scanned == 7)
+        #expect(result.indexed == 7)
+        #expect(result.lastRowID == 7)
+        #expect(result.hasMore == false)
+
+        let watermark = try await indexer.currentRowIDWatermark()
+        #expect(watermark == 7)
+        let stats = try await store.stats()
+        #expect(stats.documents == 7)
+
+        // A converged watermark leaves the next run empty, matching the
+        // steady-state shape of the single-batch pass.
+        let second = try await indexer.indexAllNewMessages()
+        #expect(second.scanned == 0)
+        #expect(second.indexed == 0)
+        #expect(second.lastRowID == 7)
+        #expect(second.hasMore == false)
+    }
+
+    @Test
+    func `Empty runs stay empty`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        let converged = try await indexer.indexAllNewMessages()
+        #expect(converged.scanned == 0)
+        #expect(converged.indexed == 0)
+        #expect(converged.lastRowID == 0)
+        #expect(converged.hasMore == false)
+
+        // The single-batch primitive agrees on empty stores, so idle polling
+        // observes no behavior change after the converging loop lands.
+        let single = try await indexer.indexNewMessages()
+        #expect(single.scanned == 0)
+        #expect(single.indexed == 0)
+        #expect(single.hasMore == false)
+    }
+
+    @Test
+    func `Single-batch primitive still pages when the backlog exceeds the bound`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... 3 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-page-\(rowID)",
+                text: "Paged message \(rowID)",
+                date: 700_000_000_000_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        // The primitive stays single-batch: a deeper backlog reports more
+        // work remaining instead of draining it.
+        let first = try await indexer.indexNewMessages()
+        #expect(first.scanned == 2)
+        #expect(first.indexed == 2)
+        #expect(first.lastRowID == 2)
+        #expect(first.hasMore == true)
+    }
+
+    @Test
+    func `Cancellation keeps the watermark of the last finished batch`() async throws {
+        let total = 40
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... total {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-cancel-\(rowID)",
+                text: "Cancellable message \(rowID)",
+                date: 700_000_000_010_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state,
+            batchLimit: 4
+        )
+        let runTask = Task { try await indexer.indexAllNewMessages() }
+        // Wait for the first committed batch to land, then cancel mid-backlog
+        // so the watermark file proves per-batch persistence. A separate
+        // indexer reads the file to avoid serializing on the running actor.
+        var didObservePartial = false
+        for _ in 0 ..< 1000 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            let probe = MessagesIndexer(
+                chatDatabasePath: paths.database,
+                store: store,
+                statePath: paths.state,
+                batchLimit: 4
+            )
+            let mark = await ((try? probe.currentRowIDWatermark()) ?? 0)
+            if mark > 0, mark < Int64(total) {
+                runTask.cancel()
+                didObservePartial = true
+                break
+            }
+            if mark == Int64(total) {
+                break
+            }
+        }
+        let outcome = await runTask.result
+        switch outcome {
+        case let .success(result):
+            // The backlog drained before the cancel landed; full convergence
+            // still proves every batch committed in ROWID order.
+            #expect(result.scanned == total)
+            #expect(result.indexed == total)
+            #expect(result.hasMore == false)
+        case let .failure(error):
+            #expect(error is CancellationError)
+            #expect(didObservePartial)
+            let checker = MessagesIndexer(
+                chatDatabasePath: paths.database,
+                store: store,
+                statePath: paths.state,
+                batchLimit: 4
+            )
+            let watermark = try await checker.currentRowIDWatermark()
+            #expect(watermark > 0)
+            #expect(watermark < Int64(total))
+            // A fresh pass resumes at the first unfinished batch and drains
+            // the tail without replaying committed rows.
+            let resume = MessagesIndexer(
+                chatDatabasePath: paths.database,
+                store: store,
+                statePath: paths.state,
+                batchLimit: 4
+            )
+            let remainder = try await resume.indexAllNewMessages()
+            #expect(Int(watermark) + remainder.scanned == total)
+            #expect(remainder.hasMore == false)
+            let stats = try await store.stats()
+            #expect(stats.documents == total)
+        }
+    }
+
+    @Test
+    func `Messages stage folds accumulated counts into its report`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... 5 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-stage-\(rowID)",
+                text: "Staged message \(rowID)",
+                date: 700_000_000_020_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let stage = IndexClosureStage.messages(
+            config: IndexConfig(enabled: true, messages: true, roots: []),
+            store: store,
+            chatDatabasePath: paths.database,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        // The stage drains through the converging entry, so its report
+        // carries the full backlog even though each batch stays bounded.
+        let report = try await stage.run(
+            reporter: ToolContext.noProgress,
+            isCancelled: { false },
+            policy: IndexConfig(enabled: true, messages: true, roots: [])
+        )
+        #expect(report.scanned == 5)
+        #expect(report.indexed == 5)
+        #expect(report.didRun)
+        let stats = try await store.stats()
+        #expect(stats.documents == 5)
+    }
 }

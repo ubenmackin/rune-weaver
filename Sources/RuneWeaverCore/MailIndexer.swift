@@ -179,22 +179,27 @@ public protocol MailIndexGateway: Sendable {
 
     /// Returns the newest messages in a mailbox, newest first.
     ///
-    /// The indexer widens `limit` across calls until the window reaches its UID
-    /// watermark, so implementations should honor larger limits with prefix
-    /// semantics (the `limit` newest) when able. Implementations that clamp to a
-    /// single newest page keep working; the indexer then holds its watermark
-    /// instead of jumping the unfetched gap.
+    /// The indexer pages strictly downward by UID during backfill: the first
+    /// page is the newest window, and each later page passes `beforeUID` equal
+    /// to the lowest UID already fetched so the gateway returns only UIDs
+    /// below that bound. The window is complete when a page reaches the
+    /// watermark or the mailbox start; a repeated page means the gateway
+    /// clamps to one newest window, so the caller holds its watermark over the
+    /// gap instead of jumping it.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox to read.
     ///   - limit: Maximum messages to return.
     ///   - mode: Fetch mode; always `.peek` from the indexer.
+    ///   - beforeUID: Exclusive upper bound for this page; only UIDs below the
+    ///     bound are returned. Nil fetches the newest window.
     /// - Returns: Messages in newest-first order.
     func messages(
         credentials: MailIndexCredentials,
         mailbox: String,
         limit: Int,
-        mode: MailFetchMode
+        mode: MailFetchMode,
+        beforeUID: Int?
     ) async throws -> [MailIndexMessage]
 
     /// Fetches one attachment part read-only.
@@ -748,20 +753,24 @@ private extension MailIndexer {
         var contentHash = ""
     }
 
-    /// Fetches the newest window covering every UID above the watermark when the gateway widens.
+    /// Fetches the newest window covering every UID above the watermark by paging downward.
     ///
-    /// The gateway only promises the newest page, so a burst of arrivals larger
-    /// than one page would leave the middle permanently skipped if the watermark
-    /// jumped straight to the newest UID. The window therefore widens by one
-    /// page until it reaches the watermark (or the mailbox start), and reports
-    /// whether it got there so the caller can hold the watermark over any
-    /// remaining gap instead of jumping it. A gateway that clamps every call to
-    /// one newest page surfaces no new IDs on the widened call, which ends the
-    /// loop without further cost.
+    /// The owner for paging is this method: it owns the downward UID loop while
+    /// the adapter owns the `UID 1:N` criterion shape. The first page fetches
+    /// the newest window with no bound; each later page passes `beforeUID`
+    /// equal to the lowest numeric UID already fetched, so the gateway returns
+    /// only UIDs below that bound. The loop stops when a page reaches the
+    /// watermark (steady state still costs exactly one newest page), when a
+    /// short page or a bound at the mailbox start proves exhaustion, or when a
+    /// repeated page proves the gateway clamps to one newest window. A clamped
+    /// gateway therefore returns an incomplete window and the caller holds its
+    /// watermark, so huge mailboxes degrade to multi-run backfill instead of
+    /// stalling. Cancellation is honored at the top of each page so the loop
+    /// stops at the next checkpoint.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox to read.
-    ///   - watermark: Highest indexed UID; widening stops once a page reaches it.
+    ///   - watermark: Highest indexed UID; paging stops once a page reaches it.
     /// - Returns: Unique messages in newest-first order, plus whether the window
     ///   reaches the watermark or the mailbox start.
     /// - Throws: Cancellation, or the gateway error for the mailbox.
@@ -770,24 +779,27 @@ private extension MailIndexer {
         mailbox: String,
         watermark: Int
     ) async throws -> (messages: [MailIndexMessage], complete: Bool) {
-        var limit = Self.pageLimit
         var collected: [MailIndexMessage] = []
         var seenIDs = Set<String>()
+        var beforeUID: Int? = nil
         while true {
             try Task.checkCancellation()
             let page = try await gateway.messages(
                 credentials: credentials,
                 mailbox: mailbox,
-                limit: limit,
-                mode: .peek
+                limit: Self.pageLimit,
+                mode: .peek,
+                beforeUID: beforeUID
             )
-            var widened = false
-            for message in page where seenIDs.insert(message.id).inserted {
-                collected.append(message)
-                widened = true
-            }
             if page.isEmpty {
                 return (collected, true)
+            }
+            // Dedupe by identifier so a repeated clamped page contributes no
+            // duplicates; the empty-delta below then ends the loop.
+            var advanced = false
+            for message in page where seenIDs.insert(message.id).inserted {
+                collected.append(message)
+                advanced = true
             }
             // Numeric UIDs decide coverage; non-numeric identifiers carry no
             // watermark order and must not fake a reached boundary.
@@ -798,18 +810,28 @@ private extension MailIndexer {
             if reachedWatermark {
                 return (collected, true)
             }
-            // A repeated page means the gateway clamps the window (the live
-            // bridge caps at one page), so stop widening and let the caller
-            // hold the watermark over the gap. This check precedes the short
-            // page check because a clamped page is also shorter than the
-            // widened limit without reaching the mailbox start.
-            if !widened {
+            // A repeated page means the gateway ignores the downward bound and
+            // clamps to one newest window, so stop and let the caller hold the
+            // watermark over the gap. This check precedes the short-page check
+            // because a clamped page is also shorter than a full window only
+            // when the mailbox itself is small.
+            if !advanced {
                 return (collected, false)
             }
-            if page.count < limit {
+            if page.count < Self.pageLimit {
                 return (collected, true)
             }
-            limit += Self.pageLimit
+            // The next bound is strictly below every UID already fetched, so
+            // pages never overlap and never skip. A missing numeric floor means
+            // there is no order to page from; holding keeps the run safe.
+            let numericFloor = collected.map { Self.uid(of: $0.id) }.filter { $0 > 0 }.min()
+            guard let lowest = numericFloor else {
+                return (collected, false)
+            }
+            if lowest <= 1 {
+                return (collected, true)
+            }
+            beforeUID = lowest
         }
     }
 

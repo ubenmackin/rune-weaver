@@ -212,6 +212,22 @@ Narrowing policy never deletes immediately. Files that fall out of policy — a 
 
 Unchanged files take a fast path: a file whose size and modification time match the stored row is skipped without re-hashing. The tradeoff is a 1-second granularity window — a same-size edit made within the same 1-second modification-time window is not detected until the next size or mtime change.
 
+### Reading the status
+
+The Memory → Index Status pane shows a Last run strip, a Last errors list, and content charts. Here is what each number means.
+
+Every run is saved to run history, so the Last run strip survives a dashboard reload or an engine restart. A fresh install with no runs yet shows an honest empty state, and the very first run in flight names itself instead of looking like empty history.
+
+Last errors mixes two things: a whole-run failure (for example a source that could not be read, such as Messages without Full Disk Access) plus the most recent per-file warnings (for example an unreadable PDF). The file list is capped to the newest entries, longest lines truncated with an expander, so it stays readable on a large home directory.
+
+A Last run of `ok` means the run finished without being cancelled or interrupted. Individual files can still have errors inside an `ok` run — those per-file errors still add to the error count and still appear under Last errors. Check the error count there rather than reading `ok` as "nothing was skipped."
+
+Chart percents are shares of the index total across the rows on screen. A Files row at 60% means 60% of the indexed documents are files; the remaining 40% is mail plus messages. The bars scale the same way, so no row is stretched — the longest fills only its share and tiny buckets read as slivers.
+
+Mail fills in from newest to oldest across runs. Each run reads the next window downward by mail number (UID) and records how far it got per mailbox, so a large mailbox backfills over several runs. When a window cannot be fully fetched, the recorded mark (watermark) stays held below the gap instead of jumping over it, so the gap is retried rather than skipped forever.
+
+Messages catches up fully on every run. Each run reads everything newer than the last recorded message in bounded batches until it reaches the newest message, then records the new mark for next time.
+
 ## Releasing
 
 The version lives in one place: the `VERSION` file at the repo root.

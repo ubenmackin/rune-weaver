@@ -712,37 +712,37 @@ export function resolveIndexSourceContent(
   });
 }
 
-// Sanitized share of the largest bucket for one chart row: the true
-// documents/max fraction capped to 0..1, degrading malformed, negative, or
+// Sanitized share of the total index for one chart row: the true
+// documents/total fraction capped to 0..1, degrading malformed, negative, or
 // zero inputs to zero so bars and labels never render NaN or Infinity.
 // Shared by the width and percent helpers below, whose guard rule is
 // identical and must stay in one place.
-export function indexShare(documents: number, maxDocuments: number): number {
+export function indexShare(documents: number, totalDocuments: number): number {
   const docs = Number.isFinite(documents) && documents > 0 ? documents : 0;
-  const max = Number.isFinite(maxDocuments) && maxDocuments > 0 ? maxDocuments : 0;
-  if (max <= 0 || docs <= 0) return 0;
-  return Math.min(1, docs / max);
+  const total =
+    Number.isFinite(totalDocuments) && totalDocuments > 0 ? totalDocuments : 0;
+  if (total <= 0 || docs <= 0) return 0;
+  return Math.min(1, docs / total);
 }
 
 // Visual track width for one chart row scaled by its document share of the
-// largest bucket, so the longest bar always fills the track and the rest read
-// as real proportions instead of binary on/off fills. Shared by the per-source
-// and extraction-outcome charts, whose scaling rule is identical. Floored to a
-// 4% minimum so single-document buckets stay visible next to large ones; the
-// honest percent label comes from indexSourceBarPercent below, never this
-// floored width.
-export function indexSourceBarWidth(documents: number, maxDocuments: number): string {
-  const share = indexShare(documents, maxDocuments);
+// total index, so every bar reads as its honest fraction of the displayed
+// rows instead of competing for the longest slot. Shared by the per-source
+// and extraction-outcome charts, whose scaling rule is identical. No
+// visibility floor remains: the width equals the rounded percent below, so a
+// tiny bucket paints as a sliver while its label stays truthful.
+export function indexSourceBarWidth(documents: number, totalDocuments: number): string {
+  const share = indexShare(documents, totalDocuments);
   if (share <= 0) return "0%";
-  return `${Math.min(100, Math.max(4, Math.round(share * 100)))}%`;
+  return `${Math.min(100, Math.round(share * 100))}%`;
 }
 
-// Honest share-of-largest percent label for one chart row: the true rounded
-// share with no visibility floor, so a 1/100 bucket labels 1% while its track
-// still paints at the floored width above. Shared by the per-source and
-// extraction-outcome charts alongside indexSourceBarWidth.
-export function indexSourceBarPercent(documents: number, maxDocuments: number): string {
-  const share = indexShare(documents, maxDocuments);
+// Honest share-of-index percent label for one chart row: the true rounded
+// share of the displayed total, so the label and the track width above always
+// agree. Shared by the per-source and extraction-outcome charts alongside
+// indexSourceBarWidth.
+export function indexSourceBarPercent(documents: number, totalDocuments: number): string {
+  const share = indexShare(documents, totalDocuments);
   if (share <= 0) return "0%";
   return `${Math.min(100, Math.round(share * 100))}%`;
 }
@@ -977,16 +977,21 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // Real per-source totals for the bars, in canonical Files/Mail/Messages
   // order; older engines without the aggregates degrade to zeroed rows.
   const sourceContent = resolveIndexSourceContent(status);
-  const maxSourceDocuments = Math.max(0, ...sourceContent.map((row) => row.documents));
+  // Displayed-total denominator for the source chart: every visible row shares
+  // this sum so each bar reads as its honest fraction of the index.
+  const sourceTotalDocuments = sourceContent.reduce((sum, row) => sum + row.documents, 0);
   // Extraction-outcome breakdown for the second chart, largest bucket first so
-  // the dominant outcome anchors the track scaling. Document counts are
-  // sanitized through floorPositive before sort/max, matching
-  // resolveIndexSourceContent, so malformed/negative/NaN payloads degrade to
-  // zero instead of misordering the rows or yielding NaN.
+  // the dominant outcome leads the list while every bar still scales by the
+  // displayed total. Document counts are sanitized through floorPositive
+  // before sort, matching resolveIndexSourceContent, so
+  // malformed/negative/NaN payloads degrade to zero instead of misordering
+  // the rows or yielding NaN.
   const extractRows: IndexExtractStatusCounts[] = [...(status?.byExtractStatus ?? [])]
     .map((row) => ({ ...row, documents: floorPositive(row.documents) }))
     .sort((left, right) => right.documents - left.documents);
-  const maxExtractDocuments = Math.max(0, ...extractRows.map((row) => row.documents));
+  // Displayed-total denominator for the extraction chart: the sum across the
+  // outcome rows above, so labels and widths agree with the source chart rule.
+  const extractTotalDocuments = extractRows.reduce((sum, row) => sum + row.documents, 0);
   // Honest on-disk storage: the database file plus the write-ahead log as the
   // primary figure, the text/vector/FTS/free rows as the breakdown, and the
   // content total as the secondary detail. Older engines without the file
@@ -2017,33 +2022,56 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 gap: 8,
               }}
             >
-              {/* Share-of-largest heading keeps the scaling honest: every bar
-                  below is a fraction of the largest bucket, not of the total. */}
+              {/* Share-of-index heading keeps the scaling honest: every bar
+                  below is a fraction of the displayed total, so small buckets
+                  read as slivers rather than competing for the longest slot. */}
               <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-                Documents by source — share of largest
+                Documents by source — share of index
               </h4>
               {sourceContent.map((source) => {
-                // The track floors tiny buckets to 4% so they stay visible while
-                // the label keeps the honest rounded share. Zero-document rows
-                // skip the track entirely so an empty bar never reads as
-                // missing paint.
+                // Width equals the rounded share with no visibility floor, so a
+                // tiny bucket paints as a sliver while its label stays
+                // truthful. Zero-document rows skip the track entirely so an
+                // empty bar never reads as missing paint.
                 const barWidth = indexSourceBarWidth(
                   source.documents,
-                  maxSourceDocuments,
+                  sourceTotalDocuments,
                 );
                 const barLabel = indexSourceBarPercent(
                   source.documents,
-                  maxSourceDocuments,
+                  sourceTotalDocuments,
                 );
                 const isEmpty = source.documents <= 0;
+                // Stacked row keeps every track on its own full-width line so
+                // label length and trailing counts can never shift the bar
+                // origin: line one pairs the name with its share, line two
+                // paints the full-width track, line three carries the totals.
                 return (
                   <div
                     key={source.kind}
-                    style={{ display: "flex", alignItems: "center", gap: 8 }}
+                    style={{ display: "flex", flexDirection: "column", gap: 4 }}
                   >
-                    <span className="text-xs muted" style={{ width: 72 }}>
-                      {sourceLabel(source.kind)}
-                    </span>
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "baseline",
+                        gap: 8,
+                      }}
+                    >
+                      <span className="text-xs muted">
+                        {sourceLabel(source.kind)}
+                      </span>
+                      {isEmpty ? null : (
+                        <span
+                          className="text-xs muted"
+                          data-testid={`index-bar-pct-${source.kind}`}
+                          style={{ textAlign: "right" }}
+                        >
+                          {barLabel}
+                        </span>
+                      )}
+                    </div>
                     {isEmpty ? (
                       <span
                         className="text-xs muted"
@@ -2054,7 +2082,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                     ) : (
                       <div
                         style={{
-                          flex: 1,
+                          width: "100%",
                           height: 10,
                           borderRadius: 5,
                           background: CHART_TRACK_COLOR,
@@ -2073,16 +2101,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                         />
                       </div>
                     )}
-                    {isEmpty ? null : (
-                      <span
-                        className="text-xs muted"
-                        data-testid={`index-bar-pct-${source.kind}`}
-                        style={{ minWidth: 40, textAlign: "right" }}
-                      >
-                        {barLabel}
-                      </span>
-                    )}
-                    <span className="text-xs muted" style={{ minWidth: 120, textAlign: "right" }}>
+                    <span className="text-xs muted">
                       {source.documents} docs · {source.chunks} chunks · {formatIndexBytes(source.bytes)}
                     </span>
                   </div>
@@ -2100,32 +2119,53 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 gap: 8,
               }}
             >
-              {/* Same share-of-largest contract as the source bars so both
-                  breakdowns read as proportions of their own largest bucket. */}
+              {/* Same share-of-index contract as the source bars so both
+                  breakdowns read as proportions of their own displayed total. */}
               <h4 className="text-xs muted" style={{ margin: 0, fontWeight: 600 }}>
-                Extraction outcomes — share of largest
+                Extraction outcomes — share of index
               </h4>
               {extractRows.length > 0 ? (
                 extractRows.map((row) => {
-                  // Floored width keeps tiny buckets visible; the label keeps
-                  // the honest rounded share like the source bars above.
+                  // Width equals the rounded share like the source bars above,
+                  // so the paint and the label never disagree.
                   const barWidth = indexSourceBarWidth(
                     row.documents,
-                    maxExtractDocuments,
+                    extractTotalDocuments,
                   );
                   const barLabel = indexSourceBarPercent(
                     row.documents,
-                    maxExtractDocuments,
+                    extractTotalDocuments,
                   );
                   const isEmpty = row.documents <= 0;
+                  // Same stacked contract as the source chart so both groups
+                  // share one row geometry: label plus share on line one, a
+                  // full-width track on line two, totals on line three.
                   return (
                     <div
                       key={row.status}
-                      style={{ display: "flex", alignItems: "center", gap: 8 }}
+                      style={{ display: "flex", flexDirection: "column", gap: 4 }}
                     >
-                      <span className="text-xs muted" style={{ width: 96 }}>
-                        {extractStatusLabel(row.status)}
-                      </span>
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "baseline",
+                          gap: 8,
+                        }}
+                      >
+                        <span className="text-xs muted">
+                          {extractStatusLabel(row.status)}
+                        </span>
+                        {isEmpty ? null : (
+                          <span
+                            className="text-xs muted"
+                            data-testid={`index-extract-pct-${row.status}`}
+                            style={{ textAlign: "right" }}
+                          >
+                            {barLabel}
+                          </span>
+                        )}
+                      </div>
                       {isEmpty ? (
                         <span
                           className="text-xs muted"
@@ -2136,7 +2176,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       ) : (
                         <div
                           style={{
-                            flex: 1,
+                            width: "100%",
                             height: 10,
                             borderRadius: 5,
                             background: CHART_TRACK_COLOR,
@@ -2155,16 +2195,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                           />
                         </div>
                       )}
-                      {isEmpty ? null : (
-                        <span
-                          className="text-xs muted"
-                          data-testid={`index-extract-pct-${row.status}`}
-                          style={{ minWidth: 40, textAlign: "right" }}
-                        >
-                          {barLabel}
-                        </span>
-                      )}
-                      <span className="text-xs muted" style={{ minWidth: 64, textAlign: "right" }}>
+                      <span className="text-xs muted">
                         {row.documents} docs
                       </span>
                     </div>

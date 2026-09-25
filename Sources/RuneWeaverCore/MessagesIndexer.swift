@@ -503,10 +503,86 @@ public actor MessagesIndexer {
             let watermark = try readWatermark()
             let names = contacts.displayNames()
             let effectiveLimit = min(max(limit ?? batchLimit, 1), Self.maxBatchLimit)
+            let batch = try await indexBatch(
+                handle: handle,
+                from: watermark,
+                limit: effectiveLimit,
+                names: names
+            )
+            try writeWatermark(batch.lastRowID)
+            return batch
+        }
+
+        /// Indexes every pending message by paging one snapshot to exhaustion.
+        ///
+        /// One snapshot keeps a long backlog consistent while pages advance
+        /// strictly by ROWID in batches of the configured bound, so per-batch
+        /// memory stays flat no matter how deep the backlog runs. The watermark
+        /// is persisted after every finished batch, so a run cancelled
+        /// mid-backlog resumes at the first unfinished batch instead of
+        /// replaying rows whose documents are already committed.
+        /// - Returns: Accumulated counts plus the final watermark; `hasMore` is
+        ///   always false because the loop only returns once the snapshot is drained.
+        /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot
+        ///   failure; cancellation propagates with finished batches already committed.
+        public func indexAllNewMessages() async throws -> MessagesIndexResult {
+            let directory = try snapshotDatabase()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let snapshotPath = directory.appendingPathComponent("chat.db").path
+            let handle = try Self.openHandle(snapshotPath: snapshotPath)
+            defer { sqlite3_close(handle) }
+
+            var watermark = try readWatermark()
+            let names = contacts.displayNames()
+            let effectiveLimit = min(max(batchLimit, 1), Self.maxBatchLimit)
+            var totalScanned = 0
+            var totalIndexed = 0
+            var lastRowID = watermark
+            while true {
+                let batch = try await indexBatch(
+                    handle: handle,
+                    from: watermark,
+                    limit: effectiveLimit,
+                    names: names
+                )
+                totalScanned += batch.scanned
+                totalIndexed += batch.indexed
+                lastRowID = batch.lastRowID
+                watermark = batch.lastRowID
+                try writeWatermark(watermark)
+                if !batch.hasMore {
+                    break
+                }
+            }
+            return MessagesIndexResult(
+                scanned: totalScanned,
+                indexed: totalIndexed,
+                lastRowID: lastRowID,
+                hasMore: false
+            )
+        }
+
+        /// Indexes one ROWID-ordered batch from an already-open snapshot.
+        ///
+        /// The caller owns snapshot lifetime and watermark persistence, so the
+        /// single-batch entry and the converging loop share identical row
+        /// handling without duplicating the cancellation or upsert shape.
+        /// - Parameters:
+        ///   - handle: Open snapshot handle owned by the caller.
+        ///   - watermark: Exclusive lower bound on `message.ROWID`.
+        ///   - limit: Maximum rows read in this batch.
+        ///   - names: Resolved contact names keyed by normalized handle.
+        /// - Returns: Counts plus the highest ROWID examined in this batch.
+        private func indexBatch(
+            handle: OpaquePointer?,
+            from watermark: Int64,
+            limit: Int,
+            names: [String: String]
+        ) async throws -> MessagesIndexResult {
             let rows = try MessagesDatabaseIO.messages(
                 handle: handle,
                 afterRowID: watermark,
-                limit: effectiveLimit
+                limit: limit
             )
 
             var indexed = 0
@@ -527,12 +603,11 @@ public actor MessagesIndexer {
                 }
                 lastRowID = max(lastRowID, row.rowID)
             }
-            try writeWatermark(lastRowID)
             return MessagesIndexResult(
                 scanned: rows.count,
                 indexed: indexed,
                 lastRowID: lastRowID,
-                hasMore: rows.count == effectiveLimit
+                hasMore: rows.count == limit
             )
         }
     #endif

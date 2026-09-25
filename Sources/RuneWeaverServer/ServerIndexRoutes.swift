@@ -279,25 +279,57 @@ private enum IndexRunCountPatterns {
     static let truncated: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+truncated", options: .caseInsensitive)
 }
 
-/// Collects the most recent index run failures via a kind-filtered store lookup.
+/// Collects the most recent index run failures plus per-file warning lines.
 ///
 /// Pure derivation over the kind-filtered store lookup in the status route:
-/// filters to error rows and renders detail strings, newest first. Only the
-/// `index`-kind rows already written by `ServerIndexRunReporter` are consulted,
-/// so the status shape reuses the durable run log instead of adding a second
-/// failure channel; rendering is bounded and carries no content.
+/// run-level error rows come first, newest first, followed by `Warning:`
+/// detail lines from the newest run's response. Only the `index`-kind rows
+/// already written by `ServerIndexRunReporter` are consulted, so the status
+/// shape reuses the durable run log instead of adding a second failure
+/// channel. The cap counts entries, not characters: when warnings overflow
+/// the remaining slots the oldest warning lines drop first, keeping the
+/// newest tail. Warning lines stay content-free because the coordinator's
+/// detail text carries only counts and short reasons, never file bytes.
+/// A run with no warnings contributes no tail, so the empty state renders
+/// no block exactly as before.
 /// - Parameters:
 ///   - runs: Newest `index`-kind rows from the kind-filtered lookup, newest first.
-///   - limit: Maximum failures to return, newest first.
-/// - Returns: Failure detail strings, newest first.
-private func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [String] {
-    runs
+///   - limit: Maximum entries to return, errors first then warnings.
+/// - Returns: Failure and warning detail strings, newest errors first.
+func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [String] {
+    guard limit > 0, !runs.isEmpty else { return [] }
+    let errorRows = runs
         .filter { $0.status == IndexRunStatus.error.rawValue }
         .prefix(limit)
         .map { entry in
             let detail = entry.response?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (detail?.isEmpty == false ? detail : nil) ?? entry.message
         }
+    var combined = Array(errorRows)
+    let remaining = limit - combined.count
+    // The newest run carries the freshest per-file signal, so its warnings
+    // trail the run-level errors; older runs' warnings stay out to keep the
+    // block bounded and current rather than accumulating stale lines.
+    if remaining > 0, let newestResponse = runs.first?.response {
+        let warnings = indexWarningDetailLines(from: newestResponse)
+        combined.append(contentsOf: warnings.suffix(remaining))
+    }
+    return combined
+}
+
+/// Extracts content-free `Warning:` detail lines from a run response.
+///
+/// Matches the coordinator's detail contract line by line, so summary,
+/// trigger, retired, and skip lines never leak into the failure list. The
+/// match is case-insensitive on the prefix only; the remainder is kept
+/// verbatim because it already holds just counts and short reasons.
+/// - Parameter response: Completion detail text from the newest run.
+/// - Returns: Trimmed warning lines in run order, oldest first.
+private func indexWarningDetailLines(from response: String) -> [String] {
+    response
+        .components(separatedBy: .newlines)
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty && $0.lowercased().hasPrefix("warning:") }
 }
 
 /// Distills the newest `index`-kind run row into the last-run strip.

@@ -366,10 +366,17 @@ extension ServerContext {
         episodesDBPath: String?,
         pluginConfig: PluginConfig,
         goalsConfig: GoalsConfig,
-        llm: any LLMProvider
+        llm: any LLMProvider,
+        runs: RunLogStore? = nil,
+        hub: WSHub? = nil
     ) async -> ServerBootstrapServices {
         let approvals = ApprovalQueue(permissionGate: permissionGate)
-        let durable = await loadDurableServerStores(schedulerConfig: schedulerConfig, episodesDBPath: episodesDBPath)
+        let durable = await loadDurableServerStores(
+            schedulerConfig: schedulerConfig,
+            episodesDBPath: episodesDBPath,
+            runs: runs,
+            hub: hub
+        )
         let bus = ToolBus(permissionGate: permissionGate)
         let resolvedGoalDBPath = episodesDBPath ?? MemoryConfig.defaultEpisodesDBPath
         let goalStore = GoalStore(dbPath: resolvedGoalDBPath)
@@ -497,7 +504,9 @@ extension ServerContext {
         mediaSecrets: SecretsManager? = nil,
         secrets: SecretsManager? = nil,
         desktopCaptureBridge: (any DesktopCapturing)? = nil,
-        desktopControlBridge: (any DesktopControlling)? = nil
+        desktopControlBridge: (any DesktopControlling)? = nil,
+        runs: RunLogStore? = nil,
+        hub: WSHub? = nil
     ) async -> ServerContext {
         let services = await bootstrapServices(
             permissionGate: permissionGate,
@@ -505,7 +514,9 @@ extension ServerContext {
             episodesDBPath: episodesDBPath,
             pluginConfig: pluginConfig,
             goalsConfig: goalsConfig,
-            llm: llm
+            llm: llm,
+            runs: runs,
+            hub: hub
         )
         let toolConfigs = ToolConfigs(
             email: emailConfig, files: filesConfig, sandbox: sandboxConfig,
@@ -691,13 +702,22 @@ private struct ResolvedPluginStack: Sendable {
 
 /// Loads durable scheduler and run stores off the cooperative pool so actor init never blocks on SQLite.
 /// Groups the four independent boot collaborators so durable hydration stays single-sourced.
+/// Callers proving the same run store plus hub to the index reporter pass them here so the
+/// status probe, the socket hub, and the reporter share one instance instead of forking memory state.
 private func loadDurableServerStores(
     schedulerConfig: SchedulerConfig,
-    episodesDBPath: String?
+    episodesDBPath: String?,
+    runs: RunLogStore? = nil,
+    hub: WSHub? = nil
 ) async -> DurableServerStores {
     let scheduler = await SchedulerStore.load(from: schedulerConfig, dbPath: episodesDBPath)
-    let runs = await RunLogStore.load(dbPath: episodesDBPath)
-    return DurableServerStores(scheduler: scheduler, runs: runs, hub: WSHub(), runLock: SchedulerRunLock())
+    let resolvedRuns = if let runs {
+        runs
+    } else {
+        await RunLogStore.load(dbPath: episodesDBPath)
+    }
+    let resolvedHub = hub ?? WSHub()
+    return DurableServerStores(scheduler: scheduler, runs: resolvedRuns, hub: resolvedHub, runLock: SchedulerRunLock())
 }
 
 /// Resolves plugin persistence plus discovery so restarts reuse the same registry directory.

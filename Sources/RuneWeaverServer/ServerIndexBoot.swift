@@ -42,15 +42,22 @@ public enum ServerIndexBoot {
     /// the shared IMAP gateway adapter, messages use their bundled defaults, and
     /// the vision stage describes only when the opt-in flag is set and an active
     /// provider is available. Each stage still gates on its own toggle, so an
-    /// enabled indexer with every source off runs an honest empty pass.
+    /// enabled indexer with every source off runs an honest empty pass. The run
+    /// reporter adapts the coordinator lifecycle onto the same run store the
+    /// status probe reads plus the live socket hub, so a manual run leaves one
+    /// start row updated in place by its completion instead of vanishing.
     /// - Parameters:
     ///   - config: Root config carrying the `[index]` section plus source policies.
+    ///   - runs: Durable run audit trail the status probe reads; receives the start plus completion rows.
+    ///   - hub: Live sockets receiving the run start plus completion broadcasts.
     ///   - embedder: Embeddings backend shared with recall, or nil for keyword-only.
     ///   - visionLLM: Active provider backing image description, or nil to skip vision.
     ///   - makeEmbeddingsBackend: Per-slot backend factory for the files pool, or nil to share `embedder`.
     /// - Returns: Store plus coordinator, or nil when `[index] enabled` is false.
     public static func makeComponents(
         config: RuneWeaverConfig,
+        runs: RunLogStore,
+        hub: WSHub,
         embedder: (any EmbeddingsBackend)?,
         visionLLM: (any LLMProvider)?,
         makeEmbeddingsBackend: (@Sendable () -> (any EmbeddingsBackend)?)? = nil
@@ -87,7 +94,12 @@ public enum ServerIndexBoot {
                 imageData: { _ in nil }
             ))
         }
-        let coordinator = IndexCoordinator(config: indexConfig, stages: stages, store: store)
+        let coordinator = IndexCoordinator(
+            config: indexConfig,
+            stages: stages,
+            store: store,
+            reporter: ServerIndexRunReporter(runs: runs, hub: hub)
+        )
         return ServerIndexComponents(store: store, coordinator: coordinator, docIndexDBPath: dbPath)
     }
 }

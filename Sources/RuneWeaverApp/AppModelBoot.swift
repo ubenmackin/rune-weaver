@@ -94,6 +94,8 @@ extension AppModel {
         let memoryEngine: MemoryEngine
         let conversations: ConversationManager
         let embedder: (any EmbeddingsBackend)?
+        let runs: RunLogStore
+        let hub: WSHub
         let indexComponents: ServerIndexComponents?
         let plugins: [any Tool]
         let permissionGate: PermissionGate
@@ -152,8 +154,16 @@ extension AppModel {
                 memoryEmbeddingBackend: config.memory.embeddingBackend,
                 providers: providers
             )
+        // Own the run store plus socket hub here so the index reporter writes
+        // into the same instances the status probe reads and the sockets fan
+        // out from; a manual run then leaves one start row updated in place by
+        // its completion instead of vanishing.
+        let runs = await RunLogStore.load(dbPath: config.memory.episodesDBPath)
+        let hub = WSHub()
         let indexComponents = ServerIndexBoot.makeComponents(
             config: config,
+            runs: runs,
+            hub: hub,
             embedder: embedder,
             visionLLM: selectedProvider,
             makeEmbeddingsBackend: makeEmbeddingsBackend
@@ -183,6 +193,8 @@ extension AppModel {
             memoryEngine: memoryEngine,
             conversations: conversations,
             embedder: embedder,
+            runs: runs,
+            hub: hub,
             indexComponents: indexComponents,
             plugins: plugins,
             permissionGate: permissionGate,
@@ -223,7 +235,9 @@ extension AppModel {
             goalsConfig: pipeline.config.goals,
             auth: pipeline.auth,
             mediaSecrets: pipeline.secrets,
-            secrets: pipeline.secrets
+            secrets: pipeline.secrets,
+            runs: pipeline.runs,
+            hub: pipeline.hub
         )
     }
 

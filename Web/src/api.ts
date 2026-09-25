@@ -2063,10 +2063,13 @@ export function isIndexRunResponse(
 // finish age, omitting any count the payload did not carry so a drifted
 // payload still renders its status and time. The trigger label stays
 // parenthesized after the status so the `Last run <status>` prefix survives
-// verbatim. A cancelled run appends the kept-work copy because committed
-// batches survive the stop and the next run resumes from there. A skipped run
-// appends its reason so a skip never reads as a silent no-op. Null renders
-// the honest never-ran copy so a fresh store never reads as an empty history.
+// verbatim, except an ok run that still recorded errors folds that count into
+// the head (`finished with N errors`) so success-with-errors never reads as a
+// clean ok plus a duplicated trailing count. A cancelled run appends the
+// kept-work copy because committed batches survive the stop and the next run
+// resumes from there. A skipped run appends its reason so a skip never reads
+// as a silent no-op. Null renders the honest never-ran copy so a fresh store
+// never reads as an empty history.
 export function describeIndexRun(
   run:
     | IndexRunDescription
@@ -2097,8 +2100,18 @@ export function describeIndexRun(
   const truncatedCount: unknown = normalized.truncatedCount;
   const normalizedStatus =
     typeof status === "string" && status.trim() ? status.trim() : "unknown";
-  const head =
-    typeof trigger === "string" && trigger.trim()
+  // An ok run that still recorded errors folds the count into the head so the
+  // line never repeats it: the head names `finished with N errors` and the
+  // trailing errors part below stays suppressed for this case only.
+  const errorCount =
+    typeof errors === "number" && Number.isFinite(errors) ? errors : null;
+  const finishedWithErrors =
+    normalizedStatus === "ok" && errorCount != null && errorCount > 0;
+  const head = finishedWithErrors
+    ? typeof trigger === "string" && trigger.trim()
+      ? `Last run finished with ${errorCount} errors (${indexRunTriggerLabel(trigger)})`
+      : `Last run finished with ${errorCount} errors`
+    : typeof trigger === "string" && trigger.trim()
       ? `Last run ${normalizedStatus} (${indexRunTriggerLabel(trigger)})`
       : `Last run ${normalizedStatus}`;
   const parts: string[] = [head];
@@ -2108,7 +2121,11 @@ export function describeIndexRun(
   if (typeof scanned === "number" && Number.isFinite(scanned)) {
     parts.push(`${scanned} scanned`);
   }
-  if (typeof errors === "number" && Number.isFinite(errors)) {
+  if (
+    typeof errors === "number" &&
+    Number.isFinite(errors) &&
+    !finishedWithErrors
+  ) {
     parts.push(`${errors} errors`);
   }
   if (
