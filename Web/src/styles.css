@@ -1298,6 +1298,64 @@ a {
   box-sizing: border-box;
 }
 
+/* Index last-errors block below the charts: a collapsed header toggle keeps a
+ * noisy pass from pushing surrounding content, while the expanded list reads
+ * inside a fixed inset scroll so ten-plus rows never grow the page. Rows keep
+ * the warning icon beside wrapped text even at 360px widths. */
+.index-errors {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.index-errors-header-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  align-self: flex-start;
+}
+
+.index-errors-scroll {
+  max-height: 18rem;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.index-errors-scroll ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.index-error-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.index-error-icon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--status-amber);
+}
+
+.index-error-text-wrap {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
 /* Per-call cancel control. It sits beside the toggle in the pill header and
  * opens a reason popover; the optimistic "Cancelling…" mark replaces it until
  * the engine's terminal frame confirms the stop. */

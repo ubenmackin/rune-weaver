@@ -108,7 +108,7 @@ extension FilesIndexer {
             await fail(relative, counters: &counters, start: start, reason: "unreadable")
             return
         }
-        if values.isSymbolicLink == true || filename.hasPrefix("._") {
+        if values.isSymbolicLink == true || values.isAliasFile == true || filename.hasPrefix("._") {
             counters.skipped += 1
             await reportWork(relative, counters: counters, start: start)
             return

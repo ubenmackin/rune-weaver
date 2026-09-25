@@ -294,11 +294,11 @@ struct IndexCoordinatorTests {
 
         #expect(summary.status == .ok)
         let recorded = await calls.snapshot()
-        // Files plus mail overlap, so their start order races while trailing
-        // stages stay sequential after the join in canonical order.
+        // Files plus mail plus messages overlap, so their start order races while
+        // vision stays sequential after the join in canonical order.
         #expect(recorded.count == 4)
-        #expect(Set(recorded.prefix(2)) == [.files, .mail])
-        #expect(Array(recorded.suffix(2)) == [.messages, .vision])
+        #expect(Set(recorded.prefix(3)) == [.files, .mail, .messages])
+        #expect(Array(recorded.suffix(1)) == [.vision])
     }
 
     @Test
@@ -872,6 +872,182 @@ struct IndexCoordinatorTests {
         #expect(summary.documentsIndexed == 14)
         let observed = await budgets.snapshot()
         #expect(observed.count == 2)
+        #expect(observed.allSatisfy { $0 == 7 })
+    }
+
+    @Test
+    func `Files plus mail plus messages overlap with messages finishing before mail and vision after peers`() async {
+        // CPU-bound files, network-bound mail, and light local messages wait
+        // on different resources, so the trio overlaps while vision stays
+        // sequential after the join; staggered sleeps make the light local
+        // messages peer finish before mail deterministically without
+        // wall-clock bounds that flake on loaded runners.
+        let probe = IndexOverlapProbe()
+        let started = IndexStageCallRecorder()
+        let finished = IndexStageCallRecorder()
+        func staged(_ kind: IndexSourceKind, delay: UInt64) -> IndexClosureStage {
+            IndexClosureStage(kind: kind, isEnabled: true) { _, _, _ in
+                await started.record(kind)
+                await probe.enter()
+                try? await Task.sleep(nanoseconds: delay)
+                await probe.exit()
+                await finished.record(kind)
+                return IndexSourceRunReport(kind: kind, scanned: 1, indexed: 1, lastItem: "\(kind.rawValue)-last")
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(
+                enabled: true,
+                files: true,
+                mail: true,
+                messages: true,
+                roots: [],
+                describeImagesWithLLM: true
+            ),
+            stages: [
+                staged(.files, delay: 300_000_000),
+                staged(.mail, delay: 600_000_000),
+                staged(.messages, delay: 100_000_000),
+                staged(.vision, delay: 0)
+            ]
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 4)
+        #expect(summary.documentsIndexed == 4)
+        #expect(await probe.maxObserved() == 3)
+        let starts = await started.snapshot()
+        #expect(starts.count == 4)
+        #expect(Set(starts.prefix(3)) == [.files, .mail, .messages])
+        #expect(starts.last == .vision)
+        let completions = await finished.snapshot()
+        #expect(completions.count == 4)
+        #expect(completions.last == .vision)
+        // The light local peer completes while the network-bound peer still runs.
+        let messagesIndex = completions.firstIndex(of: .messages)
+        let mailIndex = completions.firstIndex(of: .mail)
+        #expect(messagesIndex != nil && mailIndex != nil && messagesIndex! < mailIndex!)
+    }
+
+    @Test
+    func `Trio join keeps canonical order regardless of completion order`() async {
+        /// Messages finishes first and mail last, so completion order differs
+        /// from canonical; warnings merge in canonical order, proving the join,
+        /// not the race, owns watermarks and per-source attribution.
+        func staged(_ kind: IndexSourceKind, delay: UInt64, scanned: Int, indexed: Int) -> IndexClosureStage {
+            IndexClosureStage(kind: kind, isEnabled: true) { _, _, _ in
+                try? await Task.sleep(nanoseconds: delay)
+                return IndexSourceRunReport(
+                    kind: kind,
+                    scanned: scanned,
+                    indexed: indexed,
+                    warnings: ["\(kind.rawValue)-warn"]
+                )
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, messages: true, roots: []),
+            stages: [
+                staged(.files, delay: 300_000_000, scanned: 3, indexed: 2),
+                staged(.mail, delay: 600_000_000, scanned: 5, indexed: 4),
+                staged(.messages, delay: 100_000_000, scanned: 7, indexed: 6)
+            ]
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 15)
+        #expect(summary.documentsIndexed == 12)
+        // Canonical join, not completion order (messages, files, mail).
+        #expect(summary.warnings == ["files-warn", "mail-warn", "messages-warn"])
+    }
+
+    @Test
+    func `Cancel reaches all three overlapped peers`() async {
+        // A cancel racing the trio must stop each peer within its current
+        // batch; pre-registering every peer keeps a start race from hiding one,
+        // and committed batches stay kept for resume.
+        let started = IndexStageCallRecorder()
+        let cancelled = IndexStageCallRecorder()
+        func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
+            IndexClosureStage(
+                kind: kind,
+                isEnabled: true,
+                onCancel: { await cancelled.record(kind) }
+            ) { _, _, isCancelled in
+                await started.record(kind)
+                var done = 0
+                for _ in 0 ..< 10 {
+                    if isCancelled() {
+                        break
+                    }
+                    // Cancellable batch: the run-task cancel aborts this sleep
+                    // inside the batch instead of draining every iteration.
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    if isCancelled() {
+                        break
+                    }
+                    done += 1
+                }
+                return IndexSourceRunReport(kind: kind, scanned: done, indexed: done)
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, messages: true, roots: []),
+            stages: [staged(.files), staged(.mail), staged(.messages)]
+        )
+        let runTask = Task { await coordinator.run() }
+        // Wait for all three peers to enter rather than a fixed window, so the
+        // cancel below always lands mid-overlap even on loaded CI.
+        for _ in 0 ..< 200 {
+            let seen = await started.snapshot()
+            if seen.contains(.files), seen.contains(.mail), seen.contains(.messages) {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let seen = await started.snapshot()
+        #expect(seen.contains(.files))
+        #expect(seen.contains(.mail))
+        #expect(seen.contains(.messages))
+        await coordinator.cancel()
+        let summary = await runTask.value
+
+        #expect(summary.status == .cancelled)
+        let stopped = await cancelled.snapshot()
+        #expect(stopped.contains(.files))
+        #expect(stopped.contains(.mail))
+        #expect(stopped.contains(.messages))
+        #expect(summary.documentsIndexed < 30)
+    }
+
+    @Test
+    func `Three overlapped peers observe isolated per-source budgets`() async {
+        // All three peers read the same snapshot yet enforce their own caps; a
+        // shared counter would divide the work, so summed full caps prove
+        // isolation while keeping thermal plus battery gates inside indexers.
+        let budgets = IndexBudgetRecorder()
+        func staged(_ kind: IndexSourceKind) -> IndexClosureStage {
+            IndexClosureStage(kind: kind, isEnabled: true) { policy, _, _ in
+                await budgets.record(policy.nightlyBudget)
+                return IndexSourceRunReport(kind: kind, scanned: policy.nightlyBudget, indexed: policy.nightlyBudget)
+            }
+        }
+        let coordinator = IndexCoordinator(
+            config: IndexConfig(enabled: true, files: true, mail: true, messages: true, roots: [], nightlyBudget: 7),
+            stages: [staged(.files), staged(.mail), staged(.messages)]
+        )
+
+        let summary = await coordinator.run()
+
+        #expect(summary.status == .ok)
+        #expect(summary.scanned == 21)
+        #expect(summary.documentsIndexed == 21)
+        let observed = await budgets.snapshot()
+        #expect(observed.count == 3)
         #expect(observed.allSatisfy { $0 == 7 })
     }
 }

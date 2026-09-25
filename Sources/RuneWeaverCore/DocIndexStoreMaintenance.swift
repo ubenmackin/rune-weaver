@@ -23,7 +23,105 @@ import os
 
     /// Lock guarding the injectable size probe so test overrides stay race-free.
     private let docIndexDbstatProbeLock = OSAllocatedUnfairLock(initialState: DocIndexDbstatProbe?.none)
+#endif
 
+/// Lock guarding per-database aggregate-pass counters so parallel status polls stay race-free.
+///
+/// Counts are keyed by canonical database path, so tests over isolated
+/// temporary files never observe passes from parallel suites sharing the
+/// process-wide store.
+private let docIndexStatusSnapshotCounterLock = OSAllocatedUnfairLock(initialState: [String: Int]())
+
+/// Shared aggregate snapshot backing both status projections.
+///
+/// Owned by `DocIndexStore`: the actor holds one of these plus its timestamp
+/// and both `stats()` and `storageBreakdown()` project from it, so a single
+/// status poll performs at most one aggregate pass.
+struct DocIndexStatusSnapshot: Sendable, Equatable {
+    /// Indexed document count.
+    var documents: Int
+    /// Stored chunk count.
+    var chunks: Int
+    /// Chunks carrying an embedding.
+    var vectorChunks: Int
+    /// Logical chunk text bytes.
+    var textBytes: Int64
+    /// Logical embedding bytes over vector chunks.
+    var vectorBytes: Int64
+    /// Newest `indexed_at` watermark, epoch when empty.
+    var indexAsOf: Date
+    /// Per-source aggregates in canonical order.
+    var bySource: [IndexSourceStats]
+    /// Extraction-outcome aggregates in canonical order.
+    var byExtractStatus: [IndexExtractStatusStats]
+    /// On-disk database file size in bytes.
+    var dbFileBytes: Int64
+    /// Write-ahead log size in bytes.
+    var walBytes: Int64
+    /// Full-text page bytes, or nil when the `dbstat` table is unavailable.
+    var ftsBytes: Int64?
+    /// Freelist bytes reclaimable by `VACUUM`.
+    var freeBytes: Int64
+
+    /// Projects the statistics view from the shared snapshot.
+    ///
+    /// The text, vector, and FTS legs ride the `dbstat` availability flag:
+    /// an unavailable size table reports file sizes with a null split
+    /// instead of failing, matching the historical stats behavior.
+    /// - Returns: An index statistics snapshot with true on-disk sizes.
+    func makeStats() -> IndexStats {
+        let keywordChunks = max(chunks - vectorChunks, 0)
+        let textSplit: Int64?
+        let vectorSplit: Int64?
+        let ftsSplit: Int64?
+        if let ftsBytes {
+            textSplit = textBytes
+            vectorSplit = vectorBytes
+            ftsSplit = ftsBytes
+        } else {
+            textSplit = nil
+            vectorSplit = nil
+            ftsSplit = nil
+        }
+        return IndexStats(
+            documents: documents,
+            chunks: chunks,
+            vectorChunks: vectorChunks,
+            keywordChunks: keywordChunks,
+            bytes: textBytes,
+            indexAsOf: indexAsOf,
+            bySource: bySource,
+            byExtractStatus: byExtractStatus,
+            dbFileBytes: dbFileBytes,
+            walBytes: walBytes,
+            textBytes: textSplit,
+            vectorBytes: vectorSplit,
+            ftsBytes: ftsSplit,
+            freeBytes: freeBytes,
+            contentBytes: IndexContentBytes.contentBytes(textBytes: textBytes, vectorBytes: vectorBytes)
+        )
+    }
+
+    /// Projects the storage view from the shared snapshot.
+    ///
+    /// Logical legs always report content bytes; only the full-text leg
+    /// degrades to zero when the `dbstat` table is unavailable, matching
+    /// the historical breakdown behavior.
+    /// - Returns: The storage breakdown.
+    func makeBreakdown() -> IndexStorageBreakdown {
+        IndexStorageBreakdown(
+            dbFileBytes: dbFileBytes,
+            walBytes: walBytes,
+            textBytes: textBytes,
+            vectorBytes: vectorBytes,
+            ftsBytes: ftsBytes ?? 0,
+            freeBytes: freeBytes,
+            contentBytes: IndexContentBytes.contentBytes(textBytes: textBytes, vectorBytes: vectorBytes)
+        )
+    }
+}
+
+#if canImport(SQLite3)
     /// Deletion, aggregation, and reset for the document index.
     extension SQLiteDocIndexStore {
         /// Injectable `dbstat` probe overriding the grouped page-byte read.
@@ -118,6 +216,130 @@ import os
             return removed
         }
 
+        /// Number of aggregate passes performed in this process across all databases.
+        ///
+        /// Incremented once per `computeStatusSnapshot` so tests can prove a
+        /// cold poll performs exactly one pass and a TTL hit performs zero.
+        /// Prefer the per-path overload in new tests: the total observes every
+        /// parallel suite, while the per-path count isolates one file.
+        static var statusSnapshotComputeCount: Int {
+            docIndexStatusSnapshotCounterLock.withLock { $0.values.reduce(0, +) }
+        }
+
+        /// Reads the aggregate-pass count for one database file.
+        ///
+        /// Keyed by the canonical gate path so parallel tests over distinct
+        /// temporary files stay isolated from each other.
+        /// - Parameter dbPath: SQLite file path.
+        /// - Returns: Passes recorded for that canonical path.
+        static func statusSnapshotComputeCount(for dbPath: String) -> Int {
+            let key = canonicalDBPath(dbPath)
+            return docIndexStatusSnapshotCounterLock.withLock { $0[key] ?? 0 }
+        }
+
+        /// Resets the aggregate-pass counter so isolated tests start from zero.
+        static func resetStatusSnapshotComputeCountForTesting() {
+            docIndexStatusSnapshotCounterLock.withLock { $0.removeAll() }
+        }
+
+        /// Resets the aggregate-pass count for one database file.
+        ///
+        /// Clears only the caller's canonical entry so parallel tests over
+        /// other files keep their counts.
+        /// - Parameter dbPath: SQLite file path.
+        static func resetStatusSnapshotComputeCountForTesting(for dbPath: String) {
+            let key = canonicalDBPath(dbPath)
+            _ = docIndexStatusSnapshotCounterLock.withLock { $0.removeValue(forKey: key) }
+        }
+
+        /// Reads the shared status snapshot with the live size probe.
+        /// - Parameter dbPath: SQLite file path. `~` is expanded.
+        /// - Returns: The shared aggregate snapshot.
+        static func statusSnapshot(dbPath: String) throws -> DocIndexStatusSnapshot {
+            try statusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbeOverride)
+        }
+
+        /// Reads the shared status snapshot with an injectable size probe.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
+        /// - Returns: The shared aggregate snapshot.
+        static func statusSnapshot(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> DocIndexStatusSnapshot {
+            try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbe)
+        }
+
+        /// Computes every status aggregate in one pass over a single open handle.
+        ///
+        /// Opens once, then runs each COUNT, the MAX watermark, each GROUP BY,
+        /// both `SUM(LENGTH)` queries, one grouped `dbstat` walk, and each
+        /// PRAGMA exactly once. Both public projections read from the returned
+        /// snapshot with no second pass, so one status poll never fans out into
+        /// duplicate COUNTs or double `dbstat` walks.
+        /// - Parameters:
+        ///   - dbPath: SQLite file path. `~` is expanded.
+        ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
+        /// - Returns: The shared aggregate snapshot.
+        private static func computeStatusSnapshot(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> DocIndexStatusSnapshot {
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let documents = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_documents;")
+            let chunks = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_chunks;")
+            let vectorChunks = try scalarInt(
+                handle: handle,
+                sql: "SELECT COUNT(*) FROM indexed_chunks WHERE is_vector = 1;"
+            )
+            let textLogical = try scalarInt64(
+                handle: handle,
+                sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
+            )
+            let indexAsOf = try scalarMaxIndexedAt(handle: handle)
+            let bySource = try sourceAggregates(handle: handle)
+            let byExtractStatus = try extractStatusAggregates(handle: handle)
+            let pageCount = try scalarInt(handle: handle, sql: "PRAGMA page_count;")
+            let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
+            let freelistCount = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
+            let pageSizeBytes = Int64(max(pageSize, 0))
+            let dbFileBytes = resolvedDbFileBytes(
+                pageCount: pageCount,
+                pageSizeBytes: pageSizeBytes,
+                expandedPath: expanded
+            )
+            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
+            let walBytes = onDiskBytes(at: expanded + "-wal")
+            let vectorLogical = try scalarInt64(
+                handle: handle,
+                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
+            )
+            let grouped = try? dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
+            // Logical content bytes, not page bytes: only the FTS leg is
+            // attributed via the grouped `dbstat` split.
+            let ftsBytes: Int64? = if let grouped {
+                ftsPageBytes(from: grouped)
+            } else {
+                nil
+            }
+            let snapshot = DocIndexStatusSnapshot(
+                documents: documents,
+                chunks: chunks,
+                vectorChunks: vectorChunks,
+                textBytes: textLogical,
+                vectorBytes: vectorLogical,
+                indexAsOf: indexAsOf,
+                bySource: bySource,
+                byExtractStatus: byExtractStatus,
+                dbFileBytes: dbFileBytes,
+                walBytes: walBytes,
+                ftsBytes: ftsBytes,
+                freeBytes: freeBytes
+            )
+            // Count only successful passes so a throwing open or query never
+            // reads as a completed aggregate in the single-pass proofs.
+            let counterKey = canonicalDBPath(dbPath)
+            docIndexStatusSnapshotCounterLock.withLock { $0[counterKey, default: 0] += 1 }
+            return snapshot
+        }
+
         /// Aggregates current index statistics.
         ///
         /// The watermark is the newest `indexed_at` in the store, so recall
@@ -141,75 +363,14 @@ import os
         /// returns nil. A nil probe result still reports file sizes with a
         /// null breakdown instead of failing. Opening creates an empty store
         /// when absent so a fresh path reports zero counts with true file
-        /// sizes instead of missing-file zeros.
+        /// sizes instead of missing-file zeros. Projects from the shared
+        /// snapshot with no second aggregate pass.
         /// - Parameters:
         ///   - dbPath: SQLite file path. `~` is expanded.
         ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
         /// - Returns: An index statistics snapshot with true on-disk sizes.
         static func stats(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> IndexStats {
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            let handle = try open(dbPath: dbPath)
-            defer { sqlite3_close(handle) }
-            let documents = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_documents;")
-            let chunks = try scalarInt(handle: handle, sql: "SELECT COUNT(*) FROM indexed_chunks;")
-            let vectorChunks = try scalarInt(
-                handle: handle,
-                sql: "SELECT COUNT(*) FROM indexed_chunks WHERE is_vector = 1;"
-            )
-            let bytes = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
-            )
-            let indexAsOf = try scalarMaxIndexedAt(handle: handle)
-            let bySource = try sourceAggregates(handle: handle)
-            let byExtractStatus = try extractStatusAggregates(handle: handle)
-            let pageCount = try scalarInt(handle: handle, sql: "PRAGMA page_count;")
-            let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
-            let freelistCount = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
-            let pageSizeBytes = Int64(max(pageSize, 0))
-            let dbFileBytes = resolvedDbFileBytes(
-                pageCount: pageCount,
-                pageSizeBytes: pageSizeBytes,
-                expandedPath: expanded
-            )
-            let freeBytes = Int64(max(freelistCount, 0)) * pageSizeBytes
-            let walBytes = onDiskBytes(at: expanded + "-wal")
-            let vectorLogical = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
-            )
-            let grouped = try? dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe)
-            let textBytes: Int64?
-            let vectorBytes: Int64?
-            let ftsBytes: Int64?
-            if let grouped {
-                // Logical content bytes, not page bytes: only the FTS leg is
-                // attributed via the grouped `dbstat` split.
-                textBytes = bytes
-                vectorBytes = vectorLogical
-                ftsBytes = ftsPageBytes(from: grouped)
-            } else {
-                textBytes = nil
-                vectorBytes = nil
-                ftsBytes = nil
-            }
-            return IndexStats(
-                documents: documents,
-                chunks: chunks,
-                vectorChunks: vectorChunks,
-                keywordChunks: max(chunks - vectorChunks, 0),
-                bytes: bytes,
-                indexAsOf: indexAsOf,
-                bySource: bySource,
-                byExtractStatus: byExtractStatus,
-                dbFileBytes: dbFileBytes,
-                walBytes: walBytes,
-                textBytes: textBytes,
-                vectorBytes: vectorBytes,
-                ftsBytes: ftsBytes,
-                freeBytes: freeBytes,
-                contentBytes: IndexContentBytes.contentBytes(textBytes: bytes, vectorBytes: vectorLogical)
-            )
+            try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbe).makeStats()
         }
 
         /// Reads the on-disk and logical size breakdown.
@@ -232,43 +393,14 @@ import os
         /// probe that returns nil. A nil probe result degrades the full-text
         /// leg to zero instead of failing the probe. Opening creates an empty
         /// store when absent so a fresh path reports true file sizes instead
-        /// of missing-file zeros.
+        /// of missing-file zeros. Projects from the shared snapshot with no
+        /// second aggregate pass.
         /// - Parameters:
         ///   - dbPath: SQLite file path. `~` is expanded.
         ///   - dbstatProbe: Per-object page-byte reader, or nil for the live table.
         /// - Returns: The storage breakdown.
         static func storageBreakdown(dbPath: String, dbstatProbe: DocIndexDbstatProbe?) throws -> IndexStorageBreakdown {
-            let expanded = (dbPath as NSString).expandingTildeInPath
-            let handle = try open(dbPath: dbPath)
-            defer { sqlite3_close(handle) }
-            let textBytes = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(CAST(chunk_text AS BLOB))), 0) FROM indexed_chunks;"
-            )
-            let vectorBytes = try scalarInt64(
-                handle: handle,
-                sql: "SELECT COALESCE(SUM(LENGTH(embedding)), 0) FROM indexed_chunks WHERE is_vector = 1;"
-            )
-            let ftsBytes: Int64 = (try? ftsPageBytes(from: dbstatGroupedPageBytes(handle: handle, probe: dbstatProbe))) ?? 0
-            let freelistPages = try scalarInt(handle: handle, sql: "PRAGMA freelist_count;")
-            let pageSize = try scalarInt(handle: handle, sql: "PRAGMA page_size;")
-            let pageSizeBytes = Int64(max(pageSize, 0))
-            let pageCount = (try? scalarInt(handle: handle, sql: "PRAGMA page_count;")) ?? 0
-            let dbFileBytes = resolvedDbFileBytes(
-                pageCount: pageCount,
-                pageSizeBytes: pageSizeBytes,
-                expandedPath: expanded
-            )
-            let freeBytes = Int64(max(freelistPages, 0)) * pageSizeBytes
-            return IndexStorageBreakdown(
-                dbFileBytes: dbFileBytes,
-                walBytes: onDiskBytes(at: expanded + "-wal"),
-                textBytes: textBytes,
-                vectorBytes: vectorBytes,
-                ftsBytes: ftsBytes,
-                freeBytes: freeBytes,
-                contentBytes: IndexContentBytes.contentBytes(textBytes: textBytes, vectorBytes: vectorBytes)
-            )
+            try computeStatusSnapshot(dbPath: dbPath, dbstatProbe: dbstatProbe).makeBreakdown()
         }
 
         /// Reads per-object page bytes via one grouped `dbstat` query.
@@ -513,9 +645,15 @@ import os
         }
 
         /// Clears every document, chunk, and search-index entry.
+        ///
+        /// A missing file drops its stale ensure-gate entry so the next open
+        /// re-runs DDL instead of reusing the fast path on an empty schema.
         static func reset(dbPath: String) throws {
             let expanded = (dbPath as NSString).expandingTildeInPath
-            guard FileManager.default.fileExists(atPath: expanded) else { return }
+            guard FileManager.default.fileExists(atPath: expanded) else {
+                removeEnsuredPath(dbPath)
+                return
+            }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             try exec(handle: handle, sql: "BEGIN IMMEDIATE;")

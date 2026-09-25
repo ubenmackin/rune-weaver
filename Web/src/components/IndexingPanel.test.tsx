@@ -7,7 +7,6 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import IndexingPanel, {
   INDEX_EFFORT_OPTIONS,
-  INDEX_LAST_ERRORS_COLLAPSED_COUNT,
   INDEX_LAST_ERROR_PREVIEW_CHARS,
   IndexPolicyPanel,
   dedupeIndexErrors,
@@ -570,6 +569,7 @@ describe("IndexingPanel", () => {
   });
 
   it("shows the last index errors when the engine reports failures", async () => {
+    const user = userEvent.setup();
     const { fetchMock } = stubFetch({
       status: { ...statusPayload, lastErrors: ["mail: IMAP unreachable"] },
     });
@@ -578,9 +578,21 @@ describe("IndexingPanel", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByText(/Last errors/)).toBeInTheDocument();
+      expect(screen.getByTestId("index-errors-header-toggle")).toBeInTheDocument();
     });
-    expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
+    // Collapsed header names the count with a Show affordance.
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent(
+      "Last errors (1)",
+    );
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent("Show");
+    // Collapsed hides the row until expanded.
+    expect(screen.queryByText("mail: IMAP unreachable")).toBeNull();
+
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
+
+    await waitFor(() => {
+      expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
+    });
   });
 
   it("renders real-count source bars, the extract breakdown, and the last-run strip", async () => {
@@ -2047,8 +2059,7 @@ describe("IndexingPanel last errors helpers", () => {
     expect(dedupeIndexErrors("not-an-array")).toEqual([]);
   });
 
-  it("pins the collapsed budget and preview budget", () => {
-    expect(INDEX_LAST_ERRORS_COLLAPSED_COUNT).toBe(3);
+  it("pins the preview budget", () => {
     expect(INDEX_LAST_ERROR_PREVIEW_CHARS).toBeGreaterThan(0);
   });
 
@@ -2086,6 +2097,7 @@ describe("IndexingPanel last errors card", () => {
   });
 
   it("dedupes identical error strings in the card", async () => {
+    const user = userEvent.setup();
     const { fetchMock } = stubFetch({
       status: {
         ...statusPayload,
@@ -2099,6 +2111,17 @@ describe("IndexingPanel last errors card", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
     });
+    // Collapsed header names the deduped count before any row reads.
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent(
+      "Last errors (2)",
+    );
+    expect(screen.queryByText("mail: IMAP unreachable")).toBeNull();
+
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
+
+    await waitFor(() => {
+      expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
+    });
     // One repeated line reads once.
     expect(screen.getAllByText("mail: IMAP unreachable").length).toBe(1);
     expect(screen.getByText("files: denied")).toBeInTheDocument();
@@ -2111,6 +2134,7 @@ describe("IndexingPanel last errors card", () => {
   });
 
   it("suppresses the raw denial bullet when guidance renders", async () => {
+    const user = userEvent.setup();
     const denial = "messages: Full Disk Access required to read chat.db";
     const { fetchMock } = stubFetch({
       status: { ...statusPayload, lastErrors: [denial, "mail: IMAP unreachable"] },
@@ -2118,6 +2142,19 @@ describe("IndexingPanel last errors card", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
+    });
+    // Collapsed hides the row but keeps the actionable guidance visible.
+    expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    expect(screen.queryByText("mail: IMAP unreachable")).toBeNull();
+    // Header counts guidance-inclusive errors (denial plus mail).
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent(
+      "Last errors (2)",
+    );
+
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
 
     await waitFor(() => {
       expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
@@ -2137,8 +2174,18 @@ describe("IndexingPanel last errors card", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
     });
+    // Header counts guidance-inclusive errors: the repeated denial dedupes to one.
+    // Guidance-only renders a static count with no toggle, so the header never
+    // flips Show/Hide with zero visible change.
+    expect(screen.getByTestId("index-errors-header-count")).toHaveTextContent(
+      "Last errors (1)",
+    );
+    expect(screen.queryByTestId("index-errors-header-toggle")).toBeNull();
+    // Guidance stays visible even while collapsed so the actionable
+    // onboarding never hides behind Show.
+    expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
     expect(screen.queryByText(denial)).toBeNull();
     // Guidance steps render their own list items, so scope the raw-row check
     // to error rows: guidance-only means no indexed error row exists.
@@ -2146,7 +2193,7 @@ describe("IndexingPanel last errors card", () => {
     expect(screen.queryAllByTestId(/^index-last-error-\d+$/).length).toBe(0);
   });
 
-  it("caps rows with a show-all toggle", async () => {
+  it("renders collapsed with count and expands to the full scroll list", async () => {
     const user = userEvent.setup();
     const { fetchMock } = stubFetch({
       status: {
@@ -2161,31 +2208,46 @@ describe("IndexingPanel last errors card", () => {
     await waitFor(() => {
       expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
     });
-    // Collapsed to the budget with the remainder behind the toggle.
+    // Collapsed header names the full count with a Show affordance.
+    const header = screen.getByTestId("index-errors-header-toggle");
+    expect(header).toHaveTextContent("Last errors (5)");
+    expect(header).toHaveTextContent("Show");
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    // Collapsed hides the list behind the header; the old show-all toggle is gone.
+    expect(screen.queryByTestId("index-error-list")).toBeNull();
+    expect(screen.queryByText("error one")).toBeNull();
+    expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
+    // The block sits below the charts once status loads.
     expect(
-      within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
-    ).toBe(INDEX_LAST_ERRORS_COLLAPSED_COUNT);
-    expect(screen.getByText("error one")).toBeInTheDocument();
-    expect(screen.queryByText("error five")).toBeNull();
-    const toggle = screen.getByTestId("index-errors-toggle");
-    expect(toggle).toHaveTextContent("Show all 5 errors");
+      appearsBefore(
+        screen.getByTestId("index-donut-chart"),
+        screen.getByTestId("index-last-errors"),
+      ),
+    ).toBe(true);
 
-    await user.click(toggle);
+    await user.click(header);
     await waitFor(() => {
       expect(screen.getByText("error five")).toBeInTheDocument();
     });
+    // Expanded renders every error inside the inset scroll container.
     expect(
       within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
     ).toBe(5);
-    expect(screen.getByTestId("index-errors-toggle")).toHaveTextContent("Show fewer");
+    expect(screen.getByTestId("index-error-list")).toBeInTheDocument();
+    expect(document.querySelector(".index-errors-scroll")).not.toBeNull();
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent("Hide");
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
 
-    await user.click(screen.getByTestId("index-errors-toggle"));
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
     await waitFor(() => {
       expect(screen.queryByText("error five")).toBeNull();
     });
-    expect(
-      within(screen.getByTestId("index-last-errors")).getAllByRole("listitem").length,
-    ).toBe(INDEX_LAST_ERRORS_COLLAPSED_COUNT);
+    expect(screen.queryByTestId("index-error-list")).toBeNull();
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent("Show");
   });
 
   it("truncates long lines with an expand control", async () => {
@@ -2202,6 +2264,11 @@ describe("IndexingPanel last errors card", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
+      expect(screen.getByTestId("index-errors-header-toggle")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
+
+    await waitFor(() => {
       expect(screen.getByTestId("index-last-error-0")).toBeInTheDocument();
     });
     // Preview hides the tail behind the expand control.
@@ -2211,6 +2278,8 @@ describe("IndexingPanel last errors card", () => {
     expect(
       screen.getByTestId("index-last-error-0").querySelector("svg"),
     ).not.toBeNull();
+    // The old show-all toggle never renders alongside the header toggle.
+    expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Show more" }));
     await waitFor(() => {
@@ -2225,7 +2294,8 @@ describe("IndexingPanel last errors card", () => {
     expect(screen.getByTestId("index-last-error-0")).not.toHaveTextContent(tail);
   });
 
-  it("omits the expand control and toggle for short lists", async () => {
+  it("omits the expand control and keeps only the header toggle for short lists", async () => {
+    const user = userEvent.setup();
     const { fetchMock } = stubFetch({
       status: { ...statusPayload, lastErrors: ["mail: IMAP unreachable"] },
     });
@@ -2234,10 +2304,95 @@ describe("IndexingPanel last errors card", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
+      expect(screen.getByTestId("index-errors-header-toggle")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-errors-header-toggle")).toHaveTextContent(
+      "Last errors (1)",
+    );
+    // Collapsed hides the short row; the old toggle never renders.
+    expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+    expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
+
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
+
+    await waitFor(() => {
       expect(screen.getByText("mail: IMAP unreachable")).toBeInTheDocument();
     });
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
     expect(screen.queryByTestId("index-errors-toggle")).toBeNull();
+    expect(screen.getByTestId("index-errors-header-toggle")).toBeInTheDocument();
+  });
+
+  it("preserves row testids, aria labels, and guidance below the charts", async () => {
+    const user = userEvent.setup();
+    const denial = "messages: Full Disk Access required to read chat.db";
+    const { fetchMock } = stubFetch({
+      status: { ...statusPayload, lastErrors: [denial, "mail: IMAP unreachable"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
+    });
+    // The container keeps its accessible name while collapsed below the charts.
+    expect(screen.getByTestId("index-last-errors")).toHaveAttribute(
+      "aria-label",
+      "Last index errors",
+    );
+    expect(
+      appearsBefore(
+        screen.getByTestId("index-donut-chart"),
+        screen.getByTestId("index-last-errors"),
+      ),
+    ).toBe(true);
+
+    await user.click(screen.getByTestId("index-errors-header-toggle"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    });
+    // Row testids survive the move; the denial stays suppressed in favor of guidance.
+    expect(screen.getByTestId("index-last-error-0")).toBeInTheDocument();
+    expect(screen.getByTestId("index-last-error-0")).toHaveTextContent(
+      "mail: IMAP unreachable",
+    );
+    expect(screen.getByTestId("index-error-list")).toBeInTheDocument();
+    expect(document.querySelector(".index-errors-scroll")).not.toBeNull();
+    expect(screen.getByTestId("index-fda-guidance")).toHaveTextContent(
+      "Full Disk Access",
+    );
+  });
+
+  it("keeps the inset scroll and row geometry in the stylesheet", () => {
+    // The single stylesheet owner pins the scroll and row layout so the icon
+    // stays beside wrapped text at narrow widths.
+    expect(sharedStyles).toMatch(
+      /\.index-errors-scroll\s*\{[^}]*max-height:\s*18rem/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-errors-scroll\s*\{[^}]*overflow-y:\s*auto/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-errors-scroll\s*\{[^}]*border:\s*1px solid var\(--border-color\)/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-errors-scroll\s*\{[^}]*border-radius:\s*8px/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-error-row\s*\{[^}]*display:\s*flex/,
+    );
+    expect(sharedStyles).toMatch(/\.index-error-row\s*\{[^}]*gap:\s*8px/);
+    expect(sharedStyles).toMatch(
+      /\.index-error-icon\s*\{[^}]*flex:\s*none/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-error-text-wrap\s*\{[^}]*flex:\s*1/,
+    );
+    expect(sharedStyles).toMatch(
+      /\.index-error-text-wrap\s*\{[^}]*min-width:\s*0/,
+    );
   });
 });
 
@@ -2893,8 +3048,15 @@ describe("IndexingPanel run actions wrap", () => {
     render(<IndexingPanel />);
 
     await waitFor(() => {
-      expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+      expect(screen.getByTestId("index-last-errors")).toBeInTheDocument();
     });
+    // Guidance-only renders a static count with no toggle; the guidance stays
+    // visible without a Show/Hide affordance that would flip with no change.
+    expect(screen.getByTestId("index-fda-guidance")).toBeInTheDocument();
+    expect(screen.getByTestId("index-errors-header-count")).toHaveTextContent(
+      "Last errors (1)",
+    );
+    expect(screen.queryByTestId("index-errors-header-toggle")).toBeNull();
     // Both the paragraph and the restart step name the short action so the
     // recovery path matches the button label exactly.
     expect(screen.getByTestId("index-fda-guidance")).toHaveTextContent(

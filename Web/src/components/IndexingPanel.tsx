@@ -110,11 +110,6 @@ export function hasFullDiskAccessError(errors: unknown): boolean {
   return errors.some((detail) => typeof detail === "string" && isFullDiskAccessError(detail));
 }
 
-// Collapsed row budget for the last-errors list. Past this count the list
-// shows a show-all toggle so a noisy pass cannot push the charts below the
-// fold while a short failure still reads in full.
-export const INDEX_LAST_ERRORS_COLLAPSED_COUNT = 3;
-
 // Preview budget for one last-error line. Past this length the row renders a
 // truncated preview with an expand control so a path-heavy failure cannot
 // stretch the status card while the full text stays one click away.
@@ -907,11 +902,12 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // error slot so a confirm blocked by an in-flight run explains itself
   // instead of landing as a dead click.
   const [resetError, setResetError] = useState<string | null>(null);
-  // Last-errors display state: collapsed to a few rows with a show-all toggle,
-  // plus per-row expansion for long lines. The expanded set is pruned to the
+  // Last-errors display state: the block stays collapsed behind its header
+  // toggle so a noisy pass never pushes surrounding content, plus per-row
+  // expansion for long lines. The expanded set is pruned to the
   // current display list on every status change so stale full-text entries
   // cannot accumulate unbounded across polls.
-  const [showAllErrors, setShowAllErrors] = useState(false);
+  const [errorsExpanded, setErrorsExpanded] = useState(false);
   const [expandedErrors, setExpandedErrors] = useState<Set<string>>(
     () => new Set<string>(),
   );
@@ -1429,13 +1425,13 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   // bullet suppressed whenever the guided onboarding renders, since the
   // guidance is the formatted form of that failure. The guidance flag reads
   // the raw payload so it still fires when every line is a denial and the
-  // visible list collapses to guidance-only.
+  // visible list collapses to guidance-only. The header count stays
+  // guidance-inclusive over the deduped raw payload so a guidance-only denial
+  // still reads as Last errors (1) instead of (0).
   const displayErrors = resolveDisplayIndexErrors(status?.lastErrors);
   const showFdaGuidance = hasFullDiskAccessError(status?.lastErrors);
+  const totalErrorCount = dedupeIndexErrors(status?.lastErrors).length;
   const hasErrorBlock = displayErrors.length > 0 || showFdaGuidance;
-  const visibleErrors = showAllErrors
-    ? displayErrors
-    : displayErrors.slice(0, INDEX_LAST_ERRORS_COLLAPSED_COUNT);
   // Prunes the expanded set to the current display list so a failure that
   // ages out of lastErrors cannot keep its full text alive in state, bounding
   // the set to the visible rows instead of every error ever seen.
@@ -1790,137 +1786,6 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 ))}
               </div>
             ) : null}
-
-            {hasErrorBlock ? (
-              <div
-                className="index-errors"
-                aria-label="Last index errors"
-                data-testid="index-last-errors"
-              >
-                <h4>Last errors</h4>
-                {displayErrors.length > 0 ? (
-                  <>
-                    {/* Raw error rows own this list so guidance steps below never
-                        read as raw rows when scoped by test id or assistive tech. */}
-                    <ul data-testid="index-error-list">
-                      {visibleErrors.map((detail, index) => {
-                        // Per-row expansion looks up the full error text so the
-                        // toggle survives the show-all slice and status polls,
-                        // while the React key stays a short hash plus position
-                        // so kilobyte-long failures never become full-text keys.
-                        // The test id uses the visible position so it stays
-                        // O(1) and stable under the show-all slice.
-                        const expanded = expandedErrors.has(detail);
-                        const long = isLongIndexError(detail);
-                        const visibleText = expanded ? detail : truncateIndexError(detail);
-                        // Truncated previews render as plain text: slicing raw
-                        // markdown at the preview budget can split emphasis,
-                        // code, or link syntax and misrender through MarkdownText,
-                        // so only the expanded full text keeps markdown.
-                        const showPlainPreview = long && !expanded;
-                        return (
-                          <li
-                            key={`index-error-${index}-${hashIndexError(detail)}`}
-                            data-testid={`index-last-error-${index}`}
-                            className="index-error-row"
-                          >
-                            <span className="index-error-icon" aria-hidden="true">
-                              <AlertTriangleIcon size={14} />
-                            </span>
-                            <span
-                              className="index-error-text-wrap"
-                              title={long && !expanded ? detail : undefined}
-                            >
-                              {showPlainPreview ? (
-                                <span className="index-error-text">{visibleText}</span>
-                              ) : (
-                                <MarkdownText
-                                  text={visibleText}
-                                  className="index-error-text"
-                                />
-                              )}
-                            </span>
-                            {long ? (
-                              <button
-                                type="button"
-                                className="ghost index-error-expand"
-                                aria-expanded={expanded}
-                                onClick={() => {
-                                  setExpandedErrors((previous) => {
-                                    const next = new Set(previous);
-                                    if (next.has(detail)) {
-                                      next.delete(detail);
-                                    } else {
-                                      next.add(detail);
-                                    }
-                                    return next;
-                                  });
-                                }}
-                              >
-                                <span>{expanded ? "Show less" : "Show more"}</span>
-                              </button>
-                            ) : null}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                    {displayErrors.length > INDEX_LAST_ERRORS_COLLAPSED_COUNT ? (
-                      <button
-                        type="button"
-                        className="ghost index-errors-toggle"
-                        data-testid="index-errors-toggle"
-                        aria-expanded={showAllErrors}
-                        onClick={() => setShowAllErrors((previous) => !previous)}
-                      >
-                        <span>
-                          {showAllErrors
-                            ? "Show fewer"
-                            : `Show all ${displayErrors.length} errors`}
-                        </span>
-                      </button>
-                    ) : null}
-                  </>
-                ) : null}
-                {/* Guided onboarding for the Full Disk Access denial: macOS
-                    offers no prompt API, so the denial only surfaces at
-                    run time. The button navigates the top frame to the exact
-                    Settings pane, where window.open would be treated as a
-                    blocked popup for this system scheme. The steps name both
-                    grants because macOS attributes the read to the host
-                    process: RuneWeaver.app for the app, the terminal emulator
-                    for rune-weaver serve. The raw denial bullet stays hidden
-                    while this renders — the guidance is its formatted form. */}
-                {showFdaGuidance ? (
-                  <div
-                    className="index-fda-guidance"
-                    data-testid="index-fda-guidance"
-                    style={{ marginTop: 8 }}
-                  >
-                    <p className="muted text-sm" style={{ marginBottom: 8 }}>
-                      Messages indexing needs Full Disk Access. Grant it to
-                      RuneWeaver.app — or to your terminal emulator (for example
-                      Terminal.app or iTerm2) when you run rune-weaver serve —
-                       then restart and press Run.
-                    </p>
-                    <button
-                      type="button"
-                      className="ghost icon-text-btn"
-                      onClick={() => {
-                        window.location.href = FULL_DISK_ACCESS_SETTINGS_URL;
-                      }}
-                    >
-                      <span>Open Full Disk Access Settings</span>
-                    </button>
-                    <ol className="muted text-sm" style={{ marginTop: 8, paddingLeft: 20 }}>
-                      <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
-                      <li>Click + and add RuneWeaver.app — or your terminal emulator (for example Terminal.app or iTerm2) when you run rune-weaver serve.</li>
-                      <li>Toggle the added entry ON and authenticate when prompted.</li>
-                      <li>Quit and restart the app or terminal, then press Run.</li>
-                    </ol>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
           </>
         ) : (
           <p className="muted text-sm">Loading index status…</p>
@@ -2208,6 +2073,149 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               )}
             </div>
           </div>
+        </div>
+      ) : null}
+
+      {/* Last errors below the charts: rows stay collapsed behind their header
+          toggle so a noisy pass never pushes the charts, with the full list
+          in a fixed inset scroll once expanded. The Full Disk Access guidance
+          stays visible even while collapsed so the actionable onboarding never
+          hides behind Show. When the display list is empty (guidance-only
+          denial) the header renders a static count with no toggle, so the
+          Show/Hide affordance never flips with zero visible change. Row
+          markup, test ids, per-row expand controls, and the guided onboarding
+          stay owned here. */}
+      {hasErrorBlock ? (
+        <div
+          className="index-errors"
+          aria-label="Last index errors"
+          data-testid="index-last-errors"
+        >
+          {displayErrors.length > 0 ? (
+            <button
+              type="button"
+              className="ghost index-errors-header-toggle muted text-xs"
+              data-testid="index-errors-header-toggle"
+              aria-expanded={errorsExpanded}
+              onClick={() => setErrorsExpanded((previous) => !previous)}
+            >
+              <span>Last errors ({totalErrorCount})</span>
+              <span>{errorsExpanded ? "Hide" : "Show"}</span>
+            </button>
+          ) : (
+            <span
+              className="index-errors-header-count muted text-xs"
+              data-testid="index-errors-header-count"
+            >
+              <span>Last errors ({totalErrorCount})</span>
+            </span>
+          )}
+          {errorsExpanded && displayErrors.length > 0 ? (
+                <div className="index-errors-scroll">
+                  {/* Raw error rows own this list so guidance steps below never
+                      read as raw rows when scoped by test id or assistive tech. */}
+                  <ul data-testid="index-error-list" className="muted text-xs">
+                    {displayErrors.map((detail, index) => {
+                      // Per-row expansion looks up the full error text so the
+                      // toggle survives status polls, while the React key stays
+                      // a short hash plus position so kilobyte-long failures
+                      // never become full-text keys. The test id uses the
+                      // visible position so it stays O(1) and stable.
+                      const expanded = expandedErrors.has(detail);
+                      const long = isLongIndexError(detail);
+                      const visibleText = expanded ? detail : truncateIndexError(detail);
+                      // Truncated previews render as plain text: slicing raw
+                      // markdown at the preview budget can split emphasis,
+                      // code, or link syntax and misrender through MarkdownText,
+                      // so only the expanded full text keeps markdown.
+                      const showPlainPreview = long && !expanded;
+                      return (
+                        <li
+                          key={`index-error-${index}-${hashIndexError(detail)}`}
+                          data-testid={`index-last-error-${index}`}
+                          className="index-error-row"
+                        >
+                          <span className="index-error-icon" aria-hidden="true">
+                            <AlertTriangleIcon size={14} />
+                          </span>
+                          <span
+                            className="index-error-text-wrap"
+                            title={long && !expanded ? detail : undefined}
+                          >
+                            {showPlainPreview ? (
+                              <span className="index-error-text">{visibleText}</span>
+                            ) : (
+                              <MarkdownText
+                                text={visibleText}
+                                className="index-error-text"
+                              />
+                            )}
+                          </span>
+                          {long ? (
+                            <button
+                              type="button"
+                              className="ghost index-error-expand"
+                              aria-expanded={expanded}
+                              onClick={() => {
+                                setExpandedErrors((previous) => {
+                                  const next = new Set(previous);
+                                  if (next.has(detail)) {
+                                    next.delete(detail);
+                                  } else {
+                                    next.add(detail);
+                                  }
+                                  return next;
+                                });
+                              }}
+                            >
+                              <span>{expanded ? "Show less" : "Show more"}</span>
+                            </button>
+                          ) : null}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ) : null}
+              {/* Guided onboarding for the Full Disk Access denial, always visible
+                  even while the rows stay collapsed: macOS
+                  offers no prompt API, so the denial only surfaces at
+                  run time. The button navigates the top frame to the exact
+                  Settings pane, where window.open would be treated as a
+                  blocked popup for this system scheme. The steps name both
+                  grants because macOS attributes the read to the host
+                  process: RuneWeaver.app for the app, the terminal emulator
+                  for rune-weaver serve. The raw denial bullet stays hidden
+                  while this renders — the guidance is its formatted form. */}
+              {showFdaGuidance ? (
+                <div
+                  className="index-fda-guidance"
+                  data-testid="index-fda-guidance"
+                  style={{ marginTop: 8 }}
+                >
+                  <p className="muted text-sm" style={{ marginBottom: 8 }}>
+                    Messages indexing needs Full Disk Access. Grant it to
+                    RuneWeaver.app — or to your terminal emulator (for example
+                    Terminal.app or iTerm2) when you run rune-weaver serve —
+                     then restart and press Run.
+                  </p>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={() => {
+                      window.location.href = FULL_DISK_ACCESS_SETTINGS_URL;
+                    }}
+                  >
+                    <span>Open Full Disk Access Settings</span>
+                  </button>
+                  <ol className="muted text-sm" style={{ marginTop: 8, paddingLeft: 20 }}>
+                    <li>Open System Settings &gt; Privacy &amp; Security &gt; Full Disk Access.</li>
+                    <li>Click + and add RuneWeaver.app — or your terminal emulator (for example Terminal.app or iTerm2) when you run rune-weaver serve.</li>
+                    <li>Toggle the added entry ON and authenticate when prompted.</li>
+                    <li>Quit and restart the app or terminal, then press Run.</li>
+                  </ol>
+                </div>
+              ) : null}
         </div>
       ) : null}
 

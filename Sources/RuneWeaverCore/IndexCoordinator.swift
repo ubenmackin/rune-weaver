@@ -643,8 +643,8 @@ public actor IndexCoordinator {
     private let cancelFlag = IndexCancellationFlag()
     /// Stages currently running, for cancellation propagation.
     ///
-    /// Holds one entry during sequential passes and two during the files plus
-    /// mail overlap so cancellation reaches every in-flight stage. Each stage
+    /// Holds one entry during sequential passes and up to three during the files plus
+    /// mail plus messages overlap so cancellation reaches every in-flight stage. Each stage
     /// keeps its own budget, thermal, and battery gates, so sharing this list
     /// never shares effort accounting.
     private var activeStages: [any IndexSourceStage] = []
@@ -1084,20 +1084,22 @@ private extension IndexCoordinator {
         }.map(\.element)
     }
 
-    /// Runs every enabled stage, overlapping files plus mail and sequencing the rest.
+    /// Runs every enabled stage, overlapping files plus mail plus messages and sequencing the rest.
     ///
-    /// Files waits on mailbox latency while mail waits on the network, so the
-    /// pair runs together in a task group and finishes near the slower peer
-    /// instead of the serial sum. Messages then vision follow sequentially to
-    /// keep chat-database isolation and vision enrichment deterministic, with
-    /// canonical order preserved everywhere else. One totals per concurrent
-    /// stage feeds a single cumulative live frame so polling surfaces stay
-    /// monotonic; warnings plus errors stay attributed per source. A failing
-    /// stage is counted and the pass continues, and cancellation joins every
-    /// active stage within one batch with committed work kept for resume.
-    /// Budgets stay per source because each stage builds its own indexer from
-    /// the shared policy snapshot, and thermal plus battery gates stay inside
-    /// those indexers untouched.
+    /// CPU-bound files, network-bound mail, and light local messages wait on
+    /// different resources, so the trio runs together in a task group and
+    /// finishes near the slowest peer instead of the serial sum. Vision plus
+    /// any later stage follows sequentially in canonical order to keep
+    /// enrichment deterministic, and peers join in canonical order regardless
+    /// of completion order so watermarks match the serial pass exactly. One
+    /// totals per concurrent peer feeds a single cumulative live frame under
+    /// the generic extracting phase so polling surfaces stay monotonic;
+    /// warnings plus errors stay attributed per source. A failing peer is
+    /// counted and the pass continues, and cancellation joins every active
+    /// peer within one batch with committed work kept for resume. Budgets stay
+    /// per source because each peer builds its own indexer from the shared run
+    /// policy snapshot, and thermal plus battery gates stay inside those
+    /// indexers untouched.
     /// - Parameters:
     ///   - totals: Running counts folded across stages.
     ///   - startedAt: Instant the run began.
@@ -1107,9 +1109,9 @@ private extension IndexCoordinator {
     /// - Returns: Whether any stage produced work or a counted failure.
     func runEnabledStages(totals: inout Totals, startedAt: Date, policy: IndexConfig) async -> Bool {
         let enabled = orderedStages.filter(\.isEnabled)
-        let hasFiles = enabled.contains(where: { $0.kind == .files })
-        let hasMail = enabled.contains(where: { $0.kind == .mail })
-        guard hasFiles, hasMail else {
+        let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail || $0.kind == .messages }
+        let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail && $0.kind != .messages }
+        guard overlapStages.count >= 2 else {
             var ranAny = false
             for stage in enabled {
                 if cancelFlag.isSet || Task.isCancelled {
@@ -1123,11 +1125,9 @@ private extension IndexCoordinator {
             }
             return ranAny
         }
-        let overlapStages = enabled.filter { $0.kind == .files || $0.kind == .mail }
-        let remainder = enabled.filter { $0.kind != .files && $0.kind != .mail }
         var ranAny = false
         // The shared snapshot arrives as `policy` from the run entry, so a
-        // save landing mid-overlap cannot split the pair across policies;
+        // save landing mid-overlap cannot split the trio across policies;
         // the next run picks it up instead.
         let runPolicy = policy
         let baseScanned = totals.scanned
@@ -1140,13 +1140,13 @@ private extension IndexCoordinator {
             overlapScanned[index] = 0
             overlapIndexed[index] = 0
         }
-        // Register both upfront so a cancel racing stage start still reaches
+        // Register every peer upfront so a cancel racing stage start still reaches
         // each peer; removal below pops exactly the appended slice so two
         // stages sharing one kind never remove each other.
         let overlapBaseCount = activeStages.count
         activeStages.append(contentsOf: overlapStages)
         livePhase = .extracting
-        // Nil stage marks the mixed pair: the single cumulative frame carries
+        // Nil stage marks the mixed trio: the single cumulative frame carries
         // summed counts rather than attributing to one peer.
         liveStage = nil
         await emit(phase: .extracting, totals: totals, startedAt: startedAt, force: true)
@@ -1281,18 +1281,18 @@ private extension IndexCoordinator {
 
     /// Executes one overlapped stage against a shared run snapshot.
     ///
-    /// Owns exactly one stage's totals so the pair never shares a counter:
-    /// files and mail budgets stay isolated because each indexer enforces its
-    /// own cap from the same snapshot. Progress funnels through the summed
+    /// Owns exactly one stage's totals so peers never share a counter:
+    /// files, mail, and messages budgets stay isolated because each indexer
+    /// enforces its own cap from the same snapshot. Progress funnels through the summed
     /// observer keyed by the stage's index in the overlap batch, so duplicate
     /// kinds never overwrite each other's high-water marks. The caller in
     /// `runEnabledStages` is the only place that merges peers. Active-stage
     /// registration stays with the caller so a cancel racing stage start
-    /// still reaches both peers.
+    /// still reaches every peer.
     /// - Parameters:
     ///   - stage: Overlapped source stage to run.
     ///   - index: Position in the overlap batch, owning the high-water slot.
-    ///   - policy: Shared run snapshot for the pair.
+    ///   - policy: Shared run snapshot for the overlap batch.
     ///   - startedAt: Instant the run began.
     /// - Returns: Whether the stage contributed work plus its per-stage totals.
     func executeStage(
