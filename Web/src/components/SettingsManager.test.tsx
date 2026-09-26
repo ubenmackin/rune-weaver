@@ -3,7 +3,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import SettingsManager from "./SettingsManager";
+import SettingsManager, { SECRET_STATUS_CHUNK_SIZE } from "./SettingsManager";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
 
@@ -2089,6 +2089,16 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Browser & Web")).toBeDefined();
     });
     expect(screen.getByText("browser.navigate")).toBeDefined();
+  });
+});
+
+describe("secret status chunk contract", () => {
+  it("pins the badge-probe chunk size to the server status cap", () => {
+    // Single cross-language contract: the server owns `maxSecretStatusKeys` in
+    // `Sources/RuneWeaverServer/ServerSettingsRoutes.swift` and this mirror
+    // must stay equal at 500 so badge-probe chunks never trip the status gate;
+    // update both together.
+    expect(SECRET_STATUS_CHUNK_SIZE).toBe(500);
   });
 });
 

@@ -235,7 +235,7 @@ final class ChatTurnAuditProgress: Sendable {
             case let .turnTokens(_, _, turnTotalTokens, _):
                 guard turnTotalTokens >= 0 else { break }
                 locked.totalTokens = turnTotalTokens
-            case .warning, .toolProgress, .approval:
+            case .warning, .toolProgress, .approval, .reasoningDelta:
                 break
             }
         }
@@ -423,6 +423,8 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
         )
     case let .textDelta(delta):
         encodeWSFrame(WSStreamDelta(delta: delta, sessionID: sessionID))
+    case let .reasoningDelta(delta):
+        encodeWSFrame(WSStreamReasoningDelta(delta: delta, sessionID: sessionID))
     case let .warning(message):
         // Degraded-tool notices stream as warning frames so clients surface skips
         // mid-turn without failing the turn; the terminal done frame repeats them.

@@ -561,6 +561,8 @@ public struct BrowserNavigateResult: Sendable, Codable, Equatable {
 public struct LLMResponse: Sendable, Equatable {
     /// Incremental text for this chunk.
     public let delta: String
+    /// Incremental reasoning/thought text for this chunk.
+    public let reasoningDelta: String
     /// Whether this chunk ends the response.
     public let isFinished: Bool
     /// Failure detail when the stream terminated with an error. Nil on success.
@@ -575,12 +577,14 @@ public struct LLMResponse: Sendable, Equatable {
     /// Creates a response chunk.
     public init(
         delta: String,
+        reasoningDelta: String = "",
         isFinished: Bool = false,
         errorMessage: String? = nil,
         totalTokens: Int? = nil,
         toolCalls: [ToolInput] = []
     ) {
         self.delta = delta
+        self.reasoningDelta = reasoningDelta
         self.isFinished = isFinished
         self.errorMessage = errorMessage
         self.totalTokens = totalTokens

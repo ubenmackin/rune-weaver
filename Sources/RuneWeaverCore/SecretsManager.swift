@@ -261,6 +261,28 @@ public actor SecretsManager {
         return keys
     }
 
+    /// Maximum secret key characters accepted as a surrogate name.
+    ///
+    /// Bounds Keychain and memory pressure from unbounded key strings.
+    /// Single source for the length rule so issuance and the settings
+    /// secrets routes agree on one bound without duplicating the number.
+    public static let maxSurrogateKeyLength = 256
+
+    /// Whether a raw secret key is usable as a surrogate name.
+    ///
+    /// Single owner for the settings secrets shape: trims surrounding
+    /// whitespace, then enforces a non-empty key within the length bound
+    /// using only secret-name characters. Key names never carry secret
+    /// bytes, so callers report only the shape rule on failure.
+    /// - Parameter rawKey: Untrimmed candidate key.
+    /// - Returns: True when the trimmed key is non-empty, within bounds,
+    ///   and holds only name characters.
+    public static func isValidSurrogateKey(_ rawKey: String) -> Bool {
+        let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, key.count <= maxSurrogateKeyLength else { return false }
+        return key.allSatisfy { isSurrogateKeyChar($0) }
+    }
+
     /// Whether a character may appear in a surrogate key name.
     /// - Parameter character: Candidate key character.
     /// - Returns: True for secret-name characters; everything else ends the key.

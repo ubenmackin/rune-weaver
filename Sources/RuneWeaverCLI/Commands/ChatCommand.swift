@@ -717,6 +717,11 @@ private func drainChunkedStream(
             text += delta
             print(delta, terminator: "")
             fflush(stdout)
+        case let .reasoningDelta(thought):
+            // Streamed thoughts render dimmed like WS/Web but stay out of the
+            // accumulated text so chain-of-thought never persists as the answer.
+            print(TerminalStyle.dim(thought), terminator: "")
+            fflush(stdout)
         case let .toolCall(call):
             calls.append(call)
         case let .done(meta):

@@ -61,10 +61,14 @@ public struct EmailSearchTool: Tool, Sendable {
     public func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
         // Smart raw pre-check plus decoded CR/LF validation before ANY account lookup or credential
         // resolution so invalid input reports "Invalid search query" even when the password is
-        // missing.
+        // missing. The encoded pre-check uses the same validation case and copy as the decoded
+        // path below so one condition never surfaces as two distinct errors. Gateway validation
+        // may still surface as either the current validation case or a legacy bridge case with
+        // identical copy, so the chat path below surfaces gateway failures by localized copy
+        // rather than matching on case and stays compatible with both without branching.
         if EmailIMAPValidation.containsEncodedCRLF(in: input.argumentsJSON) {
             return .failure(
-                EmailIMAPError.bridgeFailed("Invalid search query: query must not contain CR or LF").localizedDescription,
+                EmailIMAPError.validationFailed("Invalid search query: query must not contain CR or LF").localizedDescription,
                 callID: input.callID
             )
         }
@@ -119,6 +123,8 @@ public struct EmailSearchTool: Tool, Sendable {
         } catch {
             return .failure(error.localizedDescription, callID: input.callID)
         }
+        // Gateway validation surfaces by localized copy so both the current validation case and
+        // any legacy bridge case with identical copy read the same here; no case matching needed.
         do {
             if let requested = args.trimmedMailbox {
                 return try await singleMailboxOutput(

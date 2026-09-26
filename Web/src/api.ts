@@ -73,7 +73,8 @@ export interface ToolAction {
 // state stay as back-compat summaries while rendering walks this list in order.
 export type ChatTextSegment = { kind: "text"; text: string };
 export type ChatToolsSegment = { kind: "tools"; actions: ToolAction[] };
-export type ChatSegment = ChatTextSegment | ChatToolsSegment;
+export type ChatThoughtSegment = { kind: "thought"; text: string };
+export type ChatSegment = ChatTextSegment | ChatToolsSegment | ChatThoughtSegment;
 
 // Normalizes a round hint to a comparable index: finite numbers floor to an
 // integer round, while absent or drifted shapes degrade to undefined so ordering
@@ -3269,4 +3270,36 @@ export function installMarketplacePlugin(
     body: JSON.stringify(request),
   });
 }
+
+export interface SecretStatusResponse {
+  status: Record<string, boolean>;
+}
+
+export function storeSecret(key: string, secret: string): Promise<void> {
+  return fetchJson<void>("/settings/secrets", {
+    method: "POST",
+    body: JSON.stringify({ key, secret }),
+  });
+}
+
+export async function checkSecretStatus(
+  keys: string[],
+): Promise<Record<string, boolean>> {
+  if (keys.length === 0) return {};
+  const response = await fetchJson<SecretStatusResponse>(
+    "/settings/secrets/status",
+    {
+      method: "POST",
+      body: JSON.stringify({ keys }),
+    },
+  );
+  return response?.status ?? {};
+}
+
+export function deleteSecret(key: string): Promise<void> {
+  return fetchJson<void>(`/settings/secrets/${encodeURIComponent(key)}`, {
+    method: "DELETE",
+  });
+}
+
 

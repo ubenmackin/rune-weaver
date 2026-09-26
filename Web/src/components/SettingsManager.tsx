@@ -65,6 +65,8 @@ import {
   type SettingsResponse,
   type PluginSummary,
   type ToolInfo,
+  checkSecretStatus,
+  storeSecret,
 } from "../api";
 import {
   AlertTriangleIcon,
@@ -72,8 +74,11 @@ import {
   ChatIcon,
   CheckIcon,
   CloseIcon,
+  EyeIcon,
+  EyeOffIcon,
   FolderIcon,
   GlobeIcon,
+  KeyIcon,
   MailIcon,
   MemoryIcon,
   MenuIcon,
@@ -366,6 +371,168 @@ function trimBrowserText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+interface StoreSecretModalProps {
+  isOpen: boolean;
+  secretKey: string;
+  title: string;
+  isUpdate: boolean;
+  onClose: () => void;
+  onSuccess: (key: string) => void;
+}
+
+function StoreSecretModal({
+  isOpen,
+  secretKey,
+  title,
+  isUpdate,
+  onClose,
+  onSuccess,
+}: StoreSecretModalProps) {
+  const [secretValue, setSecretValue] = useState("");
+  const [showPlaintext, setShowPlaintext] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (isOpen) {
+      setSecretValue("");
+      setShowPlaintext(false);
+      setError(null);
+      const timer = setTimeout(() => inputRef.current?.focus(), 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (secretValue.trim().length === 0) {
+      setError("Please enter a secret value.");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await storeSecret(secretKey, secretValue);
+      onSuccess(secretKey);
+      onClose();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to store secret in Keychain.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal label={title} onClose={submitting ? () => {} : onClose} containerClassName="modal-container store-secret-modal">
+      <form onSubmit={handleSubmit}>
+        <div className="modal-header">
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <KeyIcon size={18} style={{ color: "#38bdf8" }} />
+            <h3>{title}</h3>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onClose}
+            disabled={submitting}
+            aria-label="Close"
+          >
+            <CloseIcon size={16} />
+          </button>
+        </div>
+
+        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+          <p style={{ margin: 0, fontSize: "13px", color: "var(--text-muted)", lineHeight: 1.5 }}>
+            This secret will be stored directly into your macOS Keychain under service <code>com.runeweaver.secrets</code>. It is never written to disk files, database, or browser storage.
+          </p>
+
+          <div className="form-group">
+            <label style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: "4px", display: "block" }}>
+              Keychain Key / Account
+            </label>
+            <div style={{ padding: "8px 12px", background: "var(--bg-main, #0f0f13)", borderRadius: "6px", fontFamily: "monospace", fontSize: "13px", border: "1px solid var(--border-color, #272733)" }}>
+              {secretKey}
+            </div>
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="secret-value-input" style={{ fontSize: "12px", fontWeight: 600, marginBottom: "4px", display: "block" }}>
+              {isUpdate ? "New Secret / Password" : "Secret / Password"}
+            </label>
+            <div style={{ display: "flex", gap: "8px", position: "relative", alignItems: "center" }}>
+              <input
+                ref={inputRef}
+                id="secret-value-input"
+                type={showPlaintext ? "text" : "password"}
+                className="input-field"
+                value={secretValue}
+                onChange={(e) => setSecretValue(e.target.value)}
+                placeholder="Enter secret..."
+                disabled={submitting}
+                required
+                style={{ flex: 1, paddingRight: "40px" }}
+              />
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setShowPlaintext((prev) => !prev)}
+                title={showPlaintext ? "Hide secret" : "Show secret"}
+                style={{ position: "absolute", right: "6px", background: "transparent", border: "none" }}
+              >
+                {showPlaintext ? <EyeOffIcon size={16} /> : <EyeIcon size={16} />}
+              </button>
+            </div>
+          </div>
+
+          {error && (
+            <div
+              style={{
+                padding: "8px 12px",
+                background: "rgba(239, 68, 68, 0.12)",
+                border: "1px solid rgba(239, 68, 68, 0.35)",
+                borderRadius: "6px",
+                color: "#ef4444",
+                fontSize: "13px",
+              }}
+            >
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
+          <button
+            type="button"
+            className="ghost"
+            onClick={onClose}
+            disabled={submitting}
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            className="primary"
+            disabled={submitting || secretValue.trim().length === 0}
+          >
+            {submitting ? "Saving…" : isUpdate ? "Update in Keychain" : "Save to Keychain"}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// Badge-probe chunk size pinned to the server status cap (`maxSecretStatusKeys`
+// in `Sources/RuneWeaverServer/ServerSettingsRoutes.swift`). The server owns
+// the bound; this mirror must stay equal at 500 distinct keys so the email
+// plus provider plus media union merges chunks instead of tripping a 400 when
+// the list grows. Both sides pin 500 (see `SettingsRouteTests` plus the
+// dashboard contract test); update both together.
+export const SECRET_STATUS_CHUNK_SIZE = 500;
+
 export default function SettingsManager() {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>("providers");
@@ -603,6 +770,33 @@ export default function SettingsManager() {
     name: string;
   } | null>(null);
 
+  // Keychain secret status and store/update modal
+  const [secretStatus, setSecretStatus] = useState<Record<string, boolean>>({});
+  const [secretModal, setSecretModal] = useState<{
+    isOpen: boolean;
+    secretKey: string;
+    title: string;
+    isUpdate: boolean;
+  } | null>(null);
+
+  const handleOpenStoreSecretModal = (
+    secretKey: string,
+    label: string,
+    isUpdate: boolean
+  ) => {
+    setSecretModal({
+      isOpen: true,
+      secretKey,
+      title: isUpdate ? `Update ${label} in Keychain` : `Store ${label} to Keychain`,
+      isUpdate,
+    });
+  };
+
+  const handleSecretSaved = (key: string) => {
+    setSecretStatus((prev) => ({ ...prev, [key]: true }));
+    pushSuccessToast(`Stored secret for ${key} into macOS Keychain.`);
+  };
+
   // Media configuration state (Sonarr & Radarr)
   const [sonarrEnabled, setSonarrEnabled] = useState(true);
   const [sonarrUrl, setSonarrUrl] = useState("");
@@ -615,6 +809,78 @@ export default function SettingsManager() {
   const [radarrApiKeyEnv, setRadarrApiKeyEnv] = useState("RADARR_API_KEY");
   const [radarrDefaultQuality, setRadarrDefaultQuality] = useState("");
   const [radarrDefaultRoot, setRadarrDefaultRoot] = useState("");
+
+  // Single probe list for every Keychain-backed name so the status map drives
+  // all badges: email password envs, provider api_key_envs, and the Sonarr /
+  // Radarr apiKeyEnv names. Media names come from the live form plus the last
+  // loaded settings so a custom name stays probed before and after populate.
+  const relevantSecretKeys = React.useMemo(() => {
+    const keys = new Set<string>();
+    for (const item of emailAccountsList) {
+      const name = item.account.name?.trim();
+      if (name) {
+        keys.add(getEmailPasswordEnv(name));
+      }
+    }
+    for (const item of providersList) {
+      const keyEnv = (item.config.api_key_env || item.config.apiKeyEnv || "").trim();
+      if (keyEnv) {
+        keys.add(keyEnv);
+      }
+    }
+    const sonarrEnv = sonarrApiKeyEnv.trim();
+    if (sonarrEnv) {
+      keys.add(sonarrEnv);
+    }
+    const radarrEnv = radarrApiKeyEnv.trim();
+    if (radarrEnv) {
+      keys.add(radarrEnv);
+    }
+    const storedSonarrEnv = (
+      settings?.media?.sonarr?.api_key_env ||
+      settings?.media?.sonarr?.apiKeyEnv ||
+      ""
+    ).trim();
+    if (storedSonarrEnv) {
+      keys.add(storedSonarrEnv);
+    }
+    const storedRadarrEnv = (
+      settings?.media?.radarr?.api_key_env ||
+      settings?.media?.radarr?.apiKeyEnv ||
+      ""
+    ).trim();
+    if (storedRadarrEnv) {
+      keys.add(storedRadarrEnv);
+    }
+    return Array.from(keys);
+  }, [emailAccountsList, providersList, sonarrApiKeyEnv, radarrApiKeyEnv, settings]);
+
+  // Probes Keychain presence in server-sized chunks so the badge map stays
+  // complete even when the email plus provider plus media union outgrows one
+  // status request; chunks merge into one map before state lands.
+  const refreshSecretStatus = useCallback(async (keysToQuery?: string[]) => {
+    const keys = keysToQuery ?? relevantSecretKeys;
+    if (keys.length === 0) return;
+    try {
+      const merged: Record<string, boolean> = {};
+      for (let i = 0; i < keys.length; i += SECRET_STATUS_CHUNK_SIZE) {
+        const chunk = keys.slice(i, i + SECRET_STATUS_CHUNK_SIZE);
+        const res = await checkSecretStatus(chunk);
+        if (res) {
+          Object.assign(merged, res);
+        }
+      }
+      setSecretStatus((prev) => ({ ...prev, ...merged }));
+    } catch {
+      // Ignore network errors on secret check
+    }
+  }, [relevantSecretKeys]);
+
+  useEffect(() => {
+    if (relevantSecretKeys.length > 0) {
+      void refreshSecretStatus();
+    }
+  }, [relevantSecretKeys, refreshSecretStatus]);
 
   const [configuringToolName, setConfiguringToolName] = useState<string | null>(null);
   const [toolSearchQuery, setToolSearchQuery] = useState("");
@@ -3050,7 +3316,36 @@ export default function SettingsManager() {
                       </div>
 
                       <div className="form-group">
-                        <label htmlFor={`keyenv-${item.id}`}>API Key Env Var</label>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
+                          <label htmlFor={`keyenv-${item.id}`}>API Key Env Var</label>
+                          {(() => {
+                            const keyEnv = (entry.api_key_env || entry.apiKeyEnv || "").trim();
+                            if (!keyEnv) return null;
+                            const isStored = !!secretStatus[keyEnv];
+                            return (
+                              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                {isStored ? (
+                                  <span className="keychain-status-badge stored">
+                                    <CheckIcon size={12} /> Stored in Keychain
+                                  </span>
+                                ) : (
+                                  <span className="keychain-status-badge missing">
+                                    Not Set in Keychain
+                                  </span>
+                                )}
+                                <button
+                                  type="button"
+                                  className="keychain-action-btn"
+                                  onClick={() => handleOpenStoreSecretModal(keyEnv, `API Key for ${item.name || "Provider"}`, isStored)}
+                                  title={isStored ? `Update secret for ${keyEnv}` : `Store secret for ${keyEnv} in Keychain`}
+                                >
+                                  <KeyIcon size={12} />
+                                  <span>{isStored ? "Update Key" : "Store Key"}</span>
+                                </button>
+                              </div>
+                            );
+                          })()}
+                        </div>
                         <input
                           id={`keyenv-${item.id}`}
                           type="text"
@@ -4996,9 +5291,45 @@ export default function SettingsManager() {
                         </div>
                       </div>
 
-                      <div className="email-env-hint">
-                        <span>Password resolved via SecretsManager from:</span>
-                        <code>{passwordEnv}</code>
+                      <div className="email-env-hint" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }}>
+                        <div>
+                          <span>Password resolved via SecretsManager from: </span>
+                          <code>{passwordEnv}</code>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                          {secretStatus[passwordEnv] ? (
+                            <span className="keychain-status-badge stored">
+                              <CheckIcon size={12} /> Stored in Keychain
+                            </span>
+                          ) : (
+                            <span className="keychain-status-badge missing">
+                              Not Set in Keychain
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="keychain-action-btn"
+                            onClick={() =>
+                              handleOpenStoreSecretModal(
+                                passwordEnv,
+                                `Password for ${acc.name || "Email Account"}`,
+                                !!secretStatus[passwordEnv]
+                              )
+                            }
+                            title={
+                              secretStatus[passwordEnv]
+                                ? `Update password for ${acc.name} in Keychain`
+                                : `Store password for ${acc.name} in Keychain`
+                            }
+                          >
+                            <KeyIcon size={12} />
+                            <span>
+                              {secretStatus[passwordEnv]
+                                ? "Update Password in Keychain"
+                                : "Store Password to Keychain"}
+                            </span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -5742,7 +6073,36 @@ export default function SettingsManager() {
               </div>
 
               <div className="form-group" style={{ marginBottom: "10px" }}>
-                <label htmlFor="sonarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
+                  <label htmlFor="sonarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                  {(() => {
+                    const keyEnv = sonarrApiKeyEnv.trim();
+                    if (!keyEnv) return null;
+                    const isStored = !!secretStatus[keyEnv];
+                    return (
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        {isStored ? (
+                          <span className="keychain-status-badge stored">
+                            <CheckIcon size={12} /> Stored in Keychain
+                          </span>
+                        ) : (
+                          <span className="keychain-status-badge missing">
+                            Not Set in Keychain
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="keychain-action-btn"
+                          onClick={() => handleOpenStoreSecretModal(keyEnv, "Sonarr API Key", isStored)}
+                          title={isStored ? `Update secret for ${keyEnv}` : `Store secret for ${keyEnv} in Keychain`}
+                        >
+                          <KeyIcon size={12} />
+                          <span>{isStored ? "Update Key" : "Store Key"}</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
                 <input
                   id="sonarr-key-env"
                   type="text"
@@ -5808,7 +6168,36 @@ export default function SettingsManager() {
               </div>
 
               <div className="form-group" style={{ marginBottom: "10px" }}>
-                <label htmlFor="radarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px", flexWrap: "wrap", gap: "6px" }}>
+                  <label htmlFor="radarr-key-env" style={{ fontSize: "0.82rem" }}>API Key Environment Variable / Keychain Key</label>
+                  {(() => {
+                    const keyEnv = radarrApiKeyEnv.trim();
+                    if (!keyEnv) return null;
+                    const isStored = !!secretStatus[keyEnv];
+                    return (
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                        {isStored ? (
+                          <span className="keychain-status-badge stored">
+                            <CheckIcon size={12} /> Stored in Keychain
+                          </span>
+                        ) : (
+                          <span className="keychain-status-badge missing">
+                            Not Set in Keychain
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="keychain-action-btn"
+                          onClick={() => handleOpenStoreSecretModal(keyEnv, "Radarr API Key", isStored)}
+                          title={isStored ? `Update secret for ${keyEnv}` : `Store secret for ${keyEnv} in Keychain`}
+                        >
+                          <KeyIcon size={12} />
+                          <span>{isStored ? "Update Key" : "Store Key"}</span>
+                        </button>
+                      </div>
+                    );
+                  })()}
+                </div>
                 <input
                   id="radarr-key-env"
                   type="text"
@@ -6041,6 +6430,17 @@ export default function SettingsManager() {
           </div>
         </Modal>
       ) : null}
+
+      {secretModal && secretModal.isOpen && (
+        <StoreSecretModal
+          isOpen={secretModal.isOpen}
+          secretKey={secretModal.secretKey}
+          title={secretModal.title}
+          isUpdate={secretModal.isUpdate}
+          onClose={() => setSecretModal(null)}
+          onSuccess={handleSecretSaved}
+        />
+      )}
     </section>
   );
 }

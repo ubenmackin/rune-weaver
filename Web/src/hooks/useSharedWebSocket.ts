@@ -20,6 +20,12 @@ export interface WSStreamDelta {
   sessionID?: string;
 }
 
+export interface WSStreamReasoningDelta {
+  type: "reasoning_delta";
+  delta: string;
+  sessionID?: string;
+}
+
 export interface WSToolStartFrame {
   type: "tool_start";
   toolName: string;
@@ -188,6 +194,7 @@ export interface WSGenericFrame {
 // shapes are handled via an explicit `WSGenericFrame` cast instead.
 export type WSIncomingFrame =
   | WSStreamDelta
+  | WSStreamReasoningDelta
   | WSToolStartFrame
   | WSToolEndFrame
   | WSStreamDone
@@ -240,6 +247,7 @@ function isWSIncomingFrame(value: unknown): value is WSIncomingFrame {
   if (typeof value.type !== "string") return false;
   switch (value.type) {
     case "delta":
+    case "reasoning_delta":
       return typeof value.delta === "string";
     case "tool_start":
       return (

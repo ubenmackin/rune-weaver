@@ -9,6 +9,12 @@ public enum EmailIMAPError: Error, Sendable, Equatable {
     case unknownAccount(name: String, available: [String])
     /// The bridge subprocess reported a failure.
     case bridgeFailed(String)
+    /// A caller-side argument failed fail-closed validation before any dial.
+    ///
+    /// Dedicated case so session-pool eviction matches on type instead of
+    /// string-prefixing `bridgeFailed` details; a healthy connection stays
+    /// pooled when validation rejects the arguments.
+    case validationFailed(String)
     /// The bridge output could not be decoded.
     case decodeFailed(String)
     /// `python3` could not be launched.
@@ -26,6 +32,8 @@ extension EmailIMAPError: LocalizedError {
             return "Unknown email account '\(name)' (available: \(available.sorted().joined(separator: ", ")))"
         case let .bridgeFailed(detail):
             return detail
+        case let .validationFailed(detail):
+            return detail
         case let .decodeFailed(detail):
             return "Could not decode IMAP response: \(detail)"
         case let .pythonUnavailable(detail):
@@ -38,10 +46,10 @@ extension EmailIMAPError: LocalizedError {
 public enum EmailIMAPValidation: Sendable {
     /// Validates a search query, rejecting CR/LF injection.
     /// - Parameter query: Free-text query to check.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when CR/LF is present.
+    /// - Throws: `EmailIMAPError.validationFailed` when CR/LF is present.
     public static func validateSearchQuery(_ query: String) throws {
         if query.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
-            throw EmailIMAPError.bridgeFailed("Invalid search query: query must not contain CR or LF")
+            throw EmailIMAPError.validationFailed("Invalid search query: query must not contain CR or LF")
         }
     }
 
@@ -106,33 +114,33 @@ public enum EmailIMAPValidation: Sendable {
 
     /// Validates a message id against strict UID syntax.
     /// - Parameter messageID: Candidate id (trimmed before checking).
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the id is not UID syntax.
+    /// - Throws: `EmailIMAPError.validationFailed` when the id is not UID syntax.
     public static func validateMessageID(_ messageID: String) throws {
         let trimmed = messageID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidMessageID(trimmed) else {
-            throw EmailIMAPError.bridgeFailed("Invalid message id")
+            throw EmailIMAPError.validationFailed("Invalid message id")
         }
     }
 
     /// Validates an attachment index, rejecting negative positions.
     /// - Parameter index: Zero-based position into the attachment list.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the index is negative.
+    /// - Throws: `EmailIMAPError.validationFailed` when the index is negative.
     public static func validateAttachmentIndex(_ index: Int) throws {
         guard index >= 0 else {
-            throw EmailIMAPError.bridgeFailed("Invalid attachment index")
+            throw EmailIMAPError.validationFailed("Invalid attachment index")
         }
     }
 
     /// Validates a mailbox name, rejecting CR/LF injection and blank names.
     /// - Parameter mailbox: Trimmed candidate mailbox name.
-    /// - Throws: `EmailIMAPError.bridgeFailed` when the name is empty or holds CR/LF.
+    /// - Throws: `EmailIMAPError.validationFailed` when the name is empty or holds CR/LF.
     public static func validateMailbox(_ mailbox: String) throws {
         if mailbox.unicodeScalars.contains(where: { $0.value == 13 || $0.value == 10 }) {
-            throw EmailIMAPError.bridgeFailed("Invalid mailbox: mailbox must not contain CR or LF")
+            throw EmailIMAPError.validationFailed("Invalid mailbox: mailbox must not contain CR or LF")
         }
         let trimmed = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            throw EmailIMAPError.bridgeFailed("Invalid mailbox: mailbox must not be empty")
+            throw EmailIMAPError.validationFailed("Invalid mailbox: mailbox must not be empty")
         }
     }
 }
@@ -561,7 +569,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         // Reject out-of-range limits before touching the subprocess so an unchecked
         // value can never reach the Python slice and widen the result window.
         guard (1 ... EmailSearchArgs.maxLimit).contains(limit) else {
-            throw EmailIMAPError.bridgeFailed("Invalid search limit: limit must be 1...\(EmailSearchArgs.maxLimit)")
+            throw EmailIMAPError.validationFailed("Invalid search limit: limit must be 1...\(EmailSearchArgs.maxLimit)")
         }
         try EmailIMAPValidation.validateSearchQuery(query)
         try EmailIMAPValidation.validateMailbox(mailbox)

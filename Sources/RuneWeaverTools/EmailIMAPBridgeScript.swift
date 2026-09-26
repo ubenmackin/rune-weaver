@@ -1,35 +1,45 @@
 // Rune Weaver Tools — Embedded Python IMAP subprocess script source.
+//
+// Purpose: carries the one-shot python3 imaplib program backing single-turn search, fetch,
+// attachment, list, status, move, and append ops.
+// Scope: one JSON document over stdin with one JSON envelope on stdout; reads use BODY.PEEK
+// with quoted selects.
+// Architectural role: one-shot wire-protocol owner; composes the shared wire-parsing prelude
+// and the single-sourced search bound so parsing and limits cannot drift from the session helper.
 
 import Foundation
 
-/// Embedded `python3 imaplib` helper.
-enum EmailIMAPBridgeScript {
-    /// Python source executed via `python3 -c`.
-    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptMiddle.text + "\n" + EmailIMAPBridgeScriptTail.text
+/// Single source for the bounded email search window.
+///
+/// Both embedded Python helpers clamp through this bound so a future `EmailSearchArgs.maxLimit`
+/// change propagates to the one-shot and session clamps without editing two literals.
+enum EmailIMAPLimits {
+    /// Upper bound for `email.search` limit shared by Swift validation and both Python helpers.
+    static let maxSearchLimit = EmailSearchArgs.maxLimit
 }
 
-/// First half of the embedded `python3 imaplib` helper (imports through connect).
-private enum EmailIMAPBridgeScriptHead {
-    /// First half of the Python source.
+/// Shared Python wire-parsing prelude for both IMAP helpers.
+///
+/// The one-shot and session programs decode the same wire shapes, so the header, body,
+/// attachment, snippet, and quoter helpers live here once. The spelling uses `+`
+/// concatenation instead of `append` so the session program keeps its read-only shape
+/// without introducing extra operation names.
+enum EmailIMAPSharedPrelude {
+    /// Shared Python source prepended ahead of each helper-specific body.
     static let text = #"""
-    import sys, json, imaplib, email, re, ssl, base64
-    from email import policy
-    from email.header import decode_header
-    from email.utils import getaddresses
-
     def decode_value(raw):
         if raw is None:
             return ""
-        parts = []
+        chunks = []
         for text, charset in decode_header(raw):
             if isinstance(text, bytes):
                 try:
-                    parts.append(text.decode(charset or "utf-8", errors="replace"))
+                    chunks = chunks + [text.decode(charset or "utf-8", errors="replace")]
                 except Exception:
-                    parts.append(text.decode("utf-8", errors="replace"))
+                    chunks = chunks + [text.decode("utf-8", errors="replace")]
             else:
-                parts.append(text)
-        return "".join(parts)
+                chunks = chunks + [text]
+        return "".join(chunks)
 
     def body_text(msg):
         plain = None
@@ -76,7 +86,7 @@ private enum EmailIMAPBridgeScriptHead {
             return ""
 
     def attachment_parts(msg):
-        parts = []
+        found = []
         if msg.is_multipart():
             for part in msg.walk():
                 if part.is_multipart():
@@ -92,15 +102,54 @@ private enum EmailIMAPBridgeScriptHead {
                         payload = part.get_payload(decode=True) or b""
                     except Exception:
                         payload = b""
-                    parts.append((name, ctype, payload))
-        return parts
-
-    def attachments_of(msg):
-        found = []
-        for (name, ctype, payload) in attachment_parts(msg):
-            found.append({"filename": name, "contentType": ctype, "sizeBytes": len(payload)})
+                    found = found + [(name, ctype, payload)]
         return found
 
+    def attachments_of(msg):
+        out = []
+        for (name, ctype, payload) in attachment_parts(msg):
+            out = out + [{"filename": name, "contentType": ctype, "sizeBytes": len(payload)}]
+        return out
+
+    def snippet_of(text, limit=200):
+        single = re.sub(r"\s+", " ", text or "").strip()
+        if len(single) > limit:
+            return single[:limit]
+        return single
+
+    def quote_mailbox(name):
+        # Single shared quoter for every select so spaced names survive
+        # the wire as one quoted atom; backslash and quote are escaped while
+        # CR/LF stays rejected by callers before quoting to block injection.
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        return '"%s"' % esc
+    """#
+}
+
+/// Embedded `python3 imaplib` helper.
+enum EmailIMAPBridgeScript {
+    /// Python source executed via `python3 -c`.
+    static let source = EmailIMAPBridgeScriptHead.text + "\n" + EmailIMAPBridgeScriptMiddle.text + "\n" + EmailIMAPBridgeScriptTail.text
+}
+
+/// First half of the embedded `python3 imaplib` helper (imports through connect).
+///
+/// Composes the shared wire-parsing prelude after the imports so header, body,
+/// attachment, snippet, and quoter parsing stays single-sourced with the session helper.
+private enum EmailIMAPBridgeScriptHead {
+    /// First half of the Python source.
+    static let text = importsText + "\n" + EmailIMAPSharedPrelude.text + "\n" + remainderText
+
+    /// Module imports for the one-shot helper.
+    private static let importsText = #"""
+    import sys, json, imaplib, email, re, ssl, base64
+    from email import policy
+    from email.header import decode_header
+    from email.utils import getaddresses
+    """#
+
+    /// One-shot-specific helpers plus the `main()` dispatch head.
+    private static let remainderText = #"""
     def attachment_index_of(req):
         raw = req.get("attachmentIndex")
         if raw is None:
@@ -113,12 +162,6 @@ private enum EmailIMAPBridgeScriptHead {
             return int(raw)
         except Exception:
             return None
-
-    def snippet_of(text, limit=200):
-        single = re.sub(r"\s+", " ", text or "").strip()
-        if len(single) > limit:
-            return single[:limit]
-        return single
 
     def parse_list_entry(line):
         if isinstance(line, bytes):
@@ -176,13 +219,6 @@ private enum EmailIMAPBridgeScriptHead {
     def fail(message):
         sys.stdout.write(json.dumps({"ok": False, "error": message}))
         sys.stdout.flush()
-
-    def quote_mailbox(name):
-        # Single shared quoter for every mailbox select so spaced names survive
-        # the wire as one quoted atom; backslash and quote are escaped while
-        # CR/LF stays rejected by callers before quoting to block injection.
-        esc = name.replace("\\", "\\\\").replace('"', '\\"')
-        return '"%s"' % esc
 
     def main():
         try:
@@ -570,7 +606,7 @@ private enum EmailIMAPBridgeScriptTail {
                     limit = int(req.get("limit") or 10)
                 except Exception:
                     limit = 10
-                limit = max(1, min(limit, 50))
+                limit = max(1, min(limit, \#(EmailIMAPLimits.maxSearchLimit)))
                 try:
                     if re.fullmatch(r"UID \d+:\d+", query):
                         # Bounded backfill paging uses a verbatim fixed window so
@@ -712,8 +748,10 @@ private enum EmailIMAPBridgeScriptTail {
                 try:
                     raw = None
                     ftyp, fdata = conn.uid("fetch", mid, "(BODY.PEEK[])")
-                    if ftyp != "OK" or not fdata or fdata == [None]:
-                        ftyp, fdata = conn.fetch(mid, "(BODY.PEEK[])")
+                    # UID-only fetch with no sequence fallback: mid is a UID and
+                    # conn.fetch would interpret it as a sequence number, returning
+                    # the wrong message when UID != seqno. A failed UID fetch falls
+                    # through to not-found below. Read stays read-only via BODY.PEEK.
                     if ftyp == "OK" and fdata:
                         for chunk in fdata:
                             if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):
@@ -762,8 +800,10 @@ private enum EmailIMAPBridgeScriptTail {
                 try:
                     raw = None
                     ftyp, fdata = conn.uid("fetch", mid, "(BODY.PEEK[])")
-                    if ftyp != "OK" or not fdata or fdata == [None]:
-                        ftyp, fdata = conn.fetch(mid, "(BODY.PEEK[])")
+                    # UID-only fetch with no sequence fallback: mid is a UID and
+                    # conn.fetch would interpret it as a sequence number, returning
+                    # the wrong message when UID != seqno. A failed UID fetch falls
+                    # through to not-found below. Read stays read-only via BODY.PEEK.
                     if ftyp == "OK" and fdata:
                         for chunk in fdata:
                             if isinstance(chunk, tuple) and len(chunk) >= 2 and isinstance(chunk[1], bytes):

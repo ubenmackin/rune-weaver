@@ -594,3 +594,32 @@ public struct UpdateSettingsRequest: Content, Equatable {
         ServerEndpointConfig.normalizeHost(entry)
     }
 }
+
+/// Payload for storing a credential in the Keychain.
+public struct StoreSecretRequest: Content, Sendable, Equatable {
+    public let key: String
+    public let secret: String
+
+    public init(key: String, secret: String) {
+        self.key = key
+        self.secret = secret
+    }
+}
+
+/// Request to query existence of secrets in Keychain/environment without returning secret bytes.
+public struct SecretStatusRequest: Content, Sendable, Equatable {
+    public let keys: [String]
+
+    public init(keys: [String]) {
+        self.keys = keys
+    }
+}
+
+/// Response containing existence map of secrets.
+public struct SecretStatusResponse: Content, Sendable, Equatable {
+    public let status: [String: Bool]
+
+    public init(status: [String: Bool]) {
+        self.status = status
+    }
+}

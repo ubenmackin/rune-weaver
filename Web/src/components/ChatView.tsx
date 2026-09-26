@@ -41,7 +41,7 @@ import SessionSidebar from "./SessionSidebar";
 import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
-import { AlertTriangleIcon, WrenchIcon } from "./icons";
+import { AlertTriangleIcon, SparklesIcon, WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import { useIsMobile, isMobileViewport } from "../hooks/useIsMobile";
 import { useRunningRuns, type FrozenRunLogEntry } from "../hooks/useRunningRuns";
@@ -364,10 +364,13 @@ function updateToolEndInSegments(
   });
 }
 
-// Appends streamed prose to the live timeline, opening a fresh text segment when
-// the previous piece is a tool batch so text never merges across round bounds.
-function appendDeltaToSegments(
+// Shared copy/append shape for streamed prose segments, parameterized by kind
+// so text and reasoning never drift apart. Opens a fresh segment when the
+// previous piece is a tool batch or a different kind so deltas never merge
+// across round or kind bounds.
+function appendSegmentDelta(
   segments: ChatSegment[],
+  kind: "text" | "thought",
   deltaText: string,
 ): ChatSegment[] {
   if (!deltaText) return segments;
@@ -377,13 +380,39 @@ function appendDeltaToSegments(
       : { ...segment },
   );
   const last = next[next.length - 1];
-  if (last && last.kind === "text") {
+  if (kind === "text") {
+    if (last && last.kind === "text") {
+      return [
+        ...next.slice(0, -1),
+        { kind: "text" as const, text: last.text + deltaText },
+      ];
+    }
+    return [...next, { kind: "text" as const, text: deltaText }];
+  }
+  if (last && last.kind === "thought") {
     return [
       ...next.slice(0, -1),
-      { kind: "text" as const, text: last.text + deltaText },
+      { kind: "thought" as const, text: last.text + deltaText },
     ];
   }
-  return [...next, { kind: "text" as const, text: deltaText }];
+  return [...next, { kind: "thought" as const, text: deltaText }];
+}
+
+// Appends streamed prose to the live timeline, opening a fresh text segment when
+// the previous piece is a tool batch so text never merges across round bounds.
+function appendDeltaToSegments(
+  segments: ChatSegment[],
+  deltaText: string,
+): ChatSegment[] {
+  return appendSegmentDelta(segments, "text", deltaText);
+}
+
+// Appends streamed reasoning / thought to the live timeline.
+function appendReasoningDeltaToSegments(
+  segments: ChatSegment[],
+  deltaText: string,
+): ChatSegment[] {
+  return appendSegmentDelta(segments, "thought", deltaText);
 }
 
 // Keeps only prose lines not already covered by structured actions, identified
@@ -2034,6 +2063,7 @@ export default function ChatView({ health }: ChatViewProps) {
       };
       if (
         frameType === "delta" ||
+        frameType === "reasoning_delta" ||
         frameType === "tool_start" ||
         frameType === "tool_end" ||
         frameType === "warning" ||
@@ -2056,6 +2086,15 @@ export default function ChatView({ health }: ChatViewProps) {
           if (deltaText) {
             flight.turn.text += deltaText;
             flight.turn.segments = appendDeltaToSegments(
+              flight.turn.segments,
+              deltaText,
+            );
+          }
+        } else if (frameType === "reasoning_delta") {
+          const rawDelta: unknown = (data as unknown as Record<string, unknown>).delta;
+          const deltaText = typeof rawDelta === "string" ? rawDelta : "";
+          if (deltaText) {
+            flight.turn.segments = appendReasoningDeltaToSegments(
               flight.turn.segments,
               deltaText,
             );
@@ -2309,6 +2348,7 @@ export default function ChatView({ health }: ChatViewProps) {
     ) {
       if (
         frameType === "delta" ||
+        frameType === "reasoning_delta" ||
         frameType === "tool_start" ||
         frameType === "tool_end" ||
         frameType === "done" ||
@@ -2338,6 +2378,7 @@ export default function ChatView({ health }: ChatViewProps) {
     if (
       !frameSessionID &&
       (frameType === "delta" ||
+        frameType === "reasoning_delta" ||
         frameType === "tool_start" ||
         frameType === "tool_end" ||
         frameType === "done" ||
@@ -2755,6 +2796,26 @@ export default function ChatView({ health }: ChatViewProps) {
         // live timeline interleaves exactly like the persisted note boundaries.
         segments: appendDeltaToSegments(prev ? prev.segments : [], deltaText),
       }));
+    } else if (frameType === "reasoning_delta") {
+      armTurnTimeout();
+      if (cancelledRef.current) return;
+      setPending(true);
+      pendingRef.current = true;
+      if (activeTurnStartMsRef.current == null) {
+        activeTurnStartMsRef.current = Date.now();
+      }
+      const rawDelta: unknown = data.delta;
+      const deltaText = typeof rawDelta === "string" ? rawDelta : "";
+      if (deltaText) {
+        setInFlightTurn((prev) => ({
+          toolActions: prev ? prev.toolActions : [],
+          text: prev ? prev.text : "",
+          segments: appendReasoningDeltaToSegments(
+            prev ? prev.segments : [],
+            deltaText,
+          ),
+        }));
+      }
     } else if (frameType === "approval") {
       // Live approval prompts join the inbox immediately so the session
       // badge reflects blocked tools without waiting for the next poll.
@@ -4406,6 +4467,21 @@ export default function ChatView({ health }: ChatViewProps) {
                             ))}
                           </div>
                         </div>
+                      ) : segment.kind === "thought" ? (
+                        segment.text.trim().length > 0 ? (
+                          <details
+                            key={`thought-${segmentIndex}`}
+                            className="chat-thought-container"
+                          >
+                            <summary className="chat-thought-heading">
+                              <SparklesIcon size={12} />
+                              <span>Thinking Process</span>
+                            </summary>
+                            <div className="chat-thought-content">
+                              <MarkdownText text={segment.text} />
+                            </div>
+                          </details>
+                        ) : null
                       ) : segment.text.trim().length > 0 ? (
                         message.isError && isSuppressedErrorText(segment.text) ? null : (
                           <div
@@ -4498,7 +4574,7 @@ export default function ChatView({ health }: ChatViewProps) {
           })}
 
           {/* Active in-flight assistant response with live tools and streaming text */}
-          {pending && inFlightTurn && (inFlightTurn.toolActions.length > 0 || inFlightTurn.text.trim().length > 0) ? (
+          {pending && inFlightTurn && (inFlightTurn.toolActions.length > 0 || inFlightTurn.text.trim().length > 0 || (inFlightTurn.segments && inFlightTurn.segments.some((s) => s.kind === "thought" && s.text.trim().length > 0))) ? (
             <div className="message assistant streaming-bubble">
               {inFlightTurn.segments && inFlightTurn.segments.length > 0 ? (
                 <>
@@ -4529,6 +4605,22 @@ export default function ChatView({ health }: ChatViewProps) {
                           ))}
                         </div>
                       </div>
+                    ) : segment.kind === "thought" ? (
+                      segment.text.trim().length > 0 ? (
+                        <details
+                          key={`live-thought-${segmentIndex}`}
+                          className="chat-thought-container"
+                          open
+                        >
+                          <summary className="chat-thought-heading">
+                            <SparklesIcon size={12} />
+                            <span>Thinking Process</span>
+                          </summary>
+                          <div className="chat-thought-content">
+                            <MarkdownText text={segment.text} />
+                          </div>
+                        </details>
+                      ) : null
                     ) : segment.text.trim().length > 0 ? (
                       <div
                         key={`live-text-${segmentIndex}`}

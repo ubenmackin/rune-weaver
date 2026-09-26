@@ -624,10 +624,8 @@ extension RuneWeaverConfig {
     /// - Throws: ``ConfigError/validationError(field:message:)`` on any blank entry.
     public static func validateMailboxDeny(_ patterns: [String]) throws {
         let field = "index.mailbox_deny"
-        for pattern in patterns {
-            if pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw ConfigError.validationError(field: field, message: "must not contain empty patterns")
-            }
+        for pattern in patterns where pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(field: field, message: "must not contain empty patterns")
         }
     }
 
