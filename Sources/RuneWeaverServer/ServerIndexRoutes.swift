@@ -50,13 +50,12 @@ private func registerIndexStatusRoute(_ app: Application) {
         // Live snapshot rides the coordinator's cached counters, so polling
         // never touches run state or the document store; nil when idle.
         let live = await context.indexCoordinator?.liveTotals.map(IndexLiveStatus.init)
-        // Kind-filtered store lookup: the newest `index` rows come straight
+        // Kind-filtered store lookup: every `index` row comes straight
         // from the run log by kind, so a sparse index row survives interleaved
-        // chat traffic within the 500-row retention (newest-50 index-row window)
-        // instead of dropping past a newest-N overall window. One shared fetch
-        // feeds both the latest strip and the failure list so they agree on the
-        // same snapshot.
-        let kindRuns = await context.runs.list(limit: IndexStatusScan.errorCap, kind: ServerIndexRunReporter.kind)
+        // chat traffic within the 500-row retention instead of dropping past
+        // a newest-N overall window. One shared fetch feeds both the latest
+        // strip and the failure list so they agree on the same snapshot.
+        let kindRuns = await context.runs.list(limit: Int.max, kind: ServerIndexRunReporter.kind)
         let latestEntry = kindRuns.first
         var lastErrors = recentIndexErrors(from: kindRuns)
         // Fail-closed pre-run hint: there is no prompt API for Full Disk
@@ -220,19 +219,6 @@ func indexAlwaysSkippedPatterns() -> [String] {
     FilesIndexer.alwaysSkippedPatterns
 }
 
-/// Maximum `index`-kind rows examined per status poll for failures.
-///
-/// Bounds per-poll work independent of retained history size: the probe reads
-/// at most this many newest `index` rows via a kind-filtered store lookup, so
-/// sparse index rows survive interleaved chat traffic within the 500-row
-/// retention (newest-50 index-row window). Fifty index rows comfortably cover
-/// several failures while staying well below the 500-row store capacity.
-/// - Note: Single-sourced here so error derivation and its bound agree.
-private enum IndexStatusScan {
-    /// Maximum newest `index`-kind rows examined for failures per poll.
-    static let errorCap = 50
-}
-
 /// Pre-run warning surfaced in `lastErrors` when Messages is enabled but the
 /// chat database is unreadable.
 ///
@@ -279,40 +265,34 @@ private enum IndexRunCountPatterns {
     static let truncated: NSRegularExpression? = try? NSRegularExpression(pattern: "(\\d+)\\s+truncated", options: .caseInsensitive)
 }
 
-/// Collects the most recent index run failures plus per-file warning lines.
+/// Collects every index run failure plus per-file warning lines.
 ///
 /// Pure derivation over the kind-filtered store lookup in the status route:
-/// run-level error rows come first, newest first, followed by `Warning:`
-/// detail lines from the newest run's response. Only the `index`-kind rows
+/// every run-level error row comes first, newest first, followed by every
+/// `Warning:` detail line from the newest run's response. Only the `index`-kind rows
 /// already written by `ServerIndexRunReporter` are consulted, so the status
 /// shape reuses the durable run log instead of adding a second failure
-/// channel. The cap counts entries, not characters: when warnings overflow
-/// the remaining slots the oldest warning lines drop first, keeping the
-/// newest tail. Warning lines stay content-free because the coordinator's
+/// channel. Warning lines stay content-free because the coordinator's
 /// detail text carries only counts and short reasons, never file bytes.
 /// A run with no warnings contributes no tail, so the empty state renders
 /// no block exactly as before.
-/// - Parameters:
-///   - runs: Newest `index`-kind rows from the kind-filtered lookup, newest first.
-///   - limit: Maximum entries to return, errors first then warnings.
+/// - Parameter runs: Every `index`-kind row from the kind-filtered lookup, newest first.
 /// - Returns: Failure and warning detail strings, newest errors first.
-func recentIndexErrors(from runs: [RunLogEntry], limit: Int = 5) -> [String] {
-    guard limit > 0, !runs.isEmpty else { return [] }
+func recentIndexErrors(from runs: [RunLogEntry]) -> [String] {
+    guard !runs.isEmpty else { return [] }
     let errorRows = runs
         .filter { $0.status == IndexRunStatus.error.rawValue }
-        .prefix(limit)
         .map { entry in
             let detail = entry.response?.trimmingCharacters(in: .whitespacesAndNewlines)
             return (detail?.isEmpty == false ? detail : nil) ?? entry.message
         }
-    var combined = Array(errorRows)
-    let remaining = limit - combined.count
+    var combined = errorRows
     // The newest run carries the freshest per-file signal, so its warnings
     // trail the run-level errors; older runs' warnings stay out to keep the
-    // block bounded and current rather than accumulating stale lines.
-    if remaining > 0, let newestResponse = runs.first?.response {
+    // block current rather than accumulating stale lines.
+    if let newestResponse = runs.first?.response {
         let warnings = indexWarningDetailLines(from: newestResponse)
-        combined.append(contentsOf: warnings.suffix(remaining))
+        combined.append(contentsOf: warnings)
     }
     return combined
 }

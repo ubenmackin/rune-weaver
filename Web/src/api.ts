@@ -1578,6 +1578,9 @@ export interface IndexConfigData {
   // embedding work; chunks beyond the cap stay keyword-only. Optional for
   // back-compat; absent degrades to the engine default instead of failing.
   max_vector_chunks_per_document?: number;
+  // Trash-class mailbox denylist skipped without dialing. Optional for
+  // back-compat; absent degrades to the engine default instead of failing.
+  mailbox_deny?: string[];
   // Directory and file names the walker always skips, even when absent from
   // `exclude`. Read-only: populated by the engine from the walker's prune list
   // and ignored on write. Optional for back-compat with older engines that
@@ -1607,6 +1610,7 @@ export interface IndexSettingsUpdate {
   thermal_backoff?: boolean;
   pause_on_battery?: boolean;
   max_vector_chunks_per_document?: number;
+  mailbox_deny?: string[];
 }
 
 // Native desktop vision and gated control policy mirroring the engine
@@ -2060,6 +2064,18 @@ export function isIndexRunResponse(
   );
 }
 
+// Single owner for every integer count on the Index Status page. Floors
+// finite numbers so fractional payloads never render decimals, groups en-US
+// at and above 10000 so large stores stay scannable, and degrades anything
+// non-finite to zero so a drifted payload never renders NaN. Decimals,
+// percents, rates, and byte units never pass through here.
+export function formatIndexCount(value: unknown): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "0";
+  const floored = Math.floor(value);
+  if (floored >= 10000) return floored.toLocaleString("en-US");
+  return String(floored);
+}
+
 // One-line human summary of an index run shared by the top notice and the
 // last-run strip: status plus the trigger display label, outcome counts, and
 // finish age, omitting any count the payload did not carry so a drifted
@@ -2111,38 +2127,38 @@ export function describeIndexRun(
     normalizedStatus === "ok" && errorCount != null && errorCount > 0;
   const head = finishedWithErrors
     ? typeof trigger === "string" && trigger.trim()
-      ? `Last run finished with ${errorCount} errors (${indexRunTriggerLabel(trigger)})`
-      : `Last run finished with ${errorCount} errors`
+      ? `Last run finished with ${formatIndexCount(errorCount)} errors (${indexRunTriggerLabel(trigger)})`
+      : `Last run finished with ${formatIndexCount(errorCount)} errors`
     : typeof trigger === "string" && trigger.trim()
       ? `Last run ${normalizedStatus} (${indexRunTriggerLabel(trigger)})`
       : `Last run ${normalizedStatus}`;
   const parts: string[] = [head];
   if (typeof indexed === "number" && Number.isFinite(indexed)) {
-    parts.push(`${indexed} indexed`);
+    parts.push(`${formatIndexCount(indexed)} indexed`);
   }
   if (typeof scanned === "number" && Number.isFinite(scanned)) {
-    parts.push(`${scanned} scanned`);
+    parts.push(`${formatIndexCount(scanned)} scanned`);
   }
   if (
     typeof errors === "number" &&
     Number.isFinite(errors) &&
     !finishedWithErrors
   ) {
-    parts.push(`${errors} errors`);
+    parts.push(`${formatIndexCount(errors)} errors`);
   }
   if (
     typeof retiredCount === "number" &&
     Number.isFinite(retiredCount) &&
     retiredCount > 0
   ) {
-    parts.push(`${retiredCount} retired`);
+    parts.push(`${formatIndexCount(retiredCount)} retired`);
   }
   if (
     typeof truncatedCount === "number" &&
     Number.isFinite(truncatedCount) &&
     truncatedCount > 0
   ) {
-    parts.push(`${truncatedCount} truncated`);
+    parts.push(`${formatIndexCount(truncatedCount)} truncated`);
   }
   if (finishedAt != null) {
     const ageMs = indexWatermarkAgeMs(
@@ -2266,6 +2282,34 @@ export const DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT = 128;
 export const DEFAULT_INDEX_THERMAL_BACKOFF = true;
 // Default pause-on-battery toggle: keep indexing on battery unless asked.
 export const DEFAULT_INDEX_PAUSE_ON_BATTERY = false;
+// Default Trash-class mailbox denylist, mirroring
+// IndexConfig.defaultMailboxDeny.
+export const DEFAULT_INDEX_MAILBOX_DENY: string[] = [
+  "Trash",
+  "Junk",
+  "Spam",
+  "Deleted*",
+];
+// Textarea mirror of the mailbox denylist so the policy editor starts from
+// the same boundary without joining inline in every caller.
+export const DEFAULT_INDEX_MAILBOX_DENY_TEXT: string =
+  DEFAULT_INDEX_MAILBOX_DENY.join("\n");
+
+// Parses the denied-mailboxes textarea into the wire shape, defaulting to the
+// Trash-class boundary when no text is present.
+export function parseMailboxDenyText(
+  text: string | undefined | null,
+): string[] {
+  return parseLinesToList(text, DEFAULT_INDEX_MAILBOX_DENY);
+}
+
+// Formats a mailbox denylist for the multiline editor, falling back to the
+// Trash-class defaults when an older engine omits the section entirely.
+export function formatMailboxDenyText(
+  deny: string[] | undefined | null,
+): string {
+  return formatListToText(deny, DEFAULT_INDEX_MAILBOX_DENY_TEXT);
+}
 
 // Default index policy values mirroring IndexConfig so a fresh form matches the
 // boundary the engine enforces before the first settings fetch. `workers` is
@@ -2289,6 +2333,7 @@ export const DEFAULT_INDEX_CONFIG: IndexConfigData = {
   thermal_backoff: DEFAULT_INDEX_THERMAL_BACKOFF,
   pause_on_battery: DEFAULT_INDEX_PAUSE_ON_BATTERY,
   max_vector_chunks_per_document: DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
+  mailbox_deny: [...DEFAULT_INDEX_MAILBOX_DENY],
 };
 
 export interface SettingsResponse {

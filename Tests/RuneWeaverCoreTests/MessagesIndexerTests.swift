@@ -214,6 +214,24 @@ private func typedStreamBody(_ text: String) -> Data {
     return data
 }
 
+/// Collects per-batch progress frames from an injected reporter.
+private actor MessagesProgressRecorder {
+    /// Frames observed in emission order.
+    private var frames: [ToolProgress] = []
+
+    /// Records one frame.
+    /// - Parameter progress: Frame emitted by the indexer.
+    func record(_ progress: ToolProgress) {
+        frames.append(progress)
+    }
+
+    /// Returns the observed frames.
+    /// - Returns: Frames in emission order.
+    func snapshot() -> [ToolProgress] {
+        frames
+    }
+}
+
 @Suite("Messages Indexer")
 struct MessagesIndexerTests {
     @Test
@@ -764,5 +782,105 @@ struct MessagesIndexerTests {
         #expect(report.didRun)
         let stats = try await store.stats()
         #expect(stats.documents == 5)
+    }
+
+    @Test
+    func `IndexAll emits per-batch frames with cumulative totals and rowid current`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... 5 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-batch-\(rowID)",
+                text: "Batched message \(rowID)",
+                date: 700_000_000_030_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let indexer = MessagesIndexer(
+            chatDatabasePath: paths.database,
+            store: store,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        let recorder = MessagesProgressRecorder()
+        let result = try await indexer.indexAllNewMessages(reporter: { await recorder.record($0) })
+        #expect(result.scanned == 5)
+        #expect(result.indexed == 5)
+
+        // Three batches (2, 2, 1) each report cumulative totals with the
+        // batch ROWID as current, so a messages-only phase advances the top
+        // counters every page.
+        let frames = await recorder.snapshot()
+        #expect(frames.count == 3)
+        #expect(frames[0].message == "Indexing messages: 2 indexed, 2 scanned")
+        #expect(frames[0].scanned == 2)
+        #expect(frames[0].matched == 2)
+        #expect(frames[0].current == "rowid:2")
+        #expect(frames[1].message == "Indexing messages: 4 indexed, 4 scanned")
+        #expect(frames[1].scanned == 4)
+        #expect(frames[1].matched == 4)
+        #expect(frames[1].current == "rowid:4")
+        #expect(frames[2].message == "Indexing messages: 5 indexed, 5 scanned")
+        #expect(frames[2].scanned == 5)
+        #expect(frames[2].matched == 5)
+        #expect(frames[2].current == "rowid:5")
+        for index in 1 ..< frames.count {
+            #expect(frames[index].scanned >= frames[index - 1].scanned)
+            #expect(frames[index].matched >= frames[index - 1].matched)
+        }
+        // No body text ever enters a frame.
+        #expect(!frames.contains { $0.message.contains("Batched message") })
+        #expect(!frames.contains { ($0.current ?? "").contains("Batched message") })
+    }
+
+    @Test
+    func `Messages stage forwards per-batch frames through the reporter`() async throws {
+        let paths = makeMessagesPaths()
+        defer { try? FileManager.default.removeItem(at: paths.base) }
+        try createMessagesFixture(at: paths.database)
+        let handle = try openMessagesFixture(at: paths.database)
+        for rowID in 1 ... 3 {
+            try insertMessagesFixtureMessage(
+                into: handle,
+                rowID: Int64(rowID),
+                guid: "guid-forward-\(rowID)",
+                text: "Forwarded message \(rowID)",
+                date: 700_000_000_040_000_000 + Int64(rowID),
+                isFromMe: false
+            )
+            try joinMessagesFixtureChat(into: handle, chatID: 1, messageID: Int64(rowID))
+        }
+        sqlite3_close(handle)
+
+        let store = DocIndexStore(dbPath: paths.store)
+        let stage = IndexClosureStage.messages(
+            config: IndexConfig(enabled: true, messages: true, roots: []),
+            store: store,
+            chatDatabasePath: paths.database,
+            statePath: paths.state,
+            batchLimit: 2
+        )
+        let recorder = MessagesProgressRecorder()
+        let report = try await stage.run(
+            reporter: { await recorder.record($0) },
+            isCancelled: { false },
+            policy: IndexConfig(enabled: true, messages: true, roots: [])
+        )
+        #expect(report.scanned == 3)
+        #expect(report.indexed == 3)
+        let frames = await recorder.snapshot()
+        #expect(frames.count == 2)
+        #expect(frames[0].current == "rowid:2")
+        #expect(frames[1].current == "rowid:3")
+        #expect(frames.last?.scanned == 3)
+        #expect(frames.last?.matched == 3)
     }
 }

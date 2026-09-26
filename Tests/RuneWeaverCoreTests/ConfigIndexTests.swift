@@ -20,6 +20,8 @@ struct ConfigIndexTests {
         #expect(config.describeImagesWithLLM == false)
         #expect(config.nightlyBudget == 0)
         #expect(config.dbPath == "~/.runeweaver/index.db")
+        #expect(config.mailboxDeny == ["Trash", "Junk", "Spam", "Deleted*"])
+        #expect(config.mailboxDeny == IndexConfig.defaultMailboxDeny)
         #expect(RuneWeaverConfig.default.index.enabled == false)
     }
 
@@ -439,6 +441,65 @@ struct ConfigIndexTests {
         #expect(reparsed.files == config.files)
         #expect(reparsed.files.denyPatterns == FilesConfig.defaultDenyPatterns)
         try reparsed.validate()
+    }
+
+    @Test
+    func `Mailbox deny defaults to Trash-class globs`() {
+        #expect(IndexConfig.defaultMailboxDeny == ["Trash", "Junk", "Spam", "Deleted*"])
+        #expect(IndexConfig().mailboxDeny == IndexConfig.defaultMailboxDeny)
+    }
+
+    @Test
+    func `Mailbox deny round-trips through TOML`() throws {
+        var config = RuneWeaverConfig.default
+        config.index.mailboxDeny = ["Trash", "Custom*"]
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        #expect(rendered.contains("mailbox_deny"))
+
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index.mailboxDeny == ["Trash", "Custom*"])
+        try reparsed.validate()
+    }
+
+    @Test
+    func `Explicit mailbox_deny decodes`() throws {
+        let text = """
+        [llm]
+        default_provider = "mlx"
+
+        [llm.providers.mlx]
+        enabled = true
+        model = "gemma-4-9b"
+        server_url = "http://localhost:8080"
+
+        [index]
+        enabled = true
+        mailbox_deny = ["Trash", "Deleted*"]
+        """
+        let root = try TOMLParser.parse(text)
+        let config = try RuneWeaverConfig(decoding: root)
+        #expect(config.index.mailboxDeny == ["Trash", "Deleted*"])
+        try config.validate()
+    }
+
+    @Test
+    func `Empty mailbox_deny opts every mailbox back in`() throws {
+        var config = RuneWeaverConfig.default
+        config.index.mailboxDeny = []
+        try config.validate()
+
+        let rendered = config.renderTOML()
+        let reparsed = try RuneWeaverConfig(decoding: TOMLParser.parse(rendered))
+        #expect(reparsed.index.mailboxDeny == [])
+        try reparsed.validate()
+    }
+
+    @Test
+    func `Blank mailbox_deny entry fails validation`() {
+        expectIndexValidationFailure({ $0.mailboxDeny = ["Trash", "  "] }, field: "index.mailbox_deny")
+        expectIndexValidationFailure({ $0.mailboxDeny = [""] }, field: "index.mailbox_deny")
     }
 }
 

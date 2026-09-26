@@ -1358,10 +1358,9 @@ struct IndexBootReporterWiringTests {
 // MARK: - Last errors with warnings
 
 /// Covers the failure list surfacing per-file warnings beneath run-level
-/// errors: errors stay newest-first at the head while the newest run's
-/// `Warning:` detail lines fill the remaining slots up to the shared cap,
-/// so a finished pass with many skipped files still renders a bounded block
-/// and a clean pass renders none.
+/// errors: errors stay newest-first at the head while every `Warning:`
+/// detail line from the newest run follows in run order, so a finished pass
+/// with many skipped files renders every line and a clean pass renders none.
 @Suite("Index Status Last Errors")
 struct IndexStatusLastErrorsTests {
     /// Builds a completion response carrying the given warning lines.
@@ -1430,15 +1429,15 @@ struct IndexStatusLastErrorsTests {
     }
 
     @Test
-    func `Warning tail caps at five entries dropping oldest first`() async throws {
+    func `Warning tail returns every line in run order`() async throws {
         try await withIndexTestApp { app in
             let context = makeIndexTestContext()
             app.runeWeaver = context
             registerRuneWeaverRoutes(app)
 
             // One run-level failure plus a finished pass with twelve per-file
-            // warnings: only five entries may surface, so the oldest warnings
-            // drop and the newest tail survives.
+            // warnings: every entry surfaces with errors newest-first at the
+            // head and warnings in run order, oldest preserved.
             let errorDetail = "mail gateway timeout"
             _ = await context.runs.append(
                 kind: ServerIndexRunReporter.kind,
@@ -1458,19 +1457,19 @@ struct IndexStatusLastErrorsTests {
             let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
             #expect(status.status == .ok)
             let lastErrors = try status.content.decode(IndexStatusResponse.self).lastErrors
-            let expected = [errorDetail] + Array(warnings.suffix(4))
-            #expect(Array(lastErrors.prefix(5)) == expected)
-            #expect(!Array(lastErrors.prefix(5)).contains(warnings[0]))
+            let expected = [errorDetail] + warnings
+            #expect(Array(lastErrors.prefix(expected.count)) == expected)
+            #expect(lastErrors.contains(warnings[0]))
 
-            // Without any run-level failure the same twelve warnings still
-            // collapse to the newest five, since the cap counts entries.
+            // Without any run-level failure the same twelve warnings all
+            // surface in run order.
             let okOnly = RunLogEntry(
                 kind: ServerIndexRunReporter.kind,
                 status: IndexRunStatus.ok.rawValue,
                 message: okMessage,
                 response: warningResponse(message: okMessage, warnings: warnings)
             )
-            #expect(recentIndexErrors(from: [okOnly]) == Array(warnings.suffix(5)))
+            #expect(recentIndexErrors(from: [okOnly]) == warnings)
         }
     }
 

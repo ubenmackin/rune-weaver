@@ -646,6 +646,9 @@ extension RuneWeaverConfig {
         if let cap = try index.strictInt("max_vector_chunks_per_document", field: "index.max_vector_chunks_per_document") {
             config.index.maxVectorChunksPerDocument = cap
         }
+        if let deny = try index.strictStringArray("mailbox_deny", field: "index.mailbox_deny") {
+            config.index.mailboxDeny = deny
+        }
     }
 
     private static func decodeEmail(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

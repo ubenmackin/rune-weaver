@@ -572,6 +572,10 @@ extension RuneWeaverConfig {
                 message: "must be between 1 and \(IndexConfig.maxAllowedVectorChunksPerDocument) (got \(index.maxVectorChunksPerDocument))"
             )
         }
+        // Trash-class denylist stays a plain list of non-blank globs: empty
+        // opts back into every mailbox while a blank entry fails instead of
+        // matching nothing yet reading as configured.
+        try Self.validateMailboxDeny(index.mailboxDeny)
     }
 
     private func validateBrowserSection() throws {
@@ -608,6 +612,21 @@ extension RuneWeaverConfig {
                 throw ConfigError.validationError(
                     field: field, message: "must not contain '..' (got '\(pattern)')"
                 )
+            }
+        }
+    }
+
+    /// Validates the Trash-class mailbox denylist as non-blank globs.
+    ///
+    /// Empty opts every mailbox back in, so only blank entries fail: a blank
+    /// would otherwise read as configured yet match nothing.
+    /// - Parameter patterns: Raw denylist entries.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` on any blank entry.
+    public static func validateMailboxDeny(_ patterns: [String]) throws {
+        let field = "index.mailbox_deny"
+        for pattern in patterns {
+            if pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw ConfigError.validationError(field: field, message: "must not contain empty patterns")
             }
         }
     }
