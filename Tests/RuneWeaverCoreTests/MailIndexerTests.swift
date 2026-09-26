@@ -106,8 +106,8 @@ private actor BoundRecorder {
 
 /// Records search queries and limits seen by the adapter double.
 ///
-/// Capturing the verbatim query proves the adapter emits the exact `UID 1:N`
-/// shape without free text, while the limit proves the 50-per-page clamp.
+/// Capturing the verbatim query proves the adapter emits the exact `UID lo:hi`
+/// fixed-window shape without free text, while the limit proves the 50-per-page clamp.
 private actor SearchCapture {
     /// Queries observed in call order.
     private var queries: [String] = []
@@ -156,6 +156,8 @@ private struct StubMailGateway: MailIndexGateway {
     let attachmentCalls: CallRecorder
     /// Page-bound recorder shared with the test.
     let bounds: BoundRecorder
+    /// Status snapshot returned by `mailboxStatus`, when set.
+    let statusValue: MailIndexMailboxStatus?
 
     /// Creates a stub gateway.
     /// - Parameters:
@@ -165,13 +167,15 @@ private struct StubMailGateway: MailIndexGateway {
     ///   - recorder: Mode recorder shared with the test.
     ///   - attachmentCalls: Attachment-call counter shared with the test.
     ///   - bounds: Page-bound recorder shared with the test.
+    ///   - statusValue: Status snapshot for validity tests, nil means unknown.
     init(
         mailboxNames: [String] = ["INBOX"],
         messages: [MailIndexMessage],
         attachments: [MailIndexAttachmentData] = [],
         recorder: ModeRecorder = ModeRecorder(),
         attachmentCalls: CallRecorder = CallRecorder(),
-        bounds: BoundRecorder = BoundRecorder()
+        bounds: BoundRecorder = BoundRecorder(),
+        statusValue: MailIndexMailboxStatus? = nil
     ) {
         self.mailboxNames = mailboxNames
         self.messages = messages
@@ -179,6 +183,7 @@ private struct StubMailGateway: MailIndexGateway {
         self.recorder = recorder
         self.attachmentCalls = attachmentCalls
         self.bounds = bounds
+        self.statusValue = statusValue
     }
 
     /// Returns the canned mailbox list.
@@ -186,12 +191,18 @@ private struct StubMailGateway: MailIndexGateway {
         mailboxNames
     }
 
+    /// Returns the canned status snapshot, defaulting to unknown tokens.
+    func mailboxStatus(credentials _: MailIndexCredentials, mailbox _: String) async throws -> MailIndexMailboxStatus {
+        statusValue ?? MailIndexMailboxStatus(uidNext: nil, uidValidity: nil)
+    }
+
     /// Returns the canned page for one downward bound and records the fetch mode.
     ///
     /// A nil bound returns the newest window; a present bound returns only
-    /// numeric UIDs at or below bound minus one, preserving newest-first order,
-    /// so the stub models a bridge that honors `UID 1:N` paging clamped to the
-    /// requested limit. A bound at the mailbox start is already exhausted.
+    /// numeric UIDs inside the fixed `UID lo:hi` window derived from the bound,
+    /// preserving newest-first order, so the stub models a bridge that honors
+    /// bounded-window paging clamped to the requested limit. A bound at the
+    /// mailbox start is already exhausted.
     func messages(
         credentials _: MailIndexCredentials,
         mailbox _: String,
@@ -204,9 +215,10 @@ private struct StubMailGateway: MailIndexGateway {
         if let beforeUID {
             let upper = beforeUID - 1
             guard upper >= 1 else { return [] }
+            let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
             let filtered = messages.filter {
                 let uid = MailIndexer.uid(of: $0.id)
-                return uid > 0 && uid <= upper
+                return uid > 0 && uid >= lower && uid <= upper
             }
             return Array(filtered.prefix(limit))
         }
@@ -287,27 +299,41 @@ private struct ClampedMailGateway: MailIndexGateway {
 
 /// Gateway double capturing the verbatim search query the adapter emits.
 ///
-/// Proves the adapter's `UID 1:N` shape reaches the bridge without free text
-/// while still clamping to one page. Hits are canned newest-first; the fetch
-/// path returns a synthesized body so the adapter can complete the page.
+/// Proves the adapter's `UID lo:hi` fixed-window shape reaches the bridge
+/// without free text while still clamping to one page. Hits are canned
+/// newest-first; the fetch path returns a synthesized body so the adapter can
+/// complete the page.
 private struct CapturingIMAPGateway: EmailIMAPGateway, Sendable {
     /// Hits returned by `search`, already newest-first.
     let hits: [EmailSearchHit]
     /// Capture box for queries and limits.
     let capture: SearchCapture
+    /// Status snapshot returned for the newest-window anchor.
+    let statusValue: EmailMailboxStatus
 
     /// Creates a capturing gateway.
     /// - Parameters:
     ///   - hits: Canned hits in newest-first order.
     ///   - capture: Box receiving queries and limits.
-    init(hits: [EmailSearchHit] = [], capture: SearchCapture) {
+    ///   - statusValue: Status snapshot anchoring the first window.
+    init(
+        hits: [EmailSearchHit] = [],
+        capture: SearchCapture,
+        statusValue: EmailMailboxStatus = EmailMailboxStatus(mailbox: "INBOX", uidNext: 1001, uidValidity: 1)
+    ) {
         self.hits = hits
         self.capture = capture
+        self.statusValue = statusValue
     }
 
     /// Lists one mailbox without touching the network.
     func mailboxListing(credentials _: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
         EmailMailboxListing(mailboxes: ["INBOX"], delimiter: "/")
+    }
+
+    /// Returns the canned STATUS snapshot anchoring the first fixed window.
+    func status(credentials _: ResolvedEmailCredentials, mailbox _: String) async throws -> EmailMailboxStatus {
+        statusValue
     }
 
     /// Records the verbatim query and returns the clamped newest slice.
@@ -396,7 +422,7 @@ private struct CancellablePagingGateway: MailIndexGateway {
         ["INBOX"]
     }
 
-    /// Serves the downward page, sleeping cancellably past the first window.
+    /// Serves the downward fixed-window page, sleeping cancellably past the first window.
     func messages(
         credentials _: MailIndexCredentials,
         mailbox _: String,
@@ -410,9 +436,10 @@ private struct CancellablePagingGateway: MailIndexGateway {
         if let beforeUID {
             let upper = beforeUID - 1
             guard upper >= 1 else { return [] }
+            let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
             let filtered = messages.filter {
                 let uid = MailIndexer.uid(of: $0.id)
-                return uid > 0 && uid <= upper
+                return uid > 0 && uid >= lower && uid <= upper
             }
             return Array(filtered.prefix(limit))
         }
@@ -602,8 +629,8 @@ struct MailIndexerTests {
             let seedReport = try await seed.run()
             #expect(seedReport.messagesIndexed == 10)
 
-            // Seventy arrivals exceed the 50-message page; the widened window
-            // must reach back to the watermark so the middle is indexed too.
+            // Seventy arrivals exceed the 50-message page; the fixed windows
+            // tile downward to the watermark so the middle is indexed too.
             let burst = makeIndexer(
                 gateway: StubMailGateway(messages: Array((11 ... 80).map {
                     makeMessage(id: "\($0)", body: "burst body \($0)")
@@ -898,9 +925,26 @@ struct MailIndexerTests {
     }
 
     @Test
-    func `Adapter builds UID 1:N from integers only`() {
+    func `Adapter builds fixed UID window from integers only`() {
+        #expect(EmailIMAPMailIndexGateway.uidWindowWidth == 1000)
+        // Small tops clamp to the mailbox start.
         #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 51) == "UID 1:50")
         #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 2) == "UID 1:1")
+        // Large tops slide a fixed 1000-wide window, never an open-ended range.
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 2001) == "UID 1001:2000")
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 1501) == "UID 501:1500")
+        // Bottom clamping keeps the first window inside the mailbox.
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 1001) == "UID 1:1000")
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 500) == "UID 1:499")
+        // Integer-only construction: no caller text can reach the wire.
+        let windowed = EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 2001) ?? ""
+        #expect(windowed.hasPrefix("UID "))
+        let range = windowed.dropFirst(4)
+        let parts = range.split(separator: ":")
+        #expect(parts.count == 2)
+        #expect(Int(parts[0]) != nil)
+        #expect(Int(parts[1]) != nil)
+        #expect((Int(parts[1]) ?? 0) - (Int(parts[0]) ?? 0) + 1 <= EmailIMAPMailIndexGateway.uidWindowWidth)
         // A bound at the mailbox start holds no UIDs, so there is no criterion to issue.
         #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 1) == nil)
         #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 0) == nil)
@@ -908,7 +952,7 @@ struct MailIndexerTests {
     }
 
     @Test
-    func `Adapter issues verbatim UID range with clamped page`() async throws {
+    func `Adapter issues verbatim UID window with clamped page`() async throws {
         let capture = SearchCapture()
         let hits = (1 ... 5).map {
             EmailSearchHit(
@@ -928,7 +972,7 @@ struct MailIndexerTests {
             username: "user@example.com",
             password: "test-secret"
         )
-        // A present bound must reach the bridge as the exact range shape with
+        // A present bound must reach the bridge as the exact window shape with
         // no free text, still clamped to one newest page.
         _ = try await adapter.messages(
             credentials: credentials,
@@ -954,12 +998,25 @@ struct MailIndexerTests {
         #expect(queriesAfter.count == 2)
         #expect(queriesAfter[1] == "UID 1:10")
         #expect(limitsAfter[1] == EmailSearchArgs.maxLimit)
+        // A large bound slides a fixed 1000-wide window, proving the shape is
+        // bounded instead of open-ended.
+        _ = try await adapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 50,
+            mode: .peek,
+            beforeUID: 2001
+        )
+        let queriesWindowed = await capture.queriesSnapshot()
+        #expect(queriesWindowed.count == 3)
+        #expect(queriesWindowed[2] == "UID 1001:2000")
     }
 
     @Test
-    func `Adapter fetches newest window when no bound is given`() async throws {
+    func `Adapter anchors newest window from STATUS without open SEARCH`() async throws {
         let capture = SearchCapture()
-        let gateway = CapturingIMAPGateway(hits: [], capture: capture)
+        let status = EmailMailboxStatus(mailbox: "INBOX", uidNext: 2001, uidValidity: 7)
+        let gateway = CapturingIMAPGateway(hits: [], capture: capture, statusValue: status)
         let adapter = EmailIMAPMailIndexGateway(gateway: gateway)
         let credentials = MailIndexCredentials(
             accountName: "mailtest",
@@ -976,7 +1033,26 @@ struct MailIndexerTests {
             beforeUID: nil
         )
         let queries = await capture.queriesSnapshot()
-        #expect(queries == [""])
+        // UIDNEXT 2001 anchors hi 2000 with a fixed 1000-wide window, never "".
+        #expect(queries == ["UID 1001:2000"])
+        #expect(!queries.contains(""))
+        // An empty mailbox anchors below the start and returns without dialing.
+        let emptyCapture = SearchCapture()
+        let emptyGateway = CapturingIMAPGateway(
+            hits: [],
+            capture: emptyCapture,
+            statusValue: EmailMailboxStatus(mailbox: "INBOX", uidNext: 1, uidValidity: 7)
+        )
+        let emptyAdapter = EmailIMAPMailIndexGateway(gateway: emptyGateway)
+        let empty = try await emptyAdapter.messages(
+            credentials: credentials,
+            mailbox: "INBOX",
+            limit: 10,
+            mode: .peek,
+            beforeUID: nil
+        )
+        #expect(empty.isEmpty)
+        #expect(await emptyCapture.queriesSnapshot().isEmpty)
     }
 
     @Test
@@ -991,7 +1067,7 @@ struct MailIndexerTests {
             username: "user@example.com",
             password: "test-secret"
         )
-        // UID 1:0 is not a valid range; the adapter short-circuits instead.
+        // A bound at the mailbox start holds no window; the adapter short-circuits instead.
         let messages = try await adapter.messages(
             credentials: credentials,
             mailbox: "INBOX",
@@ -1028,14 +1104,20 @@ struct MailIndexerTests {
             #expect(watermark == 200)
             let stats = try await store.stats()
             #expect(stats.documents == 200)
-            // Four clamped pages cover the mailbox: each bound is the lowest
-            // UID already fetched, so pages never overlap and never skip.
+            // Four fixed pages cover the mailbox: each bound is strictly below
+            // the lowest UID already fetched, so pages never overlap and never
+            // skip, and every window stays within the 1000-wide bound.
             let observed = await bounds.snapshot()
             #expect(observed.count == 4)
             #expect(observed[0] == nil)
             #expect(observed[1] == 151)
             #expect(observed[2] == 101)
             #expect(observed[3] == 51)
+            for bound in observed.compactMap(\.self) {
+                let upper = bound - 1
+                let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+                #expect(upper - lower + 1 <= EmailIMAPMailIndexGateway.uidWindowWidth)
+            }
         }
     }
 
@@ -1114,6 +1196,52 @@ struct MailIndexerTests {
     }
 
     @Test
+    func `Mailbox entry and window fetch emit liveness frames`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = ProgressRecorder()
+        let bodyMarker = "mailbox-liveness-body-token"
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: StubMailGateway(messages: [
+                    makeMessage(id: "2", body: "\(bodyMarker) two"),
+                    makeMessage(id: "1", body: "\(bodyMarker) one")
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            _ = try await indexer.run(reporter: { progress in await recorder.record(progress) })
+        }
+
+        let frames = await recorder.snapshot()
+        // Entering, window-fetched, and finished frames surround the fetch so
+        // a long IMAP stretch never reads stuck; per-message frames stay
+        // throttled and may not appear on a fast run.
+        #expect(frames.count >= 3)
+        #expect(frames[0].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[0].scanned == 0)
+        #expect(frames[0].matched == 0)
+        #expect(frames[0].current == "INBOX")
+        #expect(frames[1].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[1].scanned == 0)
+        #expect(frames[1].matched == 0)
+        #expect((frames[1].current ?? "").contains("INBOX"))
+        #expect((frames[1].current ?? "").contains("2"))
+        #expect(frames.last?.message.contains("Mail indexing finished") == true)
+        for index in 1 ..< frames.count {
+            #expect(frames[index].scanned >= frames[index - 1].scanned)
+            #expect(frames[index].matched >= frames[index - 1].matched)
+        }
+        // No subject or body text ever enters a frame; only the mailbox name does.
+        #expect(!frames.contains { $0.message.contains(bodyMarker) })
+        #expect(!frames.contains { ($0.current ?? "").contains(bodyMarker) })
+        #expect(!frames.contains { $0.message.contains("Subject") })
+    }
+
+    @Test
     func `Cancellation mid-backfill stops at the next checkpoint`() async throws {
         let base = makeTempBase()
         defer { try? FileManager.default.removeItem(at: base) }
@@ -1142,6 +1270,415 @@ struct MailIndexerTests {
             } catch {
                 Issue.record("Expected CancellationError, got \(error)")
             }
+        }
+    }
+
+    @Test
+    func `Validity change resets watermark without duplicating documents`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let all = Array((1 ... 10).map {
+            makeMessage(id: "\($0)", body: "validity body \($0)")
+        }.reversed())
+
+        try await withTestPassword {
+            let first = makeIndexer(
+                gateway: StubMailGateway(
+                    messages: all,
+                    statusValue: MailIndexMailboxStatus(uidNext: 11, uidValidity: 1)
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let firstReport = try await first.run()
+            #expect(firstReport.messagesIndexed == 10)
+            #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX") == 10)
+            #expect(await checkpoints.uidValidity(account: testAccount.name, mailbox: "INBOX") == 1)
+
+            // Server reset reassigns UIDs with a new token; the watermark must
+            // restart from zero while retained hashes dedupe the refetch.
+            let second = makeIndexer(
+                gateway: StubMailGateway(
+                    messages: all,
+                    statusValue: MailIndexMailboxStatus(uidNext: 11, uidValidity: 2)
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let secondReport = try await second.run()
+            #expect(secondReport.messagesDeduplicated == 10)
+            #expect(secondReport.messagesIndexed == 0)
+            let stats = try await store.stats()
+            #expect(stats.documents == 10)
+            #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX") == 10)
+            #expect(await checkpoints.uidValidity(account: testAccount.name, mailbox: "INBOX") == 2)
+        }
+    }
+
+    @Test
+    func `Empty window steps downward instead of stranding older mail`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        // Gap from 101..1999 deleted: newest window holds 2000..2009, an empty
+        // middle window must be skipped to reach 1..100 below it.
+        let gapped = Array((2000 ... 2009).map {
+            makeMessage(id: "\($0)", body: "gap top \($0)")
+        }.reversed()) + Array((1 ... 100).map {
+            makeMessage(id: "\($0)", body: "gap bottom \($0)")
+        }.reversed())
+        // Window-aware stub honoring fixed lo:hi bounds so the gap surfaces as
+        // an empty page the indexer must step past.
+        struct GapGateway: MailIndexGateway {
+            /// Messages backing every page, already newest-first.
+            let messages: [MailIndexMessage]
+            /// Page-bound recorder shared with the test.
+            let bounds: BoundRecorder
+
+            /// Creates a gap gateway.
+            init(messages: [MailIndexMessage], bounds: BoundRecorder = BoundRecorder()) {
+                self.messages = messages
+                self.bounds = bounds
+            }
+
+            /// Returns the canned mailbox list.
+            func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+                ["INBOX"]
+            }
+
+            /// Returns the bounded window slice, preserving newest-first order.
+            func messages(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                limit: Int,
+                mode _: MailFetchMode,
+                beforeUID: Int? = nil
+            ) async throws -> [MailIndexMessage] {
+                await bounds.record(beforeUID)
+                if let beforeUID {
+                    let upper = beforeUID - 1
+                    guard upper >= 1 else { return [] }
+                    let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+                    let filtered = messages.filter {
+                        let uid = MailIndexer.uid(of: $0.id)
+                        return uid >= lower && uid <= upper
+                    }
+                    return Array(filtered.prefix(limit))
+                }
+                // First window anchors from the newest UID like STATUS would.
+                let top = messages.map { MailIndexer.uid(of: $0.id) }.max() ?? 0
+                let lower = max(1, top - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+                let filtered = messages.filter {
+                    let uid = MailIndexer.uid(of: $0.id)
+                    return uid >= lower && uid <= top
+                }
+                return Array(filtered.prefix(limit))
+            }
+
+            /// Never serves attachment bytes; the gap test uses attachment-free mail.
+            func attachment(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                messageID _: String,
+                attachmentIndex _: Int,
+                mode _: MailFetchMode
+            ) async throws -> MailIndexAttachmentData {
+                throw StubGatewayError.missingAttachment
+            }
+        }
+        let bounds = BoundRecorder()
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: GapGateway(messages: gapped, bounds: bounds),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 110)
+            let watermark = await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX")
+            #expect(watermark == 2009)
+            let stats = try await store.stats()
+            #expect(stats.documents == 110)
+            // The bottom message below the empty middle window stays indexed.
+            let bottomID = MailIndexer.documentExternalID(
+                account: testAccount.name,
+                mailbox: "INBOX",
+                messageID: "1"
+            )
+            #expect(try await store.document(source: .mail, externalID: bottomID) != nil)
+        }
+    }
+
+    @Test
+    func `Mailbox deny matches case-insensitively across segments and globs`() {
+        let patterns = ["Trash", "Junk", "Spam", "Deleted*"]
+        #expect(MailIndexer.isMailboxDenied("Trash", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("trash", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("TRASH", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("Junk", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("junk", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("Deleted Messages", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("deleted messages", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("DELETED ARCHIVE", patterns: patterns))
+        // Hierarchy segments match at any depth, mirroring the files walker.
+        #expect(MailIndexer.isMailboxDenied("INBOX/Trash", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("INBOX/trash", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("[Gmail]/Trash", patterns: patterns))
+        #expect(MailIndexer.isMailboxDenied("INBOX/Deleted Items", patterns: ["Deleted*"]))
+        // Archive and every other mailbox index exactly as today.
+        #expect(!MailIndexer.isMailboxDenied("INBOX", patterns: patterns))
+        #expect(!MailIndexer.isMailboxDenied("Archive", patterns: patterns))
+        #expect(!MailIndexer.isMailboxDenied("Sent", patterns: patterns))
+        #expect(!MailIndexer.isMailboxDenied("INBOX/Archive", patterns: patterns))
+        #expect(!MailIndexer.isMailboxDenied("INBOX", patterns: []))
+        #expect(!MailIndexer.isMailboxDenied("Trash", patterns: []))
+    }
+
+    @Test
+    func `Denied mailboxes skip silently with skipped counts and no warnings`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        struct MultiGateway: MailIndexGateway {
+            let perMailbox: [String: [MailIndexMessage]]
+
+            func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+                Array(perMailbox.keys).sorted()
+            }
+
+            func messages(
+                credentials _: MailIndexCredentials,
+                mailbox: String,
+                limit: Int,
+                mode _: MailFetchMode,
+                beforeUID _: Int?
+            ) async throws -> [MailIndexMessage] {
+                Array((perMailbox[mailbox] ?? []).prefix(limit))
+            }
+
+            func attachment(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                messageID _: String,
+                attachmentIndex _: Int,
+                mode _: MailFetchMode
+            ) async throws -> MailIndexAttachmentData {
+                throw StubGatewayError.missingAttachment
+            }
+        }
+        let gateway = MultiGateway(perMailbox: [
+            "INBOX": [makeMessage(id: "1", body: "inbox body unique")],
+            "Trash": [makeMessage(id: "1", body: "trash body unique")],
+            "Junk": [makeMessage(id: "1", body: "junk body unique")],
+            "Deleted Messages": [makeMessage(id: "1", body: "deleted body unique")],
+            "Archive": [makeMessage(id: "1", body: "archive body unique")]
+        ])
+        try await withTestPassword {
+            let indexer = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true),
+                gateway: gateway,
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            // Trash, Junk, and Deleted Messages skip; INBOX and Archive index.
+            #expect(report.messagesIndexed == 2)
+            #expect(report.mailboxesSkipped == 3)
+            #expect(report.warnings.isEmpty)
+            let stats = try await store.stats()
+            #expect(stats.documents == 2)
+            let trashID = MailIndexer.documentExternalID(account: testAccount.name, mailbox: "Trash", messageID: "1")
+            #expect(try await store.document(source: .mail, externalID: trashID) == nil)
+            let inboxID = MailIndexer.documentExternalID(account: testAccount.name, mailbox: "INBOX", messageID: "1")
+            #expect(try await store.document(source: .mail, externalID: inboxID) != nil)
+            let archiveID = MailIndexer.documentExternalID(account: testAccount.name, mailbox: "Archive", messageID: "1")
+            #expect(try await store.document(source: .mail, externalID: archiveID) != nil)
+        }
+    }
+
+    @Test
+    func `Newly denied mail retires on the next complete run and drops checkpoints`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        struct PerMailboxGateway: MailIndexGateway {
+            let perMailbox: [String: [MailIndexMessage]]
+
+            func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+                Array(perMailbox.keys).sorted()
+            }
+
+            func messages(
+                credentials _: MailIndexCredentials,
+                mailbox: String,
+                limit: Int,
+                mode _: MailFetchMode,
+                beforeUID _: Int?
+            ) async throws -> [MailIndexMessage] {
+                Array((perMailbox[mailbox] ?? []).prefix(limit))
+            }
+
+            func attachment(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                messageID _: String,
+                attachmentIndex _: Int,
+                mode _: MailFetchMode
+            ) async throws -> MailIndexAttachmentData {
+                throw StubGatewayError.missingAttachment
+            }
+        }
+        try await withTestPassword {
+            // Seed with an empty denylist so Trash and Junk index.
+            let seed = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true, mailboxDeny: []),
+                gateway: PerMailboxGateway(perMailbox: [
+                    "INBOX": [makeMessage(id: "1", body: "inbox seed unique")],
+                    "Trash": [makeMessage(id: "1", body: "trash seed unique")],
+                    "Junk": [makeMessage(id: "1", body: "junk seed unique")]
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let seedReport = try await seed.run()
+            #expect(seedReport.messagesIndexed == 3)
+            #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "Trash") == 1)
+            // Newly denied Trash and Junk retire on the next complete run.
+            let denied = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true),
+                gateway: PerMailboxGateway(perMailbox: [
+                    "INBOX": [makeMessage(id: "1", body: "inbox seed unique"), makeMessage(id: "2", body: "inbox second unique")],
+                    "Trash": [makeMessage(id: "2", body: "trash unseen unique")],
+                    "Junk": [makeMessage(id: "2", body: "junk unseen unique")]
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let deniedReport = try await denied.run()
+            #expect(deniedReport.mailboxesSkipped == 2)
+            #expect(deniedReport.warnings.isEmpty)
+            #expect(deniedReport.retiredCount == 2)
+            let stats = try await store.stats()
+            // INBOX keeps its row plus the new arrival; Trash and Junk are gone.
+            #expect(stats.documents == 2)
+            let trashID = MailIndexer.documentExternalID(account: testAccount.name, mailbox: "Trash", messageID: "1")
+            #expect(try await store.document(source: .mail, externalID: trashID) == nil)
+            // Checkpoints drop so re-allowing backfills from scratch.
+            #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "Trash") == 0)
+            #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "Junk") == 0)
+            // Re-allowing re-indexes from scratch.
+            let reallowed = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true, mailboxDeny: []),
+                gateway: PerMailboxGateway(perMailbox: [
+                    "Trash": [makeMessage(id: "1", body: "trash seed unique")]
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let reallowedReport = try await reallowed.run()
+            #expect(reallowedReport.messagesIndexed == 1)
+            #expect(try await store.document(source: .mail, externalID: trashID) != nil)
+        }
+    }
+
+    @Test
+    func `Budget-capped run never retires denied mail`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        struct SingleGateway: MailIndexGateway {
+            let perMailbox: [String: [MailIndexMessage]]
+
+            func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+                Array(perMailbox.keys).sorted()
+            }
+
+            func messages(
+                credentials _: MailIndexCredentials,
+                mailbox: String,
+                limit: Int,
+                mode _: MailFetchMode,
+                beforeUID _: Int?
+            ) async throws -> [MailIndexMessage] {
+                Array((perMailbox[mailbox] ?? []).prefix(limit))
+            }
+
+            func attachment(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                messageID _: String,
+                attachmentIndex _: Int,
+                mode _: MailFetchMode
+            ) async throws -> MailIndexAttachmentData {
+                throw StubGatewayError.missingAttachment
+            }
+        }
+        try await withTestPassword {
+            let seed = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true, mailboxDeny: []),
+                gateway: SingleGateway(perMailbox: ["Deleted Messages": [makeMessage(id: "1", body: "capped deleted unique")]]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            _ = try await seed.run()
+            let deniedID = MailIndexer.documentExternalID(account: testAccount.name, mailbox: "Deleted Messages", messageID: "1")
+            #expect(try await store.document(source: .mail, externalID: deniedID) != nil)
+            // Deleted Messages sorts before INBOX, so it is observed as denied
+            // before the budget exhausts on INBOX; retire must still stay
+            // skipped because the run stopped early.
+            let capped = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true, nightlyBudget: 1),
+                gateway: SingleGateway(perMailbox: [
+                    "Deleted Messages": [makeMessage(id: "2", body: "capped deleted two")],
+                    "INBOX": [makeMessage(id: "1", body: "capped inbox one"), makeMessage(id: "2", body: "capped inbox two")]
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await capped.run()
+            #expect(report.mailboxesSkipped == 1)
+            #expect(report.retiredCount == 0)
+            #expect(try await store.document(source: .mail, externalID: deniedID) != nil)
+        }
+    }
+
+    @Test
+    func `Store retire deletes mail chunks alongside documents`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        try await withTestPassword {
+            // Seed Trash with an empty denylist so it indexes.
+            let allowedSeed = MailIndexer(
+                emailConfig: EmailConfig(accounts: [testAccount]),
+                indexConfig: IndexConfig(enabled: true, mail: true, mailboxDeny: []),
+                gateway: StubMailGateway(mailboxNames: ["Trash"], messages: [makeMessage(id: "1", body: "retire chunk body unique")]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            _ = try await allowedSeed.run()
+            let seeded = try await store.searchKeyword(query: "retire", limit: 10)
+            #expect(!seeded.isEmpty)
+            let retired = try await store.retireMailboxes(["Trash"])
+            #expect(retired == 1)
+            let after = try await store.searchKeyword(query: "retire", limit: 10)
+            #expect(after.isEmpty)
+            let stats = try await store.stats()
+            #expect(stats.documents == 0)
+            #expect(stats.chunks == 0)
         }
     }
 }

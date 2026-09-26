@@ -60,6 +60,11 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// work so one text-dense document cannot fan an outsized batch; chunks
     /// beyond the cap stay keyword-only.
     public var maxVectorChunksPerDocument: Int
+    /// Glob patterns for mailboxes the mail indexer skips without dialing.
+    /// Defaults to Trash-class mailboxes so transient deletes never enter the
+    /// index; denied mailboxes retire on the next complete run and re-index
+    /// from scratch when re-allowed.
+    public var mailboxDeny: [String]
     /// Directory and file names the files walker always skips, even when they
     /// are absent from `exclude`. Read-only: always populated from the walker's
     /// prune list (`FilesIndexer.alwaysSkippedPatterns`) so the dashboard copy
@@ -161,6 +166,12 @@ public struct IndexConfig: Sendable, Codable, Equatable {
     /// Hard upper bound for `max_vector_chunks_per_document`, keeping a typo
     /// from admitting an unbounded embedding batch per document.
     public static let maxAllowedVectorChunksPerDocument = 4096
+    /// Default Trash-class mailbox denylist.
+    ///
+    /// Trash-like mail is transient by nature, so a fresh install skips it
+    /// without dialing; clearing the list opts back into indexing every
+    /// mailbox.
+    public static let defaultMailboxDeny = ["Trash", "Junk", "Spam", "Deleted*"]
 
     /// Creates an index config.
     public init(
@@ -180,7 +191,8 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         workers: Int = defaultWorkers,
         thermalBackoff: Bool = defaultThermalBackoff,
         pauseOnBattery: Bool = defaultPauseOnBattery,
-        maxVectorChunksPerDocument: Int = defaultMaxVectorChunksPerDocument
+        maxVectorChunksPerDocument: Int = defaultMaxVectorChunksPerDocument,
+        mailboxDeny: [String] = defaultMailboxDeny
     ) {
         self.enabled = enabled
         self.files = files
@@ -199,6 +211,7 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         self.thermalBackoff = thermalBackoff
         self.pauseOnBattery = pauseOnBattery
         self.maxVectorChunksPerDocument = maxVectorChunksPerDocument
+        self.mailboxDeny = mailboxDeny
         self.alwaysSkipped = FilesIndexer.alwaysSkippedPatterns
     }
 
@@ -220,6 +233,7 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         case thermalBackoff = "thermal_backoff"
         case pauseOnBattery = "pause_on_battery"
         case maxVectorChunksPerDocument = "max_vector_chunks_per_document"
+        case mailboxDeny = "mailbox_deny"
         case alwaysSkipped = "always_skipped"
     }
 
@@ -244,6 +258,7 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         thermalBackoff = try container.decodeIfPresent(Bool.self, forKey: .thermalBackoff) ?? Self.defaultThermalBackoff
         pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery) ?? Self.defaultPauseOnBattery
         maxVectorChunksPerDocument = try container.decodeIfPresent(Int.self, forKey: .maxVectorChunksPerDocument) ?? Self.defaultMaxVectorChunksPerDocument
+        mailboxDeny = try container.decodeIfPresent([String].self, forKey: .mailboxDeny) ?? Self.defaultMailboxDeny
         // Read-only: any written value is discarded so the walker list stays
         // single-sourced and a client echo cannot drift the stored policy.
         _ = try container.decodeIfPresent([String].self, forKey: .alwaysSkipped)
@@ -271,6 +286,7 @@ public struct IndexConfig: Sendable, Codable, Equatable {
         try container.encode(thermalBackoff, forKey: .thermalBackoff)
         try container.encode(pauseOnBattery, forKey: .pauseOnBattery)
         try container.encode(maxVectorChunksPerDocument, forKey: .maxVectorChunksPerDocument)
+        try container.encode(mailboxDeny, forKey: .mailboxDeny)
         try container.encode(alwaysSkipped, forKey: .alwaysSkipped)
     }
 

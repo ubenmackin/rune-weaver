@@ -147,8 +147,9 @@ public extension IndexClosureStage {
                 indexed: report.messagesIndexed,
                 vectorChunks: report.vectorsWritten,
                 keywordChunks: max(report.chunksWritten - report.vectorsWritten, 0),
-                skipped: report.messagesUnchanged + report.messagesDeduplicated,
+                skipped: report.messagesUnchanged + report.messagesDeduplicated + report.mailboxesSkipped,
                 errors: report.warnings.count,
+                retired: report.retiredCount,
                 didRun: report.didRun,
                 skippedReason: report.skippedReason,
                 warnings: report.warnings
@@ -181,7 +182,7 @@ public extension IndexClosureStage {
         statePath: String = MessagesIndexer.defaultStatePath,
         batchLimit: Int = MessagesIndexer.defaultBatchLimit
     ) -> IndexClosureStage {
-        IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { policy, _, _ in
+        IndexClosureStage(kind: .messages, isEnabled: config.enabled && config.messages) { policy, reporter, _ in
             // Live disable is honored here so the next run skips without
             // rebuilt stages; live enable still needs rebuilt stages because
             // the coordinator never executes a boot-disabled stage.
@@ -204,7 +205,9 @@ public extension IndexClosureStage {
                 // The looping entry snapshots once and drains every pending
                 // batch, so the stage folds its accumulated totals straight
                 // into the report while per-batch memory stays bounded.
-                let result = try await indexer.indexAllNewMessages()
+                // The reporter flows through so each batch advances the top
+                // scanned and indexed counts.
+                let result = try await indexer.indexAllNewMessages(reporter: reporter)
                 return IndexSourceRunReport(
                     kind: .messages,
                     scanned: result.scanned,

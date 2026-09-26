@@ -535,11 +535,12 @@ public actor MessagesIndexer {
         /// is persisted after every finished batch, so a run cancelled
         /// mid-backlog resumes at the first unfinished batch instead of
         /// replaying rows whose documents are already committed.
+        /// - Parameter reporter: Sink for advisory per-batch progress; defaults to a no-op.
         /// - Returns: Accumulated counts plus the final watermark; `hasMore` is
         ///   always false because the loop only returns once the snapshot is drained.
         /// - Throws: ``MessagesIndexError`` on a missing permission or snapshot
         ///   failure; cancellation propagates with finished batches already committed.
-        public func indexAllNewMessages() async throws -> MessagesIndexResult {
+        public func indexAllNewMessages(reporter: ToolProgressReporter = ToolContext.noProgress) async throws -> MessagesIndexResult {
             let directory = try snapshotDatabase()
             defer { try? FileManager.default.removeItem(at: directory) }
             let snapshotPath = directory.appendingPathComponent("chat.db").path
@@ -553,6 +554,10 @@ public actor MessagesIndexer {
             var totalIndexed = 0
             var lastRowID = watermark
             while true {
+                // Per-batch checkpoint so a backlog stops at the next batch
+                // boundary; per-message checks inside the batch still bound
+                // overrun to one item.
+                try Task.checkCancellation()
                 let batch = try await indexBatch(
                     handle: handle,
                     from: watermark,
@@ -564,6 +569,16 @@ public actor MessagesIndexer {
                 lastRowID = batch.lastRowID
                 watermark = batch.lastRowID
                 try writeWatermark(watermark)
+                // The batch loop owns per-batch liveness: every batch reports
+                // cumulative totals so a messages-only phase advances the top
+                // scanned and indexed on each page. Only the batch ROWID
+                // enters the frame; no body text ever does.
+                await reporter(ToolProgress(
+                    message: "Indexing messages: \(totalIndexed) indexed, \(totalScanned) scanned",
+                    scanned: totalScanned,
+                    matched: totalIndexed,
+                    current: "rowid:\(batch.lastRowID)"
+                ))
                 if !batch.hasMore {
                     break
                 }

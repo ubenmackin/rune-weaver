@@ -144,6 +144,13 @@ public protocol EmailIMAPGateway: Sendable {
     /// - Returns: Selectable mailbox names in server order plus the common delimiter.
     func mailboxListing(credentials: ResolvedEmailCredentials) async throws -> EmailMailboxListing
 
+    /// Reads the STATUS snapshot for one mailbox.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to inspect.
+    /// - Returns: Next UID plus validity token for fixed-window anchoring.
+    func status(credentials: ResolvedEmailCredentials, mailbox: String) async throws -> EmailMailboxStatus
+
     /// Compatibility shim over `mailboxListing` for existing callers.
     /// - Parameter credentials: Resolved connection fields plus password.
     /// - Returns: Selectable mailbox names in server order.
@@ -222,6 +229,11 @@ public extension EmailIMAPGateway {
         markAsRead _: Bool
     ) async throws -> EmailMoveResult {
         throw EmailIMAPError.bridgeFailed("IMAP move not supported")
+    }
+
+    /// Default status that fails closed for gateways without STATUS support.
+    func status(credentials _: ResolvedEmailCredentials, mailbox _: String) async throws -> EmailMailboxStatus {
+        throw EmailIMAPError.bridgeFailed("IMAP status not supported")
     }
 }
 
@@ -317,8 +329,11 @@ public struct EmailMoveResult: Sendable, Equatable, Codable {
 }
 
 /// Bridge request document sent to the Python helper over stdin.
+///
+/// Named owner for the STATUS op alongside the embedded script: this document
+/// defines the `"status"` operation shape the script dispatches.
 struct EmailIMAPBridgeRequest: Encodable {
-    /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, `"append"`, or `"move"`.
+    /// Operation: `"search"`, `"fetch"`, `"attachment"`, `"list"`, `"status"`, `"append"`, or `"move"`.
     let op: String
     /// IMAP hostname.
     let host: String
@@ -486,6 +501,30 @@ struct EmailIMAPBridgeRequest: Encodable {
             hasAttachment: nil
         )
     }
+
+    /// Creates a mailbox STATUS request for UIDNEXT plus UIDVALIDITY.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to inspect.
+    /// - Returns: `status` request anchoring the first fixed window.
+    static func status(credentials: ResolvedEmailCredentials, mailbox: String = "INBOX") -> Self {
+        Self(
+            op: "status",
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password,
+            mailbox: mailbox,
+            query: nil,
+            limit: nil,
+            messageID: nil,
+            attachmentIndex: nil,
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil,
+            hasAttachment: nil
+        )
+    }
 }
 
 /// Subprocess gateway shelling out to `python3 imaplib`.
@@ -570,6 +609,25 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         let data = try await run(request: request)
         do {
             return try EmailBridgeParsing.parseMailboxListingPayload(data)
+        } catch let error as EmailIMAPError {
+            throw error
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+    }
+
+    /// Reads the STATUS snapshot for one mailbox via the Python helper.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to inspect.
+    /// - Returns: Next UID plus validity token for fixed-window anchoring.
+    public func status(credentials: ResolvedEmailCredentials, mailbox: String) async throws -> EmailMailboxStatus {
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = EmailIMAPBridgeRequest.status(credentials: credentials, mailbox: trimmedMailbox)
+        let data = try await run(request: request)
+        do {
+            return try EmailBridgeParsing.parseStatusPayload(data)
         } catch let error as EmailIMAPError {
             throw error
         } catch {
@@ -730,6 +788,42 @@ private struct MoveResultResponse: Decodable {
     }
 }
 
+/// Bridge `status` response shape for the gateway snapshot.
+private struct StatusResultResponse: Decodable {
+    /// Whether the operation succeeded.
+    let ok: Bool
+    /// Error detail when `ok` is false.
+    let error: String?
+    /// Mailbox the status was read from.
+    let mailbox: String?
+    /// Next UID the server will assign.
+    let uidNext: Int?
+    /// Snake-case alias for `uidNext`.
+    let uidNextSnake: Int?
+    /// Server validity token.
+    let uidValidity: Int?
+    /// Snake-case alias for `uidValidity`.
+    let uidValiditySnake: Int?
+
+    /// Coding keys for the status document.
+    private enum CodingKeys: String, CodingKey {
+        /// Success flag.
+        case ok
+        /// Error detail.
+        case error
+        /// Mailbox label.
+        case mailbox
+        /// Next UID.
+        case uidNext
+        /// Snake-case next UID.
+        case uidNextSnake = "uid_next"
+        /// Validity token.
+        case uidValidity
+        /// Snake-case validity token.
+        case uidValiditySnake = "uid_validity"
+    }
+}
+
 public extension EmailBridgeParsing {
     /// Decodes a bridge `move` stdout payload into the gateway minimal result.
     /// Requires `mailbox`, `destination`, `moved`, and a read flag so partial
@@ -766,5 +860,32 @@ public extension EmailBridgeParsing {
             moved: moved,
             markedAsRead: marked
         )
+    }
+
+    /// Decodes a bridge `status` stdout payload into the gateway snapshot.
+    /// Requires `mailbox`, `uidNext`, and `uidValidity` so partial payloads
+    /// fail closed instead of anchoring a window from a guessed top.
+    static func parseStatusPayload(_ data: Data) throws -> EmailMailboxStatus {
+        let response: StatusResultResponse
+        do {
+            response = try JSONDecoder().decode(StatusResultResponse.self, from: data)
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+        if !response.ok {
+            throw EmailIMAPError.bridgeFailed(response.error ?? "IMAP status failed")
+        }
+        guard let mailbox = response.mailbox,
+              !mailbox.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no mailbox")
+        }
+        guard let uidNext = response.uidNext ?? response.uidNextSnake else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no uidNext")
+        }
+        guard let uidValidity = response.uidValidity ?? response.uidValiditySnake else {
+            throw EmailIMAPError.decodeFailed("IMAP bridge returned no uidValidity")
+        }
+        return EmailMailboxStatus(mailbox: mailbox, uidNext: uidNext, uidValidity: uidValidity)
     }
 }

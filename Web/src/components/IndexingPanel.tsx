@@ -16,6 +16,8 @@ import {
   ApiError,
   DEFAULT_INDEX_CONFIG,
   DEFAULT_INDEX_EFFORT,
+  DEFAULT_INDEX_MAILBOX_DENY,
+  DEFAULT_INDEX_MAILBOX_DENY_TEXT,
   DEFAULT_INDEX_WORKERS,
   DEFAULT_INDEX_PAUSE_ON_BATTERY,
   DEFAULT_INDEX_THERMAL_BACKOFF,
@@ -24,8 +26,11 @@ import {
   INDEX_EFFORT_PRESET_LABELS,
   INDEX_ICLOUD_EVICTIONS,
   INDEX_MAIL_VECTOR_WINDOWS,
+  formatMailboxDenyText,
+  parseMailboxDenyText,
   cancelIndex,
   describeIndexRun,
+  formatIndexCount,
   formatToolProgressElapsedMs,
   getIndexStatus,
   getSettings,
@@ -604,11 +609,11 @@ export function describeEffortReality(
       : null;
   if (resolved != null && cores != null) {
     const coreNoun = cores === 1 ? "core" : "cores";
-    return `${label} - using ${resolved} of ${cores} ${coreNoun}`;
+    return `${label} - using ${formatIndexCount(resolved)} of ${formatIndexCount(cores)} ${coreNoun}`;
   }
   if (resolved != null) {
     const workerNoun = resolved === 1 ? "worker" : "workers";
-    return `${label} - using ${resolved} ${workerNoun}`;
+    return `${label} - using ${formatIndexCount(resolved)} ${workerNoun}`;
   }
   return label;
 }
@@ -846,10 +851,10 @@ export function formatIndexLiveHeader(
     elapsedMs,
   );
   const elapsed = formatToolProgressElapsedMs(elapsedMs);
-  const skippedPart = skipped > 0 ? ` · ${skipped} skipped` : "";
-  const errorsPart = errors > 0 ? ` · ${errors} errors` : "";
+  const skippedPart = skipped > 0 ? ` · ${formatIndexCount(skipped)} skipped` : "";
+  const errorsPart = errors > 0 ? ` · ${formatIndexCount(errors)} errors` : "";
   const ratePart = rate ? ` · ${rate}` : "";
-  return `${label} — ${stageTitle} · ${scanned} scanned · ${indexed} indexed${skippedPart}${errorsPart}${ratePart} · ${elapsed}`;
+  return `${label} — ${stageTitle} · ${formatIndexCount(scanned)} scanned · ${formatIndexCount(indexed)} indexed${skippedPart}${errorsPart}${ratePart} · ${elapsed}`;
 }
 
 // Embedded callers (the Memory tab) render their own inner header above the
@@ -1360,7 +1365,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
     try {
       const response = await pruneIndex(cutoff.toISOString());
       setNotice(
-        `Pruned ${response?.removed ?? 0} document${response?.removed === 1 ? "" : "s"} indexed before ${formatIndexAsOf(response?.before)}.`,
+        `Pruned ${formatIndexCount(response?.removed ?? 0)} document${response?.removed === 1 ? "" : "s"} indexed before ${formatIndexAsOf(response?.before)}.`,
       );
       await loadStatus();
     } catch (failure) {
@@ -1410,7 +1415,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
   const cancellingRatePart = cancellingRate ? ` · ${cancellingRate}` : "";
   const liveHeaderText = cancelling
     ? live
-      ? `Cancelling… ${typeof live.scanned === "number" ? live.scanned : 0} scanned · ${typeof live.indexed === "number" ? live.indexed : 0} indexed${cancellingRatePart} · ${formatToolProgressElapsedMs(typeof live.elapsedMs === "number" ? live.elapsedMs : 0)}`
+      ? `Cancelling… ${formatIndexCount(live.scanned)} scanned · ${formatIndexCount(live.indexed)} indexed${cancellingRatePart} · ${formatToolProgressElapsedMs(typeof live.elapsedMs === "number" ? live.elapsedMs : 0)}`
       : "Cancelling…"
     : (formatIndexLiveHeader(live) ?? "");
   // Fresh stores have no last run yet: while the first pass is in flight the
@@ -1633,7 +1638,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   data-testid="index-last-run-retired"
                   style={{ marginLeft: 8 }}
                 >
-                  {lastRunRetired} retired
+                  {formatIndexCount(lastRunRetired)} retired
                 </span>
               ) : null}
               {lastRunTruncated != null && lastRunTruncated > 0 ? (
@@ -1642,7 +1647,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   data-testid="index-last-run-truncated"
                   style={{ marginLeft: 8 }}
                 >
-                  {lastRunTruncated} truncated
+                  {formatIndexCount(lastRunTruncated)} truncated
                 </span>
               ) : null}
             </div>
@@ -1735,7 +1740,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   data-testid="index-stat-documents-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {status.documents}
+                  {formatIndexCount(status.documents)}
                 </div>
               </div>
               <div className="card index-stat-card" style={{ padding: 12, marginBottom: 0 }}>
@@ -1745,10 +1750,10 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                   data-testid="index-stat-chunks-value"
                   style={{ fontSize: 20, fontWeight: 700, marginTop: 2 }}
                 >
-                  {status.chunks}
+                  {formatIndexCount(status.chunks)}
                 </div>
                 <div className="muted text-xs" style={{ marginTop: 2 }}>
-                  {status.vectorChunks} vector · {status.keywordChunks} keyword
+                  {formatIndexCount(status.vectorChunks)} vector · {formatIndexCount(status.keywordChunks)} keyword
                 </div>
               </div>
               <div
@@ -1813,7 +1818,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                 height={DONUT_SIZE}
                 viewBox={`0 0 ${DONUT_SIZE} ${DONUT_SIZE}`}
                 role="img"
-                aria-label={`${vectorChunks} vector chunks, ${keywordChunks} keyword chunks`}
+                aria-label={`${formatIndexCount(vectorChunks)} vector chunks, ${formatIndexCount(keywordChunks)} keyword chunks`}
                 data-testid="index-donut-chart"
               >
                 <circle
@@ -1860,7 +1865,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       background: CHART_VECTOR_COLOR,
                     }}
                   />
-                  Vector <strong>{vectorChunks}</strong>
+                  Vector <strong>{formatIndexCount(vectorChunks)}</strong>
                 </span>
                 <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                   <span
@@ -1872,7 +1877,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       background: CHART_KEYWORD_COLOR,
                     }}
                   />
-                  Keyword <strong>{keywordChunks}</strong>
+                  Keyword <strong>{formatIndexCount(keywordChunks)}</strong>
                 </span>
               </div>
             </div>
@@ -1956,7 +1961,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       >
                         <div
                           data-testid={`index-bar-${source.kind}`}
-                          aria-label={`${sourceLabel(source.kind)} ${source.documents} documents`}
+                          aria-label={`${sourceLabel(source.kind)} ${formatIndexCount(source.documents)} documents`}
                           style={{
                             width: barWidth,
                             height: "100%",
@@ -1967,7 +1972,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                       </div>
                     )}
                     <span className="text-xs muted">
-                      {source.documents} docs · {source.chunks} chunks · {formatIndexBytes(source.bytes)}
+                      {formatIndexCount(source.documents)} docs · {formatIndexCount(source.chunks)} chunks · {formatIndexBytes(source.bytes)}
                     </span>
                   </div>
                 );
@@ -2050,7 +2055,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                         >
                           <div
                             data-testid={`index-extract-bar-${row.status}`}
-                            aria-label={`${extractStatusLabel(row.status)} ${row.documents} documents`}
+                            aria-label={`${extractStatusLabel(row.status)} ${formatIndexCount(row.documents)} documents`}
                             style={{
                               width: barWidth,
                               height: "100%",
@@ -2061,7 +2066,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
                         </div>
                       )}
                       <span className="text-xs muted">
-                        {row.documents} docs
+                        {formatIndexCount(row.documents)} docs
                       </span>
                     </div>
                   );
@@ -2099,7 +2104,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               aria-expanded={errorsExpanded}
               onClick={() => setErrorsExpanded((previous) => !previous)}
             >
-              <span>Last errors ({totalErrorCount})</span>
+              <span>Last errors ({formatIndexCount(totalErrorCount)})</span>
               <span>{errorsExpanded ? "Hide" : "Show"}</span>
             </button>
           ) : (
@@ -2107,7 +2112,7 @@ export default function IndexingPanel({ hideHeader = false }: IndexingPanelProps
               className="index-errors-header-count muted text-xs"
               data-testid="index-errors-header-count"
             >
-              <span>Last errors ({totalErrorCount})</span>
+              <span>Last errors ({formatIndexCount(totalErrorCount)})</span>
             </span>
           )}
           {errorsExpanded && displayErrors.length > 0 ? (
@@ -2320,6 +2325,9 @@ export function IndexPolicyPanel() {
   const [excludeText, setExcludeText] = useState<string>(
     DEFAULT_INDEX_CONFIG.exclude.join("\n"),
   );
+  const [mailboxDenyText, setMailboxDenyText] = useState<string>(
+    DEFAULT_INDEX_MAILBOX_DENY_TEXT,
+  );
   const [saving, setSaving] = useState(false);
   // Engine core count from GET /index/status for the effort reality line.
   // Null until the status fetch settles so resolveMachineCores falls back to
@@ -2388,6 +2396,11 @@ export function IndexPolicyPanel() {
           exclude: Array.isArray(index.exclude)
             ? index.exclude
             : DEFAULT_INDEX_CONFIG.exclude,
+          mailbox_deny: Array.isArray(
+            (index as IndexConfigData).mailbox_deny,
+          )
+            ? ((index as IndexConfigData).mailbox_deny as string[])
+            : [...DEFAULT_INDEX_MAILBOX_DENY],
           // Read-only walker list: kept when the engine sends an array so the
           // detail block names exactly what the next run will skip, otherwise
           // left absent so older engines render generic copy without names.
@@ -2419,6 +2432,9 @@ export function IndexPolicyPanel() {
         };
         setConfig(merged);
         setExcludeText(merged.exclude.join("\n"));
+        setMailboxDenyText(
+          formatMailboxDenyText(merged.mailbox_deny),
+        );
       }
     } catch {
       // A settings read failure leaves the local defaults; the save path
@@ -2443,6 +2459,10 @@ export function IndexPolicyPanel() {
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
+    // Denied mailboxes mirror the excludes editor: one glob per line,
+    // trimmed, blanks dropped so an emptied editor opts every mailbox back
+    // in instead of persisting whitespace rows.
+    const mailboxDeny = parseMailboxDenyText(mailboxDenyText);
     const effort = normalizeIndexEffortPreset(config.effort);
     // Presets derive workers on the engine so they must save 0; only custom
     // carries an explicit 1..64 count. The stepper fallback stays
@@ -2474,6 +2494,7 @@ export function IndexPolicyPanel() {
         pause_on_battery:
           config.pause_on_battery ?? DEFAULT_INDEX_PAUSE_ON_BATTERY,
         max_vector_chunks_per_document: vectorCap,
+        mailbox_deny: mailboxDeny,
       },
     });
     const index = saved?.index;
@@ -2485,6 +2506,11 @@ export function IndexPolicyPanel() {
         exclude: Array.isArray(index.exclude)
           ? index.exclude
           : DEFAULT_INDEX_CONFIG.exclude,
+        mailbox_deny: Array.isArray(
+          (index as IndexConfigData).mailbox_deny,
+        )
+          ? ((index as IndexConfigData).mailbox_deny as string[])
+          : [...DEFAULT_INDEX_MAILBOX_DENY],
         always_skipped: Array.isArray(
           (index as IndexConfigData).always_skipped,
         )
@@ -2494,12 +2520,15 @@ export function IndexPolicyPanel() {
       if (mountedRef.current) {
         setConfig(merged);
         setExcludeText(merged.exclude.join("\n"));
+        setMailboxDenyText(
+          formatMailboxDenyText(merged.mailbox_deny),
+        );
       }
     }
     // Saved enabled truth for the restart gate: the engine echo wins so a
     // disable-then-save never restarts from a stale pre-save closure.
     return typeof index?.enabled === "boolean" ? index.enabled : config.enabled;
-  }, [config, excludeText]);
+  }, [config, excludeText, mailboxDenyText]);
 
   // Sole owner of save-and-restart: the settings patch never auto-starts a
   // run, so a policy saved mid-scan must stop the old generation and start a
@@ -2915,6 +2944,21 @@ export function IndexPolicyPanel() {
           />
           <p className="muted text-xs">
             Directories and patterns skipped during a file scan.
+          </p>
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="index-mailbox-deny">Denied mailboxes (one glob per line)</label>
+          <textarea
+            id="index-mailbox-deny"
+            aria-label="Denied mailboxes"
+            rows={4}
+            value={mailboxDenyText}
+            onChange={(event) => setMailboxDenyText(event.target.value)}
+          />
+          <p className="muted text-xs">
+            Trash-class mailboxes skipped without dialing. Denied mail retires
+            on the next complete run; clearing a name re-indexes it from scratch.
           </p>
         </div>
 

@@ -46,6 +46,7 @@ import {
   DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
   DEFAULT_INDEX_WORKERS,
   describeIndexRun,
+  formatIndexCount,
   indexRunLabelForRun,
   indexRunTriggerLabel,
   parseIndexRunTrigger,
@@ -196,6 +197,30 @@ describe("IndexingPanel helpers", () => {
     expect(formatIndexBytes(1536 * 1024)).toBe("1.5 MB");
   });
 
+  it("groups large index counts en-US while leaving small counts plain", () => {
+    // Boundary owns the threshold: below stays plain, at and above groups.
+    expect(formatIndexCount(9999)).toBe("9999");
+    expect(formatIndexCount(10000)).toBe("10,000");
+    expect(formatIndexCount(1040)).toBe("1040");
+    expect(formatIndexCount(25765)).toBe("25,765");
+    expect(formatIndexCount(39751)).toBe("39,751");
+    expect(formatIndexCount(150189)).toBe("150,189");
+    // Fractional payloads floor before grouping so decimals never leak.
+    expect(formatIndexCount(9999.9)).toBe("9999");
+    expect(formatIndexCount(10000.9)).toBe("10,000");
+    expect(formatIndexCount(3.7)).toBe("3");
+    // Negatives stay honest instead of collapsing so a drifted payload reads.
+    expect(formatIndexCount(-5)).toBe("-5");
+    expect(formatIndexCount(0)).toBe("0");
+    // Non-finite and non-number payloads degrade to zero instead of NaN.
+    expect(formatIndexCount(Number.NaN)).toBe("0");
+    expect(formatIndexCount(Number.POSITIVE_INFINITY)).toBe("0");
+    expect(formatIndexCount(Number.NEGATIVE_INFINITY)).toBe("0");
+    expect(formatIndexCount(null)).toBe("0");
+    expect(formatIndexCount(undefined)).toBe("0");
+    expect(formatIndexCount("150189")).toBe("0");
+  });
+
   it("normalizes the last watermark and never renders an epoch for null", () => {
     expect(formatIndexAsOf(null)).toBe("Never indexed");
     expect(formatIndexAsOf(0)).toBe("Never indexed");
@@ -286,6 +311,45 @@ describe("IndexingPanel helpers", () => {
     expect(
       describeIndexRun({ status: "ok", indexed: 3, scanned: 5, errors: 0, finishedAt: 1 }),
     ).toContain("3 indexed");
+  });
+
+  it("groups large run counts digit-for-digit across notice and strip", () => {
+    // Large stores group en-US while small counts stay plain, and the shared
+    // formatter keeps the notice and the strip identical.
+    const strip = describeIndexRun({
+      status: "ok",
+      indexed: 150189,
+      scanned: 39751,
+      errors: 25765,
+      finishedAt: 1,
+      trigger: "onDemand",
+    });
+    expect(strip).toContain("150,189 indexed");
+    expect(strip).toContain("39,751 scanned");
+    expect(strip).toContain("25,765 errors");
+    expect(strip).not.toMatch(/150189/);
+    const small = describeIndexRun({
+      status: "ok",
+      indexed: 1040,
+      scanned: 9999,
+      errors: 0,
+      finishedAt: 1,
+    });
+    expect(small).toContain("1040 indexed");
+    expect(small).toContain("9999 scanned");
+    expect(small).not.toContain(",");
+    // Retired and truncated group the same way so the strip and the badges agree.
+    const withRetired = describeIndexRun({
+      status: "ok",
+      indexed: 3,
+      scanned: 5,
+      errors: 0,
+      finishedAt: 1,
+      retiredCount: 150189,
+      truncatedCount: 25765,
+    });
+    expect(withRetired).toContain("150,189 retired");
+    expect(withRetired).toContain("25,765 truncated");
   });
 
   it("folds ok-with-errors into the head without duplicating the count", () => {
@@ -652,6 +716,63 @@ describe("IndexingPanel", () => {
     expect(screen.getByTestId("index-watermark-card")).toBeInTheDocument();
   });
 
+  it("groups large strip, stat, source, extract, and donut counts", async () => {
+    // Large integer counts group en-US everywhere while byte units, percents,
+    // rates, and elapsed keep their existing copy.
+    const { fetchMock } = stubFetch({
+      status: {
+        ...statusPayload,
+        documents: 150189,
+        chunks: 39751,
+        vectorChunks: 25765,
+        keywordChunks: 1040,
+        sources: [
+          { kind: "files", enabled: true },
+          { kind: "mail", enabled: false },
+          { kind: "messages", enabled: false },
+        ],
+        bySource: [
+          { kind: "files", documents: 25765, chunks: 39751, bytes: 1500 },
+          { kind: "mail", documents: 1040, chunks: 30, bytes: 548 },
+        ],
+        byExtractStatus: [
+          { status: "extracted", documents: 25765 },
+          { status: "partial", documents: 1040 },
+        ],
+        lastRun: {
+          status: "ok",
+          indexed: 150189,
+          scanned: 39751,
+          errors: 0,
+          finishedAt: 1,
+          trigger: "onDemand",
+        },
+      },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexingPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-last-run")).toHaveTextContent("150,189 indexed");
+    });
+    // Strip and stat cards agree digit-for-digit.
+    expect(screen.getByTestId("index-last-run")).toHaveTextContent("39,751 scanned");
+    expect(screen.getByTestId("index-stat-documents-value")).toHaveTextContent("150,189");
+    expect(screen.getByTestId("index-stat-chunks-value")).toHaveTextContent("39,751");
+    // Source rows group documents and chunks while bytes stay byte units.
+    expect(screen.getByText("25,765 docs · 39,751 chunks · 1.5 KB")).toBeInTheDocument();
+    expect(screen.getByText("1040 docs · 30 chunks · 548 B")).toBeInTheDocument();
+    // Extraction rows group while percent labels stay plain percents.
+    expect(screen.getByText("25,765 docs")).toBeInTheDocument();
+    expect(screen.getByText("1040 docs")).toBeInTheDocument();
+    // Donut legend groups vector while the small keyword count stays plain.
+    expect(screen.getByTestId("index-donut-chart")).toHaveAttribute(
+      "aria-label",
+      "25,765 vector chunks, 1040 keyword chunks",
+    );
+  });
+
   it("titles both bar groups with their share-of-index contract", async () => {
     const { fetchMock } = stubFetch();
     vi.stubGlobal("fetch", fetchMock);
@@ -820,6 +941,43 @@ describe("IndexingPanel", () => {
     expect(patch?.max_vector_chunks_per_document).toBe(
       DEFAULT_INDEX_MAX_VECTOR_CHUNKS_PER_DOCUMENT,
     );
+    // The Trash-class denylist rides the same save path: the fixture omits
+    // it so it degrades to the engine default instead of failing.
+    expect(patch?.mailbox_deny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
+  });
+
+  it("edits denied mailboxes through its own textarea on the save path", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      settings: { ...indexConfig, mailbox_deny: ["Trash", "Junk"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Denied mailboxes/)).toBeInTheDocument();
+    });
+    const textarea = screen.getByLabelText(
+      /Denied mailboxes/,
+    ) as HTMLTextAreaElement;
+    expect(textarea.value).toContain("Trash");
+    expect(textarea.value).toContain("Junk");
+    await user.clear(textarea);
+    await user.type(textarea, "Trash\nArchive*");
+    await user.click(
+      screen.getByRole("button", { name: "Save Index Settings" }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Index settings saved.")).toBeInTheDocument();
+    });
+    const put = calls.find(
+      (call) => call.url === "/settings" && call.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    const patch = (put?.body as { index?: Record<string, unknown> })?.index;
+    expect(patch?.mailbox_deny).toEqual(["Trash", "Archive*"]);
   });
 
   it("restarts the running scan on policy save", async () => {
@@ -1016,6 +1174,14 @@ describe("IndexingPanel", () => {
     ]) {
       expect(DEFAULT_INDEX_CONFIG.exclude).toContain(pattern);
     }
+    // The Trash-class denylist mirrors IndexConfig.defaultMailboxDeny so the
+    // fresh form and the back-compat fallback cannot drift.
+    expect(DEFAULT_INDEX_CONFIG.mailbox_deny).toEqual([
+      "Trash",
+      "Junk",
+      "Spam",
+      "Deleted*",
+    ]);
   });
 
   it("prefers the engine core count for the policy reality line", async () => {
@@ -1629,6 +1795,28 @@ describe("IndexingPanel", () => {
       current: "notes/ideas.md",
     });
     expect(early).not.toContain("docs/s");
+  });
+
+  it("groups large live counts while keeping rates and elapsed verbatim", () => {
+    // Large scanned/indexed group en-US; the rate, byte-free elapsed, and
+    // percents keep their existing copy untouched.
+    const header = formatIndexLiveHeader({
+      trigger: "onDemand",
+      phase: "extracting",
+      stage: "files",
+      scanned: 39751,
+      indexed: 150189,
+      skipped: 0,
+      errors: 0,
+      rate: 41,
+      elapsedMs: 1500,
+      current: "notes/ideas.md",
+    });
+    expect(header).toContain("39,751 scanned");
+    expect(header).toContain("150,189 indexed");
+    expect(header).toContain("41 docs/s");
+    expect(header).toContain("1.5s");
+    expect(header).not.toMatch(/39751/);
   });
 
   it("renders vision stage copy from the polled live snapshot", async () => {

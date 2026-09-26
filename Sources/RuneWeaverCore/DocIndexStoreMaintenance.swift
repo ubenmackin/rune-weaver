@@ -216,6 +216,72 @@ struct DocIndexStatusSnapshot: Sendable, Equatable {
             return removed
         }
 
+        /// Deletes `mail` documents whose mailbox sits in the denied set.
+        ///
+        /// The mail run gate owns matching while this call owns deletion:
+        /// mailbox comparison is exact on the observed names the gate
+        /// collected, so a pattern never deletes a mailbox it did not observe.
+        /// Chunk deletes fire the FTS triggers and retired text stops
+        /// surfacing in keyword search. Space reclaim stays with the caller,
+        /// which vacuums only on a non-zero return.
+        static func retireMailboxes(mailboxes: Set<String>, dbPath: String) throws -> Int {
+            let trimmed = mailboxes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            guard !trimmed.isEmpty else { return 0 }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return 0 }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let placeholders = Array(repeating: "?", count: trimmed.count).joined(separator: ", ")
+            let chunkSQL = "DELETE FROM indexed_chunks WHERE document_id IN "
+                + "(SELECT id FROM indexed_documents WHERE source = ? AND mailbox IN (\(placeholders)));"
+            let docSQL = "DELETE FROM indexed_documents WHERE source = ? AND mailbox IN (\(placeholders));"
+            var parameters: [SQLiteValue] = [.text(IndexSource.mail.rawValue)]
+            parameters.append(contentsOf: trimmed.map { SQLiteValue.text($0) })
+            try exec(handle: handle, sql: "BEGIN IMMEDIATE;")
+            let removed: Int
+            do {
+                try exec(handle: handle, sql: chunkSQL, parameters: parameters)
+                try exec(handle: handle, sql: docSQL, parameters: parameters)
+                removed = Int(sqlite3_changes(handle))
+                try exec(handle: handle, sql: "COMMIT;")
+            } catch {
+                try? exec(handle: handle, sql: "ROLLBACK;")
+                throw error
+            }
+            return removed
+        }
+
+        /// Reads distinct content hashes for `mail` documents in the denied set.
+        ///
+        /// Lets the mail gate forget exactly the retired bodies so a re-allowed
+        /// mailbox re-indexes instead of deduplicating against deleted rows.
+        static func mailContentHashes(mailboxes: Set<String>, dbPath: String) throws -> Set<String> {
+            let trimmed = mailboxes.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            guard !trimmed.isEmpty else { return [] }
+            let expanded = (dbPath as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: expanded) else { return [] }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            let placeholders = Array(repeating: "?", count: trimmed.count).joined(separator: ", ")
+            let sql = "SELECT DISTINCT content_hash FROM indexed_documents WHERE source = ? AND mailbox IN (\(placeholders));"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw DocIndexError.persistenceFailed("Could not prepare mailbox hash read")
+            }
+            defer { sqlite3_finalize(statement) }
+            SQLiteHelpers.bindText(statement, index: 1, value: IndexSource.mail.rawValue)
+            for (offset, mailbox) in trimmed.enumerated() {
+                SQLiteHelpers.bindText(statement, index: Int32(offset + 2), value: mailbox)
+            }
+            var hashes = Set<String>()
+            while sqlite3_step(statement) == SQLITE_ROW {
+                if let hash = SQLiteHelpers.columnText(statement, index: 0) {
+                    hashes.insert(hash)
+                }
+            }
+            return hashes
+        }
+
         /// Number of aggregate passes performed in this process across all databases.
         ///
         /// Incremented once per `computeStatusSnapshot` so tests can prove a

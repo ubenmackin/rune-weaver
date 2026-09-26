@@ -177,6 +177,13 @@ private enum EmailIMAPBridgeScriptHead {
         sys.stdout.write(json.dumps({"ok": False, "error": message}))
         sys.stdout.flush()
 
+    def quote_mailbox(name):
+        # Single shared quoter for every mailbox select so spaced names survive
+        # the wire as one quoted atom; backslash and quote are escaped while
+        # CR/LF stays rejected by callers before quoting to block injection.
+        esc = name.replace("\\", "\\\\").replace('"', '\\"')
+        return '"%s"' % esc
+
     def main():
         try:
             req = json.loads(sys.stdin.read() or "{}")
@@ -223,6 +230,11 @@ private enum EmailIMAPBridgeScriptHead {
                 return
         elif op == "list":
             pass
+        elif op == "status":
+            early_box = str(req.get("mailbox") or "INBOX")
+            if "\r" in early_box or "\n" in early_box:
+                fail("Invalid mailbox")
+                return
         elif op == "move":
             early_mid = str(req.get("messageID") or req.get("messageId") or req.get("id") or req.get("uid") or "").strip()
             if not early_mid:
@@ -317,6 +329,55 @@ private enum EmailIMAPBridgeScriptMiddle {
                 sys.stdout.write(json.dumps({"ok": True, "mailboxes": boxes, "delimiter": common, "commonDelimiter": common}))
                 sys.stdout.flush()
                 return
+            if op == "status":
+                # Named owner for the STATUS op alongside the request document:
+                # reports UIDNEXT plus UIDVALIDITY so fixed windows anchor
+                # without an open-ended SEARCH. Uses the shared quoter so
+                # spaced names survive as one quoted atom.
+                status_box = str(req.get("mailbox") or "INBOX").strip()
+                if not status_box:
+                    fail("Invalid mailbox: mailbox must not be empty")
+                    return
+                if "\r" in status_box or "\n" in status_box:
+                    fail("Invalid mailbox")
+                    return
+                try:
+                    styp, sdata = conn.status(quote_mailbox(status_box), "(UIDNEXT UIDVALIDITY)")
+                except Exception as exc:
+                    fail("IMAP status failed: %s" % exc)
+                    return
+                if styp != "OK":
+                    fail("IMAP status failed")
+                    return
+                try:
+                    blobs = []
+                    for item in (sdata or []):
+                        if item is None:
+                            continue
+                        if isinstance(item, bytes):
+                            blobs.append(item.decode("utf-8", errors="replace"))
+                        elif isinstance(item, tuple):
+                            for sub in item:
+                                if isinstance(sub, bytes):
+                                    blobs.append(sub.decode("utf-8", errors="replace"))
+                                elif sub is not None:
+                                    blobs.append(str(sub))
+                        else:
+                            blobs.append(str(item))
+                    blob = " ".join(blobs)
+                    m_next = re.search(r"UIDNEXT\s+(\d+)", blob, re.IGNORECASE)
+                    m_valid = re.search(r"UIDVALIDITY\s+(\d+)", blob, re.IGNORECASE)
+                    if not m_next or not m_valid:
+                        fail("IMAP status failed: missing UIDNEXT or UIDVALIDITY")
+                        return
+                    uid_next = int(m_next.group(1))
+                    uid_valid = int(m_valid.group(1))
+                except Exception as exc:
+                    fail("IMAP status failed: %s" % exc)
+                    return
+                sys.stdout.write(json.dumps({"ok": True, "mailbox": status_box, "uidNext": uid_next, "uidValidity": uid_valid}))
+                sys.stdout.flush()
+                return
             if op == "move":
                 src_box = str(req.get("mailbox") or "INBOX").strip()
                 dest_box = str(req.get("destination") or req.get("dest") or "").strip()
@@ -349,11 +410,8 @@ private enum EmailIMAPBridgeScriptMiddle {
                 if "\r" in dest_box or "\n" in dest_box:
                     fail("Invalid destination: destination must not contain CR or LF")
                     return
-                def quote_mailbox(name):
-                    esc = name.replace("\\", "\\\\").replace('"', '\\"')
-                    return '"%s"' % esc
                 try:
-                    typ, _ = conn.select(src_box, readonly=False)
+                    typ, _ = conn.select(quote_mailbox(src_box), readonly=False)
                 except Exception as exc:
                     fail("Could not open mailbox %s: %s" % (src_box, exc))
                     return
@@ -437,7 +495,7 @@ private enum EmailIMAPBridgeScriptMiddle {
                 if mark_read and moved and dest_uid:
                     try:
                         try:
-                            conn.select(dest_box, readonly=False)
+                            conn.select(quote_mailbox(dest_box), readonly=False)
                         except Exception:
                             dest_uid = None
                         else:
@@ -492,7 +550,7 @@ private enum EmailIMAPBridgeScriptTail {
                 fail("Invalid mailbox")
                 return
             try:
-                typ, _ = conn.select(mailbox, readonly=True)
+                typ, _ = conn.select(quote_mailbox(mailbox), readonly=True)
             except Exception as exc:
                 fail("Could not open mailbox %s: %s" % (mailbox, exc))
                 return
@@ -514,10 +572,13 @@ private enum EmailIMAPBridgeScriptTail {
                     limit = 10
                 limit = max(1, min(limit, 50))
                 try:
-                    if re.fullmatch(r"UID 1:\d+", query):
-                        # Backfill paging uses a verbatim UID range so the newest page inside
-                        # 1:N surfaces without free-text wrapping; the bound is integers-only
-                        # from the adapter, and the shared limit slice below keeps it to one page.
+                    if re.fullmatch(r"UID \d+:\d+", query):
+                        # Bounded backfill paging uses a verbatim fixed window so
+                        # the newest page inside lo:hi surfaces without free-text
+                        # wrapping; the bounds are integers-only from the adapter
+                        # window builder, and the shared limit slice below keeps
+                        # each window to one bounded page. The mailbox select
+                        # above stays quoted through the shared quoter.
                         typ, data = conn.uid("search", None, query)
                     elif not query or query == "*":
                         typ, data = conn.uid("search", None, "ALL")

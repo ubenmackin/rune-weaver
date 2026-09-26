@@ -835,6 +835,8 @@ public struct IndexSettingsUpdate: Content, Equatable {
     /// Maximum vector chunks stored per document, bounding per-document
     /// embedding work; chunks beyond the cap stay keyword-only.
     public var maxVectorChunksPerDocument: Int?
+    /// Trash-class mailbox denylist skipped without dialing.
+    public var mailboxDeny: [String]?
     /// Directory and file names the walker always skips, even when absent from
     /// `exclude`. Read-only: populated from the walker's prune list when a patch
     /// is built from a snapshot and ignored when a patch is applied, so the
@@ -861,6 +863,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
     ///   - thermalBackoff: Thermal backoff toggle.
     ///   - pauseOnBattery: Pause-on-battery toggle.
     ///   - maxVectorChunksPerDocument: Per-document vector chunk cap.
+    ///   - mailboxDeny: Trash-class mailbox denylist.
     ///   - alwaysSkipped: Read-only walker prune names, ignored on apply.
     public init(
         enabled: Bool? = nil,
@@ -880,6 +883,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         thermalBackoff: Bool? = nil,
         pauseOnBattery: Bool? = nil,
         maxVectorChunksPerDocument: Int? = nil,
+        mailboxDeny: [String]? = nil,
         alwaysSkipped: [String]? = nil
     ) {
         self.enabled = enabled
@@ -899,6 +903,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.thermalBackoff = thermalBackoff
         self.pauseOnBattery = pauseOnBattery
         self.maxVectorChunksPerDocument = maxVectorChunksPerDocument
+        self.mailboxDeny = mailboxDeny
         self.alwaysSkipped = alwaysSkipped
     }
 
@@ -923,6 +928,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         self.thermalBackoff = config.thermalBackoff
         self.pauseOnBattery = config.pauseOnBattery
         self.maxVectorChunksPerDocument = config.maxVectorChunksPerDocument
+        self.mailboxDeny = config.mailboxDeny
         self.alwaysSkipped = indexAlwaysSkippedPatterns()
     }
 
@@ -944,6 +950,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         case thermalBackoff = "thermal_backoff"
         case pauseOnBattery = "pause_on_battery"
         case maxVectorChunksPerDocument = "max_vector_chunks_per_document"
+        case mailboxDeny = "mailbox_deny"
         case alwaysSkipped = "always_skipped"
     }
 
@@ -968,6 +975,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         thermalBackoff = try container.decodeIfPresent(Bool.self, forKey: .thermalBackoff)
         pauseOnBattery = try container.decodeIfPresent(Bool.self, forKey: .pauseOnBattery)
         maxVectorChunksPerDocument = try container.decodeIfPresent(Int.self, forKey: .maxVectorChunksPerDocument)
+        mailboxDeny = try container.decodeIfPresent([String].self, forKey: .mailboxDeny)
         alwaysSkipped = try container.decodeIfPresent([String].self, forKey: .alwaysSkipped)
     }
 
@@ -992,6 +1000,7 @@ public struct IndexSettingsUpdate: Content, Equatable {
         try container.encodeIfPresent(thermalBackoff, forKey: .thermalBackoff)
         try container.encodeIfPresent(pauseOnBattery, forKey: .pauseOnBattery)
         try container.encodeIfPresent(maxVectorChunksPerDocument, forKey: .maxVectorChunksPerDocument)
+        try container.encodeIfPresent(mailboxDeny, forKey: .mailboxDeny)
         try container.encodeIfPresent(alwaysSkipped, forKey: .alwaysSkipped)
     }
 }
@@ -1087,6 +1096,9 @@ extension UpdateSettingsRequest {
         }
         if let maxVectorChunksPerDocument = update.maxVectorChunksPerDocument {
             index.maxVectorChunksPerDocument = maxVectorChunksPerDocument
+        }
+        if let mailboxDeny = update.mailboxDeny {
+            index.mailboxDeny = mailboxDeny
         }
         // Read-only: `always_skipped` is never merged so a client echo cannot
         // drift the stored policy; the walker list stays single-sourced.

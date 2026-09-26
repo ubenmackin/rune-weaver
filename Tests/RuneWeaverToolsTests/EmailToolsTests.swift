@@ -1136,6 +1136,7 @@ struct EmailToolsTests {
     func `Assembled bridge source parses as Python without executing`() throws {
         let source = EmailIMAPBridgeScript.source
         #expect(source.contains("op == \"list\""))
+        #expect(source.contains("op == \"status\""))
         #expect(source.contains("op == \"search\""))
         #expect(source.contains("op == \"fetch\""))
         #expect(source.contains("op == \"attachment\""))
@@ -1986,10 +1987,105 @@ struct EmailToolsTests {
         // The embedded helper must stay parseable while covering every list/move op the tools dial.
         let source = EmailIMAPBridgeScript.source
         #expect(source.contains("op == \"list\""))
+        #expect(source.contains("op == \"status\""))
         #expect(source.contains("op == \"move\""))
         #expect(source.contains("ssl.create_default_context()"))
         #expect(!source.contains("_create_unverified_context"))
         #expect(!source.contains("CERT_NONE"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
+
+    @Test
+    func `Bridge script quotes every mailbox select with shared quoter`() throws {
+        // Spaced folders must reach the wire as one quoted atom on every select path.
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("def quote_mailbox"))
+        // A single shared owner keeps read plus move selects from drifting apart.
+        #expect(source.components(separatedBy: "def quote_mailbox").count == 2)
+        // Shared definition sits above the op dispatch so all paths reach it.
+        if let quoter = source.range(of: "def quote_mailbox"),
+           let listOp = source.range(of: "op == \"list\"")
+        {
+            #expect(quoter.lowerBound < listOp.lowerBound)
+        } else {
+            Issue.record("Expected shared quoter above list dispatch")
+        }
+        // Backslash plus quote escaping stays inside the shared quoter.
+        #expect(source.contains(#"name.replace("\\", "\\\\")"#))
+        #expect(source.contains(#"'"%s"' % esc"#))
+        // Read, move-source, plus move-destination selects all quote.
+        #expect(source.contains("conn.select(quote_mailbox(mailbox)"))
+        #expect(source.contains("conn.select(quote_mailbox(src_box)"))
+        #expect(source.contains("conn.select(quote_mailbox(dest_box)"))
+        // STATUS also quotes through the shared owner so spaced names survive.
+        #expect(source.contains("conn.status(quote_mailbox(status_box)"))
+        // CR/LF rejection stays ahead of every quoted select to block injection.
+        #expect(source.contains("Invalid mailbox"))
+        #expect(source.contains("Invalid destination"))
+        #expect(source.contains("\\r") && source.contains("\\n"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
+
+    @Test
+    func `Bridge STATUS op reports UIDNEXT plus UIDVALIDITY`() throws {
+        // The STATUS probe anchors the first fixed window without an open SEARCH.
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("op == \"status\""))
+        #expect(source.contains("UIDNEXT"))
+        #expect(source.contains("UIDVALIDITY"))
+        #expect(source.contains("conn.status(quote_mailbox(status_box)"))
+        #expect(source.contains("\"uidNext\"") || source.contains("\"uid_next\"") || source.contains("uidNext"))
+        #expect(source.contains("\"uidValidity\"") || source.contains("\"uid_validity\"") || source.contains("uidValidity"))
+        #expect(source.contains("Invalid mailbox"))
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+        // Request document plus parser stay paired with the script op.
+        let creds = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.yourdomain.com",
+            port: 993,
+            username: "you@yourdomain.com",
+            password: "test-secret"
+        )
+        let payload = Data(#"{"ok": true, "mailbox": "INBOX", "uidNext": 2001, "uidValidity": 7}"#.utf8)
+        let status = try EmailBridgeParsing.parseStatusPayload(payload)
+        #expect(status.mailbox == "INBOX")
+        #expect(status.uidNext == 2001)
+        #expect(status.uidValidity == 7)
+        let snake = Data(#"{"ok": true, "mailbox": "INBOX", "uid_next": 2001, "uid_validity": 7}"#.utf8)
+        let snakeStatus = try EmailBridgeParsing.parseStatusPayload(snake)
+        #expect(snakeStatus.uidNext == 2001)
+        #expect(snakeStatus.uidValidity == 7)
+        // Partial payloads fail closed instead of anchoring from a guess.
+        for bad in [
+            #"{"ok": false, "error": "IMAP status failed"}"#,
+            #"{"ok": true, "mailbox": "INBOX"}"#,
+            #"{"ok": true, "mailbox": "INBOX", "uidNext": 5}"#,
+            #"{"ok": true, "uidNext": 5, "uidValidity": 1}"#
+        ] {
+            do {
+                _ = try EmailBridgeParsing.parseStatusPayload(Data(bad.utf8))
+                Issue.record("Expected status failure for \(bad)")
+            } catch {
+                #expect(!error.localizedDescription.isEmpty)
+            }
+        }
+        _ = creds
+    }
+
+    @Test
+    func `Bridge script issues bounded UID window as quoted range search`() throws {
+        // Every backfill SEARCH carries an explicit fixed window, never an open query.
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains(#"UID \d+:\d+"#) || source.contains("UID "))
+        #expect(!source.contains(#"UID 1:\d+"#) || source.contains(#"UID \d+:\d+"#))
+        #expect(source.contains("conn.uid(\"search\", None, query)"))
+        // The mailbox select ahead of the range stays quoted through the shared owner.
+        #expect(source.contains("conn.select(quote_mailbox(mailbox)"))
+        #expect(source.contains("readonly=True"))
+        // Windowed shape is integers-only from the adapter builder.
+        #expect(EmailIMAPMailIndexGateway.uidWindowWidth == 1000)
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 2001) == "UID 1001:2000")
+        #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 51) == "UID 1:50")
         try ToolsTestSupport.assertBridgeSourceParses(source)
     }
 }

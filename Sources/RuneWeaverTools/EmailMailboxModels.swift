@@ -32,6 +32,31 @@ public struct EmailMailboxListing: Sendable, Equatable, Codable {
     }
 }
 
+/// Mailbox STATUS snapshot returned by the gateway `STATUS` operation.
+///
+/// Bundles the next-assigned UID with the server validity token so fixed
+/// backfill windows anchor from `uidNext - 1` and validity mismatches reset
+/// the incremental watermark without duplicating documents.
+public struct EmailMailboxStatus: Sendable, Equatable, Codable {
+    /// Mailbox the status was read from.
+    public let mailbox: String
+    /// Next UID the server will assign.
+    public let uidNext: Int
+    /// Server validity token for the mailbox.
+    public let uidValidity: Int
+
+    /// Creates a mailbox status snapshot.
+    /// - Parameters:
+    ///   - mailbox: Mailbox the status was read from.
+    ///   - uidNext: Next UID the server will assign.
+    ///   - uidValidity: Server validity token.
+    public init(mailbox: String, uidNext: Int, uidValidity: Int) {
+        self.mailbox = mailbox
+        self.uidNext = uidNext
+        self.uidValidity = uidValidity
+    }
+}
+
 /// Arguments for the `email.listMailboxes` tool.
 public struct EmailListMailboxesArgs: Sendable, Equatable, Decodable {
     /// Account nickname matching an `EmailAccount.name` entry.

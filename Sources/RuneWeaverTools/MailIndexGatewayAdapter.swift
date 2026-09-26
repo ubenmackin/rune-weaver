@@ -13,6 +13,12 @@ import RuneWeaverCore
 
 /// Bridges an ``EmailIMAPGateway`` to the core mail indexer seam.
 public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
+    /// Fixed UID window width bounding every backfill SEARCH.
+    ///
+    /// Named owner for the window shape: every criterion stays within this
+    /// width so per-page cost stays bounded without widening the limit.
+    public static let uidWindowWidth = 1000
+
     /// Underlying IMAP gateway (subprocess bridge by default).
     private let gateway: any EmailIMAPGateway
     /// Whether indexed bodies carry the redacted agent-visible form. Defaults
@@ -44,23 +50,38 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
         try await gateway.mailboxListing(credentials: credentials.resolvedEmailCredentials()).mailboxes
     }
 
+    /// Returns the mailbox status snapshot for backfill anchoring.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to inspect.
+    /// - Returns: Next UID plus validity token, with nils when unknown.
+    public func mailboxStatus(credentials: MailIndexCredentials, mailbox: String) async throws -> MailIndexMailboxStatus {
+        let status = try await gateway.status(
+            credentials: credentials.resolvedEmailCredentials(),
+            mailbox: mailbox
+        )
+        return MailIndexMailboxStatus(uidNext: status.uidNext, uidValidity: status.uidValidity)
+    }
+
     /// Returns the newest messages in one mailbox, newest first.
     ///
-    /// The owner for the backfill criterion shape is this adapter: a present
-    /// bound is expressed as a verbatim `UID 1:N` range with `N` equal to the
-    /// bound minus one, built from integers only with no free text, so the
-    /// bridge issues `UID SEARCH UID 1:N` and returns the newest page inside
-    /// that range. A bound at or below the mailbox start holds no UIDs and
-    /// returns empty without dialing. The core indexer filters this page
-    /// against its UID watermark and pages strictly downward, so each call
-    /// stays clamped to one newest page.
+    /// The named owner for the backfill criterion shape is this adapter: every
+    /// SEARCH carries an explicit fixed window `UID lo:hi` at most
+    /// `uidWindowWidth` wide, built from integers only with no free text, so
+    /// the bridge issues a bounded range and returns the newest page inside
+    /// that window. The first window top anchors from the STATUS UIDNEXT probe
+    /// so no open-ended SEARCH remains on any path; later pages pass a bound
+    /// strictly below the lowest fetched UID. A bound at or below the mailbox
+    /// start holds no UIDs and returns empty without dialing. The core indexer
+    /// filters each page against its watermark and tiles strictly downward, so
+    /// each call stays clamped to one bounded page.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox to read.
     ///   - limit: Maximum messages to return.
     ///   - mode: Fetch mode; the live bridge is always read-only.
     ///   - beforeUID: Exclusive upper bound for this page; only UIDs below the
-    ///     bound are returned. Nil fetches the newest window.
+    ///     bound are returned. Nil anchors the newest window from STATUS.
     /// - Returns: Messages in newest-first order.
     public func messages(
         credentials: MailIndexCredentials,
@@ -80,7 +101,22 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
             }
             query = criterion
         } else {
-            query = ""
+            // Anchor the first fixed window from STATUS UIDNEXT so the newest
+            // page is bounded without an open-ended SEARCH. An empty mailbox
+            // holds no UIDs and returns without dialing. Gateways without
+            // STATUS support fall back to the legacy listing so doubles
+            // without the probe still index.
+            do {
+                let status = try await gateway.status(credentials: resolved, mailbox: mailbox)
+                let upper = status.uidNext - 1
+                guard upper >= 1 else { return [] }
+                guard let criterion = Self.uidRangeCriterion(beforeUID: upper + 1) else {
+                    return []
+                }
+                query = criterion
+            } catch {
+                query = ""
+            }
         }
         let hits = try await gateway.search(credentials: resolved, mailbox: mailbox, query: query, limit: clamped)
         var messages: [MailIndexMessage] = []
@@ -121,18 +157,22 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
         return messages
     }
 
-    /// Builds the verbatim IMAP range for one downward backfill page.
+    /// Builds the verbatim IMAP window for one downward backfill page.
     ///
-    /// The criterion is always the exact shape `UID 1:N` with `N` equal to the
-    /// bound minus one, interpolated from integers only so no caller text can
-    /// reach the wire. A bound at or below the mailbox start holds no UIDs and
-    /// yields nil so the caller returns empty without dialing.
+    /// The named owner for the window shape is this builder: the criterion is
+    /// always the exact shape `UID lo:hi` with `hi` equal to the bound minus
+    /// one and `lo` equal to `max(1, hi - uidWindowWidth + 1)`, interpolated
+    /// from integers only so no caller text can reach the wire. A bound at or
+    /// below the mailbox start holds no UIDs and yields nil so the caller
+    /// returns empty without dialing; bottom clamping keeps the first window
+    /// inside the mailbox.
     /// - Parameter beforeUID: Exclusive upper bound for the page.
-    /// - Returns: `UID 1:N` criterion, or nil when the range is empty.
+    /// - Returns: `UID lo:hi` criterion, or nil when the range is empty.
     public static func uidRangeCriterion(beforeUID: Int) -> String? {
         let upper = beforeUID - 1
         guard upper >= 1 else { return nil }
-        return "UID 1:\(upper)"
+        let lower = max(1, upper - uidWindowWidth + 1)
+        return "UID \(lower):\(upper)"
     }
 
     /// Fetches one attachment part read-only.

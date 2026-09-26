@@ -199,6 +199,7 @@ extension RuneWeaverConfig {
             "thermal_backoff = \(index.thermalBackoff ? "true" : "false")",
             "pause_on_battery = \(index.pauseOnBattery ? "true" : "false")",
             "max_vector_chunks_per_document = \(index.maxVectorChunksPerDocument)",
+            "mailbox_deny = \(Self.tomlStringArray(index.mailboxDeny))",
             ""
         ]
     }

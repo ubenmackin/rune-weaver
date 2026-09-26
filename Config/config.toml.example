@@ -196,6 +196,13 @@ nightly_budget = 0
 # N chunks in document order, so a capped document stays fully findable by
 # keyword.
 max_vector_chunks_per_document = 128
+# Trash-class mailboxes skipped without dialing (one glob per entry).
+# Matching is case-insensitive against the full mailbox name plus every
+# slash-separated hierarchy segment, so "Trash" covers "Trash" and
+# "INBOX/Trash" while "Deleted*" covers "Deleted Messages". Denied mail
+# retires on the next complete run and re-indexes from scratch when re-allowed;
+# clearing the list opts every mailbox back in.
+mailbox_deny = ["Trash", "Junk", "Spam", "Deleted*"]
 # Run effort: "light" (1 worker) | "balanced" (half the cores, up to 4) |
 # "performance" (all but one core) | "custom" (explicit `workers` count).
 # Resolved once at run start; thermal pressure can back the run off below it.

@@ -344,6 +344,41 @@ public actor DocIndexStore {
         return result
     }
 
+    /// Deletes `mail` documents whose mailbox sits in the denied set.
+    ///
+    /// The mail run gate owns matching while this call owns deletion: every
+    /// `mail` row whose `mailbox` matches an observed denied name goes with
+    /// its chunks, so chunk deletes fire the FTS triggers and retired text
+    /// stops surfacing in keyword search. Files and Messages rows are
+    /// untouched. The caller reclaims file space after a non-zero return.
+    /// - Parameter mailboxes: Observed denied mailbox names.
+    /// - Returns: Number of `mail` documents removed.
+    @discardableResult
+    public func retireMailboxes(_ mailboxes: Set<String>) async throws -> Int {
+        guard !mailboxes.isEmpty else { return 0 }
+        let dbPath = self.dbPath
+        let result = try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.retireMailboxes(mailboxes: mailboxes, dbPath: dbPath)
+        }
+        invalidateStatusCache()
+        return result
+    }
+
+    /// Reads distinct content hashes for `mail` documents in the given mailboxes.
+    ///
+    /// The mail gate reads these before retiring so the checkpoint can forget
+    /// exactly the retired bodies: re-allowing a mailbox then re-indexes from
+    /// scratch instead of deduplicating against its own deleted rows.
+    /// - Parameter mailboxes: Observed denied mailbox names.
+    /// - Returns: Content hashes of the matching mail documents.
+    public func mailContentHashes(mailboxes: Set<String>) async throws -> Set<String> {
+        guard !mailboxes.isEmpty else { return [] }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run(lane: .indexing) {
+            try DocIndexStoreIO.mailContentHashes(mailboxes: mailboxes, dbPath: dbPath)
+        }
+    }
+
     /// Clears every document, chunk, and search-index entry.
     public func reset() async throws {
         let dbPath = self.dbPath
@@ -533,6 +568,24 @@ enum DocIndexStoreIO {
     static func retireUnseenFiles(runID: String, dbPath: String) throws -> Int {
         #if canImport(SQLite3)
             return try SQLiteDocIndexStore.retireUnseenFiles(runID: runID, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Deletes `mail` documents whose mailbox sits in the denied set.
+    static func retireMailboxes(mailboxes: Set<String>, dbPath: String) throws -> Int {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.retireMailboxes(mailboxes: mailboxes, dbPath: dbPath)
+        #else
+            throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
+        #endif
+    }
+
+    /// Reads distinct content hashes for `mail` documents in the denied set.
+    static func mailContentHashes(mailboxes: Set<String>, dbPath: String) throws -> Set<String> {
+        #if canImport(SQLite3)
+            return try SQLiteDocIndexStore.mailContentHashes(mailboxes: mailboxes, dbPath: dbPath)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
