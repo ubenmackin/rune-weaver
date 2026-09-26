@@ -292,6 +292,9 @@ extension MemoryEngine {
                 if let messageID = doc.messageID {
                     metadata["message_id"] = messageID
                 }
+                if let mtime = doc.mtime {
+                    metadata["date"] = indexWatermark(mtime)
+                }
             }
             if let watermark {
                 metadata["index_as_of"] = watermark

@@ -258,4 +258,76 @@ struct IndexedRecallTests {
         #expect(hit.metadata["path"] == "/Users/alice/Desktop/bills.numbers")
         #expect(hit.metadata["document_source"] == "files")
     }
+
+    @Test
+    func `Document recall round-trips event dates from mtime`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // A 2019 event long predates the index write, so the hit must carry
+        // event time rather than the snapshot watermark; otherwise
+        // when-questions would answer with the index time.
+        let mtime2019 = Date(timeIntervalSince1970: 1_546_300_800)
+        // Truncated to whole seconds because the persisted timestamp plus the
+        // second-precision ISO8601 rendering cannot preserve sub-second
+        // fractions; without this the round-trip would look flaky.
+        let recentMtime = Date(timeIntervalSince1970: floor(Date().timeIntervalSince1970))
+
+        let stored2019 = try await store.upsertDocument(IndexedDocument(
+            source: .messages,
+            externalID: "msg-2019",
+            displayName: "msg-2019",
+            messageID: "msg-2019",
+            mailbox: "chat-thread-1",
+            mtime: mtime2019,
+            contentHash: "hash-msg-2019",
+            indexedAt: Date()
+        ))
+        _ = try await store.upsertChunks(documentID: stored2019.id, chunks: [
+            IndexedChunk(documentID: stored2019.id, ordinal: 0, text: "lantern festival reunion photographs")
+        ])
+
+        let storedRecent = try await store.upsertDocument(IndexedDocument(
+            source: .messages,
+            externalID: "msg-recent",
+            displayName: "msg-recent",
+            messageID: "msg-recent",
+            mailbox: "chat-thread-1",
+            mtime: recentMtime,
+            contentHash: "hash-msg-recent",
+            indexedAt: Date()
+        ))
+        _ = try await store.upsertChunks(documentID: storedRecent.id, chunks: [
+            IndexedChunk(documentID: storedRecent.id, ordinal: 0, text: "harbor picnic seating chart")
+        ])
+
+        // No mtime means unknown event time, so the hit must omit the key
+        // entirely rather than emitting an empty or epoch value; callers use
+        // absence to distinguish unknown from known.
+        let storedUndated = try await store.upsertDocument(IndexedDocument(
+            source: .messages,
+            externalID: "msg-undated",
+            displayName: "msg-undated",
+            messageID: "msg-undated",
+            mailbox: "chat-thread-1",
+            contentHash: "hash-msg-undated",
+            indexedAt: Date()
+        ))
+        _ = try await store.upsertChunks(documentID: storedUndated.id, chunks: [
+            IndexedChunk(documentID: storedUndated.id, ordinal: 0, text: "undated field sketch notebook")
+        ])
+
+        let formatter = ISO8601DateFormatter()
+        let hits2019 = await engine.recallDocuments(query: "lantern", limit: 5)
+        let hit2019 = try #require(hits2019.first { $0.metadata["document_id"] == stored2019.id.uuidString })
+        #expect(hit2019.metadata["date"] == formatter.string(from: mtime2019))
+
+        let hitsRecent = await engine.recallDocuments(query: "picnic", limit: 5)
+        let hitRecent = try #require(hitsRecent.first { $0.metadata["document_id"] == storedRecent.id.uuidString })
+        #expect(hitRecent.metadata["date"] == formatter.string(from: recentMtime))
+
+        let hitsUndated = await engine.recallDocuments(query: "sketch", limit: 5)
+        let hitUndated = try #require(hitsUndated.first { $0.metadata["document_id"] == storedUndated.id.uuidString })
+        #expect(hitUndated.metadata["date"] == nil)
+    }
 }
