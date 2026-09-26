@@ -721,34 +721,100 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             }
         }
 
-        /// Presses a named key with optional modifiers.
+        /// Key names accepted by `pressKey`, surfaced when a name misses the table.
+        private static let supportedKeyHint =
+            "Return/Enter, Escape/Esc, Tab, Space, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, F1-F12, a-z, 0-9."
+
+        /// Hardware codes shared by named keys and shortcut characters.
+        private static let keyCodeTable: [String: CGKeyCode] = [
+            "return": 0x24, "enter": 0x24,
+            "escape": 0x35, "esc": 0x35,
+            "tab": 0x30,
+            "space": 0x31,
+            "backspace": 0x33, "delete": 0x33,
+            "forwarddelete": 0x75,
+            "arrowup": 0x7E, "up": 0x7E,
+            "arrowdown": 0x7D, "down": 0x7D,
+            "arrowleft": 0x7B, "left": 0x7B,
+            "arrowright": 0x7C, "right": 0x7C,
+            "home": 0x73,
+            "end": 0x77,
+            "pageup": 0x74,
+            "pagedown": 0x79,
+            "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76,
+            "f5": 0x60, "f6": 0x61, "f7": 0x62, "f8": 0x64,
+            "f9": 0x65, "f10": 0x6D, "f11": 0x67, "f12": 0x6F,
+            "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02,
+            "e": 0x0E, "f": 0x03, "g": 0x05, "h": 0x04,
+            "i": 0x22, "j": 0x26, "k": 0x28, "l": 0x25,
+            "m": 0x2E, "n": 0x2D, "o": 0x1F, "p": 0x23,
+            "q": 0x0C, "r": 0x0F, "s": 0x01, "t": 0x11,
+            "u": 0x20, "v": 0x09, "w": 0x0D, "x": 0x07,
+            "y": 0x10, "z": 0x06,
+            "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14,
+            "4": 0x15, "5": 0x17, "6": 0x16, "7": 0x1A,
+            "8": 0x1C, "9": 0x19
+        ]
+
+        /// Reports whether a key name resolves to a hardware code.
+        ///
+        /// Shares the live table so shortcut-capability checks stay in sync
+        /// instead of duplicating its coverage elsewhere.
+        static func isShortcutMappable(_ key: String) -> Bool {
+            keyCodeTable[key.lowercased()] != nil
+        }
+
+        /// Presses a key with optional modifiers, routing through hardware codes when needed.
+        ///
+        /// Unicode posting carries the character itself, so the OS never
+        /// resolves it as a shortcut target when command is held. Modified
+        /// single characters therefore resolve through the hardware table and
+        /// fail closed when unmappable rather than typing a literal.
         private func pressKey(_ key: String, modifiers: [KeyModifier]) throws {
-            // Single characters use Unicode posting so the typed character
-            // matches the request instead of always posting virtual key 0.
-            if key.count == 1, let character = key.first {
-                try postUnicodeCharacter(character, modifiers: modifiers)
+            // Bare characters stay on the Unicode path so typing remains
+            // layout-exact; modified characters need hardware codes so the
+            // system sees the intended shortcut chord.
+            if key.count == 1, let character = key.first, modifiers.isEmpty {
+                try postUnicodeCharacter(character)
                 return
             }
             guard let keyCode = virtualKeyCode(for: key) else {
-                let valid = "Return, Escape, Tab, Space, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, F1-F12."
                 throw DesktopControlError.actionFailed(
                     index: 0,
-                    reason: "Unknown key name: '\(key)'. Supported: \(valid)"
+                    reason: "Unknown key name: '\(key)'. Supported: \(Self.supportedKeyHint)"
                 )
             }
-            let flags = cgEventFlags(for: modifiers)
+            try postVirtualKey(keyCode, modifiers: modifiers)
+        }
 
-            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) else { return }
+        /// Posts a hardware key chord so the system sees a real shortcut press.
+        ///
+        /// Both halves must dispatch for the turn to report success; a half-posted
+        /// chord throws instead of masquerading as a completed shortcut.
+        private func postVirtualKey(_ keyCode: CGKeyCode, modifiers: [KeyModifier]) throws {
+            let flags = cgEventFlags(for: modifiers)
+            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true) else {
+                throw DesktopControlError.actionFailed(
+                    index: 0, reason: "Failed to post key-down event"
+                )
+            }
             down.flags = flags
             down.post(tap: .cghidEventTap)
 
-            guard let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else { return }
+            guard let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+                throw DesktopControlError.actionFailed(
+                    index: 0, reason: "Failed to post key-up event"
+                )
+            }
             keyUp.flags = flags
             keyUp.post(tap: .cghidEventTap)
         }
 
-        /// Posts a single character via Unicode events with matching buffers.
-        private func postUnicodeCharacter(_ character: Character, modifiers: [KeyModifier]) throws {
+        /// Posts a single bare character via Unicode events.
+        ///
+        /// The bare path never carries modifiers, so flags stay empty; a
+        /// half-posted pair throws instead of reporting a completed press.
+        private func postUnicodeCharacter(_ character: Character) throws {
             let scalars = Array(character.unicodeScalars)
             guard !scalars.isEmpty else {
                 throw DesktopControlError.actionFailed(
@@ -756,17 +822,22 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
                 )
             }
             let codeUnits = scalars.map { UniChar($0.value) }
-            let flags = cgEventFlags(for: modifiers)
-            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else { return }
-            down.flags = flags
+            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) else {
+                throw DesktopControlError.actionFailed(
+                    index: 0, reason: "Failed to post key-down event"
+                )
+            }
             down.keyboardSetUnicodeString(
                 stringLength: codeUnits.count,
                 unicodeString: codeUnits
             )
             down.post(tap: .cghidEventTap)
 
-            guard let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { return }
-            keyUp.flags = flags
+            guard let keyUp = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+                throw DesktopControlError.actionFailed(
+                    index: 0, reason: "Failed to post key-up event"
+                )
+            }
             keyUp.keyboardSetUnicodeString(
                 stringLength: codeUnits.count,
                 unicodeString: codeUnits
@@ -801,32 +872,13 @@ public struct DesktopControlBridge: DesktopControlling, Sendable {
             return flags
         }
 
-        /// Maps named keys to virtual key codes.
+        /// Maps names and shortcut characters to hardware key codes.
+        ///
+        /// Letters and digits share the named-key table so modified
+        /// single characters resolve to the physical key the shortcut
+        /// system expects, while bare typing stays on the Unicode path.
         private func virtualKeyCode(for key: String) -> CGKeyCode? {
-            let lowered = key.lowercased()
-            let mapping: [String: CGKeyCode] = [
-                "return": 0x24, "enter": 0x24,
-                "escape": 0x35, "esc": 0x35,
-                "tab": 0x30,
-                "space": 0x31,
-                "backspace": 0x33, "delete": 0x33,
-                "forwarddelete": 0x75,
-                "arrowup": 0x7E, "up": 0x7E,
-                "arrowdown": 0x7D, "down": 0x7D,
-                "arrowleft": 0x7B, "left": 0x7B,
-                "arrowright": 0x7C, "right": 0x7C,
-                "home": 0x73,
-                "end": 0x77,
-                "pageup": 0x74,
-                "pagedown": 0x79,
-                "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76,
-                "f5": 0x60, "f6": 0x61, "f7": 0x62, "f8": 0x64,
-                "f9": 0x65, "f10": 0x6D, "f11": 0x67, "f12": 0x6F
-            ]
-            if let code = mapping[lowered] {
-                return code
-            }
-            return nil
+            Self.keyCodeTable[key.lowercased()]
         }
     }
 
