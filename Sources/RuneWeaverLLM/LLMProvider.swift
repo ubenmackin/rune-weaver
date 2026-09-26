@@ -133,6 +133,8 @@ public enum SessionTokenDisplay: Sendable {
 public enum LLMResponseChunk: Sendable, Equatable {
     /// Incremental model text.
     case textDelta(String)
+    /// Incremental model reasoning / thought text from thinking models.
+    case reasoningDelta(String)
     /// A fully reassembled model-requested tool invocation.
     case toolCall(ToolCall)
     /// The response is complete.
@@ -223,6 +225,8 @@ public extension ChunkStreamingProvider {
                     switch chunk {
                     case let .textDelta(text):
                         continuation.yield(LLMResponse(delta: text))
+                    case let .reasoningDelta(thought):
+                        continuation.yield(LLMResponse(delta: "", reasoningDelta: thought))
                     case let .toolCall(call):
                         let input = ToolInput(toolName: call.name, argumentsJSON: call.argumentsJSON, callID: call.id)
                         continuation.yield(LLMResponse(delta: "", toolCalls: [input]))
@@ -345,10 +349,27 @@ struct OpenAIDeltaDTO: Decodable, Sendable {
     var content: String?
     /// Tool-call deltas requested by the model.
     var toolCalls: [OpenAIToolCallDeltaDTO]?
+    /// Reasoning / thought text from DeepSeek, Qwen, llama.cpp, etc.
+    var reasoningContent: String?
+    /// Alternate reasoning key used by Ollama and other backends.
+    var reasoning: String?
+
+    /// Best-effort reasoning delta.
+    var effectiveReasoning: String? {
+        if let reasoningText = reasoningContent, !reasoningText.isEmpty {
+            return reasoningText
+        }
+        if let fallbackReasoning = reasoning, !fallbackReasoning.isEmpty {
+            return fallbackReasoning
+        }
+        return nil
+    }
 
     private enum CodingKeys: String, CodingKey {
         case content
         case toolCalls = "tool_calls"
+        case reasoningContent = "reasoning_content"
+        case reasoning
     }
 }
 
@@ -999,7 +1020,7 @@ enum OpenAISSEPump {
         lastUsage: inout TokenUsage?,
         lastFinishReason: inout String?,
         toolAccumulator: inout OpenAIToolCallAccumulator
-    ) -> String? {
+    ) -> (text: String?, reasoning: String?) {
         if let reported = chunk.model, !reported.isEmpty {
             lastModel = reported
         }
@@ -1022,7 +1043,7 @@ enum OpenAISSEPump {
                 RuneWeaverLog.server.info("Chat usage: prompt \(prompt) tokens (\(cached) cached)")
             }
         }
-        guard let choice = chunk.choices?.first else { return nil }
+        guard let choice = chunk.choices?.first else { return (nil, nil) }
         if let reason = choice.finishReason {
             lastFinishReason = reason
         }
@@ -1030,10 +1051,9 @@ enum OpenAISSEPump {
         for toolDelta in delta?.toolCalls ?? [] {
             toolAccumulator.apply(toolDelta)
         }
-        if let text = delta?.content, !text.isEmpty {
-            return text
-        }
-        return nil
+        let reasoning = delta?.effectiveReasoning
+        let text = (delta?.content?.isEmpty == false) ? delta?.content : nil
+        return (text: text, reasoning: reasoning)
     }
 
     /// Pumps SSE lines into chunk events.
@@ -1071,13 +1091,17 @@ enum OpenAISSEPump {
                     RuneWeaverLog.tools.debug("OpenAIStream: failed to decode chunk: \(error.localizedDescription)")
                     continue
                 }
-                if let text = ingestChatChunk(
+                let ingested = ingestChatChunk(
                     chunk,
                     lastModel: &lastModel,
                     lastUsage: &lastUsage,
                     lastFinishReason: &lastFinishReason,
                     toolAccumulator: &accumulator
-                ) {
+                )
+                if let reasoning = ingested.reasoning, !reasoning.isEmpty {
+                    continuation.yield(.reasoningDelta(reasoning))
+                }
+                if let text = ingested.text, !text.isEmpty {
                     continuation.yield(.textDelta(text))
                 }
             }
@@ -1086,13 +1110,17 @@ enum OpenAISSEPump {
             {
                 do {
                     let chunk = try JSONDecoder().decode(OpenAIStreamChunkDTO.self, from: data)
-                    if let text = ingestChatChunk(
+                    let ingested = ingestChatChunk(
                         chunk,
                         lastModel: &lastModel,
                         lastUsage: &lastUsage,
                         lastFinishReason: &lastFinishReason,
                         toolAccumulator: &accumulator
-                    ) {
+                    )
+                    if let reasoning = ingested.reasoning, !reasoning.isEmpty {
+                        continuation.yield(.reasoningDelta(reasoning))
+                    }
+                    if let text = ingested.text, !text.isEmpty {
                         continuation.yield(.textDelta(text))
                     }
                 } catch {

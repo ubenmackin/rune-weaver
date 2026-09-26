@@ -363,4 +363,39 @@ struct SettingsRouteTests {
         #expect(configuredOutput.content.contains("Missing API key for Sonarr"))
         #expect(configuredOutput.content.contains("MOCK_SONARR_KEY"))
     }
+
+    @Test
+    func `ServerPaths defines secrets and status paths`() {
+        #expect(ServerPaths.secrets == "secrets")
+        #expect(ServerPaths.status == "status")
+    }
+
+    @Test
+    func `StoreSecretRequest and SecretStatusRequest JSON roundtrips`() throws {
+        let storeReq = StoreSecretRequest(key: "EMAIL_WORK_PASSWORD", secret: "testpass123")
+        let encodedStore = try JSONEncoder().encode(storeReq)
+        let decodedStore = try JSONDecoder().decode(StoreSecretRequest.self, from: encodedStore)
+        #expect(decodedStore.key == "EMAIL_WORK_PASSWORD")
+        #expect(decodedStore.secret == "testpass123")
+
+        let statusReq = SecretStatusRequest(keys: ["EMAIL_WORK_PASSWORD", "OPENAI_API_KEY"])
+        let encodedStatus = try JSONEncoder().encode(statusReq)
+        let decodedStatus = try JSONDecoder().decode(SecretStatusRequest.self, from: encodedStatus)
+        #expect(decodedStatus.keys == ["EMAIL_WORK_PASSWORD", "OPENAI_API_KEY"])
+
+        let statusResp = SecretStatusResponse(status: ["EMAIL_WORK_PASSWORD": true, "OPENAI_API_KEY": false])
+        let encodedResp = try JSONEncoder().encode(statusResp)
+        let decodedResp = try JSONDecoder().decode(SecretStatusResponse.self, from: encodedResp)
+        #expect(decodedResp.status["EMAIL_WORK_PASSWORD"] == true)
+        #expect(decodedResp.status["OPENAI_API_KEY"] == false)
+    }
+
+    @Test
+    func `Secret status cap stays pinned to the dashboard chunk contract`() {
+        // Single cross-language contract: the server owns `maxSecretStatusKeys`
+        // and the dashboard mirrors `SECRET_STATUS_CHUNK_SIZE` in
+        // `Web/src/components/SettingsManager.tsx`. Both pin 500 so badge-probe
+        // chunks never trip the status gate; update both together.
+        #expect(maxSecretStatusKeys == 500)
+    }
 }

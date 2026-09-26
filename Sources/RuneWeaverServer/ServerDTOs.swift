@@ -75,6 +75,10 @@ public enum ServerPaths {
     public static let websocket = "ws"
     /// Settings group.
     public static let settings = "settings"
+    /// Secrets subpath under `/settings`.
+    public static let secrets = "secrets"
+    /// Status subpath under `/settings/secrets`.
+    public static let status = "status"
     /// Single-owner bearer auth group.
     public static let auth = "auth"
     /// Owner token rotation subpath under `/auth`.

@@ -16,6 +16,11 @@ import Vapor
 /// Registers settings routes for reading and persisting configuration.
 func registerSettingsRoutes(_ app: Application) {
     let settings = app.grouped(PathComponent.constant(ServerPaths.settings))
+    registerSettingsConfigRoutes(settings)
+    registerSettingsSecretsRoutes(settings)
+}
+
+private func registerSettingsConfigRoutes(_ settings: RoutesBuilder) {
     settings.get { req async throws -> Response in
         let url = RuneWeaverConfig.defaultConfigFileURL()
         let config: RuneWeaverConfig
@@ -31,100 +36,209 @@ func registerSettingsRoutes(_ app: Application) {
         return response
     }
     settings.put { req async throws -> Response in
-        let body = try req.content.decode(UpdateSettingsRequest.self)
-        let url = RuneWeaverConfig.defaultConfigFileURL()
-        var config: RuneWeaverConfig
-        do {
-            config = try RuneWeaverConfig.loadDefault()
-        } catch let error as ConfigError {
-            throw Abort(.badRequest, reason: String(describing: error))
-        } catch {
-            throw Abort(.internalServerError, reason: error.localizedDescription)
+        try await handlePutSettings(req: req)
+    }
+}
+
+private func handlePutSettings(req: Request) async throws -> Response {
+    let body = try req.content.decode(UpdateSettingsRequest.self)
+    let url = RuneWeaverConfig.defaultConfigFileURL()
+    var config: RuneWeaverConfig
+    do {
+        config = try RuneWeaverConfig.loadDefault()
+    } catch let error as ConfigError {
+        throw Abort(.badRequest, reason: String(describing: error))
+    } catch {
+        throw Abort(.internalServerError, reason: error.localizedDescription)
+    }
+    // Snapshot the stored bind before the merge so the response advertises
+    // a restart only when the file values actually move. A save that
+    // resends unchanged bind keys (for example a full-form PUT) leaves the
+    // flag false instead of crying restart on every edit.
+    let oldServerHostname = config.server.hostname
+    let oldServerPort = config.server.port
+    let oldServerAllowedHosts = config.server.allowedHosts
+    let oldLLMConfig = config.llm
+    do {
+        try body.apply(to: &config)
+        // Validate the merged config before persisting so a single bad
+        // field cannot corrupt the stored file or live engine state.
+        try config.validate()
+        // The bind and the Host gate stay on the boot values, so only a
+        // real hostname/port/allowed_hosts change needs a restart. The
+        // `carriesServerPatch` gate short-circuits saves without bind keys
+        // so unrelated edits skip the compare entirely. Hostname
+        // compares trimmed plus lowercased plus bracket-canonicalized and
+        // allowed hosts compare as sets of their bracket-canonicalized
+        // normalized Host forms so casing, `:port` spellings, bracketed
+        // versus bare IPv6 spellings, or reorderings that the gate treats
+        // identically do not trip a spurious restart, matching the
+        // dashboard normalized dirty-check.
+        let normalizedHostname = canonicalRestartHost(config.server.hostname)
+        let normalizedOldHostname = canonicalRestartHost(oldServerHostname)
+        let normalizedAllowedHosts = config.server.allowedHosts.map {
+            canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
         }
-        // Snapshot the stored bind before the merge so the response advertises
-        // a restart only when the file values actually move. A save that
-        // resends unchanged bind keys (for example a full-form PUT) leaves the
-        // flag false instead of crying restart on every edit.
-        let oldServerHostname = config.server.hostname
-        let oldServerPort = config.server.port
-        let oldServerAllowedHosts = config.server.allowedHosts
-        let oldLLMConfig = config.llm
-        do {
-            try body.apply(to: &config)
-            // Validate the merged config before persisting so a single bad
-            // field cannot corrupt the stored file or live engine state.
-            try config.validate()
-            // The bind and the Host gate stay on the boot values, so only a
-            // real hostname/port/allowed_hosts change needs a restart. The
-            // `carriesServerPatch` gate short-circuits saves without bind keys
-            // so unrelated edits skip the compare entirely. Hostname
-            // compares trimmed plus lowercased plus bracket-canonicalized and
-            // allowed hosts compare as sets of their bracket-canonicalized
-            // normalized Host forms so casing, `:port` spellings, bracketed
-            // versus bare IPv6 spellings, or reorderings that the gate treats
-            // identically do not trip a spurious restart, matching the
-            // dashboard normalized dirty-check.
-            let normalizedHostname = canonicalRestartHost(config.server.hostname)
-            let normalizedOldHostname = canonicalRestartHost(oldServerHostname)
-            let normalizedAllowedHosts = config.server.allowedHosts.map {
-                canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
-            }
-            let normalizedOldAllowedHosts = oldServerAllowedHosts.map {
-                canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
-            }
-            let serverChanged = body.carriesServerPatch
-                && (normalizedHostname != normalizedOldHostname
-                    || config.server.port != oldServerPort
-                    || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
-            let llmChanged = config.llm != oldLLMConfig
-            // Providers build the live LLM at boot with no live-reload path,
-            // so any provider delta (including supportsVision) leaves the live
-            // model stale until restart.
-            let providersChanged = config.llm.providers != oldLLMConfig.providers
-            let needsRestart = serverChanged || llmChanged || providersChanged
-            let liveContext = req.application.runeWeaver
-            // Fail-closed bind guard: a changed non-loopback hostname persists
-            // only when an owner token resolves. Without one the save is
-            // refused with a Generate CTA instead of silently downgrading to an
-            // unauthenticated LAN bind or pretending loopback still applies.
-            // Unchanged binds (including an already-stored LAN value resent by
-            // a full-form save) skip the gate so unrelated edits stay saveable.
-            if serverChanged, !UpdateSettingsRequest.isLoopbackHostname(config.server.hostname) {
-                let hasToken = await serverBindHasOwnerToken(config: config)
-                guard hasToken else {
-                    throw Abort(
-                        .badRequest,
-                        reason: "Refusing to save non-loopback hostname '\(config.server.hostname)' without a configured owner token. "
-                            + "Set [server] hostname to a loopback address (127.0.0.1, localhost, ::1, or [::1]), "
-                            + "or run 'rune-weaver auth token generate' to enable LAN binds."
-                    )
-                }
-            }
-            // Fail-closed pre-save probe: a rejected `db_path` throws before
-            // the file is persisted and before any live tool state mutates,
-            // so the durable file and live desktop/index state never diverge.
-            // The probed components ride along into the reconcile below so an
-            // enable or `db_path` change builds and probes the new store once.
-            let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
-            try config.save(to: url)
-            await applyLiveOrchestratorTuning(body: body, context: liveContext)
-            await reloadLiveMediaTools(body: body, config: config, context: liveContext)
-            await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
-            await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
-            try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
-            // The bind and the Host middleware stay on the boot values: a
-            // `[server]` save persists to the file and returns `requiresRestart`
-            // without touching the live socket or middleware set.
-            let response = try await SettingsResponse(config: config, configPath: url.path, requiresRestart: needsRestart).encodeResponse(for: req)
-            response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
-            return response
-        } catch let abort as Abort {
-            throw abort
-        } catch let error as ConfigError {
-            throw Abort(.badRequest, reason: String(describing: error))
-        } catch {
-            throw Abort(.internalServerError, reason: error.localizedDescription)
+        let normalizedOldAllowedHosts = oldServerAllowedHosts.map {
+            canonicalRestartHost(UpdateSettingsRequest.normalizedAllowedHost($0))
         }
+        let serverChanged = body.carriesServerPatch
+            && (normalizedHostname != normalizedOldHostname
+                || config.server.port != oldServerPort
+                || Set(normalizedAllowedHosts) != Set(normalizedOldAllowedHosts))
+        let llmChanged = config.llm != oldLLMConfig
+        // Providers build the live LLM at boot with no live-reload path,
+        // so any provider delta (including supportsVision) leaves the live
+        // model stale until restart.
+        let providersChanged = config.llm.providers != oldLLMConfig.providers
+        let needsRestart = serverChanged || llmChanged || providersChanged
+        let liveContext = req.application.runeWeaver
+        // Fail-closed bind guard: a changed non-loopback hostname persists
+        // only when an owner token resolves. Without one the save is
+        // refused with a Generate CTA instead of silently downgrading to an
+        // unauthenticated LAN bind or pretending loopback still applies.
+        // Unchanged binds (including an already-stored LAN value resent by
+        // a full-form save) skip the gate so unrelated edits stay saveable.
+        if serverChanged, !UpdateSettingsRequest.isLoopbackHostname(config.server.hostname) {
+            let hasToken = await serverBindHasOwnerToken(config: config)
+            guard hasToken else {
+                throw Abort(
+                    .badRequest,
+                    reason: "Refusing to save non-loopback hostname '\(config.server.hostname)' without a configured owner token. "
+                        + "Set [server] hostname to a loopback address (127.0.0.1, localhost, ::1, or [::1]), "
+                        + "or run 'rune-weaver auth token generate' to enable LAN binds."
+                )
+            }
+        }
+        // Fail-closed pre-save probe: a rejected `db_path` throws before
+        // the file is persisted and before any live tool state mutates,
+        // so the durable file and live desktop/index state never diverge.
+        // The probed components ride along into the reconcile below so an
+        // enable or `db_path` change builds and probes the new store once.
+        let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
+        try config.save(to: url)
+        await applyLiveOrchestratorTuning(body: body, context: liveContext)
+        await reloadLiveMediaTools(body: body, config: config, context: liveContext)
+        await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
+        await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
+        try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
+        // The bind and the Host middleware stay on the boot values: a
+        // `[server]` save persists to the file and returns `requiresRestart`
+        // without touching the live socket or middleware set.
+        let response = try await SettingsResponse(config: config, configPath: url.path, requiresRestart: needsRestart).encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
+    } catch let abort as Abort {
+        throw abort
+    } catch let error as ConfigError {
+        throw Abort(.badRequest, reason: String(describing: error))
+    } catch {
+        throw Abort(.internalServerError, reason: error.localizedDescription)
+    }
+}
+
+/// Maximum secret value bytes accepted by the store route.
+///
+/// Bounds the Keychain write so an unbounded body cannot pressure the
+/// Keychain or memory. Measured in UTF-8 bytes, matching the transport size.
+private let maxSecretStoreBytes = 16 * 1024
+
+/// Maximum keys accepted per status lookup.
+///
+/// Single contract owner for the secret-status bound: the dashboard mirror
+/// `SECRET_STATUS_CHUNK_SIZE` in `Web/src/components/SettingsManager.tsx` must
+/// stay equal so badge-probe chunks never trip this gate. Both sides pin 500
+/// (see `SettingsRouteTests` plus the dashboard contract test); update both
+/// together.
+///
+/// Bounds the retrieve loop so one request cannot fan out unbounded Keychain
+/// reads. Sized at 500 distinct keys to cover the dashboard badge probe,
+/// which unions email password envs, provider `api_key_env` names, and the
+/// Sonarr/Radarr names, without turning the probe into a 400.
+let maxSecretStatusKeys = 500
+
+/// Validates a raw secret key for the secrets routes.
+///
+/// Delegates the shape rule to the core single owner so store, status, and
+/// delete agree without duplicating the alphabet or the length bound. Key
+/// names never carry secret bytes, so the failure reason names only the
+/// shape rule.
+/// - Parameter rawKey: Untrimmed key from the request body or path.
+/// - Returns: Trimmed key safe for the Keychain lookup.
+/// - Throws: `Abort(.badRequest)` when the key is empty, holds non-name
+///   characters, or exceeds the length bound.
+private func validateSecretKey(_ rawKey: String) throws -> String {
+    let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard SecretsManager.isValidSurrogateKey(rawKey) else {
+        if key.count > SecretsManager.maxSurrogateKeyLength {
+            throw Abort(.badRequest, reason: "Key must not exceed \(SecretsManager.maxSurrogateKeyLength) characters.")
+        }
+        throw Abort(.badRequest, reason: "Key must not be empty and must contain only alphanumeric characters, underscores, hyphens, and periods.")
+    }
+    return key
+}
+
+private func registerSettingsSecretsRoutes(_ settings: RoutesBuilder) {
+    // Keychain secret management routes.
+    // Responses never cache and never carry secret bytes: store and delete
+    // return an empty 200 while status returns only an existence map.
+    let secretsGroup = settings.grouped(PathComponent.constant(ServerPaths.secrets))
+
+    secretsGroup.post { req async throws -> Response in
+        let body = try req.content.decode(StoreSecretRequest.self)
+        let key = try validateSecretKey(body.key)
+        guard !body.secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Abort(.badRequest, reason: "Secret must not be empty.")
+        }
+        guard body.secret.utf8.count <= maxSecretStoreBytes else {
+            throw Abort(.payloadTooLarge, reason: "Secret exceeds \(maxSecretStoreBytes) bytes.")
+        }
+        let secrets = req.application.runeWeaver.secrets ?? SecretsManager()
+        do {
+            try await secrets.store(key: key, secret: body.secret)
+        } catch {
+            throw Abort(.internalServerError, reason: "Failed to store secret in Keychain: \(error.localizedDescription)")
+        }
+        let response = Response(status: .ok)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
+    }
+
+    secretsGroup.post(PathComponent.constant(ServerPaths.status)) { req async throws -> Response in
+        let body = try req.content.decode(SecretStatusRequest.self)
+        guard body.keys.count <= maxSecretStatusKeys else {
+            throw Abort(.badRequest, reason: "Keys must not exceed \(maxSecretStatusKeys) entries.")
+        }
+        let secrets = req.application.runeWeaver.secrets ?? SecretsManager()
+        var statusMap: [String: Bool] = [:]
+        for rawKey in body.keys {
+            let key = try validateSecretKey(rawKey)
+            do {
+                let val = try await secrets.retrieve(key: key)
+                statusMap[key] = !(val?.isEmpty ?? true)
+            } catch {
+                throw Abort(.internalServerError, reason: "Failed to retrieve secret status from Keychain: \(error.localizedDescription)")
+            }
+        }
+        let response = try await SecretStatusResponse(status: statusMap).encodeResponse(for: req)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
+    }
+
+    secretsGroup.delete(PathComponent.parameter("key")) { req async throws -> Response in
+        guard let rawKey = req.parameters.get("key") else {
+            throw Abort(.badRequest, reason: "Key parameter missing.")
+        }
+        let key = try validateSecretKey(rawKey)
+        let secrets = req.application.runeWeaver.secrets ?? SecretsManager()
+        do {
+            try await secrets.delete(key: key)
+        } catch {
+            throw Abort(.internalServerError, reason: "Failed to delete secret from Keychain: \(error.localizedDescription)")
+        }
+        let response = Response(status: .ok)
+        response.headers.replaceOrAdd(name: "Cache-Control", value: "no-store, private")
+        return response
     }
 }
 

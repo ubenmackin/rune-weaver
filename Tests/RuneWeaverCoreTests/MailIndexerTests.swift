@@ -595,6 +595,200 @@ private struct StubEmbeddings: EmbeddingsBackend {
     }
 }
 
+/// Records pooled session open plus close calls per mailbox.
+///
+/// Each entry is `account/mailbox` so the bracket count asserts without
+/// touching the network. The inbox never leaks: every open pairs with a close
+/// except an open failure, which never reaches the close.
+private actor SessionOpenCloseRecorder {
+    /// Opens observed in call order.
+    private var opens: [String] = []
+    /// Closes observed in call order.
+    private var closes: [String] = []
+
+    /// Records one open.
+    /// - Parameter key: Account plus mailbox key.
+    func recordOpen(_ key: String) {
+        opens.append(key)
+    }
+
+    /// Records one close.
+    /// - Parameter key: Account plus mailbox key.
+    func recordClose(_ key: String) {
+        closes.append(key)
+    }
+
+    /// Returns the observed opens.
+    /// - Returns: Opens in call order.
+    func opensSnapshot() -> [String] {
+        opens
+    }
+
+    /// Returns the observed closes.
+    /// - Returns: Closes in call order.
+    func closesSnapshot() -> [String] {
+        closes
+    }
+}
+
+/// Gateway double recording the session bracket the indexer owns.
+///
+/// Messages serve canned per-mailbox windows; an injected open or message
+/// failure message exercises the skip path while the recorder proves the
+/// bracket still opened plus closed exactly once.
+private struct RecordingSessionGateway: MailIndexGateway {
+    /// Mailboxes reported by `mailboxes`.
+    let mailboxNames: [String]
+    /// Canned messages per mailbox, already newest-first.
+    let perMailbox: [String: [MailIndexMessage]]
+    /// Bracket recorder shared with the test.
+    let recorder: SessionOpenCloseRecorder
+    /// Failure message thrown by `openMailboxSession` when set.
+    let openFailureMessage: String?
+    /// Failure message thrown by `messages` when set.
+    let messagesFailureMessage: String?
+    /// Counter for message page calls.
+    let messageCalls: CallRecorder
+
+    /// Creates a recording gateway.
+    /// - Parameters:
+    ///   - mailboxNames: Mailboxes reported by the stub.
+    ///   - perMailbox: Canned messages per mailbox.
+    ///   - recorder: Bracket recorder shared with the test.
+    ///   - openFailureMessage: Failure message thrown by open when set.
+    ///   - messagesFailureMessage: Failure message thrown by messages when set.
+    ///   - messageCalls: Counter shared with the test.
+    init(
+        mailboxNames: [String] = ["INBOX"],
+        perMailbox: [String: [MailIndexMessage]] = [:],
+        recorder: SessionOpenCloseRecorder,
+        openFailureMessage: String? = nil,
+        messagesFailureMessage: String? = nil,
+        messageCalls: CallRecorder = CallRecorder()
+    ) {
+        self.mailboxNames = mailboxNames
+        self.perMailbox = perMailbox
+        self.recorder = recorder
+        self.openFailureMessage = openFailureMessage
+        self.messagesFailureMessage = messagesFailureMessage
+        self.messageCalls = messageCalls
+    }
+
+    /// Returns the canned mailbox list.
+    func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+        mailboxNames
+    }
+
+    /// Records the open and optionally throws the injected failure.
+    func openMailboxSession(credentials: MailIndexCredentials, mailbox: String) async throws {
+        await recorder.recordOpen("\(credentials.accountName)/\(mailbox)")
+        if let openFailureMessage {
+            throw RetryProbeError(message: openFailureMessage)
+        }
+    }
+
+    /// Records the close, no-op when absent by construction.
+    func closeMailboxSession(credentials: MailIndexCredentials, mailbox: String) async {
+        await recorder.recordClose("\(credentials.accountName)/\(mailbox)")
+    }
+
+    /// Serves the canned window or throws the injected failure.
+    func messages(
+        credentials _: MailIndexCredentials,
+        mailbox: String,
+        limit: Int,
+        mode _: MailFetchMode,
+        beforeUID _: Int? = nil
+    ) async throws -> [MailIndexMessage] {
+        await messageCalls.bump()
+        if let messagesFailureMessage {
+            throw RetryProbeError(message: messagesFailureMessage)
+        }
+        return Array((perMailbox[mailbox] ?? []).prefix(limit))
+    }
+
+    /// Never serves attachment bytes; the bracket tests use attachment-free mail.
+    func attachment(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int,
+        mode _: MailFetchMode
+    ) async throws -> MailIndexAttachmentData {
+        throw StubGatewayError.missingAttachment
+    }
+}
+
+/// Gateway double parking cancellably on later pages while recording the bracket.
+///
+/// The first page returns immediately; later pages sleep so a mid-backfill
+/// cancel lands deterministically with the session still closed once.
+private struct CancellableSessionGateway: MailIndexGateway {
+    /// Messages backing every page, already newest-first.
+    let messages: [MailIndexMessage]
+    /// Bracket recorder shared with the test.
+    let recorder: SessionOpenCloseRecorder
+
+    /// Creates a cancellable gateway.
+    /// - Parameters:
+    ///   - messages: Canned messages in newest-first order.
+    ///   - recorder: Bracket recorder shared with the test.
+    init(messages: [MailIndexMessage], recorder: SessionOpenCloseRecorder) {
+        self.messages = messages
+        self.recorder = recorder
+    }
+
+    /// Returns one mailbox without touching the network.
+    func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+        ["INBOX"]
+    }
+
+    /// Records the open.
+    func openMailboxSession(credentials: MailIndexCredentials, mailbox: String) async throws {
+        await recorder.recordOpen("\(credentials.accountName)/\(mailbox)")
+    }
+
+    /// Records the close.
+    func closeMailboxSession(credentials: MailIndexCredentials, mailbox: String) async {
+        await recorder.recordClose("\(credentials.accountName)/\(mailbox)")
+    }
+
+    /// Serves the first page at once and parks cancellably past it.
+    func messages(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        limit: Int,
+        mode _: MailFetchMode,
+        beforeUID: Int? = nil
+    ) async throws -> [MailIndexMessage] {
+        if beforeUID != nil {
+            try await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+        if let beforeUID {
+            let upper = beforeUID - 1
+            guard upper >= 1 else { return [] }
+            let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+            let filtered = messages.filter {
+                let uid = MailIndexer.uid(of: $0.id)
+                return uid > 0 && uid >= lower && uid <= upper
+            }
+            return Array(filtered.prefix(limit))
+        }
+        return Array(messages.prefix(limit))
+    }
+
+    /// Never serves attachment bytes; the cancellation test uses attachment-free mail.
+    func attachment(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int,
+        mode _: MailFetchMode
+    ) async throws -> MailIndexAttachmentData {
+        throw StubGatewayError.missingAttachment
+    }
+}
+
 // MARK: - Helpers
 
 /// Creates an isolated temporary base directory.
@@ -2118,5 +2312,123 @@ struct MailIndexerTests {
         }
         // Only the first page fetched before the pause threw.
         #expect(await bounds.count() == 1)
+    }
+
+    @Test
+    func `Session bracket opens once plus closes once per mailbox on success`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+        let perMailbox: [String: [MailIndexMessage]] = [
+            "INBOX": [makeMessage(id: "1", body: "inbox session body unique")],
+            "Archive": [makeMessage(id: "1", body: "archive session body unique")]
+        ]
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RecordingSessionGateway(
+                    mailboxNames: ["INBOX", "Archive"],
+                    perMailbox: perMailbox,
+                    recorder: recorder
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 2)
+        }
+        let opens = await recorder.opensSnapshot()
+        let closes = await recorder.closesSnapshot()
+        #expect(opens.sorted() == ["INBOX", "Archive"].sorted().map { "mailtest/\($0)" })
+        #expect(closes.sorted() == opens.sorted())
+        #expect(opens.count == 2)
+        #expect(closes.count == 2)
+    }
+
+    @Test
+    func `Session bracket still closes once when the mailbox skips`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RecordingSessionGateway(
+                    mailboxNames: ["INBOX"],
+                    perMailbox: [:],
+                    recorder: recorder,
+                    messagesFailureMessage: "BAD Parse Error: invalid mailbox name"
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 0)
+            #expect(report.warnings.count == 1)
+        }
+        #expect(await recorder.opensSnapshot() == ["mailtest/INBOX"])
+        #expect(await recorder.closesSnapshot() == ["mailtest/INBOX"])
+    }
+
+    @Test
+    func `Session bracket closes on cancel with no leak`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+        let all = Array((1 ... 200).map {
+            makeMessage(id: "\($0)", body: "session cancel body \($0)")
+        }.reversed())
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: CancellableSessionGateway(messages: all, recorder: recorder),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let runTask = Task { try await indexer.run() }
+            try await Task.sleep(nanoseconds: 200_000_000)
+            runTask.cancel()
+            do {
+                _ = try await runTask.value
+                Issue.record("Expected CancellationError from session cancel")
+            } catch is CancellationError {
+            } catch {
+                Issue.record("Expected CancellationError, got \(error)")
+            }
+        }
+        #expect(await recorder.opensSnapshot() == ["mailtest/INBOX"])
+        #expect(await recorder.closesSnapshot() == ["mailtest/INBOX"])
+    }
+
+    @Test
+    func `Open failure skips with no one-shot fallback`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = SessionOpenCloseRecorder()
+        let messageCalls = CallRecorder()
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RecordingSessionGateway(
+                    mailboxNames: ["INBOX"],
+                    perMailbox: ["INBOX": [makeMessage(id: "1", body: "openfail body unique")]],
+                    recorder: recorder,
+                    openFailureMessage: "connection reset by peer",
+                    messageCalls: messageCalls
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 0)
+            #expect(report.warnings.count == 1)
+        }
+        #expect(await recorder.opensSnapshot() == ["mailtest/INBOX"])
+        #expect(await recorder.closesSnapshot() == [])
+        #expect(await messageCalls.value() == 0)
     }
 }

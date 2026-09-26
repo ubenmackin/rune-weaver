@@ -74,6 +74,23 @@ public struct WSStreamDelta: Codable, Sendable, Equatable {
     }
 }
 
+/// Streamed reasoning / thought delta sent by the engine over WebSocket.
+public struct WSStreamReasoningDelta: Codable, Sendable, Equatable {
+    /// Always `"reasoning_delta"`.
+    public let type: String
+    /// Incremental model reasoning / thought text.
+    public let delta: String
+    /// Owning session identifier.
+    public var sessionID: UUID?
+
+    /// Creates a stream reasoning delta.
+    public init(delta: String, sessionID: UUID? = nil) {
+        self.type = "reasoning_delta"
+        self.delta = delta
+        self.sessionID = sessionID
+    }
+}
+
 /// Terminal chat frame sent by the engine over WebSocket.
 public struct WSStreamDone: Codable, Sendable, Equatable {
     /// Always `"done"`.

@@ -472,6 +472,9 @@ extension Orchestrator {
             sessionID: request.sessionID,
             onDelta: { delta in
                 await request.onEvent?(.textDelta(delta))
+            },
+            onReasoningDelta: { reasoning in
+                await request.onEvent?(.reasoningDelta(reasoning))
             }
         )
         // A zero usage report carries no occupancy signal, so it falls back to
@@ -628,6 +631,34 @@ extension Orchestrator {
         )
     }
 
+    /// Handles an empty assistant round following tool execution, attempting a synthesis prompt
+    /// or falling back to a generic completion notice.
+    /// Reasoning is intentionally never promoted to final text so chain-of-thought
+    /// stays out of the user-visible answer, episodic memory, and audit trail.
+    /// - Returns: True if an empty-round synthesis prompt was queued and the loop should continue.
+    private func handleEmptyRoundAfterTools(
+        toolActions: [ToolAction],
+        finalText: inout String,
+        attemptedEmptyRoundSynthesis: inout Bool,
+        workingMessages: inout [Message],
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
+    ) async -> Bool {
+        guard !toolActions.isEmpty, finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        if !attemptedEmptyRoundSynthesis {
+            attemptedEmptyRoundSynthesis = true
+            workingMessages.append(Message(
+                role: .system,
+                content: "[System Notice]: Tool execution finished. Please summarize the results or provide your final response to the user."
+            ))
+            return true
+        }
+        finalText = "Tool execution completed."
+        await onEvent?(.textDelta(finalText))
+        return false
+    }
+
     /// Runs the bounded tool loop for one turn until final text or parking.
     func runTurnLoop(
         _ request: TurnLoopRequest,
@@ -640,6 +671,7 @@ extension Orchestrator {
         var billedTokens: Int?
         var lastRoundContextTokens: Int?
         var llmRoundIndex = request.initialLlmRoundIndex
+        var attemptedEmptyRoundSynthesis = false
 
         while true {
             try Task.checkCancellation()
@@ -674,6 +706,17 @@ extension Orchestrator {
             )
             let narratedGated = OrchestratorToolLoop.narratedGatedCalls(from: finalText, tools: request.tools)
             if calls.isEmpty, narratedGated.isEmpty {
+                // Collected reasoning stays out of the empty-round path by design.
+                let shouldContinue = await handleEmptyRoundAfterTools(
+                    toolActions: toolActions,
+                    finalText: &finalText,
+                    attemptedEmptyRoundSynthesis: &attemptedEmptyRoundSynthesis,
+                    workingMessages: &workingMessages,
+                    onEvent: request.onEvent
+                )
+                if shouldContinue {
+                    continue
+                }
                 break
             }
             // Parked frames carry the latest round's context tokens (or fallback estimate)
@@ -1048,7 +1091,8 @@ extension Orchestrator {
         messages: [Message],
         tools: [any Tool],
         sessionID: UUID? = nil,
-        onDelta: (@Sendable (String) async -> Void)? = nil
+        onDelta: (@Sendable (String) async -> Void)? = nil,
+        onReasoningDelta: (@Sendable (String) async -> Void)? = nil
     ) async throws -> TurnDraft {
         var text = ""
         var billed: Int?
@@ -1074,6 +1118,12 @@ extension Orchestrator {
                 }
                 if let message = chunk.errorMessage {
                     throw OrchestratorError.llmFailed(message.isEmpty ? "unknown error" : message)
+                }
+                if !chunk.reasoningDelta.isEmpty {
+                    // Reasoning streams live via the callback below but stays out
+                    // of the final text by design: it is never accumulated or
+                    // promoted into the draft, so no unused per-turn state remains.
+                    await onReasoningDelta?(chunk.reasoningDelta)
                 }
                 text += chunk.delta
                 if !chunk.toolCalls.isEmpty {
@@ -1107,7 +1157,11 @@ extension Orchestrator {
         if let interruptToken, let sessionID, let queue = steeringQueue {
             await queue.unregisterInterrupt(sessionID: sessionID, token: interruptToken)
         }
-        return TurnDraft(text: text, billedTokens: billed, toolCalls: toolCalls)
+        return TurnDraft(
+            text: text,
+            billedTokens: billed,
+            toolCalls: toolCalls
+        )
     }
 
     /// Resolves tool calls for the latest assistant turn.
