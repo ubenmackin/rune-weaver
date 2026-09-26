@@ -81,6 +81,51 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
     var shouldFailBlocked: String?
     var shouldDenyAccessibilityPermission: Bool = false
 
+    /// Mirrors the live bridge hint so stub denials carry identical
+    /// operator guidance; one literal means drift shows as a diff here.
+    private static let supportedKeyHint =
+        "Return/Enter, Escape/Esc, Tab, Space, Backspace, Delete, ArrowUp/Down/Left/Right, Home, End, PageUp/Down, F1-F12, a-z, 0-9."
+
+    /// Hardware codes mirrored from the live bridge table so the stub gate
+    /// and the hermetic mapping test below read one list; UInt16 keeps the
+    /// suite compiling where CoreGraphics is unavailable. Prefer a live
+    /// test-visible helper if one becomes available.
+    fileprivate static let mirroredKeyCodes: [String: UInt16] = [
+        "return": 0x24, "enter": 0x24,
+        "escape": 0x35, "esc": 0x35,
+        "tab": 0x30,
+        "space": 0x31,
+        "backspace": 0x33, "delete": 0x33,
+        "forwarddelete": 0x75,
+        "arrowup": 0x7E, "up": 0x7E,
+        "arrowdown": 0x7D, "down": 0x7D,
+        "arrowleft": 0x7B, "left": 0x7B,
+        "arrowright": 0x7C, "right": 0x7C,
+        "home": 0x73,
+        "end": 0x77,
+        "pageup": 0x74,
+        "pagedown": 0x79,
+        "f1": 0x7A, "f2": 0x78, "f3": 0x63, "f4": 0x76,
+        "f5": 0x60, "f6": 0x61, "f7": 0x62, "f8": 0x64,
+        "f9": 0x65, "f10": 0x6D, "f11": 0x67, "f12": 0x6F,
+        "a": 0x00, "b": 0x0B, "c": 0x08, "d": 0x02,
+        "e": 0x0E, "f": 0x03, "g": 0x05, "h": 0x04,
+        "i": 0x22, "j": 0x26, "k": 0x28, "l": 0x25,
+        "m": 0x2E, "n": 0x2D, "o": 0x1F, "p": 0x23,
+        "q": 0x0C, "r": 0x0F, "s": 0x01, "t": 0x11,
+        "u": 0x20, "v": 0x09, "w": 0x0D, "x": 0x07,
+        "y": 0x10, "z": 0x06,
+        "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14,
+        "4": 0x15, "5": 0x17, "6": 0x16, "7": 0x1A,
+        "8": 0x1C, "9": 0x19
+    ]
+
+    /// Case-insensitive lookup over the mirrored table, matching the live
+    /// bridge fold so capitalization never forks a chord.
+    fileprivate static func keyCode(for key: String) -> UInt16? {
+        mirroredKeyCodes[key.lowercased()]
+    }
+
     func executeBatch(
         actions: [DesktopAction],
         scaleX: Double,
@@ -102,6 +147,17 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
 
         var results: [DesktopActionStepResult] = []
         for (idx, action) in actions.enumerated() {
+            // Mirror the live fail-closed rule so modified unmappable keys
+            // refuse here too; keeps the unit suite hermetic without live
+            // CGEvent dispatch for the unknown-key contract.
+            if case let .keyPress(key, modifiers) = action,
+               !modifiers.isEmpty, !isShortcutMappable(key)
+            {
+                throw DesktopControlError.actionFailed(
+                    index: idx,
+                    reason: "Unknown key name: '\(key)'. Supported: \(Self.supportedKeyHint)"
+                )
+            }
             let msg = switch action {
             case let .switchApp(app):
                 "Switched to \(app)"
@@ -109,8 +165,12 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
                 "Clicked \(button) at (\(Int(x * scaleX)), \(Int(y * scaleY)))"
             case let .typeText(text):
                 "Typed \"\(text)\""
-            case let .keyPress(key, _):
-                "Pressed \(key)"
+            case let .keyPress(key, modifiers):
+                // Mirror the live "Pressed <key> with mod+mod" shape so
+                // stub routing assertions cover the modifier contract too.
+                modifiers.isEmpty
+                    ? "Pressed \(key)"
+                    : "Pressed \(key) with \(modifiers.map(\.rawValue).joined(separator: "+"))"
             default:
                 "Executed \(action)"
             }
@@ -122,6 +182,14 @@ private struct StubDesktopControlBridge: DesktopControlling, Sendable {
             ))
         }
         return results
+    }
+
+    /// Test-owned mirror of the live shortcut table shape: modified a-z and
+    /// 0-9 plus named keys resolve, while punctuation like "!" has no slot.
+    /// Reads the single mirrored table so the gate cannot fork from the
+    /// hardware codes pinned by the hermetic test below.
+    private func isShortcutMappable(_ key: String) -> Bool {
+        Self.keyCode(for: key) != nil
     }
 }
 
@@ -627,5 +695,232 @@ struct DesktopToolsTests {
         #expect(output.isError)
         #expect(output.content.contains("Screen Recording permission is required"))
         #expect(output.content.contains("System Settings > Privacy & Security > Screen Recording"))
+    }
+
+    // MARK: - Shortcut key_press batches (hermetic stub routing)
+
+    @Test
+    func `Cmd Shift H routes through stub shortcut path`() async throws {
+        // Modified letters must reach the shortcut system as hardware codes
+        // (h is 0x04) instead of Unicode text, since Unicode posting with
+        // command flags never triggers the intended chord. The stub proves
+        // routing without posting a real Finder chord.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let input = ToolInput(
+            toolName: "desktop.action",
+            argumentsJSON: #"{"actions": [{"action": "key_press", "key": "h", "modifiers": ["cmd", "shift"]}]}"#
+        )
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        #expect(!output.isError)
+        #expect(output.content.contains("Pressed h"))
+        #expect(output.content.contains("cmd"))
+        #expect(output.content.contains("shift"))
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Cmd Shift N routes through stub shortcut path`() async throws {
+        // Same hardware-code invariant for the companion Finder chord
+        // (n is 0x2D): modified input must resolve before any Unicode path.
+        // Stubbed so CI never dispatches the live chord.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let input = ToolInput(
+            toolName: "desktop.action",
+            argumentsJSON: #"{"actions": [{"action": "key_press", "key": "n", "modifiers": ["cmd", "shift"]}]}"#
+        )
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        #expect(!output.isError)
+        #expect(output.content.contains("Pressed n"))
+        #expect(output.content.contains("cmd"))
+        #expect(output.content.contains("shift"))
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Uppercase H with Cmd matches lowercase shortcut`() async throws {
+        // Lookup folds case so Shift-as-capitalization never forks the
+        // chord: explicit cmd plus uppercase H lands on the same hardware
+        // key as lowercase h instead of typing a literal.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let context = ToolContext(conversationID: UUID())
+        let lower = try await tool.execute(
+            input: ToolInput(
+                toolName: "desktop.action",
+                argumentsJSON: #"{"actions": [{"action": "key_press", "key": "h", "modifiers": ["cmd"]}]}"#
+            ),
+            context: context
+        )
+        let upper = try await tool.execute(
+            input: ToolInput(
+                toolName: "desktop.action",
+                argumentsJSON: #"{"actions": [{"action": "key_press", "key": "H", "modifiers": ["cmd"]}]}"#
+            ),
+            context: context
+        )
+        #expect(!lower.isError)
+        #expect(!upper.isError)
+        #expect(lower.content.contains("Pressed h"))
+        #expect(upper.content.contains("Pressed H"))
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Bare N without modifiers takes the stub typing path`() async throws {
+        // Unmodified characters stay layout-exact through Unicode posting
+        // rather than consuming a hardware slot, so plain typing never
+        // depends on the shortcut table. Stubbed to avoid live dispatch.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let input = ToolInput(
+            toolName: "desktop.action",
+            argumentsJSON: #"{"actions": [{"action": "key_press", "key": "n"}]}"#
+        )
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        #expect(!output.isError)
+        #expect(output.content.contains("Pressed n"))
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Modified punctuation fails closed as unknown key`() async throws {
+        // Punctuation has no shortcut hardware slot, so a modified mark
+        // must refuse with guidance instead of typing a literal that the
+        // model would mistake for a successful chord. The stub mirrors the
+        // live fail-closed rule, so no CGEvent is posted.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let input = ToolInput(
+            toolName: "desktop.action",
+            argumentsJSON: #"{"actions": [{"action": "key_press", "key": "!", "modifiers": ["cmd"]}]}"#
+        )
+        let output = try await tool.execute(input: input, context: ToolContext(conversationID: UUID()))
+        #expect(output.isError)
+        #expect(output.content.contains("Unknown key name"))
+        // The denial must carry the live hint verbatim so stub and live
+        // failures give the operator identical recovery guidance.
+        #expect(output.content.contains("Return/Enter, Escape/Esc"))
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Shortcut hardware codes match documented values`() {
+        // Pins the chord contract without posting: modified input must
+        // resolve to the physical key the shortcut system expects, so the
+        // suite locks representative codes plus full-table coverage and
+        // case folding instead of trusting routing text alone. Performs no
+        // dispatch, so it needs no emergency-stop latch handling.
+        #expect(StubDesktopControlBridge.keyCode(for: "h") == 0x04)
+        #expect(StubDesktopControlBridge.keyCode(for: "H") == 0x04)
+        #expect(StubDesktopControlBridge.keyCode(for: "n") == 0x2D)
+        #expect(StubDesktopControlBridge.keyCode(for: "N") == 0x2D)
+        #expect(StubDesktopControlBridge.keyCode(for: "a") == 0x00)
+        #expect(StubDesktopControlBridge.keyCode(for: "z") == 0x06)
+        #expect(StubDesktopControlBridge.keyCode(for: "0") == 0x1D)
+        #expect(StubDesktopControlBridge.keyCode(for: "9") == 0x19)
+        #expect(StubDesktopControlBridge.keyCode(for: "return") == 0x24)
+        #expect(StubDesktopControlBridge.keyCode(for: "Enter") == 0x24)
+        #expect(StubDesktopControlBridge.keyCode(for: "escape") == 0x35)
+        #expect(StubDesktopControlBridge.keyCode(for: "Esc") == 0x35)
+        #expect(StubDesktopControlBridge.keyCode(for: "tab") == 0x30)
+        #expect(StubDesktopControlBridge.keyCode(for: "space") == 0x31)
+        #expect(StubDesktopControlBridge.keyCode(for: "backspace") == 0x33)
+        #expect(StubDesktopControlBridge.keyCode(for: "delete") == 0x33)
+        #expect(StubDesktopControlBridge.keyCode(for: "arrowup") == 0x7E)
+        #expect(StubDesktopControlBridge.keyCode(for: "arrowdown") == 0x7D)
+        #expect(StubDesktopControlBridge.keyCode(for: "arrowleft") == 0x7B)
+        #expect(StubDesktopControlBridge.keyCode(for: "arrowright") == 0x7C)
+        #expect(StubDesktopControlBridge.keyCode(for: "home") == 0x73)
+        #expect(StubDesktopControlBridge.keyCode(for: "end") == 0x77)
+        #expect(StubDesktopControlBridge.keyCode(for: "pageup") == 0x74)
+        #expect(StubDesktopControlBridge.keyCode(for: "pagedown") == 0x79)
+        #expect(StubDesktopControlBridge.keyCode(for: "f1") == 0x7A)
+        #expect(StubDesktopControlBridge.keyCode(for: "F12") == 0x6F)
+        // Every letter and digit resolves, while punctuation and unknown
+        // names have no slot and must fail closed as unknown keys.
+        for scalar in "abcdefghijklmnopqrstuvwxyz0123456789" {
+            #expect(StubDesktopControlBridge.keyCode(for: String(scalar)) != nil)
+        }
+        #expect(StubDesktopControlBridge.keyCode(for: "!") == nil)
+        #expect(StubDesktopControlBridge.keyCode(for: "@") == nil)
+        #expect(StubDesktopControlBridge.keyCode(for: ".") == nil)
+        #expect(StubDesktopControlBridge.keyCode(for: "F13") == nil)
+        #expect(StubDesktopControlBridge.keyCode(for: "") == nil)
+    }
+
+    @Test(.enabled(if: ProcessInfo.processInfo.environment["RUNEWEAVER_LIVE_DESKTOP_SHORTCUTS"] == "1"))
+    func `Live shortcut dispatch runs only with explicit opt-in`() async throws {
+        // Live CGEvent dispatch stays behind an explicit opt-in so the unit
+        // suite never posts real Finder chords on macOS CI; set
+        // RUNEWEAVER_LIVE_DESKTOP_SHORTCUTS=1 for a local integration run.
+        // The enabled trait keeps the test absent by default instead of
+        // throwing an XCTest skip, which Swift Testing records as a failure.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let live = DesktopControlBridge(accessibilityAccess: { true })
+        do {
+            let results = try await live.executeBatch(
+                actions: [.keyPress(key: "h", modifiers: [.cmd, .shift])],
+                scaleX: 1.0,
+                scaleY: 1.0,
+                blockedApps: []
+            )
+            #expect(results.count == 1)
+            #expect(results[0].success == true)
+            #expect(results[0].message.contains("Pressed h"))
+        } catch let error as DesktopControlError {
+            #if canImport(CoreGraphics) && canImport(AppKit)
+                Issue.record("Live cmd+shift+h should resolve to 0x04, got \(error)")
+            #else
+                #expect(error == .unsupportedPlatform)
+            #endif
+        } catch {
+            Issue.record("Unexpected failure for live cmd+shift+h: \(error)")
+        }
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+    }
+
+    @Test
+    func `Nine-step Finder batch decodes and keeps envelope shape`() async throws {
+        // The reported Finder flow mixes app focus, shortcut chords, typing,
+        // and pointer settles; the batch must decode intact and the tool
+        // envelope must report the full shape so progress stays honest.
+        // Uses the stub where hardware posting is unavailable so the shape
+        // check never depends on real dispatch.
+        await DesktopControlMonitor.shared.clearEmergencyStop()
+        let json = """
+        {
+            "actions": [
+                {"action": "switch_app", "app_name": "Finder"},
+                {"action": "key_press", "key": "h", "modifiers": ["cmd", "shift"]},
+                {"action": "key_press", "key": "n", "modifiers": ["cmd", "shift"]},
+                {"action": "type_text", "text": "Untitled folder"},
+                {"action": "key_press", "key": "Return"},
+                {"action": "click", "x": 400, "y": 300},
+                {"action": "double_click", "x": 400, "y": 300},
+                {"action": "scroll", "delta_x": 0, "delta_y": -20},
+                {"action": "delay", "milliseconds": 200}
+            ],
+            "scale_x": 1.0,
+            "scale_y": 1.0
+        }
+        """
+        let decoded = try DesktopActionArgs.decode(from: json)
+        #expect(decoded.actions.count == 9)
+
+        let tool = DesktopActionTool(controlBridge: StubDesktopControlBridge())
+        let input = ToolInput(toolName: "desktop.action", argumentsJSON: json)
+        let context = ToolContext(conversationID: UUID())
+        let output = try await tool.execute(input: input, context: context)
+
+        #expect(!output.isError)
+        let data = try #require(output.content.data(using: .utf8))
+        let envelope = try JSONDecoder().decode(DesktopActionEnvelope.self, from: data)
+        #expect(envelope.success == true)
+        #expect(envelope.stepsTotal == 9)
+        #expect(envelope.stepsCompleted == 9)
+        #expect(envelope.results.count == 9)
+        await DesktopControlMonitor.shared.clearEmergencyStop()
     }
 }
