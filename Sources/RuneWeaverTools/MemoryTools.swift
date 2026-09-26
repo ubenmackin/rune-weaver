@@ -372,7 +372,10 @@ public struct RecallMemoriesTool: Tool, Sendable {
     public let description =
         "Recalls what is known about a topic from past conversations, stored facts, and indexed documents (files, mail, messages). "
             + "Use when the user asks what you remember, references earlier context, or asks about indexed emails, messages, or files. "
-            + "Returns ranked memories and document excerpts best first."
+            + "Returns ranked memories and document excerpts best first. "
+            + "Indexed hits carry a date field holding the original document event time; "
+            + "use date for when-things-happened questions and never infer event dates from index_as_of, "
+            + "which marks index time only."
     /// Function-calling contract for `query` and `limit`.
     public let inputSchema =
         JSONSchema(

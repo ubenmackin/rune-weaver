@@ -128,25 +128,105 @@ cat << PLIST_EOF > "${CONTENTS_DIR}/Info.plist"
 </plist>
 PLIST_EOF
 
-# Code signing: prefer explicit CODE_SIGN_IDENTITY, or search for an available codesigning identity.
-# Stable identities preserve macOS Keychain ACLs across app rebuilds, whereas ad-hoc ("-") signatures
-# change their CDHash with every compile, causing macOS to re-prompt for Keychain access.
+# Code signing lives behind sign_app_bundle so every build signs and verifies
+# through one closed gate. A stable identity is mandatory because macOS binds
+# Keychain ACLs and TCC grants (such as Full Disk Access) to the signature:
+# every ad-hoc rebuild mints a fresh CDHash, so Keychain re-prompts and prior
+# TCC approvals stop matching. Refusing silent ad-hoc fallback keeps a rebuild
+# from looking signed while quietly losing its data protections.
+# Over ssh the login keychain stays locked (no GUI unlock happened at login),
+# so codesign cannot reach the private key even though the same command works
+# from local Terminal.app where the keychain is already unlocked. Signing once
+# at the top level without --deep avoids sealing nested content with stale
+# hashes; the closing verify still walks the whole bundle strictly to fail closed.
+sign_app_bundle() {
+    local bundle_path="$1"
+
+    # Strip quarantine and stale seals so the fresh signature starts clean.
+    xattr -cr "${bundle_path}"
+
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:-}"
 
-if [ -z "${SIGNING_IDENTITY}" ]; then
-    # Look for Apple Development, Developer ID, or a local code signing certificate
-    AVAILABLE_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -E 'Apple Development|Developer ID Application|RuneWeaver' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
-    if [ -n "${AVAILABLE_IDENTITY}" ]; then
-        SIGNING_IDENTITY="${AVAILABLE_IDENTITY}"
+    # The sole ad-hoc path is an explicit opt-in: only CODE_SIGN_IDENTITY=-
+    # signs ad-hoc directly. Anything else must resolve to a stable identity
+    # or fail closed below — silent ad-hoc is refused because its CDHash churn
+    # breaks Keychain ACLs and TCC grants like Full Disk Access on every rebuild.
+    if [ "${SIGNING_IDENTITY}" = "-" ]; then
+        echo "==> Ad-hoc signing ${APP_NAME} (explicit CODE_SIGN_IDENTITY=- only; Keychain ACLs and TCC will not persist across rebuilds)..."
+        if ! codesign --force --sign - "${bundle_path}"; then
+            echo "Error: ad-hoc codesign failed for ${bundle_path}." >&2
+            echo "  List identities with: security find-identity -v -p codesigning" >&2
+            echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+            echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
+            echo "  Ad-hoc is refused unless explicitly requested because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access." >&2
+            exit 1
+        fi
+        if ! codesign --verify --deep --strict --verbose=2 "${bundle_path}"; then
+            echo "Error: ad-hoc signature verification failed for ${bundle_path}." >&2
+            echo "  List identities with: security find-identity -v -p codesigning" >&2
+            echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+            echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
+            echo "  Ad-hoc is refused unless explicitly requested because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access." >&2
+            exit 1
+        fi
+        return 0
     fi
-fi
 
-if [ -n "${SIGNING_IDENTITY}" ]; then
+    if [ -z "${SIGNING_IDENTITY}" ]; then
+        # Look for Apple Development, Developer ID, or a local code signing certificate
+        AVAILABLE_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null | grep -E 'Apple Development|Developer ID Application|RuneWeaver' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/' || true)"
+        if [ -n "${AVAILABLE_IDENTITY}" ]; then
+            SIGNING_IDENTITY="${AVAILABLE_IDENTITY}"
+        fi
+    fi
+
+    if [ -z "${SIGNING_IDENTITY}" ]; then
+        echo "Error: no codesigning identity found; refusing ad-hoc fallback." >&2
+        echo "  List identities with: security find-identity -v -p codesigning" >&2
+        echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+        echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
+        echo "  Ad-hoc is refused because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access." >&2
+        if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
+            echo "  The login keychain is locked over ssh, so codesign cannot use the key even when it works from local Terminal.app." >&2
+            echo "  Run security unlock-keychain ~/Library/Keychains/login.keychain-db first, then retry." >&2
+            echo "  Or run make app from local Terminal.app instead of over ssh." >&2
+            echo "  To persist approval: security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <pw> ~/Library/Keychains/login.keychain-db" >&2
+        fi
+        exit 1
+    fi
+
     echo "==> Signing ${APP_NAME} with identity: ${SIGNING_IDENTITY}..."
-    codesign --force --deep --sign "${SIGNING_IDENTITY}" "${APP_BUNDLE}"
-else
-    echo "==> Ad-hoc signing ${APP_NAME} (Note: set CODE_SIGN_IDENTITY or create a local signing cert to persist Keychain access across rebuilds)..."
-    codesign --force --deep --sign - "${APP_BUNDLE}"
-fi
+    if ! codesign --force --sign "${SIGNING_IDENTITY}" "${bundle_path}"; then
+        echo "Error: codesign failed for identity '${SIGNING_IDENTITY}'." >&2
+        echo "  List identities with: security find-identity -v -p codesigning" >&2
+        echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+        echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
+        echo "  Ad-hoc is refused because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access — no downgrade attempted." >&2
+        if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
+            echo "  The login keychain is locked over ssh, so codesign cannot use the key even when it works from local Terminal.app." >&2
+            echo "  Run security unlock-keychain ~/Library/Keychains/login.keychain-db first, then retry." >&2
+            echo "  Or run make app from local Terminal.app instead of over ssh." >&2
+            echo "  To persist approval: security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <pw> ~/Library/Keychains/login.keychain-db" >&2
+        fi
+        exit 1
+    fi
+
+    if ! codesign --verify --deep --strict --verbose=2 "${bundle_path}"; then
+        echo "Error: signature verification failed for ${bundle_path}." >&2
+        echo "  List identities with: security find-identity -v -p codesigning" >&2
+        echo "  A locked keychain hides keys: security unlock-keychain ~/Library/Keychains/login.keychain-db" >&2
+        echo "  In Keychain Access, the private key's Access Control must grant codesign access or signing prompts and fails." >&2
+        echo "  Ad-hoc is refused because every rebuild mints a new CDHash, which breaks Keychain ACLs and TCC grants like Full Disk Access." >&2
+        if [ -n "${SSH_TTY:-}" ] || [ -n "${SSH_CONNECTION:-}" ]; then
+            echo "  The login keychain is locked over ssh, so codesign cannot use the key even when it works from local Terminal.app." >&2
+            echo "  Run security unlock-keychain ~/Library/Keychains/login.keychain-db first, then retry." >&2
+            echo "  Or run make app from local Terminal.app instead of over ssh." >&2
+            echo "  To persist approval: security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k <pw> ~/Library/Keychains/login.keychain-db" >&2
+        fi
+        exit 1
+    fi
+}
+
+sign_app_bundle "${APP_BUNDLE}"
 
 echo "==> Successfully built: ${APP_BUNDLE}"
