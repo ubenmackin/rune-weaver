@@ -643,6 +643,25 @@ public actor MailIndexer {
     /// the adapter remains the named owner for the window shape.
     public static let uidWindowWidth = 1000
 
+    /// Maximum fetch attempts per mailbox before skipping with a warning.
+    ///
+    /// The first failure of a retryable transport error backs off and retries;
+    /// the terminal failure warns once with an attempt suffix.
+    public static let maxFetchAttempts = 3
+
+    /// Backoff delays in seconds between fetch attempts.
+    ///
+    /// The first retry waits the first entry and the second retry waits the
+    /// second entry; the delays are cancellable so backoff aborts promptly.
+    public static let fetchRetryDelaysSeconds: [TimeInterval] = [2, 8]
+
+    /// Steady pause in seconds between gateway page calls.
+    ///
+    /// The fetch loop sleeps this long before every page except the first so
+    /// backfill paces uniformly across hosts; the pause is injectable for tests
+    /// and cancellable so a stop aborts the pause promptly.
+    public static let interPagePauseSeconds: TimeInterval = 1.0
+
     /// Configured mail accounts.
     private let emailConfig: EmailConfig
     /// Index policy: enablement, source toggles, caps, budget, and vector window.
@@ -887,16 +906,50 @@ public actor MailIndexer {
         ))
         let fetched: [MailIndexMessage]
         let windowComplete: Bool
-        do {
-            (fetched, windowComplete) = try await fetchFreshWindow(
-                credentials: context.credentials,
-                mailbox: context.mailbox,
-                watermark: watermark
-            )
-        } catch let cancel as CancellationError {
-            throw cancel
-        } catch {
-            cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+        // The fetch section of indexMailbox owns the retry loop: retryable
+        // transport failures back off and refetch without progress frames,
+        // while cancellation rethrows immediately and auth or protocol errors
+        // skip at once with the unsuffixed copy. Watermarks plus content
+        // hashes already persist, so every retry refetches safely and resumes
+        // without duplicates.
+        var attempt = 0
+        var succeeded: (messages: [MailIndexMessage], complete: Bool)?
+        var terminalTransportError: Error?
+        while attempt < Self.maxFetchAttempts {
+            attempt += 1
+            do {
+                succeeded = try await fetchFreshWindow(
+                    credentials: context.credentials,
+                    mailbox: context.mailbox,
+                    watermark: watermark
+                )
+                terminalTransportError = nil
+                break
+            } catch let cancel as CancellationError {
+                throw cancel
+            } catch {
+                guard Self.isRetryableMailError(error) else {
+                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    return
+                }
+                if attempt >= Self.maxFetchAttempts {
+                    terminalTransportError = error
+                    break
+                }
+                let delayIndex = min(attempt - 1, Self.fetchRetryDelaysSeconds.count - 1)
+                if delayIndex >= 0 {
+                    let delaySeconds = Self.fetchRetryDelaysSeconds[delayIndex]
+                    try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                }
+                continue
+            }
+        }
+        if let succeeded {
+            (fetched, windowComplete) = succeeded
+        } else if let terminalTransportError {
+            cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(terminalTransportError.localizedDescription) (after \(Self.maxFetchAttempts) attempts)")
+            return
+        } else {
             return
         }
         let fresh = Self.freshSortedMessages(fetched, watermark: watermark)
@@ -969,9 +1022,9 @@ public actor MailIndexer {
 
 // MARK: - Indexing
 
-private extension MailIndexer {
+extension MailIndexer {
     /// Per-mailbox indexing context, bundling the run-scoped policy.
-    struct MailboxContext: Sendable {
+    private struct MailboxContext: Sendable {
         /// Account being walked.
         let account: EmailAccount
         /// Mailbox being walked.
@@ -987,7 +1040,7 @@ private extension MailIndexer {
     }
 
     /// Counts produced while indexing one message.
-    struct MessageOutcome {
+    private struct MessageOutcome {
         /// Whether the message was written.
         var indexed = false
         /// Whether the stored body hash was already current.
@@ -1024,24 +1077,36 @@ private extension MailIndexer {
     /// strand older mail. A clamped gateway therefore returns an incomplete
     /// window and the caller holds its watermark, so huge mailboxes degrade to
     /// multi-run backfill instead of stalling. Cancellation is honored at the
-    /// top of each page so the loop stops at the next checkpoint.
+    /// top of each page so the loop stops at the next checkpoint. The named
+    /// owner for pacing is this page loop: it pauses `interPagePauseSeconds`
+    /// before every gateway page call except the first, uniformly for every
+    /// host with no per-account branching.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox to read.
     ///   - watermark: Highest indexed UID; paging stops once a page reaches it.
+    ///   - sleeper: Pause hook sleeping the given nanoseconds; defaults to
+    ///     `Task.sleep` so production paces while tests inject a recorder. The
+    ///     hook throws so cancellation aborts the pause.
     /// - Returns: Unique messages in newest-first order, plus whether the window
     ///   reaches the watermark or the mailbox start.
-    /// - Throws: Cancellation, or the gateway error for the mailbox.
+    /// - Throws: Cancellation, the sleeper error, or the gateway error for the mailbox.
     func fetchFreshWindow(
         credentials: MailIndexCredentials,
         mailbox: String,
-        watermark: Int
+        watermark: Int,
+        sleeper: (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }
     ) async throws -> (messages: [MailIndexMessage], complete: Bool) {
         var collected: [MailIndexMessage] = []
         var seenIDs = Set<String>()
         var beforeUID: Int?
+        var isFirstPage = true
         while true {
             try Task.checkCancellation()
+            if !isFirstPage {
+                try await sleeper(UInt64(Self.interPagePauseSeconds * 1_000_000_000))
+            }
+            isFirstPage = false
             let page = try await gateway.messages(
                 credentials: credentials,
                 mailbox: mailbox,
@@ -1125,7 +1190,7 @@ private extension MailIndexer {
     /// The password is read from the environment or Keychain and never logged.
     /// - Parameter account: Configured account.
     /// - Returns: Resolved credentials, or nil when no password is available.
-    func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
+    private func resolvedCredentials(for account: EmailAccount) async -> MailIndexCredentials? {
         let envVar = account.passwordEnvVar
         guard let password = try? await secrets.retrieve(key: envVar), !password.isEmpty else {
             return nil
@@ -1145,7 +1210,7 @@ private extension MailIndexer {
     ///   - mailbox: Mailbox being walked.
     ///   - messageID: Message being indexed.
     /// - Returns: A progress value with no secret content.
-    static func progress(report: MailIndexRunReport, mailbox: String, messageID: String) -> ToolProgress {
+    private static func progress(report: MailIndexRunReport, mailbox: String, messageID: String) -> ToolProgress {
         ToolProgress(
             message: "Indexing mail: \(report.messagesIndexed) indexed, \(report.messagesSeen) scanned",
             scanned: report.messagesSeen,
@@ -1160,7 +1225,7 @@ private extension MailIndexer {
     ///   - context: Per-mailbox indexing context.
     /// - Returns: Counts describing the message outcome.
     /// - Throws: Cancellation, or a document-store write failure.
-    func index(message: MailIndexMessage, context: MailboxContext) async throws -> MessageOutcome {
+    private func index(message: MailIndexMessage, context: MailboxContext) async throws -> MessageOutcome {
         var outcome = MessageOutcome()
         let bodyText = Self.messageText(subject: message.subject, body: message.body)
         let contentHash = Self.contentHash(bodyText)
@@ -1226,7 +1291,7 @@ private extension MailIndexer {
     }
 
     /// Mutable attachment accumulation for one message.
-    struct AttachmentStaging {
+    private struct AttachmentStaging {
         /// Body plus attachment chunks.
         var chunks: [DocumentChunk]
         /// Document metadata to annotate.
@@ -1243,7 +1308,7 @@ private extension MailIndexer {
     ///   - context: Per-mailbox indexing context.
     ///   - staging: Chunks, metadata, outcome, and degraded flag updated in place.
     /// - Throws: Cancellation.
-    func collectAttachmentChunks(
+    private func collectAttachmentChunks(
         message: MailIndexMessage,
         context: MailboxContext,
         staging: inout AttachmentStaging
@@ -1326,7 +1391,7 @@ private extension MailIndexer {
     ///   - chunks: Chunks to embed.
     ///   - eligible: Whether the message falls inside the vector window.
     /// - Returns: One vector per chunk, empty for keyword-only chunks.
-    func embeddings(for chunks: [DocumentChunk], eligible: Bool) async throws -> [[Float]] {
+    private func embeddings(for chunks: [DocumentChunk], eligible: Bool) async throws -> [[Float]] {
         guard !chunks.isEmpty else { return [] }
         guard eligible, let embedder else {
             return Array(repeating: [], count: chunks.count)
@@ -1359,7 +1424,7 @@ private extension MailIndexer {
     ///   - filename: Original filename, sanitized before use.
     /// - Returns: The staging directory plus the staged file URL.
     /// - Throws: `MailIndexError.stagingFailed` when confinement cannot be proven.
-    func stage(bytes: Data, filename: String) throws -> (directory: URL, file: URL) {
+    private func stage(bytes: Data, filename: String) throws -> (directory: URL, file: URL) {
         let directory: URL
         if let stagingRoot {
             let candidate = stagingRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1381,7 +1446,7 @@ private extension MailIndexer {
     /// Fails closed unless the Seatbelt profile permits the staging temp.
     /// - Parameter directory: Confined temp directory.
     /// - Throws: `MailIndexError.stagingFailed` when the profile omits it.
-    func requireConfinedTempAllow(_ directory: URL) throws {
+    private func requireConfinedTempAllow(_ directory: URL) throws {
         let profile = SeatbeltProfileBuilder(allowedTempPaths: [directory.path]).buildProfile()
         guard profile.contains(directory.path) else {
             throw MailIndexError.stagingFailed("Attachment staging confined temp rejected by the Seatbelt profile")
@@ -1390,7 +1455,7 @@ private extension MailIndexer {
 
     /// Deletes a staging directory and its staged binary.
     /// - Parameter directory: Confined temp directory to remove.
-    func discardStaged(at directory: URL) {
+    private func discardStaged(at directory: URL) {
         try? FileManager.default.removeItem(at: directory)
     }
 }
@@ -1424,6 +1489,45 @@ extension MailIndexer {
                     return true
                 }
             }
+        }
+        return false
+    }
+
+    /// Whether a mail fetch error is worth retrying.
+    ///
+    /// The named owner for classification is this method: cancellation never
+    /// retries, authentication failures never retry, transient transport
+    /// phrases retry, and everything else skips at once. Authentication wins
+    /// over transport so a message carrying both signals still skips.
+    /// - Parameter error: Fetch failure under test.
+    /// - Returns: True for retryable transport failures, false otherwise.
+    public static func isRetryableMailError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+        let described: String = if let localized = (error as? LocalizedError)?.errorDescription {
+            localized + " " + String(describing: error)
+        } else {
+            error.localizedDescription + " " + String(describing: error)
+        }
+        let lowered = described.lowercased()
+        let authPhrases = ["auth", "credential", "password", "login"]
+        for phrase in authPhrases where lowered.contains(phrase) {
+            return false
+        }
+        let transportPhrases = [
+            "connection reset",
+            "connection abort",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "eof",
+            "connection refused",
+            "network is unreachable",
+            "service unavailable"
+        ]
+        for phrase in transportPhrases where lowered.contains(phrase) {
+            return true
         }
         return false
     }
