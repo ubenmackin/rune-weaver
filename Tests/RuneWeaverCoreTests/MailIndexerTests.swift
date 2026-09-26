@@ -104,6 +104,34 @@ private actor BoundRecorder {
     }
 }
 
+/// Records inter-page pauses requested by the fetch loop.
+///
+/// Each entry is the requested pause in nanoseconds, in call order. The count
+/// proves the loop pauses once per additional page while the values prove the
+/// steady one-second pacing.
+private actor SleepRecorder {
+    /// Pauses observed in call order.
+    private var sleeps: [UInt64] = []
+
+    /// Records one pause.
+    /// - Parameter nanoseconds: Requested pause in nanoseconds.
+    func record(_ nanoseconds: UInt64) {
+        sleeps.append(nanoseconds)
+    }
+
+    /// Returns the observed pauses.
+    /// - Returns: Pauses in call order.
+    func snapshot() -> [UInt64] {
+        sleeps
+    }
+
+    /// Returns the number of pauses observed.
+    /// - Returns: Pause count.
+    func count() -> Int {
+        sleeps.count
+    }
+}
+
 /// Records search queries and limits seen by the adapter double.
 ///
 /// Capturing the verbatim query proves the adapter emits the exact `UID lo:hi`
@@ -447,6 +475,102 @@ private struct CancellablePagingGateway: MailIndexGateway {
     }
 
     /// Never serves attachment bytes; the cancellation test uses attachment-free mail.
+    func attachment(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        messageID _: String,
+        attachmentIndex _: Int,
+        mode _: MailFetchMode
+    ) async throws -> MailIndexAttachmentData {
+        throw StubGatewayError.missingAttachment
+    }
+}
+
+/// Probe error carrying a fixed message for retry classification checks.
+///
+/// The message surfaces as the localized description so the classifier sees
+/// the same text a live transport or authentication failure would carry.
+private struct RetryProbeError: LocalizedError {
+    /// Message surfaced as the localized description.
+    let message: String
+
+    /// Creates a probe error.
+    /// - Parameter message: Localized description for the probe.
+    init(message: String) {
+        self.message = message
+    }
+
+    /// Human-readable message without any secret value.
+    var errorDescription: String? {
+        message
+    }
+}
+
+/// Gateway double failing a fixed number of fetches before succeeding.
+///
+/// Leading `messages` calls throw a probe error with the configured message;
+/// later calls serve the canned newest window. The attempt counter doubles as
+/// the fetch count for retry assertions.
+private struct RetryProbeGateway: MailIndexGateway {
+    /// Messages returned once the configured failures are exhausted.
+    let probeMessages: [MailIndexMessage]
+    /// Number of leading fetches that throw before succeeding.
+    let failuresBeforeSuccess: Int
+    /// Message for the thrown probe error.
+    let failureMessage: String
+    /// Counter for message fetch calls.
+    let attempts: CallRecorder
+
+    /// Creates a retry probe gateway.
+    /// - Parameters:
+    ///   - probeMessages: Canned messages in newest-first order.
+    ///   - failuresBeforeSuccess: Leading fetches that throw.
+    ///   - failureMessage: Message for the thrown probe error.
+    ///   - attempts: Counter shared with the test.
+    init(
+        probeMessages: [MailIndexMessage],
+        failuresBeforeSuccess: Int,
+        failureMessage: String,
+        attempts: CallRecorder = CallRecorder()
+    ) {
+        self.probeMessages = probeMessages
+        self.failuresBeforeSuccess = failuresBeforeSuccess
+        self.failureMessage = failureMessage
+        self.attempts = attempts
+    }
+
+    /// Returns the canned mailbox list.
+    func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+        ["INBOX"]
+    }
+
+    /// Throws for the configured leading fetches, then serves the canned window.
+    func messages(
+        credentials _: MailIndexCredentials,
+        mailbox _: String,
+        limit: Int,
+        mode _: MailFetchMode,
+        beforeUID: Int? = nil
+    ) async throws -> [MailIndexMessage] {
+        await attempts.bump()
+        let count = await attempts.value()
+        if count <= failuresBeforeSuccess {
+            throw RetryProbeError(message: failureMessage)
+        }
+        if let beforeUID {
+            let upper = beforeUID - 1
+            guard upper >= 1 else { return [] }
+            let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+            let filtered = probeMessages.filter {
+                let uid = MailIndexer.uid(of: $0.id)
+                return uid > 0 && uid >= lower && uid <= upper
+            }
+            return Array(filtered.prefix(limit))
+        }
+        return Array(probeMessages.prefix(limit))
+    }
+
+    /// Never serves attachment bytes; the retry tests use attachment-free mail.
     func attachment(
         credentials _: MailIndexCredentials,
         mailbox _: String,
@@ -1680,5 +1804,319 @@ struct MailIndexerTests {
             #expect(stats.documents == 0)
             #expect(stats.chunks == 0)
         }
+    }
+
+    @Test
+    func `Transient reset then success indexes with no warning`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let attempts = CallRecorder()
+        let progress = ProgressRecorder()
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RetryProbeGateway(
+                    probeMessages: [makeMessage(id: "1", body: "retry success body unique")],
+                    failuresBeforeSuccess: 2,
+                    failureMessage: "connection reset by peer",
+                    attempts: attempts
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run(reporter: { update in await progress.record(update) })
+            #expect(report.messagesIndexed == 1)
+            #expect(report.messagesSeen == 1)
+            #expect(report.warnings.isEmpty)
+        }
+
+        let fetchCount = await attempts.value()
+        #expect(fetchCount == 3)
+        // Retries emit no progress frames: the entering and window-fetched
+        // frames each appear exactly once despite two retries.
+        let frames = await progress.snapshot()
+        #expect(frames.count >= 3)
+        #expect(frames[0].current == "INBOX")
+        #expect((frames[1].current ?? "").contains("INBOX"))
+        #expect(frames.last?.message.contains("Mail indexing finished") == true)
+        let enteringFrames = frames.filter { $0.current == "INBOX" }
+        #expect(enteringFrames.count == 1)
+        let windowFrames = frames.filter { ($0.current ?? "").contains("new)") }
+        #expect(windowFrames.count == 1)
+    }
+
+    @Test
+    func `Permanent reset warns once with attempt suffix after exactly three fetches`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let attempts = CallRecorder()
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RetryProbeGateway(
+                    probeMessages: [makeMessage(id: "1", body: "retry terminal body unique")],
+                    failuresBeforeSuccess: Int.max,
+                    failureMessage: "connection reset by peer",
+                    attempts: attempts
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 0)
+            #expect(report.messagesSeen == 0)
+            #expect(report.warnings.count == 1)
+            #expect(report.warnings[0].contains("Skipped mailbox 'INBOX'"))
+            #expect(report.warnings[0].contains("connection reset by peer"))
+            #expect(report.warnings[0].contains("(after 3 attempts)"))
+        }
+
+        let fetchCount = await attempts.value()
+        #expect(fetchCount == MailIndexer.maxFetchAttempts)
+        #expect(fetchCount == 3)
+    }
+
+    @Test
+    func `Auth failure warns once after a single fetch with unsuffixed copy`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let attempts = CallRecorder()
+        let failureMessage = "AUTH failed: invalid credentials"
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RetryProbeGateway(
+                    probeMessages: [makeMessage(id: "1", body: "auth body unique")],
+                    failuresBeforeSuccess: Int.max,
+                    failureMessage: failureMessage,
+                    attempts: attempts
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let report = try await indexer.run()
+            #expect(report.messagesIndexed == 0)
+            #expect(report.warnings.count == 1)
+            #expect(report.warnings[0] == "Skipped mailbox 'INBOX': \(failureMessage)")
+            #expect(!report.warnings[0].contains("after"))
+        }
+
+        let fetchCount = await attempts.value()
+        #expect(fetchCount == 1)
+    }
+
+    @Test
+    func `Cancellation during backoff rethrows with no warning`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let attempts = CallRecorder()
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: RetryProbeGateway(
+                    probeMessages: [makeMessage(id: "1", body: "cancel backoff body unique")],
+                    failuresBeforeSuccess: Int.max,
+                    failureMessage: "connection reset by peer",
+                    attempts: attempts
+                ),
+                store: store,
+                checkpoints: checkpoints
+            )
+            let runTask = Task { try await indexer.run() }
+            // The first fetch fails at once, so the run parks in the first
+            // backoff sleep; cancelling there must abort the sleep promptly.
+            try await Task.sleep(nanoseconds: 200_000_000)
+            runTask.cancel()
+            do {
+                _ = try await runTask.value
+                Issue.record("Expected CancellationError from backoff cancel")
+            } catch is CancellationError {
+                // Cancellation wins with no warning recorded.
+            } catch {
+                Issue.record("Expected CancellationError, got \(error)")
+            }
+        }
+
+        let fetchCount = await attempts.value()
+        #expect(fetchCount == 1)
+    }
+
+    @Test
+    func `Retry classifier distinguishes transport, auth, and unknown errors`() {
+        #expect(MailIndexer.maxFetchAttempts == 3)
+        #expect(MailIndexer.fetchRetryDelaysSeconds == [2, 8])
+        // Cancellation never retries.
+        #expect(!MailIndexer.isRetryableMailError(CancellationError()))
+        // Each transport phrase retries.
+        let transportMessages = [
+            "connection reset by peer",
+            "Connection abort by host",
+            "Broken pipe while reading",
+            "operation timed out",
+            "request timeout exceeded",
+            "unexpected EOF from server",
+            "connection refused by host",
+            "network is unreachable",
+            "service unavailable, try later"
+        ]
+        for message in transportMessages {
+            #expect(
+                MailIndexer.isRetryableMailError(RetryProbeError(message: message)),
+                "Expected retryable for: \(message)"
+            )
+        }
+        // Each auth phrase never retries.
+        let authMessages = [
+            "AUTH failed: invalid credentials",
+            "invalid credential rejected",
+            "wrong password supplied",
+            "LOGIN failed for user"
+        ]
+        for message in authMessages {
+            #expect(
+                !MailIndexer.isRetryableMailError(RetryProbeError(message: message)),
+                "Expected non-retryable for: \(message)"
+            )
+        }
+        // Authentication wins over transport when both signals appear.
+        #expect(!MailIndexer.isRetryableMailError(RetryProbeError(message: "auth failed: connection reset by peer")))
+        #expect(!MailIndexer.isRetryableMailError(RetryProbeError(message: "login failed: connection reset by peer")))
+        #expect(!MailIndexer.isRetryableMailError(RetryProbeError(message: "password error: timeout while connecting")))
+        // Unknown and protocol errors never retry.
+        #expect(!MailIndexer.isRetryableMailError(RetryProbeError(message: "BAD Parse Error: invalid mailbox name")))
+        #expect(!MailIndexer.isRetryableMailError(RetryProbeError(message: "something went wrong")))
+    }
+
+    @Test
+    func `Three-page mailbox pauses twice with steady one-second pacing`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let sleeps = SleepRecorder()
+        // One hundred twenty arrivals tile into exactly three fifty-capped
+        // pages, so the loop must pause twice.
+        let all = Array((1 ... 120).map {
+            makeMessage(id: "\($0)", body: "pacing body \($0)")
+        }.reversed())
+        let indexer = makeIndexer(
+            gateway: StubMailGateway(messages: all, bounds: bounds),
+            store: store,
+            checkpoints: checkpoints
+        )
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+
+        #expect(MailIndexer.interPagePauseSeconds == 1.0)
+        let result = try await indexer.fetchFreshWindow(
+            credentials: credentials,
+            mailbox: "INBOX",
+            watermark: 0,
+            sleeper: { nanoseconds in await sleeps.record(nanoseconds) }
+        )
+        #expect(result.messages.count == 120)
+        #expect(result.complete == true)
+        let pages = await bounds.count()
+        #expect(pages == 3)
+        let observed = await sleeps.snapshot()
+        #expect(observed.count == pages - 1)
+        #expect(observed.count == 2)
+        let expected = UInt64(MailIndexer.interPagePauseSeconds * 1_000_000_000)
+        #expect(expected == 1_000_000_000)
+        #expect(observed.allSatisfy { $0 == expected })
+        #expect(observed.allSatisfy { $0 == 1_000_000_000 })
+    }
+
+    @Test
+    func `Single-page mailbox never pauses`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let sleeps = SleepRecorder()
+        let indexer = makeIndexer(
+            gateway: StubMailGateway(
+                messages: [makeMessage(id: "1", body: "single page body unique")],
+                bounds: bounds
+            ),
+            store: store,
+            checkpoints: checkpoints
+        )
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+
+        let result = try await indexer.fetchFreshWindow(
+            credentials: credentials,
+            mailbox: "INBOX",
+            watermark: 0,
+            sleeper: { nanoseconds in await sleeps.record(nanoseconds) }
+        )
+        #expect(result.messages.count == 1)
+        #expect(result.complete == true)
+        #expect(await bounds.count() == 1)
+        #expect(await sleeps.count() == 0)
+        #expect(await sleeps.snapshot().isEmpty)
+    }
+
+    @Test
+    func `Throwing sleeper aborts the fetch before the next page`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let bounds = BoundRecorder()
+        let all = Array((1 ... 120).map {
+            makeMessage(id: "\($0)", body: "abort body \($0)")
+        }.reversed())
+        let indexer = makeIndexer(
+            gateway: StubMailGateway(messages: all, bounds: bounds),
+            store: store,
+            checkpoints: checkpoints
+        )
+        let credentials = MailIndexCredentials(
+            accountName: "mailtest",
+            host: "imap.example.com",
+            port: 993,
+            username: "user@example.com",
+            password: "test-secret"
+        )
+        struct PauseAborted: Error {}
+
+        do {
+            _ = try await indexer.fetchFreshWindow(
+                credentials: credentials,
+                mailbox: "INBOX",
+                watermark: 0,
+                sleeper: { _ in throw PauseAborted() }
+            )
+            Issue.record("Expected PauseAborted from throwing sleeper")
+        } catch is PauseAborted {
+            // The pause aborts the fetch with the error propagating to the caller,
+            // where the mailbox loop degrades it to the existing skip path.
+        } catch {
+            Issue.record("Expected PauseAborted, got \(error)")
+        }
+        // Only the first page fetched before the pause threw.
+        #expect(await bounds.count() == 1)
     }
 }
