@@ -170,4 +170,166 @@ describe("MarkdownText", () => {
     const { container } = render(<MarkdownText text="" />);
     expect(container.firstChild).toBeNull();
   });
+
+  it("preserves paragraph node identity across same-text parent re-renders", () => {
+    // Same text plus styling skips the subtree so background refreshes keep nodes.
+    function Wrapper({ tick }: { tick: number }) {
+      void tick;
+      return <MarkdownText text={"First line\n\nSecond line"} />;
+    }
+    const { container, rerender } = render(<Wrapper tick={0} />);
+    const before = container.querySelector("p.chat-p");
+    expect(before).not.toBeNull();
+    rerender(<Wrapper tick={1} />);
+    const after = container.querySelector("p.chat-p");
+    expect(after).toBe(before);
+    rerender(<Wrapper tick={2} />);
+    expect(container.querySelector("p.chat-p")).toBe(before);
+  });
+
+  it("updates only the changed bubble when one text changes", () => {
+    // Changed text re-renders its bubble while the sibling keeps DOM identity.
+    const { container, rerender } = render(
+      <div>
+        <div data-testid="bubble-a">
+          <MarkdownText text="Alpha bubble" />
+        </div>
+        <div data-testid="bubble-b">
+          <MarkdownText text="Beta bubble" />
+        </div>
+      </div>,
+    );
+    const bubbleB = container.querySelector(
+      '[data-testid="bubble-b"] p.chat-p',
+    );
+    expect(bubbleB?.textContent).toBe("Beta bubble");
+    rerender(
+      <div>
+        <div data-testid="bubble-a">
+          <MarkdownText text="Alpha bubble changed" />
+        </div>
+        <div data-testid="bubble-b">
+          <MarkdownText text="Beta bubble" />
+        </div>
+      </div>,
+    );
+    const afterA = container.querySelector(
+      '[data-testid="bubble-a"] p.chat-p',
+    );
+    const afterB = container.querySelector(
+      '[data-testid="bubble-b"] p.chat-p',
+    );
+    expect(afterA?.textContent).toBe("Alpha bubble changed");
+    expect(afterB?.textContent).toBe("Beta bubble");
+    expect(afterB).toBe(bubbleB);
+  });
+
+  it("renders all hoisted element types with bubble styling", () => {
+    // Each renderer maps to its bubble class without extra wrappers.
+    const sample = [
+      "# Title",
+      "## Subtitle",
+      "### Section",
+      "",
+      "Body paragraph.",
+      "",
+      "> Quoted note.",
+      "",
+      "- one",
+      "- two",
+      "",
+      "1. first",
+      "2. second",
+      "",
+      "---",
+      "",
+      "| A | B |",
+      "| --- | --- |",
+      "| 1 | 2 |",
+      "",
+      "[Ok](https://example.com)",
+      "",
+      "![photo](https://example.com/img.png)",
+    ].join("\n");
+    const { container } = render(<MarkdownText text={sample} />);
+    expect(
+      container.querySelector("div.chat-table-wrapper table.chat-table"),
+    ).not.toBeNull();
+    expect(container.querySelector("hr.chat-hr")).not.toBeNull();
+    const link = container.querySelector("a.chat-markdown-link");
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute("href")).toBe("https://example.com");
+    expect(link?.getAttribute("target")).toBe("_blank");
+    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    const img = container.querySelector(
+      "img.chat-markdown-img",
+    ) as HTMLImageElement | null;
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute("src")).toBe("https://example.com/img.png");
+    expect(container.querySelector("h3.chat-h3")?.textContent).toBe("Title");
+    expect(container.querySelector("h4.chat-h4")?.textContent).toBe(
+      "Subtitle",
+    );
+    expect(container.querySelector("h5.chat-h5")?.textContent).toBe("Section");
+    expect(
+      container.querySelector("blockquote.chat-blockquote"),
+    ).not.toBeNull();
+    expect(container.querySelector("ul.chat-ul")).not.toBeNull();
+    expect(container.querySelector("ol.chat-ol")).not.toBeNull();
+    expect(container.querySelector("p.chat-p")).not.toBeNull();
+  });
+
+  it("rejects camouflaged and unsafe schemes with inert fallback", () => {
+    // Fail-closed gate blocks hidden javascript, data, vbscript, and relatives.
+    const blocked = [
+      "[a](javascript:alert(1))",
+      "[b](JaVaScRiPt:alert(1))",
+      "[c](java\tscript:alert(1))",
+      "[d](%6Aavascript:alert(1))",
+      "[e](javascript&#58;alert(1))",
+      "[f](java/**/script:alert(1))",
+      "[g](data:text/html;base64,PGI+) ",
+      "[h](vbscript:msgbox(1))",
+      "[i](//evil.example.com/x)",
+      "[j](\\\\evil.example.com\\x)",
+      "[k](http:foo)",
+      "[l](mailto:nobody)",
+      "[m](mailto:a@b.com<script>)",
+    ].join(" ");
+    const { container } = render(<MarkdownText text={blocked} />);
+    expect(container.querySelectorAll("a").length).toBe(0);
+    expect(container.querySelector('a[href^="javascript:"]')).toBeNull();
+    expect(container.textContent).not.toContain("javascript:");
+    expect(container.textContent).not.toContain("data:text");
+    expect(container.textContent).not.toContain("//evil.example.com");
+  });
+
+  it("renders blocked links as inert text and blocked images as alt only", () => {
+    // Blocked URIs never reach href or src attributes.
+    const { container } = render(
+      <MarkdownText
+        text={'[Bad](javascript:alert(1)) ![alt photo](javascript:alert(1))'}
+      />,
+    );
+    expect(container.querySelectorAll("a").length).toBe(0);
+    expect(container.querySelectorAll("img").length).toBe(0);
+    expect(container.textContent).toContain("[Bad]");
+    expect(container.textContent).toContain("alt photo");
+    expect(container.textContent).not.toContain("javascript:");
+  });
+
+  it("allows valid mailto and hierarchical http links", () => {
+    // Valid contact and web links keep their normalized href.
+    const { container } = render(
+      <MarkdownText
+        text={
+          "[Mail](mailto:ops@example.com) [Web](https://example.com/a?b=1)"
+        }
+      />,
+    );
+    const links = container.querySelectorAll("a.chat-markdown-link");
+    expect(links.length).toBe(2);
+    expect(links[0].getAttribute("href")).toBe("mailto:ops@example.com");
+    expect(links[1].getAttribute("href")).toBe("https://example.com/a?b=1");
+  });
 });

@@ -3425,3 +3425,140 @@ describe("Reloaded-tab reattach without cancel", () => {
   });
 });
 
+describe("Poll-tick selection survival", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+    resetSharedRunsForTesting();
+    localStorage.clear();
+  });
+
+  it("preserves two-line selection across three run-log poll ticks", async () => {
+    // Idle history stays selectable while background polls land.
+    const sessionID = "poll-tick-selection-aaaa-1111";
+    localStorage.setItem("rw_active_session_id", sessionID);
+    const now = new Date().toISOString();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionID,
+                title: "Poll Session",
+                messageCount: 2,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Poll Session",
+            messages: [
+              {
+                id: "u1",
+                role: "user",
+                content: "history prompt",
+                createdAt: now,
+              },
+              {
+                id: "a1",
+                role: "assistant",
+                content: "Alpha line one\n\nBeta line two",
+                createdAt: now,
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          return jsonResponse({ runs: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/Alpha line one/)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/Beta line two/)).toBeInTheDocument();
+      const list = document.querySelector(".message-list") as HTMLElement;
+      expect(list).not.toBeNull();
+      const messageText = screen
+        .getByText(/Alpha line one/)
+        .closest(".message-text") as HTMLElement;
+      expect(messageText).not.toBeNull();
+      expect(messageText.textContent).toContain("Beta line two");
+      const range = document.createRange();
+      range.selectNodeContents(messageText);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      expect(messageListHasActiveSelection(list)).toBe(true);
+      const selectedBefore = window.getSelection()?.toString() ?? "";
+      expect(selectedBefore).toContain("Alpha line one");
+      expect(selectedBefore).toContain("Beta line two");
+      const paraBefore = document.querySelector("p.chat-p");
+      expect(paraBefore).not.toBeNull();
+      scrollSpy.mockClear();
+      for (let i = 0; i < 3; i++) {
+        await dispatchFrameOrThrow(capture.onMessage, {
+          type: "run_completed",
+          run: {
+            id: `run-poll-${i}`,
+            kind: "chat",
+            status: "ok",
+            message: "background work",
+            sessionID: `other-session-${i}`,
+            timestamp: new Date().toISOString(),
+          },
+        });
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+      await waitFor(() => {
+        expect(screen.getByText(/Alpha line one/)).toBeInTheDocument();
+      });
+      const selectedAfter = window.getSelection()?.toString() ?? "";
+      expect(selectedAfter).toBe(selectedBefore);
+      expect(selectedAfter).toContain("Alpha line one");
+      expect(selectedAfter).toContain("Beta line two");
+      expect(scrollSpy).not.toHaveBeenCalled();
+      const paraAfter = document.querySelector("p.chat-p");
+      expect(paraAfter).toBe(paraBefore);
+      const afterSel = window.getSelection();
+      expect(afterSel?.rangeCount).toBe(1);
+      expect(afterSel?.isCollapsed).toBe(false);
+      expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+});
+
