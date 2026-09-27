@@ -29,6 +29,7 @@ extension RuneWeaverConfig {
         try validateDesktopSection()
         try validateSecuritySection()
         try validateGoalsSection()
+        try validateBashSection()
     }
 
     private func validateEngineSection() throws {
@@ -940,6 +941,15 @@ extension RuneWeaverConfig {
             throw ConfigError.validationError(
                 field: "goals.plan_timeout_seconds",
                 message: "must be positive (got \(goals.planTimeoutSeconds))"
+            )
+        }
+    }
+
+    private func validateBashSection() throws {
+        if bash.timeoutSeconds < 1 || bash.timeoutSeconds > 3600 {
+            throw ConfigError.validationError(
+                field: "bash.timeout_seconds",
+                message: "must be between 1 and 3600 (got \(bash.timeoutSeconds))"
             )
         }
     }

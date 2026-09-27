@@ -84,6 +84,21 @@ private enum FilesTestSupport {
         /// Whether further paths existed past the cap.
         let truncated: Bool
     }
+
+    /// Decoded shape of one list entry.
+    struct ListEntry: Decodable {
+        let name: String
+        let path: String
+        let type: String
+        let sizeBytes: Int64?
+    }
+
+    /// Decoded shape of the list success document.
+    struct List: Decodable {
+        let entries: [ListEntry]
+        let count: Int
+        let truncated: Bool
+    }
 }
 
 /// Serializes progress reports captured during a tool call.
@@ -148,18 +163,25 @@ struct FilesToolsTests {
         // Base is only needed for the home boundary; remove via home's parent.
         defer { FilesTestSupport.cleanup(home.deletingLastPathComponent()) }
         let tools = FilesTools.makeTools(homeDirectoryURL: home)
-        #expect(tools.count == 3)
-        #expect(tools.map(\.name) == ["files.read", "files.grep", "files.glob"])
-        for tool in tools {
-            #expect(tool.permissionLevel == .readOnly)
-        }
-        #expect(FilesTools.toolNames == ["files.read", "files.grep", "files.glob"])
+        #expect(tools.count == 5)
+        #expect(tools.map(\.name) == ["files.read", "files.grep", "files.glob", "files.list", "files.write"])
+        // Reads stay approval-free while the mutating write parks for approval,
+        // preserving the read-by-default/write-with-permission boundary.
+        let levels = Dictionary(uniqueKeysWithValues: tools.map { ($0.name, $0.permissionLevel) })
+        #expect(levels["files.read"] == .readOnly)
+        #expect(levels["files.grep"] == .readOnly)
+        #expect(levels["files.glob"] == .readOnly)
+        #expect(levels["files.list"] == .readOnly)
+        #expect(levels["files.write"] == .requiresApproval)
+        #expect(FilesTools.toolNames == ["files.read", "files.grep", "files.glob", "files.list", "files.write"])
         let bus = ToolBus()
         await FilesTools.register(on: bus, homeDirectoryURL: home)
         let names = await bus.toolNames()
         #expect(names.contains("files.read"))
         #expect(names.contains("files.grep"))
         #expect(names.contains("files.glob"))
+        #expect(names.contains("files.list"))
+        #expect(names.contains("files.write"))
     }
 
     @Test
@@ -720,6 +742,46 @@ struct FilesToolsTests {
     }
 
     @Test
+    func `Glob non-recursive honors recursive flag`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+        let top = home.appendingPathComponent("top.txt")
+        try FilesTestSupport.write("top content", at: top)
+        let subDir = home.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        let nested = subDir.appendingPathComponent("nested.txt")
+        try FilesTestSupport.write("nested content", at: nested)
+
+        let tool = FilesGlobTool(homeDirectoryURL: home)
+
+        // With recursive: false, only matches top-level files
+        let shallow = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.glob",
+                argumentsJSON: #"{"pattern":"*.txt","baseDir":"\#(home.path)","recursive":false}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(shallow.isError == false)
+        let shallowDecoded = try JSONDecoder().decode(FilesTestSupport.Glob.self, from: Data(shallow.content.utf8))
+        #expect(shallowDecoded.paths == [FilesAccessGuard.resolvedURL(for: top.path).path])
+
+        // With recursive: true (or default), matches both top and nested
+        let deep = try await tool.execute(
+            input: ToolInput(
+                toolName: "files.glob",
+                argumentsJSON: #"{"pattern":"*.txt","baseDir":"\#(home.path)","recursive":true}"#
+            ),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(deep.isError == false)
+        let deepDecoded = try JSONDecoder().decode(FilesTestSupport.Glob.self, from: Data(deep.content.utf8))
+        #expect(deepDecoded.paths.count == 2)
+        #expect(deepDecoded.paths.contains(FilesAccessGuard.resolvedURL(for: top.path).path))
+        #expect(deepDecoded.paths.contains(FilesAccessGuard.resolvedURL(for: nested.path).path))
+    }
+
+    @Test
     func `FilesGlobMatching matchesPath follows Git and VS Code convention`() {
         #expect(FilesGlobMatching.matchesPath(pattern: "*.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
         #expect(FilesGlobMatching.matchesPath(pattern: "CONFIG.md", relativePath: "harness/CONFIG.md", filename: "CONFIG.md") == true)
@@ -963,5 +1025,121 @@ struct SeatbeltTempStagingTests {
         let rawPermissions = attributes[.posixPermissions]
         let permissions = (rawPermissions as? NSNumber)?.intValue ?? (rawPermissions as? Int) ?? 0
         #expect(permissions & 0o777 == 0o700)
+    }
+}
+
+@Suite("files.list")
+struct FilesListToolTests {
+    @Test
+    func `Lists immediate children and reports types`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+
+        let topFile = home.appendingPathComponent("file.txt")
+        try FilesTestSupport.write("hello world", at: topFile)
+
+        let subDir = home.appendingPathComponent("subfolder")
+        try FileManager.default.createDirectory(at: subDir, withIntermediateDirectories: true)
+        let deepFile = subDir.appendingPathComponent("deep.txt")
+        try FilesTestSupport.write("nested", at: deepFile)
+
+        let tool = FilesListTool(homeDirectoryURL: home)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(home.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        let decoded = try JSONDecoder().decode(FilesTestSupport.List.self, from: Data(output.content.utf8))
+        #expect(decoded.count == 2)
+        #expect(decoded.truncated == false)
+
+        // Check entries: subfolder (directory) first, then file.txt (file)
+        #expect(decoded.entries[0].name == "subfolder")
+        #expect(decoded.entries[0].type == "directory")
+        #expect(decoded.entries[0].sizeBytes == nil)
+
+        #expect(decoded.entries[1].name == "file.txt")
+        #expect(decoded.entries[1].type == "file")
+        #expect(decoded.entries[1].sizeBytes == 11)
+
+        // Deep file should NOT appear (shallow listing)
+        #expect(!decoded.entries.contains(where: { $0.name == "deep.txt" }))
+    }
+
+    @Test
+    func `Honors showHidden flag`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+
+        let visible = home.appendingPathComponent("visible.txt")
+        try FilesTestSupport.write("visible", at: visible)
+        let hidden = home.appendingPathComponent(".custom_hidden")
+        try FilesTestSupport.write("hidden", at: hidden)
+
+        let tool = FilesListTool(homeDirectoryURL: home)
+
+        // By default showHidden is false
+        let outputDefault = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(home.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(outputDefault.isError == false)
+        let decodedDefault = try JSONDecoder().decode(FilesTestSupport.List.self, from: Data(outputDefault.content.utf8))
+        #expect(decodedDefault.entries.contains(where: { $0.name == "visible.txt" }))
+        #expect(!decodedDefault.entries.contains(where: { $0.name == ".custom_hidden" }))
+
+        // With showHidden: true
+        let outputHidden = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(home.path)","showHidden":true}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(outputHidden.isError == false)
+        let decodedHidden = try JSONDecoder().decode(FilesTestSupport.List.self, from: Data(outputHidden.content.utf8))
+        #expect(decodedHidden.entries.contains(where: { $0.name == ".custom_hidden" }))
+    }
+
+    @Test
+    func `Caps results with limit and sets truncated`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+
+        for i in 1 ... 5 {
+            try FilesTestSupport.write("line", at: home.appendingPathComponent("file\(i).txt"))
+        }
+
+        let tool = FilesListTool(homeDirectoryURL: home)
+        let output = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(home.path)","limit":2}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(output.isError == false)
+        let decoded = try JSONDecoder().decode(FilesTestSupport.List.self, from: Data(output.content.utf8))
+        #expect(decoded.count == 2)
+        #expect(decoded.truncated == true)
+    }
+
+    @Test
+    func `Rejects non-directory and non-existent paths`() async throws {
+        let (base, home) = try FilesTestSupport.makeBaseAndHome()
+        defer { FilesTestSupport.cleanup(base) }
+
+        let file = home.appendingPathComponent("regular.txt")
+        try FilesTestSupport.write("hello", at: file)
+
+        let tool = FilesListTool(homeDirectoryURL: home)
+
+        let notDirOutput = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(file.path)"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(notDirOutput.isError == true)
+        #expect(notDirOutput.content.contains("Not a directory"))
+
+        let notFoundOutput = try await tool.execute(
+            input: ToolInput(toolName: "files.list", argumentsJSON: #"{"path":"\#(home.path)/does_not_exist"}"#),
+            context: ToolContext(conversationID: UUID())
+        )
+        #expect(notFoundOutput.isError == true)
+        #expect(notFoundOutput.content.contains("Directory not found"))
     }
 }

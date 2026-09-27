@@ -95,11 +95,87 @@ public enum ServerPaths {
     public static let marketplace = "marketplace"
     /// Marketplace install subpath.
     public static let install = "install"
+    /// Staged files management group.
+    public static let files = "files"
+    /// Staged files subpath under `/files`.
+    public static let filesStaged = "staged"
+    /// Accept staged file subpath under `/files`.
+    public static let filesAccept = "accept"
+    /// Discard staged file subpath under `/files`.
+    public static let filesDiscard = "discard"
     /// Engine API version served on `/health`.
     /// Single-sourced through `RuneWeaverVersion` so health, User-Agents,
     /// and providers cannot drift.
     public static var apiVersion: String {
         RuneWeaverVersion.current
+    }
+}
+
+/// One staged file record returned by `GET /files/staged`.
+public struct StagedFileEntry: Content, Sendable, Equatable {
+    public let path: String
+    public let stagingPath: String
+    public let additions: Int
+    public let deletions: Int
+    public let diff: String
+    public let updatedAt: String
+
+    public init(
+        path: String,
+        stagingPath: String,
+        additions: Int,
+        deletions: Int,
+        diff: String,
+        updatedAt: String
+    ) {
+        self.path = path
+        self.stagingPath = stagingPath
+        self.additions = additions
+        self.deletions = deletions
+        self.diff = diff
+        self.updatedAt = updatedAt
+    }
+}
+
+/// Response payload for `GET /files/staged`.
+public struct StagedFilesResponse: Content, Sendable, Equatable {
+    public let files: [StagedFileEntry]
+
+    public init(files: [StagedFileEntry]) {
+        self.files = files
+    }
+}
+
+/// Request payload for `POST /files/accept` and `POST /files/discard`.
+public struct FileActionRequest: Content, Sendable {
+    public let path: String?
+    public let all: Bool?
+
+    public init(path: String? = nil, all: Bool? = nil) {
+        self.path = path
+        self.all = all
+    }
+}
+
+/// Response payload for file actions.
+public struct FileActionResponse: Content, Sendable {
+    public let status: String
+    public let count: Int?
+
+    public init(status: String, count: Int? = nil) {
+        self.status = status
+        self.count = count
+    }
+}
+
+/// WebSocket broadcast payload for file actions.
+public struct WSFileActionEvent: Content, Sendable {
+    public let type: String
+    public let path: String?
+
+    public init(type: String, path: String? = nil) {
+        self.type = type
+        self.path = path
     }
 }
 

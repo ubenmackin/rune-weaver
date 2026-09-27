@@ -266,6 +266,15 @@ public actor ConversationManager {
     /// Maximum title characters stored per session, bounding the sessions table and sidebar display.
     public static let maxTitleLength: Int = 200
 
+    /// Synthetic tool result recorded when a restart strands a call without an outcome.
+    /// Single-sourced here so conversation history and run-log persistence report
+    /// the same interruption instead of drifting when one copy is edited.
+    public static let interruptedToolResultContent = "Tool interrupted by application restart"
+    /// Fallback run response recorded when a restart strands a run without output.
+    /// Single-sourced here so the SQL bootstrap and the in-memory reconcile path
+    /// agree on one restart notice.
+    public static let restartedRunResponseMessage = "Process restarted while run was in progress"
+
     /// Creates a conversation manager.
     public init(
         maxMessages: Int = 100,
@@ -658,9 +667,11 @@ public actor ConversationManager {
         let winners = selectBestOwners(perNote: perNote)
         return rebuildGroupedActions(perNote: perNote, winners: winners)
     }
+}
 
-    // MARK: - Persistence (SQLite with JSON fallback)
+// MARK: - Persistence (SQLite with JSON fallback)
 
+extension ConversationManager {
     /// Saves all tracked sessions to the configured store.
     public func saveAll() async throws {
         guard let path = episodesDBPath else { return }
@@ -678,6 +689,50 @@ public actor ConversationManager {
         }
         sessions = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
         unpersistedIDs.removeAll()
+        await reconcileDanglingToolCalls()
+    }
+
+    /// Reconciles dangling tool call placeholders in a single session.
+    /// Returns true if any messages were synthesized.
+    @discardableResult
+    private func reconcileDanglingToolCalls(session: inout ConversationSession) -> Bool {
+        let resultsByCallID = collectToolResults(from: session.messages)
+        var missingCallIDs: [String] = []
+        for message in session.messages where message.role == .assistant {
+            for line in NormalizedText.splitLines(message.content) {
+                guard let parsed = ToolInput.parsePlaceholderLine(line),
+                      let callID = nonEmptyCallID(parsed.callID) else { continue }
+                if resultsByCallID[callID] == nil, !missingCallIDs.contains(callID) {
+                    missingCallIDs.append(callID)
+                }
+            }
+        }
+        guard !missingCallIDs.isEmpty else { return false }
+        let now = Date()
+        for callID in missingCallIDs {
+            let syntheticMsg = Message(
+                role: .tool,
+                content: Self.interruptedToolResultContent,
+                toolCallID: callID,
+                isError: true,
+                errorKind: .executionError,
+                createdAt: now
+            )
+            session.messages.append(syntheticMsg)
+        }
+        session.updatedAt = now
+        return true
+    }
+
+    /// Reconciles dangling tool call placeholders from prior interrupted runs across all sessions.
+    /// Appends synthetic interrupted tool results so reloads never leave orphaned
+    /// pending tool badges in chat history.
+    public func reconcileDanglingToolCalls() async {
+        for (id, var session) in sessions {
+            guard reconcileDanglingToolCalls(session: &session) else { continue }
+            sessions[id] = session
+            await persistUncancellable(session)
+        }
     }
 
     /// Saves one session without throwing (used after every mutation).

@@ -229,6 +229,7 @@ extension AppModel {
             engineConfig: pipeline.config.engine,
             emailConfig: pipeline.config.email,
             filesConfig: pipeline.config.files,
+            bashConfig: pipeline.config.bash,
             mediaConfig: pipeline.config.media,
             desktopConfig: pipeline.config.desktop,
             securityConfig: pipeline.config.security,

@@ -76,6 +76,8 @@ public final class ServerContext: Sendable {
     public let toolStates: ToolStateStore
     /// Sandbox staging retention configuration bounding `pending/`, `approved/`, and `attachments/`.
     public let sandboxConfig: SandboxConfig
+    /// File access policy bounding read/write operations.
+    public let filesConfig: FilesConfig
     /// Periodic scheduler reclaiming expired and over-cap staged files.
     public let sandboxCleanup: SandboxCleanupScheduler
     /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
@@ -178,6 +180,7 @@ public final class ServerContext: Sendable {
         toolStates: ToolStateStore? = nil,
         sandboxConfig: SandboxConfig = SandboxConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
+        filesConfig: FilesConfig = FilesConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
         indexCoordinator: IndexCoordinator? = nil,
         indexStore: DocIndexStore? = nil,
@@ -243,6 +246,7 @@ public final class ServerContext: Sendable {
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.sandboxConfig = sandboxConfig
+        self.filesConfig = filesConfig
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
         self.servingLLM = servingLLM
@@ -315,6 +319,7 @@ extension ServerContext {
     private struct ToolConfigs: Sendable {
         let email: EmailConfig?
         let files: FilesConfig
+        let bash: BashConfig
         let sandbox: SandboxConfig
         let browser: BrowserConfig
         let media: MediaConfig?
@@ -404,6 +409,7 @@ extension ServerContext {
             on: bus,
             emailConfig: configs.email,
             filesConfig: configs.files,
+            bashConfig: configs.bash,
             sandboxConfig: configs.sandbox,
             browserConfig: configs.browser,
             mediaConfig: configs.media,
@@ -490,6 +496,7 @@ extension ServerContext {
         engineConfig: EngineConfig = EngineConfig(),
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig = FilesConfig(),
+        bashConfig: BashConfig = BashConfig(),
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         securityConfig: SecurityConfig = SecurityConfig(),
@@ -519,7 +526,7 @@ extension ServerContext {
             hub: hub
         )
         let toolConfigs = ToolConfigs(
-            email: emailConfig, files: filesConfig, sandbox: sandboxConfig,
+            email: emailConfig, files: filesConfig, bash: bashConfig, sandbox: sandboxConfig,
             browser: browserConfig, media: mediaConfig, desktop: desktopConfig,
             llmServerURLs: llmServerURLs, security: securityConfig, goals: goalsConfig
         )
@@ -572,6 +579,7 @@ extension ServerContext {
             pluginDiscovery: services.pluginStack.discovery,
             toolStates: services.pluginStack.states,
             sandboxConfig: sandboxConfig,
+            filesConfig: toolConfigs.files,
             browserConfig: browserConfig,
             indexCoordinator: indexCoordinator,
             indexStore: indexStore,

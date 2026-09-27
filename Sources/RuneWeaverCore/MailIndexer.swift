@@ -616,75 +616,12 @@ public actor MailIndexer {
                 return
             }
         }
-        let fetched: [MailIndexMessage]
-        let windowComplete: Bool
-        // The fetch section of indexMailbox owns the retry loop: retryable
-        // transport failures back off and refetch without progress frames,
-        // while cancellation rethrows immediately and auth or protocol errors
-        // skip at once with the unsuffixed copy. Watermarks plus content
-        // hashes already persist, so every retry refetches safely and resumes
-        // without duplicates.
-        var attempt = 0
-        var succeeded: (messages: [MailIndexMessage], complete: Bool)?
-        var terminalTransportError: Error?
-        // The probed STATUS `uidNext` threads into the first page as its
-        // `beforeUID` so the gateway skips a second anchor STATUS on the same
-        // connection; a nil probe keeps the unanchored fallback. The anchor
-        // is cleared after a reopen so a retry never reuses a stale `uidNext`
-        // that would exclude arrivals during the backoff.
-        var anchoredUidNext = probedStatus?.uidNext
-        while attempt < Self.maxFetchAttempts {
-            attempt += 1
-            do {
-                succeeded = try await fetchFreshWindow(
-                    credentials: context.credentials,
-                    mailbox: context.mailbox,
-                    watermark: watermark,
-                    anchoredUidNext: anchoredUidNext
-                )
-                terminalTransportError = nil
-                break
-            } catch let cancel as CancellationError {
-                throw cancel
-            } catch {
-                guard Self.isRetryableMailError(error) else {
-                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
-                    return
-                }
-                if attempt >= Self.maxFetchAttempts {
-                    terminalTransportError = error
-                    break
-                }
-                // Back off before reopening so the delay never holds a fresh
-                // server connection idle. A session failure already evicted,
-                // so the reopen after the sleep still resumes fresh instead
-                // of degrading to one-shot mid-bracket. A reopen failure
-                // skips at once with no fallback.
-                let delayIndex = min(attempt - 1, Self.fetchRetryDelaysSeconds.count - 1)
-                let delaySeconds = Self.fetchRetryDelaysSeconds[delayIndex]
-                try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
-                do {
-                    try await gateway.openMailboxSession(credentials: context.credentials, mailbox: context.mailbox)
-                    // Drop the stale anchor so the retry fetches with a fresh
-                    // session STATUS instead of the pre-backoff `uidNext`.
-                    anchoredUidNext = nil
-                } catch let cancel as CancellationError {
-                    throw cancel
-                } catch {
-                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
-                    return
-                }
-                continue
-            }
-        }
-        if let succeeded {
-            (fetched, windowComplete) = succeeded
-        } else if let terminalTransportError {
-            let message = "Skipped mailbox '\(context.mailbox)': \(terminalTransportError.localizedDescription) "
-                + "(after \(Self.maxFetchAttempts) attempts)"
-            cursor.report.warnings.append(message)
-            return
-        } else {
+        guard let (fetched, windowComplete) = try await fetchFreshWindowWithRetry(
+            context: context,
+            watermark: watermark,
+            anchoredUidNext: probedStatus?.uidNext,
+            cursor: &cursor
+        ) else {
             return
         }
         let fresh = Self.freshSortedMessages(fetched, watermark: watermark)
@@ -712,6 +649,59 @@ public actor MailIndexer {
             holdsWatermark: holdsWatermark
         )
         try await indexFreshMessages(batch: batch, cursor: &cursor, reporter: reporter)
+    }
+
+    /// Retries fetching fresh window up to `maxFetchAttempts`, backing off on retryable errors.
+    private func fetchFreshWindowWithRetry(
+        context: MailboxContext,
+        watermark: Int,
+        anchoredUidNext: Int?,
+        cursor: inout MailRunCursor
+    ) async throws -> (messages: [MailIndexMessage], complete: Bool)? {
+        var attempt = 0
+        var terminalTransportError: Error?
+        var currentAnchor = anchoredUidNext
+        while attempt < Self.maxFetchAttempts {
+            attempt += 1
+            do {
+                return try await fetchFreshWindow(
+                    credentials: context.credentials,
+                    mailbox: context.mailbox,
+                    watermark: watermark,
+                    anchoredUidNext: currentAnchor
+                )
+            } catch let cancel as CancellationError {
+                throw cancel
+            } catch {
+                guard Self.isRetryableMailError(error) else {
+                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    return nil
+                }
+                if attempt >= Self.maxFetchAttempts {
+                    terminalTransportError = error
+                    break
+                }
+                let delayIndex = min(attempt - 1, Self.fetchRetryDelaysSeconds.count - 1)
+                let delaySeconds = Self.fetchRetryDelaysSeconds[delayIndex]
+                try await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+                do {
+                    try await gateway.openMailboxSession(credentials: context.credentials, mailbox: context.mailbox)
+                    currentAnchor = nil
+                } catch let cancel as CancellationError {
+                    throw cancel
+                } catch {
+                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    return nil
+                }
+                continue
+            }
+        }
+        if let terminalTransportError {
+            let message = "Skipped mailbox '\(context.mailbox)': \(terminalTransportError.localizedDescription) "
+                + "(after \(Self.maxFetchAttempts) attempts)"
+            cursor.report.warnings.append(message)
+        }
+        return nil
     }
 
     /// Indexes one sorted mailbox window, recording watermarks and progress.

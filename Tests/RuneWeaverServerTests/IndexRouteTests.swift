@@ -39,7 +39,8 @@ private func makeIndexAuth(token: String = "owner-token") throws -> (auth: Serve
     let (directory, fileURL) = try makeIndexTokenFile(contents: token)
     let store = ServerAuthTokenStore(
         authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET", tokenFile: fileURL.path),
-        service: "com.runeweaver.tests.\(UUID().uuidString)"
+        service: "com.runeweaver.tests.\(UUID().uuidString)",
+        inMemory: true
     )
     return (ServerAuth(initialToken: token, store: store), directory)
 }

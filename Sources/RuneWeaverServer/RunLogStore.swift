@@ -168,33 +168,66 @@ public actor RunLogStore {
         guard let dbPath else { return }
         #if canImport(SQLite3)
             let pruneCap = capacity
+            await SQLiteSerialIO.runUncancellable {
+                SQLiteRunLogStore.reconcileRunningRuns(dbPath: dbPath)
+            }
             var loaded: [RunLogEntry]
             do {
                 loaded = try await SQLiteSerialIO.run {
                     SQLiteRunLogStore.read(dbPath: dbPath, limit: pruneCap)
                 }
+            } catch is CancellationError {
+                // Cancellation must propagate instead of masquerading as an
+                // empty store; abort hydration and leave prior state untouched.
+                return
             } catch {
                 RuneWeaverLog.stores.error("RunLogStore: failed reading entries from SQLite: \(error.localizedDescription)")
                 loaded = []
             }
-            for index in loaded.indices where loaded[index].status == "running" {
-                let reconciled = RunLogEntry(
-                    id: loaded[index].id,
-                    jobID: loaded[index].jobID,
-                    sessionID: loaded[index].sessionID,
-                    goalID: loaded[index].goalID,
-                    kind: loaded[index].kind,
-                    status: "interrupted",
-                    message: loaded[index].message,
-                    timestamp: loaded[index].timestamp,
-                    response: loaded[index].response ?? "Process restarted while run was in progress",
-                    toolActions: loaded[index].toolActions,
-                    totalTokens: loaded[index].totalTokens,
-                    durationMs: loaded[index].durationMs
-                )
-                loaded[index] = reconciled
-                await SQLiteSerialIO.runUncancellable {
-                    SQLiteRunLogStore.write(entry: reconciled, dbPath: dbPath, pruneCapacity: pruneCap)
+            for index in loaded.indices {
+                let entry = loaded[index]
+                var needsWrite = false
+                let status = entry.status == "running" ? "interrupted" : entry.status
+                if status != entry.status {
+                    needsWrite = true
+                }
+                var reconciledActions = entry.toolActions
+                if status == "interrupted" {
+                    for aIndex in reconciledActions.indices where reconciledActions[aIndex].result == nil {
+                        let action = reconciledActions[aIndex]
+                        reconciledActions[aIndex] = ToolAction(
+                            toolName: action.toolName,
+                            callID: action.callID,
+                            argumentsJSON: action.argumentsJSON,
+                            result: ToolResult.failure(
+                                toolCallID: action.callID,
+                                content: ConversationManager.interruptedToolResultContent,
+                                errorKind: .executionError
+                            ),
+                            roundIndex: action.roundIndex
+                        )
+                        needsWrite = true
+                    }
+                }
+                if needsWrite {
+                    let reconciled = RunLogEntry(
+                        id: entry.id,
+                        jobID: entry.jobID,
+                        sessionID: entry.sessionID,
+                        goalID: entry.goalID,
+                        kind: entry.kind,
+                        status: status,
+                        message: entry.message,
+                        timestamp: entry.timestamp,
+                        response: entry.response ?? ConversationManager.restartedRunResponseMessage,
+                        toolActions: reconciledActions,
+                        totalTokens: entry.totalTokens,
+                        durationMs: entry.durationMs
+                    )
+                    loaded[index] = reconciled
+                    await SQLiteSerialIO.runUncancellable {
+                        SQLiteRunLogStore.write(entry: reconciled, dbPath: dbPath, pruneCapacity: pruneCap)
+                    }
                 }
             }
             entries = loaded
@@ -534,6 +567,107 @@ enum SQLiteOpenHelper {
                 RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed creating goal_id index: \(error.localizedDescription)")
             }
             return handle
+        }
+
+        static func reconcileRunningRuns(dbPath: String) {
+            guard let handle = SQLiteOpenHelper.openLogged(
+                dbPath: dbPath,
+                storeName: "SQLiteRunLogStore",
+                fallbackNote: "startup running reconciliation skipped",
+                open: { try open(dbPath: dbPath) }
+            ) else {
+                return
+            }
+            defer { sqlite3_close(handle) }
+            // Single-sourced restart notice stays quoted as one SQL literal even
+            // if the shared wording ever gains an apostrophe.
+            let restartedResponse = ConversationManager.restartedRunResponseMessage.replacingOccurrences(of: "'", with: "''")
+            let sql = """
+            UPDATE run_logs
+            SET status = 'interrupted',
+                response = CASE
+                    WHEN response IS NULL OR response = '' THEN '\(restartedResponse)'
+                    ELSE response
+                END
+            WHERE status = 'running';
+            """
+            do {
+                try SQLiteHelpers.exec(
+                    handle: handle,
+                    sql: sql,
+                    failure: { RunLogError(message: $0) }
+                )
+            } catch {
+                RuneWeaverLog.stores.error("SQLiteRunLogStore: failed reconciling running runs: \(error.localizedDescription)")
+            }
+            reconcileInterruptedToolActions(handle: handle)
+        }
+
+        /// Repairs pending tool results on every interrupted row in durable storage.
+        /// The in-memory bootstrap only sees the newest window, so without this pass
+        /// older rows keep nil results and reload as orphan pending badges.
+        private static func reconcileInterruptedToolActions(handle: OpaquePointer?) {
+            let pending: [(id: String, payload: String)] = {
+                var collected: [(id: String, payload: String)] = []
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "SELECT id, tool_actions FROM run_logs WHERE status = 'interrupted';", -1, &statement, nil) == SQLITE_OK else {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing interrupted tool-action reconcile (code \(code)).")
+                    return collected
+                }
+                defer { sqlite3_finalize(statement) }
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    guard let idStr = SQLiteHelpers.columnText(statement, index: 0),
+                          let raw = SQLiteHelpers.columnText(statement, index: 1),
+                          let data = raw.data(using: .utf8)
+                    else { continue }
+                    let actions: [ToolAction]
+                    do {
+                        actions = try JSONDecoder().decode([ToolAction].self, from: data)
+                    } catch {
+                        RuneWeaverLog.stores.warning("SQLiteRunLogStore: failed to decode tool actions for run \(idStr): \(error.localizedDescription)")
+                        continue
+                    }
+                    guard actions.contains(where: { $0.result == nil }) else { continue }
+                    let repaired = actions.map { action -> ToolAction in
+                        guard action.result == nil else { return action }
+                        return ToolAction(
+                            toolName: action.toolName,
+                            callID: action.callID,
+                            argumentsJSON: action.argumentsJSON,
+                            result: ToolResult.failure(
+                                toolCallID: action.callID,
+                                content: ConversationManager.interruptedToolResultContent,
+                                errorKind: .executionError
+                            ),
+                            roundIndex: action.roundIndex
+                        )
+                    }
+                    do {
+                        let repairedData = try JSONEncoder().encode(repaired)
+                        guard let repairedJSON = String(data: repairedData, encoding: .utf8) else { continue }
+                        collected.append((id: idStr, payload: repairedJSON))
+                    } catch {
+                        RuneWeaverLog.stores.error("SQLiteRunLogStore: failed to encode reconciled tool actions for run \(idStr): \(error.localizedDescription)")
+                    }
+                }
+                return collected
+            }()
+            for item in pending {
+                var update: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "UPDATE run_logs SET tool_actions = ? WHERE id = ?;", -1, &update, nil) == SQLITE_OK else {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing interrupted tool-action write (code \(code)); run \(item.id) keeps pending actions on disk.")
+                    continue
+                }
+                SQLiteHelpers.bindText(update, index: 1, value: item.payload)
+                SQLiteHelpers.bindText(update, index: 2, value: item.id)
+                if sqlite3_step(update) != SQLITE_DONE {
+                    let code = sqlite3_errcode(handle)
+                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed reconciling tool actions for run \(item.id) (code \(code)).")
+                }
+                sqlite3_finalize(update)
+            }
         }
 
         static func read(dbPath: String, limit: Int) -> [RunLogEntry] {

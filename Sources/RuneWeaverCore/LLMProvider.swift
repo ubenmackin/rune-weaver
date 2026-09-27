@@ -83,42 +83,186 @@ public enum VisionGate: Sendable {
     /// with missing `=` padding and base64url spellings tolerated, so
     /// text-only models never receive leaked pixels through a strict match.
     /// Also strips JSON image payload fields (`imageDataBase64`, `screenshotDataURL`).
-    public static func strippedContent(_ content: String) -> String {
+    private static func isBase64Char(_ char: Character) -> Bool {
+        char.isLetter || char.isNumber || char == "+" || char == "/" || char == "-" || char == "_" || char == "="
+    }
+
+    private static func scanBase64Payload(in str: String, from start: String.Index) -> String.Index {
+        var curr = start
+        var hasPadding = false
+
+        while curr < str.endIndex {
+            let char = str[curr]
+            if char == "=" {
+                hasPadding = true
+                curr = str.index(after: curr)
+                continue
+            }
+            if hasPadding {
+                break
+            }
+            if isBase64Char(char) {
+                curr = str.index(after: curr)
+                continue
+            }
+            if char == "\r" || char == "\n" {
+                var lookahead = curr
+                if str[lookahead] == "\r" {
+                    lookahead = str.index(after: lookahead)
+                }
+                if lookahead < str.endIndex, str[lookahead] == "\n" {
+                    lookahead = str.index(after: lookahead)
+                }
+                var count = 0
+                var peek = lookahead
+                while peek < str.endIndex, isBase64Char(str[peek]), count < 16 {
+                    count += 1
+                    peek = str.index(after: peek)
+                }
+                if count >= 16 {
+                    curr = lookahead
+                    continue
+                } else {
+                    break
+                }
+            }
+            break
+        }
+        return curr
+    }
+
+    /// Replaces JSON image payload fields (`screenshotDataURL` or `imageDataBase64`) with `replacement`.
+    /// Uses string index scanning to support arbitrarily large image payloads without regular expression engine limits.
+    private static func replaceJSONImageFields(
+        in content: String,
+        replacement: String,
+        onExtract: ((String) -> Void)? = nil
+    ) -> String {
+        let targetKeys = ["screenshotDataURL", "imageDataBase64"]
         var result = content
 
-        // 1. Data URLs: data:image/jpeg;base64,...
-        if result.contains("data:image") {
-            if let pattern = try? NSRegularExpression(
-                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]{16,}(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
-                options: []
-            ) {
-                let range = NSRange(result.startIndex ..< result.endIndex, in: result)
-                result = pattern.stringByReplacingMatches(
-                    in: result,
-                    options: [],
-                    range: range,
-                    withTemplate: strippedPlaceholder
-                )
+        for key in targetKeys {
+            let needle = "\"" + key + "\""
+            var searchStart = result.startIndex
+
+            while let keyRange = result.range(of: needle, range: searchStart ..< result.endIndex) {
+                var idx = keyRange.upperBound
+                while idx < result.endIndex, result[idx].isWhitespace {
+                    idx = result.index(after: idx)
+                }
+                guard idx < result.endIndex, result[idx] == ":" else {
+                    searchStart = keyRange.upperBound
+                    continue
+                }
+                idx = result.index(after: idx)
+                while idx < result.endIndex, result[idx].isWhitespace {
+                    idx = result.index(after: idx)
+                }
+                guard idx < result.endIndex, result[idx] == "\"" else {
+                    searchStart = keyRange.upperBound
+                    continue
+                }
+                let valueStart = result.index(after: idx)
+
+                var scan = valueStart
+                var isEscaped = false
+                var valueEnd: String.Index?
+                while scan < result.endIndex {
+                    let char = result[scan]
+                    if isEscaped {
+                        isEscaped = false
+                    } else if char == "\\" {
+                        isEscaped = true
+                    } else if char == "\"" {
+                        valueEnd = scan
+                        break
+                    }
+                    scan = result.index(after: scan)
+                }
+
+                guard let end = valueEnd else {
+                    searchStart = keyRange.upperBound
+                    continue
+                }
+
+                let rawValue = String(result[valueStart ..< end])
+                guard rawValue.count >= 16 else {
+                    searchStart = result.index(after: end)
+                    continue
+                }
+
+                if let onExtract {
+                    let unescaped = rawValue.replacingOccurrences(of: "\\/", with: "/")
+                    if unescaped.hasPrefix("data:image/") {
+                        onExtract(unescaped)
+                    } else if unescaped.hasPrefix("/9j/") || unescaped.hasPrefix("iVBOR") {
+                        onExtract("data:image/jpeg;base64,\(unescaped)")
+                    }
+                }
+
+                let fullReplacement = "\"\(key)\": \"\(replacement)\""
+                let fullRange = keyRange.lowerBound ..< result.index(after: end)
+                result.replaceSubrange(fullRange, with: fullReplacement)
+                let newEnd = result.index(keyRange.lowerBound, offsetBy: fullReplacement.count)
+                searchStart = newEnd
             }
         }
+        return result
+    }
 
-        // 2. JSON image fields: "imageDataBase64": "..." or "screenshotDataURL": "..."
-        // Length-gated so empty values stay untouched and re-stripping stays stable.
+    /// Replaces inline `data:image/...;base64,...` URLs with `replacement`.
+    /// Uses string index scanning to avoid regex recursion limits on large image payloads.
+    private static func replaceInlineDataURLs(
+        in content: String,
+        replacement: String,
+        onExtract: ((String) -> Void)? = nil
+    ) -> String {
+        let marker = "data:image/"
+        var result = content
+        var searchStart = result.startIndex
+
+        while let markerRange = result.range(of: marker, range: searchStart ..< result.endIndex) {
+            guard let semi = result[markerRange.upperBound...].firstIndex(of: ";") else {
+                searchStart = markerRange.upperBound
+                continue
+            }
+            let b64Marker = ";base64,"
+            guard result[semi...].hasPrefix(b64Marker) else {
+                searchStart = result.index(after: semi)
+                continue
+            }
+            let dataStart = result.index(semi, offsetBy: b64Marker.count)
+            let scanEnd = scanBase64Payload(in: result, from: dataStart)
+            let rawPayload = String(result[dataStart ..< scanEnd])
+            let base64Chars = rawPayload.filter { $0 != "\r" && $0 != "\n" }
+            guard base64Chars.count >= 16 else {
+                searchStart = scanEnd
+                continue
+            }
+
+            let mime = String(result[markerRange.upperBound ..< semi])
+            let fullURL = "data:image/" + mime + ";base64," + base64Chars
+            onExtract?(fullURL)
+
+            result.replaceSubrange(markerRange.lowerBound ..< scanEnd, with: replacement)
+            let newEnd = result.index(markerRange.lowerBound, offsetBy: replacement.count)
+            searchStart = newEnd
+        }
+        return result
+    }
+
+    /// Removes inline image payloads from one text turn.
+    /// Matches contiguous base64 plus newline-wrapped chunks with missing `=` padding and base64url spellings tolerated,
+    /// so text-only models never receive leaked pixels through a strict match.
+    /// Also strips JSON image payload fields (`imageDataBase64`, `screenshotDataURL`).
+    public static func strippedContent(_ content: String) -> String {
+        var result = content
         if result.contains("imageDataBase64") || result.contains("screenshotDataURL") {
-            if let jsonPattern = try? NSRegularExpression(
-                pattern: #"\"(imageDataBase64|screenshotDataURL)\"\s*:\s*\"[^\"]{16,}\""#,
-                options: []
-            ) {
-                let range = NSRange(result.startIndex ..< result.endIndex, in: result)
-                result = jsonPattern.stringByReplacingMatches(
-                    in: result,
-                    options: [],
-                    range: range,
-                    withTemplate: "\"$1\": \"\(strippedPlaceholder)\""
-                )
-            }
+            result = replaceJSONImageFields(in: result, replacement: strippedPlaceholder)
         }
-
+        if result.contains("data:image") {
+            result = replaceInlineDataURLs(in: result, replacement: strippedPlaceholder)
+        }
         return result
     }
 
@@ -153,58 +297,16 @@ public enum VisionGate: Sendable {
         var result = content
         var extracted: [String] = []
 
-        // 1. JSON image payload fields: "screenshotDataURL": "..." or "imageDataBase64": "..."
         if result.contains("screenshotDataURL") || result.contains("imageDataBase64") {
-            if let jsonPattern = try? NSRegularExpression(
-                pattern: #"\"(screenshotDataURL|imageDataBase64)\"\s*:\s*\"([^\"]{16,})\""#,
-                options: []
-            ) {
-                let nsString = result as NSString
-                let matches = jsonPattern.matches(in: result, options: [], range: NSRange(location: 0, length: nsString.length))
-                for match in matches where match.numberOfRanges > 2 {
-                    let rawValue = nsString.substring(with: match.range(at: 2))
-                    // Unescape escaped slashes like "data:image\/jpeg;base64,..."
-                    let unescaped = rawValue.replacingOccurrences(of: "\\/", with: "/")
-                    if unescaped.hasPrefix("data:image/") {
-                        extracted.append(unescaped)
-                    } else if unescaped.hasPrefix("/9j/") || unescaped.hasPrefix("iVBOR") {
-                        extracted.append("data:image/jpeg;base64,\(unescaped)")
-                    }
-                }
-                // Scrub every 16+ value so unknown shapes never retain raw
-                // payload in tool metadata; only known image prefixes extract.
-                result = jsonPattern.stringByReplacingMatches(
-                    in: result,
-                    options: [],
-                    range: NSRange(location: 0, length: nsString.length),
-                    withTemplate: "\"$1\": \"[image attached]\""
-                )
+            result = replaceJSONImageFields(in: result, replacement: "[image attached]") { url in
+                extracted.append(url)
             }
         }
 
-        // 2. Inline data URLs in text
         if result.contains("data:image") {
-            if let pattern = try? NSRegularExpression(
-                pattern: #"data:image/[a-zA-Z0-9.+\-]+;base64,[A-Za-z0-9+/\-_=]{16,}(?:\r?\n[A-Za-z0-9+/\-_=]{16,})*"#,
-                options: []
-            ) {
-                let nsString = result as NSString
-                let matches = pattern.matches(in: result, options: [], range: NSRange(location: 0, length: nsString.length))
-                for match in matches {
-                    let raw = nsString.substring(with: match.range)
-                    let cleanedURL = raw.replacingOccurrences(of: "\r\n", with: "")
-                        .replacingOccurrences(of: "\n", with: "")
-                    if !extracted.contains(cleanedURL) {
-                        extracted.append(cleanedURL)
-                    }
-                }
-                if !extracted.isEmpty {
-                    result = pattern.stringByReplacingMatches(
-                        in: result,
-                        options: [],
-                        range: NSRange(location: 0, length: nsString.length),
-                        withTemplate: ""
-                    )
+            result = replaceInlineDataURLs(in: result, replacement: "") { url in
+                if !extracted.contains(url) {
+                    extracted.append(url)
                 }
             }
         }

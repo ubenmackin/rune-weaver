@@ -26,6 +26,7 @@ import MobileBottomNav from "./components/MobileBottomNav";
 import RunLogViewer from "./components/RunLogViewer";
 import SchedulerManager from "./components/SchedulerManager";
 import SettingsManager from "./components/SettingsManager";
+import StagedChangesDrawer from "./components/StagedChangesDrawer";
 import TopNav, { type Tab } from "./components/TopNav";
 import { useWebNotifications } from "./hooks/useWebNotifications";
 
@@ -157,6 +158,8 @@ interface AuthenticatedAppProps {
 function AuthenticatedApp({ health }: AuthenticatedAppProps) {
   const isStandalone = isStandaloneMode();
   const [tab, setTab] = useState<Tab>(() => (isStandalone ? "settings" : getInitialTab()));
+  const [stagedDrawerOpen, setStagedDrawerOpen] = useState(false);
+  const [stagedFilesCount, setStagedFilesCount] = useState(0);
 
   const {
     notificationsEnabled,
@@ -266,8 +269,16 @@ function AuthenticatedApp({ health }: AuthenticatedAppProps) {
         runsBadge={runsBadge}
         approvalsBadge={approvalsBadge}
         warningsBadge={warningsBadge}
+        stagedFilesCount={stagedFilesCount}
+        onOpenStagedDrawer={() => setStagedDrawerOpen(true)}
         notificationsEnabled={notificationsEnabled}
         onRequestNotifications={handleRequestNotifications}
+      />
+
+      <StagedChangesDrawer
+        isOpen={stagedDrawerOpen}
+        onClose={() => setStagedDrawerOpen(false)}
+        onCountChange={setStagedFilesCount}
       />
 
       {/* Main Content Area */}

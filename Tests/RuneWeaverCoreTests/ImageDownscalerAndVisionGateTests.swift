@@ -72,4 +72,20 @@ struct ImageDownscalerAndVisionGateTests {
         #expect(extracted.dataURLs.isEmpty)
         #expect(extracted.cleanedText == text)
     }
+
+    @Test
+    func `VisionGate handles large payloads exceeding regex limits without failure`() {
+        let largeBase64 = String(repeating: "A", count: 250_000)
+        let json = #"{"displayIndex":0,"scaledWidth":1280,"screenshotDataURL":"data:image\/jpeg;base64,\/9j\/\#(largeBase64)==","screenshotHash":"hash123"}"#
+        let extracted = VisionGate.extractDataURLs(json)
+        #expect(extracted.dataURLs.count == 1)
+        #expect(extracted.dataURLs[0].hasPrefix("data:image/jpeg;base64,/9j/AAAA"))
+        #expect(extracted.dataURLs[0].hasSuffix("=="))
+        #expect(extracted.cleanedText.contains("\"screenshotDataURL\": \"[image attached]\""))
+        #expect(!extracted.cleanedText.contains("AAAAAA"))
+
+        let stripped = VisionGate.strippedContent(json)
+        #expect(stripped.contains("\"screenshotDataURL\": \"\(VisionGate.strippedPlaceholder)\""))
+        #expect(!stripped.contains("AAAAAA"))
+    }
 }

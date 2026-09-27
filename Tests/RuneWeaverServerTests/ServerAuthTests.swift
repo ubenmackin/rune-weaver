@@ -73,14 +73,15 @@ private func makeTokenFile(
     return (directory, fileURL)
 }
 
-/// Makes a verifier whose persistence target is an isolated temp token file.
+/// Makes a verifier whose persistence target is an isolated temp token file and in-memory secrets store.
 private func makeAuth(
     token: String = "owner-token"
 ) throws -> (auth: ServerAuth, directory: URL, fileURL: URL) {
     let (directory, fileURL) = try makeTokenFile(contents: token)
     let store = ServerAuthTokenStore(
         authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET", tokenFile: fileURL.path),
-        service: "com.runeweaver.tests.\(UUID().uuidString)"
+        service: "com.runeweaver.tests.\(UUID().uuidString)",
+        inMemory: true
     )
     return (ServerAuth(initialToken: token, store: store), directory, fileURL)
 }
@@ -179,7 +180,8 @@ struct ServerAuthTokenLifecycleTests {
         let emptyService = "com.runeweaver.tests.\(UUID().uuidString)"
         let absent = try await ServerAuth.resolve(
             authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)", tokenFile: nil),
-            service: emptyService
+            service: emptyService,
+            inMemory: true
         )
         #expect(absent == nil)
 
@@ -187,7 +189,8 @@ struct ServerAuthTokenLifecycleTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let resolved = try await ServerAuth.resolve(
             authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)", tokenFile: fileURL.path),
-            service: "com.runeweaver.tests.\(UUID().uuidString)"
+            service: "com.runeweaver.tests.\(UUID().uuidString)",
+            inMemory: true
         )
         let auth = try #require(resolved)
         #expect(await auth.verify("file-token"))
@@ -203,7 +206,8 @@ struct ServerAuthTokenLifecycleTests {
         do {
             _ = try await ServerAuth.resolve(
                 authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)", tokenFile: fileURL.path),
-                service: "com.runeweaver.tests.\(UUID().uuidString)"
+                service: "com.runeweaver.tests.\(UUID().uuidString)",
+                inMemory: true
             )
             Issue.record("Expected insecureTokenFile for a group/other-readable token file")
         } catch let error as ServerAuthError {
@@ -990,7 +994,8 @@ struct ServerAuthCLILifecycleTests {
         defer { _ = unsetenv(envName) }
         let store = ServerAuthTokenStore(
             authConfig: AuthConfig(tokenEnv: envName, tokenFile: nil),
-            service: "com.runeweaver.tests.\(UUID().uuidString)"
+            service: "com.runeweaver.tests.\(UUID().uuidString)",
+            inMemory: true
         )
         let resolved = try await store.resolve()
         let unwrapped = try #require(resolved)
@@ -1008,7 +1013,8 @@ struct ServerAuthCLILifecycleTests {
         defer { _ = unsetenv(envName) }
         let store = ServerAuthTokenStore(
             authConfig: AuthConfig(tokenEnv: envName, tokenFile: nil),
-            service: "com.runeweaver.tests.\(UUID().uuidString)"
+            service: "com.runeweaver.tests.\(UUID().uuidString)",
+            inMemory: true
         )
         let resolved = try await store.resolve()
         let unwrapped = try #require(resolved)
@@ -1025,7 +1031,8 @@ struct ServerAuthCLILifecycleTests {
                 tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)",
                 tokenFile: fileURL.path
             ),
-            service: "com.runeweaver.tests.\(UUID().uuidString)"
+            service: "com.runeweaver.tests.\(UUID().uuidString)",
+            inMemory: true
         )
         let resolved = try await store.resolve()
         let unwrapped = try #require(resolved)
@@ -1064,7 +1071,8 @@ struct ServerAuthCLILifecycleTests {
                 tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET_\(UUID().uuidString)",
                 tokenFile: fileURL.path
             ),
-            service: "com.runeweaver.tests.\(UUID().uuidString)"
+            service: "com.runeweaver.tests.\(UUID().uuidString)",
+            inMemory: true
         )
         let auth = ServerAuth(initialToken: "", store: store)
         #expect(await auth.verify("") == false)
@@ -1614,5 +1622,80 @@ struct HostParityContractTests {
             let allowedOK = (try? RuneWeaverConfig.validateAllowedHosts([vector.input])) != nil
             #expect(allowedOK == vector.allowedHostValid, "validateAllowedHosts('\(vector.input)')")
         }
+    }
+}
+
+#if canImport(Security)
+    import Security
+
+    /// Deletes a generic password from the Keychain if one was written during tests.
+    private func deleteTestKeychainItem(service: String, account: String = AuthConfig.defaultTokenKey) {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+#endif
+
+@Suite("SecretsManager In-Memory and Keychain Isolation Tests")
+struct SecretsManagerInMemoryTests {
+    @Test
+    func `InMemory secrets manager stores and retrieves without touching Keychain`() async throws {
+        let service = "com.runeweaver.tests.inmemory.\(UUID().uuidString)"
+        let secrets = SecretsManager(service: service, inMemory: true)
+
+        try await secrets.store(key: "TEST_KEY", secret: "test-secret-value")
+        let retrieved = try await secrets.retrieve(key: "TEST_KEY")
+        #expect(retrieved == "test-secret-value")
+
+        #if canImport(Security)
+            // Assert that the item was NOT written to the macOS Keychain
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: "TEST_KEY",
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            #expect(status == errSecItemNotFound, "Item should not exist in Keychain when inMemory is true")
+        #endif
+
+        try await secrets.delete(key: "TEST_KEY")
+        let absent = try await secrets.retrieve(key: "TEST_KEY")
+        #expect(absent == nil)
+    }
+
+    @Test
+    func `InMemory ServerAuthTokenStore persists and rotates without Keychain leakage`() async throws {
+        let (directory, fileURL) = try makeTokenFile(contents: "initial-token")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let service = "com.runeweaver.tests.inmemory.\(UUID().uuidString)"
+        let store = ServerAuthTokenStore(
+            authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET", tokenFile: fileURL.path),
+            service: service,
+            inMemory: true
+        )
+        let auth = ServerAuth(initialToken: "initial-token", store: store)
+
+        let rotated = try await auth.rotate()
+        #expect(rotated.isEmpty == false)
+        #expect(await auth.verify(rotated))
+
+        #if canImport(Security)
+            // Verify no Keychain item was written
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: AuthConfig.defaultTokenKey,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            var item: CFTypeRef?
+            let status = SecItemCopyMatching(query as CFDictionary, &item)
+            #expect(status == errSecItemNotFound, "Rotation with inMemory store must not persist to Keychain")
+        #endif
     }
 }

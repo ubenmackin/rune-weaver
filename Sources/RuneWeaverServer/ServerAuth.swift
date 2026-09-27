@@ -125,8 +125,13 @@ public struct ServerAuthTokenStore: Sendable {
     /// - Parameters:
     ///   - authConfig: Declared token sources.
     ///   - service: Keychain service namespace.
-    public init(authConfig: AuthConfig, service: String = SecretsManager.defaultService) {
-        self.secrets = SecretsManager(service: service)
+    ///   - inMemory: When true, secrets are kept in-memory and never touch the system Keychain.
+    public init(
+        authConfig: AuthConfig,
+        service: String = SecretsManager.defaultService,
+        inMemory: Bool = false
+    ) {
+        self.secrets = SecretsManager(service: service, inMemory: inMemory)
         let trimmedEnv = authConfig.tokenEnv?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.tokenEnv = (trimmedEnv?.isEmpty ?? true) ? nil : trimmedEnv
         if let file = authConfig.tokenFile?.trimmingCharacters(in: .whitespacesAndNewlines), !file.isEmpty {
@@ -426,13 +431,15 @@ public actor ServerAuth {
     /// - Parameters:
     ///   - authConfig: Declared token sources.
     ///   - service: Keychain service namespace.
+    ///   - inMemory: When true, secrets are kept in-memory and never touch the system Keychain.
     /// - Returns: A verifier, or nil when no source resolves (loopback-no-auth).
     /// - Throws: ``ServerAuthError`` on unreadable storage so boot fails closed.
     public static func resolve(
         authConfig: AuthConfig,
-        service: String = SecretsManager.defaultService
+        service: String = SecretsManager.defaultService,
+        inMemory: Bool = false
     ) async throws -> ServerAuth? {
-        let store = ServerAuthTokenStore(authConfig: authConfig, service: service)
+        let store = ServerAuthTokenStore(authConfig: authConfig, service: service, inMemory: inMemory)
         guard let loaded = try await store.resolve()?.token else {
             return nil
         }

@@ -26,11 +26,17 @@ public actor SecretsManager {
     /// Keychain service namespace used when callers omit `service`.
     public let service: String
 
+    /// Whether secrets are held in-memory rather than written to the system Keychain.
+    public let inMemory: Bool
+
     /// Creates a secrets manager.
-    /// - Parameter service: Keychain service namespace. Defaults to
-    ///   `com.runeweaver.secrets`.
-    public init(service: String = SecretsManager.defaultService) {
+    /// - Parameters:
+    ///   - service: Keychain service namespace. Defaults to
+    ///     `com.runeweaver.secrets`.
+    ///   - inMemory: When true, secrets are kept in-memory and never touch the system Keychain.
+    public init(service: String = SecretsManager.defaultService, inMemory: Bool = false) {
         self.service = service
+        self.inMemory = inMemory
     }
 
     // MARK: - Store / retrieve
@@ -51,26 +57,28 @@ public actor SecretsManager {
             throw SecretsError.encodingError
         }
         #if canImport(Security)
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: namespace,
-                kSecAttrAccount as String: key
-            ]
-            let attributes: [String: Any] = [
-                kSecValueData as String: data,
-                kSecAttrLabel as String: "Rune Weaver: \(key)",
-                kSecAttrDescription as String: "Rune Weaver credential for \(key)"
-            ]
-            var status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
-            if status == errSecDuplicateItem {
-                status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            if !inMemory {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: namespace,
+                    kSecAttrAccount as String: key
+                ]
+                let attributes: [String: Any] = [
+                    kSecValueData as String: data,
+                    kSecAttrLabel as String: "Rune Weaver: \(key)",
+                    kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+                ]
+                var status = SecItemAdd(query.merging(attributes) { _, new in new } as CFDictionary, nil)
+                if status == errSecDuplicateItem {
+                    status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+                }
+                guard status == errSecSuccess else {
+                    throw SecretsError.keychainError(status: status)
+                }
+                return
             }
-            guard status == errSecSuccess else {
-                throw SecretsError.keychainError(status: status)
-            }
-        #else
-            fallbackStore[keyed: key, service: namespace] = data
         #endif
+        fallbackStore[keyed: key, service: namespace] = data
     }
 
     /// Retrieves a secret, checking the environment first.
@@ -86,46 +94,47 @@ public actor SecretsManager {
         }
         let namespace = service ?? self.service
         #if canImport(Security)
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: namespace,
-                kSecAttrAccount as String: key,
-                kSecReturnData as String: true,
-                kSecReturnAttributes as String: true,
-                kSecMatchLimit as String: kSecMatchLimitOne
-            ]
-            var item: CFTypeRef?
-            let status = SecItemCopyMatching(query as CFDictionary, &item)
-            if status == errSecItemNotFound {
-                return nil
-            }
-            guard status == errSecSuccess else {
-                throw SecretsError.keychainError(status: status)
-            }
-            guard let dict = item as? [String: Any],
-                  let data = dict[kSecValueData as String] as? Data,
-                  let secret = String(data: data, encoding: .utf8)
-            else {
-                throw SecretsError.encodingError
-            }
-            let currentLabel = dict[kSecAttrLabel as String] as? String
-            if currentLabel == nil || currentLabel == namespace {
-                let updateQuery: [String: Any] = [
+            if !inMemory {
+                let query: [String: Any] = [
                     kSecClass as String: kSecClassGenericPassword,
                     kSecAttrService as String: namespace,
-                    kSecAttrAccount as String: key
+                    kSecAttrAccount as String: key,
+                    kSecReturnData as String: true,
+                    kSecReturnAttributes as String: true,
+                    kSecMatchLimit as String: kSecMatchLimitOne
                 ]
-                let updateAttrs: [String: Any] = [
-                    kSecAttrLabel as String: "Rune Weaver: \(key)",
-                    kSecAttrDescription as String: "Rune Weaver credential for \(key)"
-                ]
-                _ = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+                var item: CFTypeRef?
+                let status = SecItemCopyMatching(query as CFDictionary, &item)
+                if status == errSecItemNotFound {
+                    return nil
+                }
+                guard status == errSecSuccess else {
+                    throw SecretsError.keychainError(status: status)
+                }
+                guard let dict = item as? [String: Any],
+                      let data = dict[kSecValueData as String] as? Data,
+                      let secret = String(data: data, encoding: .utf8)
+                else {
+                    throw SecretsError.encodingError
+                }
+                let currentLabel = dict[kSecAttrLabel as String] as? String
+                if currentLabel == nil || currentLabel == namespace {
+                    let updateQuery: [String: Any] = [
+                        kSecClass as String: kSecClassGenericPassword,
+                        kSecAttrService as String: namespace,
+                        kSecAttrAccount as String: key
+                    ]
+                    let updateAttrs: [String: Any] = [
+                        kSecAttrLabel as String: "Rune Weaver: \(key)",
+                        kSecAttrDescription as String: "Rune Weaver credential for \(key)"
+                    ]
+                    _ = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+                }
+                return secret
             }
-            return secret
-        #else
-            guard let data = fallbackStore[keyed: key, service: namespace] else { return nil }
-            return String(data: data, encoding: .utf8)
         #endif
+        guard let data = fallbackStore[keyed: key, service: namespace] else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// Deletes a secret from the Keychain. Missing items are a no-op.
@@ -135,18 +144,20 @@ public actor SecretsManager {
         }
         let namespace = service ?? self.service
         #if canImport(Security)
-            let query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: namespace,
-                kSecAttrAccount as String: key
-            ]
-            let status = SecItemDelete(query as CFDictionary)
-            guard status == errSecSuccess || status == errSecItemNotFound else {
-                throw SecretsError.keychainError(status: status)
+            if !inMemory {
+                let query: [String: Any] = [
+                    kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: namespace,
+                    kSecAttrAccount as String: key
+                ]
+                let status = SecItemDelete(query as CFDictionary)
+                guard status == errSecSuccess || status == errSecItemNotFound else {
+                    throw SecretsError.keychainError(status: status)
+                }
+                return
             }
-        #else
-            fallbackStore.remove(keyed: key, service: namespace)
         #endif
+        fallbackStore.remove(keyed: key, service: namespace)
     }
 
     // MARK: - Surrogates (agent-visible references)
@@ -449,24 +460,20 @@ public actor SecretsManager {
         }
     }
 
-    #if !canImport(Security)
-        private var fallbackStore: FallbackStore = .init()
-    #endif
+    private var fallbackStore: FallbackStore = .init()
 }
 
-#if !canImport(Security)
-    /// In-memory stand-in used only where the Security framework is
-    /// unavailable (e.g. Linux CI). The environment fallback still applies.
-    private struct FallbackStore: Sendable {
-        private var values: [String: Data] = [:]
+/// In-memory stand-in used when inMemory is enabled or where the Security framework is
+/// unavailable (e.g. Linux CI). The environment fallback still applies.
+private struct FallbackStore: Sendable {
+    private var values: [String: Data] = [:]
 
-        subscript(keyed key: String, service namespace: String) -> Data? {
-            get { values["\(namespace)/\(key)"] }
-            set { values["\(namespace)/\(key)"] = newValue }
-        }
-
-        mutating func remove(keyed key: String, service namespace: String) {
-            values.removeValue(forKey: "\(namespace)/\(key)")
-        }
+    subscript(keyed key: String, service namespace: String) -> Data? {
+        get { values["\(namespace)/\(key)"] }
+        set { values["\(namespace)/\(key)"] = newValue }
     }
-#endif
+
+    mutating func remove(keyed key: String, service namespace: String) {
+        values.removeValue(forKey: "\(namespace)/\(key)")
+    }
+}

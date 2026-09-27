@@ -382,6 +382,8 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
     public let baseDir: String?
     /// Maximum paths to return, clamped to `1...500`.
     public let maxResults: Int
+    /// Whether to recurse into subdirectories.
+    public let recursive: Bool
 
     /// Default path count when the caller omits `maxResults`.
     public static let defaultMaxResults = 100
@@ -391,10 +393,11 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
     public static let maxPatternChars = 500
 
     /// Memberwise initializer with `maxResults` clamping.
-    public init(pattern: String, baseDir: String? = nil, maxResults: Int = defaultMaxResults) {
+    public init(pattern: String, baseDir: String? = nil, maxResults: Int = defaultMaxResults, recursive: Bool = true) {
         self.pattern = pattern
         self.baseDir = baseDir
         self.maxResults = min(max(maxResults, 1), Self.maxMaxResults)
+        self.recursive = recursive
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -405,6 +408,7 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
         case maxResults
         case maxResultsSnake = "max_results"
         case limit
+        case recursive
     }
 
     /// Decodes arguments, accepting snake-case and `limit` aliases.
@@ -419,7 +423,8 @@ public struct FilesGlobArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(Int.self, forKey: .maxResultsSnake)
             ?? container.decodeIfPresent(Int.self, forKey: .limit)
             ?? Self.defaultMaxResults
-        self.init(pattern: pattern, baseDir: baseDir, maxResults: rawMax)
+        let rec = try container.decodeIfPresent(Bool.self, forKey: .recursive) ?? true
+        self.init(pattern: pattern, baseDir: baseDir, maxResults: rawMax, recursive: rec)
     }
 
     /// Trimmed glob pattern.
@@ -887,7 +892,9 @@ public struct FilesGlobTool: Tool, Sendable {
                 + #"filenames at any depth under baseDir. Patterns with '/' match paths relative to baseDir."},"baseDir":{"type":"string","description":"Base "#
                 + #"directory to search; prefer the narrowest directory (\"~\" expands to home). "#
                 + #"Omitted searches the entire home directory"},"maxResults":{"type":"integer","description":"Maximum "#
-                + #"paths (1-500, default 100)","minimum":1,"maximum":500}},"required":["pattern"],"additionalProperties":false}"#
+                + #"paths (1-500, default 100)","minimum":1,"maximum":500},"recursive":{"type":"boolean","description":"Whether "#
+                + #"to recurse into subdirectories (default true). Pass false to search only the immediate children of baseDir."}}"#
+                + #","required":["pattern"],"additionalProperties":false}"#
         )
     /// Always allowed at the gate level; sensitive paths escalate via the failure hint instead.
     public let permissionLevel = PermissionLevel.readOnly
@@ -982,11 +989,10 @@ public struct FilesGlobTool: Tool, Sendable {
         let scope = filesScopeDisplay(resolvedPath: baseDecision.resolvedPath, homeDirectoryURL: homeDirectoryURL)
         let progressWarning = FilesGlobScopeWarning.warningCopy(pattern: rawPattern, baseDirOmitted: baseDirOmitted)
         let progressMessage = FilesGlobScopeWarning.findMessage(pattern: rawPattern, scope: scope)
-        let prefix = baseURL.path.hasSuffix("/") ? baseURL.path : baseURL.path + "/"
         var matched = try await collectGlobMatches(
             baseURL: baseURL,
             rawPattern: rawPattern,
-            prefix: prefix,
+            recursive: args.recursive,
             progressMessage: progressMessage,
             progressWarning: progressWarning,
             context: context
@@ -1015,11 +1021,12 @@ public struct FilesGlobTool: Tool, Sendable {
     private func collectGlobMatches(
         baseURL: URL,
         rawPattern: String,
-        prefix: String,
+        recursive: Bool,
         progressMessage: String,
         progressWarning: String?,
         context: ToolContext
     ) async throws -> [String] {
+        let prefix = baseURL.path.hasSuffix("/") ? baseURL.path : baseURL.path + "/"
         let startInstant = nowProvider()
         var throttle = FilesProgressThrottle()
         throttle.begin(scanned: 0, now: startInstant)
@@ -1028,7 +1035,7 @@ public struct FilesGlobTool: Tool, Sendable {
         guard let enumerator = FileManager.default.enumerator(
             at: baseURL,
             includingPropertiesForKeys: [.isDirectoryKey],
-            options: [],
+            options: recursive ? [] : [.skipsSubdirectoryDescendants],
             errorHandler: { _, _ in true }
         ) else {
             return matched
@@ -1049,6 +1056,9 @@ public struct FilesGlobTool: Tool, Sendable {
                     enumerator.skipDescendants()
                 }
                 continue
+            }
+            if !recursive, (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                enumerator.skipDescendants()
             }
             guard decision.resolvedPath.hasPrefix(prefix) else {
                 continue
@@ -1170,14 +1180,16 @@ public enum SeatbeltTempStaging: Sendable {
 /// Factory registering the LLM-invokable file tools on a `ToolBus`.
 public enum FilesTools {
     /// Tool names in registration order.
-    public static let toolNames = ["files.read", "files.grep", "files.glob"]
+    public static let toolNames = ["files.read", "files.grep", "files.glob", "files.list", "files.write"]
 
     /// Builds the file tools.
     public static func makeTools(homeDirectoryURL: URL? = nil, filesConfig: FilesConfig = FilesConfig()) -> [any Tool] {
         let read: any Tool = FilesReadTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let grep: any Tool = FilesGrepTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
         let glob: any Tool = FilesGlobTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
-        return [read, grep, glob]
+        let list: any Tool = FilesListTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        let write: any Tool = FilesWriteTool(homeDirectoryURL: homeDirectoryURL, filesConfig: filesConfig)
+        return [read, grep, glob, list, write]
     }
 
     /// Registers the file tools, replacing same-named entries.
