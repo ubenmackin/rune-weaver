@@ -1,55 +1,92 @@
 // Rune Weaver Tools Tests — Messages search, read, and send tool tests.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
 
 /// In-memory stub gateway for hermetic Messages tool tests.
-final class StubMessagesGateway: MessagesGateway, @unchecked Sendable {
-    var searchResults: [MessagesMessageItem] = []
-    var readResults: [MessagesMessageItem] = []
-    var sentMessages: [(recipient: String, text: String)] = []
-    var shouldFailSend: String?
+final class StubMessagesGateway: MessagesGateway, Sendable {
+    private struct State: Sendable {
+        var searchResults: [MessagesMessageItem]
+        var readResults: [MessagesMessageItem]
+        var sentMessages: [(recipient: String, text: String)] = []
+        var shouldFailSend: String?
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+
+    var searchResults: [MessagesMessageItem] {
+        get { state.withLock { $0.searchResults } }
+        set { state.withLock { $0.searchResults = newValue } }
+    }
+
+    var readResults: [MessagesMessageItem] {
+        get { state.withLock { $0.readResults } }
+        set { state.withLock { $0.readResults = newValue } }
+    }
+
+    var sentMessages: [(recipient: String, text: String)] {
+        get { state.withLock { $0.sentMessages } }
+        set { state.withLock { $0.sentMessages = newValue } }
+    }
+
+    var shouldFailSend: String? {
+        get { state.withLock { $0.shouldFailSend } }
+        set { state.withLock { $0.shouldFailSend = newValue } }
+    }
 
     init(
         searchResults: [MessagesMessageItem] = [],
         readResults: [MessagesMessageItem] = []
     ) {
-        self.searchResults = searchResults
-        self.readResults = readResults
+        self.state = OSAllocatedUnfairLock(
+            initialState: State(
+                searchResults: searchResults,
+                readResults: readResults
+            )
+        )
     }
 
     func search(query: String?, recipient: String?, limit: Int, since _: Date? = nil, until _: Date? = nil) async throws -> [MessagesMessageItem] {
-        var results = searchResults
-        if let query, !query.isEmpty, query != "*" {
-            results = results.filter { $0.text.localizedCaseInsensitiveContains(query) }
-        }
-        if let recipient, !recipient.isEmpty {
-            results = results.filter {
-                $0.sender.localizedCaseInsensitiveContains(recipient)
-                    || ($0.chatID?.localizedCaseInsensitiveContains(recipient) ?? false)
+        let results = state.withLock { s in
+            var res = s.searchResults
+            if let query, !query.isEmpty, query != "*" {
+                res = res.filter { $0.text.localizedCaseInsensitiveContains(query) }
             }
+            if let recipient, !recipient.isEmpty {
+                res = res.filter {
+                    $0.sender.localizedCaseInsensitiveContains(recipient)
+                        || ($0.chatID?.localizedCaseInsensitiveContains(recipient) ?? false)
+                }
+            }
+            return res
         }
         return Array(results.prefix(limit))
     }
 
     func read(chatID: String?, recipient: String?, limit: Int, since _: Date? = nil, until _: Date? = nil) async throws -> [MessagesMessageItem] {
-        var results = readResults
-        if let chatID, !chatID.isEmpty {
-            results = results.filter { $0.chatID == chatID }
-        }
-        if let recipient, !recipient.isEmpty {
-            results = results.filter { $0.sender.localizedCaseInsensitiveContains(recipient) }
+        let results = state.withLock { s in
+            var res = s.readResults
+            if let chatID, !chatID.isEmpty {
+                res = res.filter { $0.chatID == chatID }
+            }
+            if let recipient, !recipient.isEmpty {
+                res = res.filter { $0.sender.localizedCaseInsensitiveContains(recipient) }
+            }
+            return res
         }
         return Array(results.prefix(limit))
     }
 
     func send(recipient: String, text: String) async throws -> MessagesSendResult {
-        if let failure = shouldFailSend {
-            throw MessagesToolError.scriptFailed(failure)
+        try state.withLock { s in
+            if let failure = s.shouldFailSend {
+                throw MessagesToolError.scriptFailed(failure)
+            }
+            s.sentMessages.append((recipient: recipient, text: text))
         }
-        sentMessages.append((recipient: recipient, text: text))
         return MessagesSendResult(success: true, recipient: recipient, text: text)
     }
 }

@@ -1,6 +1,7 @@
 // Rune Weaver Tools — Fine-grained sandboxed bash execution tool.
 
 import Foundation
+import os
 import RuneWeaverCore
 
 /// Arguments for `bash.exec`.
@@ -59,48 +60,43 @@ public struct BashResultEnvelope: Codable, Sendable, Equatable {
 }
 
 /// Thread-safe capped output buffer for process stdout/stderr streams.
-final class BashOutputBuffer: @unchecked Sendable {
-    private let lock = NSLock()
-    private var data = Data()
-    private let maxBytes: Int
+final class BashOutputBuffer: Sendable {
+    private struct State: Sendable {
+        var data = Data()
+        let maxBytes: Int
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
 
     init(maxBytes: Int = 1024 * 1024) {
-        self.maxBytes = maxBytes
+        self.state = OSAllocatedUnfairLock(initialState: State(data: Data(), maxBytes: maxBytes))
     }
 
     func append(_ chunk: Data) {
         guard !chunk.isEmpty else { return }
-        lock.lock()
-        defer { lock.unlock() }
-        if data.count < maxBytes {
-            data.append(chunk.prefix(maxBytes - data.count))
+        state.withLock { buffer in
+            if buffer.data.count < buffer.maxBytes {
+                buffer.data.append(chunk.prefix(buffer.maxBytes - buffer.data.count))
+            }
         }
     }
 
     var stringValue: String {
-        lock.lock()
-        defer { lock.unlock() }
-        return String(data: data, encoding: .utf8) ?? ""
+        state.withLock { buffer in
+            String(data: buffer.data, encoding: .utf8) ?? ""
+        }
     }
 }
 
 /// Sendable box holding the timeout cancellation task.
 /// The caller thread stores the handle while the process termination handler
-/// cancels it on an arbitrary queue, so the handle stays behind a lock.
-private final class TaskBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: Task<Void, Never>?
+/// cancels it on an arbitrary queue, so the handle stays behind an unfair lock.
+private final class TaskBox: Sendable {
+    private let stored = OSAllocatedUnfairLock<Task<Void, Never>?>(initialState: nil)
+
     var task: Task<Void, Never>? {
-        get {
-            lock.lock()
-            defer { lock.unlock() }
-            return stored
-        }
-        set {
-            lock.lock()
-            defer { lock.unlock() }
-            stored = newValue
-        }
+        get { stored.withLock { $0 } }
+        set { stored.withLock { $0 = newValue } }
     }
 }
 

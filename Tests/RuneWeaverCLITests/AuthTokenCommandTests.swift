@@ -46,8 +46,9 @@ struct AuthTokenCommandTests {
         do {
             try await command.run()
             Issue.record("Expected the generate command to refuse an already-configured token")
-        } catch is ExitCode {
+        } catch let exitCode as ExitCode {
             // Expected: refusal is a nonzero exit, never a silent overwrite.
+            #expect(exitCode.rawValue != 0)
         }
     }
 

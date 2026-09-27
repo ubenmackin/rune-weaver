@@ -8,7 +8,13 @@
 // stays peek-only and every response reuses the one-shot envelope shape.
 
 import Foundation
+import os
 import RuneWeaverCore
+#if canImport(Darwin)
+    import Darwin
+#elseif canImport(Glibc)
+    import Glibc
+#endif
 
 /// Line framing seam for the persistent IMAP session.
 ///
@@ -39,7 +45,7 @@ public protocol SessionLineTransport: Sendable {
     func terminate() async
 }
 
-/// Exactly-once resume state for one cancellable session line read.
+/// Exactly-once resume coordinator for one cancellable session line read.
 ///
 /// The blocking pipe reader, timeout timer, and task cancellation race; only
 /// the first finisher resumes the continuation while losers exit silently once
@@ -47,14 +53,9 @@ public protocol SessionLineTransport: Sendable {
 /// continuation publishes stores its result so a late publish still delivers
 /// it instead of hanging the read.
 ///
-/// Sendable proof: every access to `continuation`, `published`, `settled`,
-/// `stored`, and `timer` holds `mutex` via `withLock`. `set`, `setTimer`, and
-/// the private `resume(with:)` are the only mutating paths; each captures the
-/// continuation and timer under the lock, then resumes or cancels outside the
-/// lock so a reentrant resume can never deadlock. `CheckedContinuation` and
-/// `DispatchWorkItem` are not statically `Sendable`, so the class stays
-/// `@unchecked Sendable` with the lock as the single synchronization point.
-private final class SessionLineReadState: @unchecked Sendable {
+/// Implemented as an actor to provide safe, race-free synchronization over the
+/// continuation and timeout task without manual locks or unchecked Sendability.
+private actor SessionLineReadCoordinator {
     /// Published continuation awaiting the winning racer.
     private var continuation: CheckedContinuation<String, Error>?
     /// Whether `set` already published the continuation.
@@ -63,40 +64,28 @@ private final class SessionLineReadState: @unchecked Sendable {
     private var settled = false
     /// Winning result stored for a late publish when cancellation wins first.
     private var stored: Result<String, Error>?
-    /// Pending timeout work cancelled once any racer wins.
-    private var timer: DispatchWorkItem?
-    /// Guards continuation, verdict, stored result, and timer.
-    private let mutex = NSLock()
+    /// Pending timeout task cancelled once any racer wins.
+    private var timerTask: Task<Void, Never>?
 
     /// Publishes the continuation, delivering an early winning result when present.
     /// - Parameter continuation: Continuation awaiting the read verdict.
     func set(_ continuation: CheckedContinuation<String, Error>) {
-        let early: Result<String, Error>? = mutex.withLock {
-            guard !published else { return nil }
-            published = true
-            if settled {
-                return stored
-            }
+        guard !published else { return }
+        published = true
+        if settled, let stored {
+            continuation.resume(with: stored)
+        } else {
             self.continuation = continuation
-            return nil
-        }
-        if let early {
-            continuation.resume(with: early)
         }
     }
 
-    /// Records the timeout work so a winning reader or cancellation can drop it.
-    /// - Parameter item: Scheduled timeout work.
-    func setTimer(_ item: DispatchWorkItem) {
-        let shouldCancel: Bool = mutex.withLock {
-            if settled {
-                return true
-            }
-            timer = item
-            return false
-        }
-        if shouldCancel {
-            item.cancel()
+    /// Records the timeout task so a winning reader or cancellation can drop it.
+    /// - Parameter task: Scheduled timeout task.
+    func setTimerTask(_ task: Task<Void, Never>) {
+        if settled {
+            task.cancel()
+        } else {
+            timerTask = task
         }
     }
 
@@ -116,31 +105,22 @@ private final class SessionLineReadState: @unchecked Sendable {
         resume(with: .failure(error))
     }
 
-    private struct ResumeOutcome {
-        let won: Bool
-        let held: CheckedContinuation<String, Error>?
-        let pending: DispatchWorkItem?
-    }
-
-    /// Settles the read unless already settled, cancelling the pending timer.
+    /// Settles the read unless already settled, cancelling the pending timer task.
     /// - Parameter result: Winning verdict.
     /// - Returns: True when this caller won, false for late losers.
-    private func resume(with result: Result<String, Error>) -> Bool {
-        let outcome = mutex.withLock {
-            guard !settled else { return ResumeOutcome(won: false, held: nil, pending: nil) }
-            settled = true
-            stored = result
-            let held = continuation
-            continuation = nil
-            let pending = timer
-            timer = nil
-            return ResumeOutcome(won: true, held: held, pending: pending)
-        }
-        outcome.pending?.cancel()
-        if let held = outcome.held {
+    @discardableResult
+    func resume(with result: Result<String, Error>) -> Bool {
+        guard !settled else { return false }
+        settled = true
+        stored = result
+        timerTask?.cancel()
+        timerTask = nil
+        let held = continuation
+        continuation = nil
+        if let held {
             held.resume(with: result)
         }
-        return outcome.won
+        return true
     }
 }
 
@@ -184,28 +164,29 @@ public enum SessionLineTimeout {
 /// The live drain appends incrementally and keeps only the newest bytes so a
 /// hung helper's last words survive without unbounded growth. Decoding is
 /// lossy-tolerant so a byte-boundary split never drops the whole tail.
-private final class SessionStderrTail: @unchecked Sendable {
+private final class SessionStderrTail: Sendable {
+    private struct State: Sendable {
+        var data = Data()
+        let cap: Int
+    }
+
     /// Guards retained bytes.
-    private let lock = NSLock()
-    /// Newest retained bytes, capped at the transport bound.
-    private var data = Data()
-    /// Maximum bytes retained.
-    private let cap: Int
+    private let state: OSAllocatedUnfairLock<State>
 
     /// Creates a tail store with a byte cap.
     /// - Parameter cap: Maximum bytes retained.
     init(cap: Int) {
-        self.cap = cap
+        self.state = OSAllocatedUnfairLock(initialState: State(data: Data(), cap: cap))
     }
 
     /// Appends a chunk, keeping only the newest capped bytes.
     /// - Parameter chunk: Fresh stderr bytes from the drain.
     func append(_ chunk: Data) {
         guard !chunk.isEmpty else { return }
-        lock.withLock {
-            data.append(chunk)
-            if data.count > cap {
-                data.removeSubrange(0 ..< (data.count - cap))
+        state.withLock { tail in
+            tail.data.append(chunk)
+            if tail.data.count > tail.cap {
+                tail.data.removeSubrange(0 ..< (tail.data.count - tail.cap))
             }
         }
     }
@@ -213,8 +194,8 @@ private final class SessionStderrTail: @unchecked Sendable {
     /// Returns the retained tail as trimmed text.
     /// - Returns: Trimmed stderr text, or empty when nothing was captured.
     func snapshot() -> String {
-        lock.withLock {
-            String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        state.withLock { tail in
+            String(decoding: tail.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         }
     }
 }
@@ -228,21 +209,10 @@ private final class SessionStderrTail: @unchecked Sendable {
 /// transport keeps the last 500 stderr bytes for timeout errors plus the full
 /// 8KB dump for failure events so a stalled helper still leaves its dying words.
 ///
-/// Sendable proof: `Process` and `FileHandle` are not `Sendable`, so the class
-/// stays `@unchecked Sendable`. All handle and process touches hold `ioLock`:
-/// `writeLine` performs the stdin write under `ioLock`, `processIdentifier`
-/// reads the child pid under `ioLock` so it serializes against `terminate`,
-/// `terminate` performs `terminate` plus stdin/stdout/stderr closes under
-/// `ioLock` exactly once via `didTerminate`, the termination handler closes the stderr drain under
-/// `ioLock` after checking `didTerminate` so it serializes against
-/// `terminate` instead of racing its guarded closes, and `blockingReadLine`
-/// captures the stdout handle under `ioLock` then reads outside the lock so
-/// a hung read never stalls termination. A close racing a read surfaces as a
-/// mapped `bridgeFailed` instead of undefined behavior, and the `pending`
-/// buffer stays under `pendingLock`. The stderr drain is cancelled by closing
-/// its handle, and the child is reaped with `waitUntilExit` off the
-/// cooperative pool.
-public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked Sendable {
+/// Sendable proof: All mutable state is isolated behind `ioState` and `pending`
+/// using `OSAllocatedUnfairLock`. The child process is reaped off-pool by pid
+/// via POSIX `waitpid` without capturing non-Sendable references.
+public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
     /// Maximum stderr characters retained for timeout diagnostics.
     ///
     /// Keeps timeout errors readable while preserving the helper's last words;
@@ -255,26 +225,27 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     /// live drain bound and the log dump bound cannot drift; the 500-char
     /// timeout tail stays unchanged for readable timeout errors.
     public static let maxStderrDumpBytes = MailSessionEventLog.maxStderrDumpBytes
-    /// Underlying helper process. Touched only while holding `ioLock`.
+    /// Underlying helper process. Touched only while holding `ioState`.
     private let process: Process
-    /// Writable stdin handle. Written and closed only while holding `ioLock`.
+    /// Writable stdin handle. Written and closed only while holding `ioState`.
     private let stdinHandle: FileHandle
-    /// Readable stdout handle. Captured under `ioLock`, read outside it.
+    /// Readable stdout handle. Captured under `ioState`, read outside it.
     private let stdoutHandle: FileHandle
-    /// Readable stderr handle. Drained off-pool; closed under `ioLock`.
+    /// Readable stderr handle. Drained off-pool; closed under `ioState`.
     private let stderrHandle: FileHandle
     /// Retained stderr tail feeding timeout errors. Appended only by the drain.
     private let stderrTail: SessionStderrTail
     /// Retained stderr dump feeding failure events. Appended only by the drain.
     private let stderrDump: SessionStderrTail
     /// Buffered stdout bytes awaiting a newline boundary.
-    private var pending = Data()
-    /// Guards buffered stdout bytes across concurrent readers.
-    private let pendingLock = NSLock()
-    /// Whether termination already ran. Guarded by `ioLock`.
-    private var didTerminate = false
+    private let pending = OSAllocatedUnfairLock(initialState: Data())
+    /// Termination and handle closure state.
+    private struct IOState: Sendable {
+        var didTerminate = false
+    }
+
     /// Guards process, stdin/stdout/stderr handles, and termination state.
-    private let ioLock = NSLock()
+    private let ioState = OSAllocatedUnfairLock(initialState: IOState())
 
     /// Spawns the session helper with piped stdio.
     /// - Parameters:
@@ -324,12 +295,12 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
         self.stdoutHandle = stdoutPipe.fileHandleForReading
         self.stderrHandle = stderrReading
         // Reap the child without blocking the caller: the handler closes the
-        // stderr drain handle under `ioLock` after checking `didTerminate` so
+        // stderr drain handle under `ioState` after checking `didTerminate` so
         // it serializes against `terminate` instead of racing its guarded closes.
         self.process.terminationHandler = { [weak self] _ in
             guard let self else { return }
-            self.ioLock.withLock {
-                guard !self.didTerminate else { return }
+            self.ioState.withLock { state in
+                guard !state.didTerminate else { return }
                 try? self.stderrHandle.close()
             }
         }
@@ -344,13 +315,16 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
 
     /// Writes one JSON line plus a newline to the helper stdin.
     ///
-    /// The stdin write holds `ioLock` so it serializes against `terminate`
+    /// The stdin write holds `ioState` so it serializes against `terminate`
     /// closes; a write racing teardown maps to a transport-phrased error.
     /// - Parameter line: Single JSON document without a trailing newline.
     public func writeLine(_ line: String) async throws {
         let payload = Data((line + "\n").utf8)
         do {
-            try ioLock.withLock {
+            try ioState.withLock { state in
+                guard !state.didTerminate else {
+                    throw EmailIMAPError.bridgeFailed("IMAP session closed")
+                }
                 try stdinHandle.write(contentsOf: payload)
             }
         } catch {
@@ -371,50 +345,61 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     public func readLine(timeout: TimeInterval) async throws -> String {
         let budget = max(0, timeout)
         try Task.checkCancellation()
-        let state = SessionLineReadState()
+        let coordinator = SessionLineReadCoordinator()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                state.set(continuation)
+                Task {
+                    await coordinator.set(continuation)
+                }
                 DispatchQueue.global(qos: .utility).async { [self] in
                     do {
                         let line = try self.blockingReadLine()
-                        state.resume(returning: line)
+                        Task {
+                            await coordinator.resume(returning: line)
+                        }
                     } catch {
-                        state.resume(throwing: error)
+                        Task {
+                            await coordinator.resume(throwing: error)
+                        }
                     }
                 }
-                let timer = DispatchWorkItem { [self] in
-                    // Read the retained tail at fire time so diagnostics written
-                    // just before the stall still ride the timeout detail.
+                let timer = Task {
+                    try? await Task.sleep(nanoseconds: UInt64(budget * 1_000_000_000))
+                    guard !Task.isCancelled else { return }
                     let tail = self.stderrTail.snapshot()
-                    state.resume(
+                    await coordinator.resume(
                         throwing: EmailIMAPError.bridgeFailed(
                             SessionLineTimeout.timeoutMessage(timeout: timeout, stderrTail: tail)
                         )
                     )
                 }
-                state.setTimer(timer)
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + budget, execute: timer)
+                Task {
+                    await coordinator.setTimerTask(timer)
+                }
                 if Task.isCancelled {
-                    state.resume(throwing: CancellationError())
+                    Task {
+                        await coordinator.resume(throwing: CancellationError())
+                    }
                 }
             }
         } onCancel: {
-            state.resume(throwing: CancellationError())
+            Task {
+                await coordinator.resume(throwing: CancellationError())
+            }
         }
     }
 
     /// Terminates the helper and closes stdio exactly once, then reaps off-pool.
     ///
-    /// Holds `ioLock` across the termination flag, `terminate`, and all three
+    /// Holds `ioState` across the termination flag, `terminate`, and all three
     /// handle closes so concurrent writers serialize instead of writing into a
     /// half-closed pipe. Closing stdout/stderr unblocks the stray blocking
-    /// reader and the stderr drain; `waitUntilExit` runs off the cooperative
-    /// pool so teardown never stalls the executor.
+    /// reader and the stderr drain; `waitpid` runs off the cooperative
+    /// pool on GCD so teardown never stalls the executor or captures non-Sendable state.
     public func terminate() async {
-        let shouldReap: Bool = ioLock.withLock {
-            guard !didTerminate else { return false }
-            didTerminate = true
+        let shouldReap: Bool = ioState.withLock { state in
+            guard !state.didTerminate else { return false }
+            state.didTerminate = true
             process.terminate()
             try? stdinHandle.close()
             try? stdoutHandle.close()
@@ -422,22 +407,20 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
             return true
         }
         guard shouldReap else { return }
-        // `self` is `@unchecked Sendable`, so capturing it keeps the reap
-        // closure `Sendable`; `process` itself is an immutable let whose only
-        // mutable operations already ran under `ioLock` above.
-        DispatchQueue.global(qos: .utility).async { [self] in
-            self.process.waitUntilExit()
+        let pid = process.processIdentifier
+        DispatchQueue.global(qos: .utility).async {
+            var status: Int32 = 0
+            waitpid(pid, &status, 0)
         }
     }
 
     /// Spawned helper pid for session events.
     ///
-    /// Read under `ioLock` so it serializes against a concurrent `terminate`;
-    /// the pid is stable once the spawn succeeds, and the lock keeps the
-    /// non-`Sendable` process touch inside the single synchronization point.
-    /// Lets event lines tie diagnostics to the owning helper.
+    /// Read under `ioState` so it serializes against a concurrent `terminate`;
+    /// the pid is stable once the spawn succeeds. Lets event lines tie diagnostics
+    /// to the owning helper.
     public var processIdentifier: Int32? {
-        ioLock.withLock { process.processIdentifier }
+        ioState.withLock { _ in process.processIdentifier }
     }
 
     /// Newest retained helper stderr for failure dumps.
@@ -450,19 +433,19 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
 
     /// Blocks the calling thread until one newline-terminated line arrives.
     ///
-    /// The stdout handle is captured under `ioLock` and read outside it so a
+    /// The stdout handle is captured under `ioState` and read outside it so a
     /// hung helper never holds the lock while `terminate` waits to close. A
     /// close racing the read throws and maps to a transport-phrased closure
-    /// error; buffered bytes stay under `pendingLock`.
+    /// error; buffered bytes stay under `pending`.
     /// - Returns: Single line without the trailing newline.
     private func blockingReadLine() throws -> String {
         while true {
-            let buffered: Data? = pendingLock.withLock {
-                guard let newline = pending.firstIndex(of: 10) else {
+            let buffered: Data? = pending.withLock { pendingData in
+                guard let newline = pendingData.firstIndex(of: 10) else {
                     return nil
                 }
-                let slice = Data(pending.prefix(upTo: newline))
-                pending.removeSubrange(pending.startIndex ... newline)
+                let slice = Data(pendingData.prefix(upTo: newline))
+                pendingData.removeSubrange(pendingData.startIndex ... newline)
                 return slice
             }
             if let buffered {
@@ -471,7 +454,7 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
                 }
                 return line
             }
-            let stdoutReading: FileHandle = ioLock.withLock { stdoutHandle }
+            let stdoutReading: FileHandle = ioState.withLock { _ in stdoutHandle }
             let chunk: Data?
             do {
                 chunk = try stdoutReading.read(upToCount: 4096)
@@ -483,8 +466,8 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
             guard let chunk, !chunk.isEmpty else {
                 throw EmailIMAPError.bridgeFailed("IMAP session connection closed")
             }
-            pendingLock.withLock {
-                pending.append(chunk)
+            pending.withLock { pendingData in
+                pendingData.append(chunk)
             }
         }
     }
@@ -499,103 +482,67 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
 /// stderr mirrors the live retained tail through the same timeout helper, so
 /// live-drain retention is covered through this seam without spawning helpers.
 ///
-/// Sendable proof: every queue, counter, flag, budget, and stderr access holds `mutex`
-/// via `withLock` or `lock`/`unlock`. All stored state is value types, and the
-/// lock is the single synchronization point across `writeLine`, `readLine`,
-/// `enqueue`, `setHang`, `setStderr`, and `terminate`. The class stays `@unchecked Sendable`
-/// only because the compiler cannot verify the manual lock discipline.
-public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Sendable {
+/// Sendable proof: All mutable state is bundled in Sendable `State` and protected
+/// by `OSAllocatedUnfairLock`, providing verified compile-time Sendable conformance.
+public final class FakeSessionLineTransport: SessionLineTransport, Sendable {
+    private struct State: Sendable {
+        var written: [String] = []
+        var responses: [String]
+        var hang: Bool
+        var stderrText: String
+        var pid: Int32?
+        var terminated = false
+        var terminates = 0
+        var reads = 0
+        var timeouts: [TimeInterval] = []
+    }
+
+    private let state: OSAllocatedUnfairLock<State>
+
     /// Every line written through `writeLine`, in order.
     public var writtenLines: [String] {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _written
+        state.withLock { $0.written }
     }
 
     /// Number of `writeLine` calls observed.
     public var writeCount: Int {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _written.count
+        state.withLock { $0.written.count }
     }
 
     /// Number of `readLine` calls observed.
     public var readCount: Int {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _reads
+        state.withLock { $0.reads }
     }
 
     /// Number of `terminate` calls observed.
     public var terminateCount: Int {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _terminates
+        state.withLock { $0.terminates }
     }
 
     /// Whether `terminate` has run at least once.
     public var isTerminated: Bool {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _terminated
+        state.withLock { $0.terminated }
     }
 
     /// Requested read budgets in call order, for budget assertions.
     public var readTimeouts: [TimeInterval] {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _timeouts
+        state.withLock { $0.timeouts }
     }
 
     /// Canned stderr tail surfaced on timeouts, mirroring the live drain.
     public var stderrText: String {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _stderrText
+        state.withLock { $0.stderrText }
     }
 
     /// Hermetic pid for the seam, nil unless a test injects one.
-    ///
-    /// Keeps hermetic runs pid-free by default while the live pipe returns the
-    /// child pid; session events omit the pid field when nil so fake lines stay
-    /// parseable. A supplied pid lets pool tests correlate pool lines with the
-    /// spawn line through one shared value without dialing.
     public var processIdentifier: Int32? {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return _pid
+        state.withLock { $0.pid }
     }
 
     /// Canned stderr dump for failure events, mirroring the live 8KB drain.
-    ///
-    /// Caps through `MailSessionEventLog.cappedDump` so the hermetic bound
-    /// shares one owner with the live drain and the log event.
     public var retainedStderr: String {
-        mutex.lock()
-        defer { mutex.unlock() }
-        return MailSessionEventLog.cappedDump(_stderrText)
+        state.withLock { MailSessionEventLog.cappedDump($0.stderrText) }
     }
-
-    /// Guards in-memory queues and counters.
-    private let mutex = NSLock()
-    /// Recorded writes in arrival order.
-    private var _written: [String] = []
-    /// Queued response lines served first-in first-out.
-    private var _responses: [String]
-    /// When true, reads report a timeout without serving the queue.
-    private var _hang: Bool
-    /// Canned stderr tail appended to timeout errors via the shared helper.
-    private var _stderrText: String
-    /// Hermetic pid returned for pool correlation, nil for pid-free runs.
-    private var _pid: Int32?
-    /// Whether termination ran.
-    private var _terminated = false
-    /// Termination call count.
-    private var _terminates = 0
-    /// Read call count.
-    private var _reads = 0
-    /// Requested read budgets in call order.
-    private var _timeouts: [TimeInterval] = []
 
     /// Creates an in-memory transport with canned responses.
     /// - Parameters:
@@ -604,79 +551,75 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     ///   - stderrText: Canned stderr tail appended to timeout errors, mirroring the live drain.
     ///   - pid: Hermetic pid for spawn correlation, nil keeps runs pid-free.
     public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "", pid: Int32? = nil) {
-        self._responses = responses
-        self._hang = hangReads
-        self._stderrText = stderrText
-        self._pid = pid
+        self.state = OSAllocatedUnfairLock(
+            initialState: State(
+                responses: responses,
+                hang: hangReads,
+                stderrText: stderrText,
+                pid: pid
+            )
+        )
     }
 
     /// Queues one more response line for the next read.
     /// - Parameter line: Single JSON response line.
     public func enqueue(_ line: String) {
-        mutex.withLock {
-            _responses.append(line)
+        state.withLock { fakeState in
+            fakeState.responses.append(line)
         }
     }
 
     /// Toggles hang mode for upcoming reads.
     /// - Parameter hang: When true, reads report a timeout.
     public func setHang(_ hang: Bool) {
-        mutex.withLock {
-            _hang = hang
+        state.withLock { fakeState in
+            fakeState.hang = hang
         }
     }
 
     /// Sets the canned stderr tail for upcoming timeout errors.
-    ///
-    /// Mirrors the live stderr drain through the shared timeout helper so
-    /// timeout copy stays identical between the live and hermetic paths.
     /// - Parameter text: Stderr text retained for the next hung read.
     public func setStderr(_ text: String) {
-        mutex.withLock {
-            _stderrText = text
+        state.withLock { fakeState in
+            fakeState.stderrText = text
         }
     }
 
     /// Records one written line.
     /// - Parameter line: Single JSON document without a trailing newline.
     public func writeLine(_ line: String) async throws {
-        mutex.withLock {
-            _written.append(line)
+        state.withLock { fakeState in
+            fakeState.written.append(line)
         }
     }
 
     /// Serves one queued line or reports a timeout when hanging.
-    ///
-    /// An empty queue surfaces as a closed connection so tests fail fast
-    /// instead of blocking. Hang mode mirrors the live timeout wording exactly,
-    /// including the retained stderr tail, without waiting out the budget,
-    /// keeping timeout tests hermetic and fast.
     /// - Parameter timeout: Budget used for the timeout message and recording.
     /// - Returns: Next queued response line.
     public func readLine(timeout: TimeInterval) async throws -> String {
-        let (hanging, tail): (Bool, String) = mutex.withLock {
-            _reads += 1
-            _timeouts.append(timeout)
-            return (_hang, _stderrText)
+        let (hanging, tail): (Bool, String) = state.withLock { fakeState in
+            fakeState.reads += 1
+            fakeState.timeouts.append(timeout)
+            return (fakeState.hang, fakeState.stderrText)
         }
         if hanging {
             throw EmailIMAPError.bridgeFailed(
                 SessionLineTimeout.timeoutMessage(timeout: timeout, stderrTail: tail)
             )
         }
-        return try mutex.withLock {
-            guard !_responses.isEmpty else {
+        return try state.withLock { fakeState in
+            guard !fakeState.responses.isEmpty else {
                 throw EmailIMAPError.bridgeFailed("IMAP session connection closed")
             }
-            return _responses.removeFirst()
+            return fakeState.responses.removeFirst()
         }
     }
 
     /// Marks the fake terminated and counts the call.
     public func terminate() async {
-        mutex.withLock {
-            _terminated = true
-            _terminates += 1
+        state.withLock { fakeState in
+            fakeState.terminated = true
+            fakeState.terminates += 1
         }
     }
 }
@@ -917,7 +860,11 @@ public actor EmailIMAPSession {
             }
         }
     }
+}
 
+// MARK: - Mailbox Operations & Execution Helpers
+
+extension EmailIMAPSession {
     /// Reads the STATUS snapshot for one mailbox over the open session.
     /// - Parameter mailbox: Mailbox to inspect.
     /// - Returns: Next UID plus validity token for fixed-window anchoring.
