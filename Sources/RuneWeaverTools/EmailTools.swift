@@ -14,10 +14,11 @@ public struct EmailSearchTool: Tool, Sendable {
             + "Use query \"*\" or empty for the most-recent messages. "
             + "Pass mailbox to narrow to one folder; each hit labels its mailbox for email.read. "
             + "Pass hasAttachment (true/false) to filter for messages with or without attachments. "
+            + "Pass since/until as YYYY-MM-DD local-day or full ISO8601 datetimes to bound the window (since inclusive, until exclusive). "
             + "Attachment filtering scans the newest candidates first (up to five times the requested limit, minimum fifty per mailbox), "
             + "so older matches outside that newest window are not returned. "
             + "Returns matching message ids, headers, snippets, and mailboxes."
-    /// Function-calling contract for `account`, `query`, `limit`, and `mailbox`.
+    /// Function-calling contract for `account`, `query`, `limit`, `mailbox`, `since`, and `until`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"account":{"type":"string","description":"Account nickname "#
@@ -28,7 +29,11 @@ public struct EmailSearchTool: Tool, Sendable {
                 + #"to search (e.g. INBOX, Sent); omitted or blank searches every selectable mailbox"},"#
                 + #""folder":{"type":"string","description":"Alias for mailbox"},"#
                 + #""hasAttachment":{"type":"boolean","description":"Optional filter: true for messages with attachments, false for messages without; "#
-                + #"filtered searches scan the newest candidates first (up to 5x limit, minimum 50 per mailbox)"}}"#
+                + #"filtered searches scan the newest candidates first (up to 5x limit, minimum 50 per mailbox)"},"#
+                + #""since":{"type":"string","description":"Optional inclusive lower bound YYYY-MM-DD local-day or full ISO8601 datetime; "#
+                + #"date-only means 00:00:00 local inclusive; omitted or blank means unbounded"},"#
+                + #""until":{"type":"string","description":"Optional exclusive upper bound YYYY-MM-DD local-day or full ISO8601 datetime; "#
+                + #"date-only means 00:00:00 local of that day exclusive; omitted or blank means unbounded"}}"#
                 + #","required":["account","query"],"additionalProperties":false}"#
         )
     /// Always allowed: search never changes mailbox state.
@@ -99,6 +104,17 @@ public struct EmailSearchTool: Tool, Sendable {
                 return .failure(error.localizedDescription, callID: input.callID)
             }
         }
+        // Parse the temporal window before any credential resolution so malformed
+        // bounds fail closed with the parse copy even when the password is missing.
+        // Blank behaves as omitted inside TemporalFilter, and inversion rejects.
+        let temporalRange: TemporalRange
+        do {
+            temporalRange = try TemporalFilter.parse(since: args.trimmedSince, until: args.trimmedUntil)
+        } catch {
+            return .failure(error.localizedDescription, callID: input.callID)
+        }
+        let sinceDate = temporalRange.since
+        let untilDate = temporalRange.until
         let accountName = args.trimmedAccount
         let query = args.trimmedQuery
         guard !accountName.isEmpty else {
@@ -134,6 +150,8 @@ public struct EmailSearchTool: Tool, Sendable {
                     effectiveQuery: effectiveQuery,
                     limit: args.limit,
                     hasAttachment: args.hasAttachment,
+                    since: sinceDate,
+                    until: untilDate,
                     callID: input.callID
                 )
             }
@@ -143,6 +161,8 @@ public struct EmailSearchTool: Tool, Sendable {
                 effectiveQuery: effectiveQuery,
                 limit: args.limit,
                 hasAttachment: args.hasAttachment,
+                since: sinceDate,
+                until: untilDate,
                 callID: input.callID
             )
         } catch {
@@ -157,6 +177,15 @@ extension EmailSearchTool {
         hits.filter { $0.matches(hasAttachment: hasAttachment) }
     }
 
+    /// Reapplies the temporal window locally so gateways returning day-granular
+    /// IMAP hits still honor exact datetimes. Undated hits only survive an
+    /// unbounded window; any bound drops unparseable dates fail-closed.
+    private func filteredByTemporal(_ hits: [EmailSearchHit], since: Date?, until: Date?) -> [EmailSearchHit] {
+        guard since != nil || until != nil else { return hits }
+        let range = TemporalRange(since: since, until: until)
+        return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
+    }
+
     /// Searches one explicit mailbox with a clear unknown-folder error.
     private func singleMailboxOutput(
         account: EmailAccount,
@@ -165,6 +194,8 @@ extension EmailSearchTool {
         effectiveQuery: String,
         limit: Int,
         hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -180,9 +211,11 @@ extension EmailSearchTool {
             mailbox: canonical,
             query: effectiveQuery,
             limit: limit,
-            hasAttachment: hasAttachment
+            hasAttachment: hasAttachment,
+            since: since,
+            until: until
         )
-        let labeled = filteredByAttachment(hits, hasAttachment: hasAttachment).map {
+        let labeled = filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
             EmailSearchHit(
                 id: $0.id,
                 subject: $0.subject,
@@ -218,6 +251,8 @@ extension EmailSearchTool {
         effectiveQuery: String,
         limit: Int,
         hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil,
         callID: String
     ) async throws -> ToolOutput {
         let listed = try await gateway.listMailboxes(credentials: credentials)
@@ -235,9 +270,11 @@ extension EmailSearchTool {
                     mailbox: box,
                     query: effectiveQuery,
                     limit: limit,
-                    hasAttachment: hasAttachment
+                    hasAttachment: hasAttachment,
+                    since: since,
+                    until: until
                 )
-                let labeled = filteredByAttachment(hits, hasAttachment: hasAttachment).map {
+                let labeled = filteredByTemporal(filteredByAttachment(hits, hasAttachment: hasAttachment), since: since, until: until).map {
                     EmailSearchHit(
                         id: $0.id,
                         subject: $0.subject,

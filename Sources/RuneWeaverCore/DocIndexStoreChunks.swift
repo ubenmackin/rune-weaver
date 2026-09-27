@@ -105,7 +105,12 @@ import os
         }
 
         /// Full-text search over chunk text with a LIKE fallback.
-        static func searchKeyword(query: String, limit: Int, dbPath: String) throws -> [IndexedChunk] {
+        ///
+        /// A dated window filters on the parent `indexed_documents.mtime`
+        /// before ranking: present bounds join chunks to their document and
+        /// compare epoch seconds, so undated parents (NULL `mtime`) never
+        /// match a bounded query while an unbounded query keeps today's rows.
+        static func searchKeyword(query: String, limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { return [] }
@@ -114,15 +119,64 @@ import os
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             let clamped = SQLiteHelpers.sqliteLimit(min(limit, maxResults))
+            if since == nil, until == nil {
+                var statement: OpaquePointer?
+                let sql = """
+                SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector
+                FROM indexed_chunks_fts JOIN indexed_chunks c ON c.rowid = indexed_chunks_fts.rowid
+                WHERE indexed_chunks_fts MATCH ? ORDER BY rank, c.rowid DESC LIMIT ?;
+                """
+                if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
+                    SQLiteHelpers.bindText(statement, index: 1, value: ftsEscaped(trimmed))
+                    sqlite3_bind_int(statement, 2, clamped)
+                    var results: [IndexedChunk] = []
+                    var step = sqlite3_step(statement)
+                    while step == SQLITE_ROW {
+                        if let chunk = readChunk(statement) {
+                            results.append(chunk)
+                        }
+                        step = sqlite3_step(statement)
+                    }
+                    let succeeded = (step == SQLITE_DONE)
+                    sqlite3_finalize(statement)
+                    if succeeded, !results.isEmpty {
+                        return results
+                    }
+                    // Fall through to the LIKE scan when FTS succeeds empty or errors
+                    // after prepare, so stemming gaps and token mismatches still recall
+                    // literal matches.
+                } else if statement != nil {
+                    sqlite3_finalize(statement)
+                }
+                return try likeSearch(query: trimmed, limit: clamped, handle: handle)
+            }
             var statement: OpaquePointer?
-            let sql = """
-            SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector
-            FROM indexed_chunks_fts JOIN indexed_chunks c ON c.rowid = indexed_chunks_fts.rowid
-            WHERE indexed_chunks_fts MATCH ? ORDER BY rank, c.rowid DESC LIMIT ?;
-            """
+            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector "
+                + "FROM indexed_chunks_fts JOIN indexed_chunks c ON c.rowid = indexed_chunks_fts.rowid "
+                + "JOIN indexed_documents d ON d.id = c.document_id "
+                + "WHERE indexed_chunks_fts MATCH ?"
+            if since != nil {
+                sql += " AND d.mtime >= ?"
+            }
+            if until != nil {
+                sql += " AND d.mtime < ?"
+            }
+            sql += " ORDER BY rank, c.rowid DESC LIMIT ?;"
             if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
-                SQLiteHelpers.bindText(statement, index: 1, value: ftsEscaped(trimmed))
-                sqlite3_bind_int(statement, 2, clamped)
+                var bindIndex: Int32 = 1
+                SQLiteHelpers.bindText(statement, index: bindIndex, value: ftsEscaped(trimmed))
+                bindIndex += 1
+                let range = TemporalRange(since: since, until: until)
+                let bounds = TemporalFilter.unixBounds(for: range)
+                if let lower = bounds.since {
+                    sqlite3_bind_double(statement, bindIndex, lower)
+                    bindIndex += 1
+                }
+                if let upper = bounds.until {
+                    sqlite3_bind_double(statement, bindIndex, upper)
+                    bindIndex += 1
+                }
+                sqlite3_bind_int(statement, bindIndex, clamped)
                 var results: [IndexedChunk] = []
                 var step = sqlite3_step(statement)
                 while step == SQLITE_ROW {
@@ -136,17 +190,21 @@ import os
                 if succeeded, !results.isEmpty {
                     return results
                 }
-                // Fall through to the LIKE scan when FTS succeeds empty or errors
-                // after prepare, so stemming gaps and token mismatches still recall
+                // Fall through to the bounded LIKE scan when FTS succeeds empty
+                // or errors after prepare, so the dated window still applies to
                 // literal matches.
             } else if statement != nil {
                 sqlite3_finalize(statement)
             }
-            return try likeSearch(query: trimmed, limit: clamped, handle: handle)
+            return try likeSearch(query: trimmed, limit: clamped, handle: handle, since: since, until: until)
         }
 
         /// Token-overlap LIKE scan used when FTS returns nothing.
-        private static func likeSearch(query: String, limit: Int32, handle: OpaquePointer?) throws -> [IndexedChunk] {
+        ///
+        /// The bounded form joins chunks to `indexed_documents` so the same
+        /// `mtime` window applies to literal matches; NULL parents stay
+        /// excluded because the comparison never holds for NULL.
+        private static func likeSearch(query: String, limit: Int32, handle: OpaquePointer?, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             let maxLikePatterns = 50
             let tokens = Array(Tokenization.tokenize(query).sorted().prefix(maxLikePatterns - 1))
             guard !tokens.isEmpty else { return [] }
@@ -161,17 +219,58 @@ import os
                 }
             }
             let conditions = patterns.map { _ in "chunk_text LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
-            let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
-                + "WHERE (\(conditions)) ORDER BY rowid DESC LIMIT ?;"
+            if since == nil, until == nil {
+                let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
+                    + "WHERE (\(conditions)) ORDER BY rowid DESC LIMIT ?;"
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare keyword search")
+                }
+                defer { sqlite3_finalize(statement) }
+                for (index, pattern) in patterns.enumerated() {
+                    SQLiteHelpers.bindText(statement, index: Int32(index + 1), value: pattern)
+                }
+                sqlite3_bind_int(statement, Int32(patterns.count + 1), limit)
+                var results: [IndexedChunk] = []
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    if let chunk = readChunk(statement) {
+                        results.append(chunk)
+                    }
+                }
+                return results
+            }
+            let boundedConditions = patterns.map { _ in "c.chunk_text LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
+            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
+                + "JOIN indexed_documents d ON d.id = c.document_id "
+                + "WHERE (\(boundedConditions))"
+            if since != nil {
+                sql += " AND d.mtime >= ?"
+            }
+            if until != nil {
+                sql += " AND d.mtime < ?"
+            }
+            sql += " ORDER BY c.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare keyword search")
             }
             defer { sqlite3_finalize(statement) }
-            for (index, pattern) in patterns.enumerated() {
-                SQLiteHelpers.bindText(statement, index: Int32(index + 1), value: pattern)
+            var bindIndex: Int32 = 1
+            for pattern in patterns {
+                SQLiteHelpers.bindText(statement, index: bindIndex, value: pattern)
+                bindIndex += 1
             }
-            sqlite3_bind_int(statement, Int32(patterns.count + 1), limit)
+            let likeRange = TemporalRange(since: since, until: until)
+            let likeBounds = TemporalFilter.unixBounds(for: likeRange)
+            if let lower = likeBounds.since {
+                sqlite3_bind_double(statement, bindIndex, lower)
+                bindIndex += 1
+            }
+            if let upper = likeBounds.until {
+                sqlite3_bind_double(statement, bindIndex, upper)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, limit)
             var results: [IndexedChunk] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let chunk = readChunk(statement) {
@@ -184,20 +283,60 @@ import os
         /// Reads the newest chunks carrying an embedding, bounded by `limit`.
         /// Newest-first ordering keeps the capped semantic pool over recent
         /// writes; callers needing full-corpus recall must page the bound.
-        static func chunkVectors(limit: Int, dbPath: String) throws -> [IndexedChunk] {
+        ///
+        /// A dated window joins to `indexed_documents` so only chunks whose
+        /// parent event time falls in `[since, until)` survive; NULL parents
+        /// stay excluded while unbounded reads keep today's newest-first rows.
+        static func chunkVectors(limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
-            let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
-                + "WHERE is_vector = 1 ORDER BY rowid DESC LIMIT ?;"
+            if since == nil, until == nil {
+                let sql = "SELECT id, document_id, ordinal, chunk_text, embedding, is_vector FROM indexed_chunks "
+                    + "WHERE is_vector = 1 ORDER BY rowid DESC LIMIT ?;"
+                var statement: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                    throw DocIndexError.persistenceFailed("Could not prepare vector read")
+                }
+                defer { sqlite3_finalize(statement) }
+                sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(min(limit, maxResults)))
+                var results: [IndexedChunk] = []
+                while sqlite3_step(statement) == SQLITE_ROW {
+                    if let chunk = readChunk(statement) {
+                        results.append(chunk)
+                    }
+                }
+                return results
+            }
+            var sql = "SELECT c.id, c.document_id, c.ordinal, c.chunk_text, c.embedding, c.is_vector FROM indexed_chunks c "
+                + "JOIN indexed_documents d ON d.id = c.document_id "
+                + "WHERE c.is_vector = 1"
+            if since != nil {
+                sql += " AND d.mtime >= ?"
+            }
+            if until != nil {
+                sql += " AND d.mtime < ?"
+            }
+            sql += " ORDER BY c.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
                 throw DocIndexError.persistenceFailed("Could not prepare vector read")
             }
             defer { sqlite3_finalize(statement) }
-            sqlite3_bind_int(statement, 1, SQLiteHelpers.sqliteLimit(min(limit, maxResults)))
+            var bindIndex: Int32 = 1
+            let vectorRange = TemporalRange(since: since, until: until)
+            let vectorBounds = TemporalFilter.unixBounds(for: vectorRange)
+            if let lower = vectorBounds.since {
+                sqlite3_bind_double(statement, bindIndex, lower)
+                bindIndex += 1
+            }
+            if let upper = vectorBounds.until {
+                sqlite3_bind_double(statement, bindIndex, upper)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(min(limit, maxResults)))
             var results: [IndexedChunk] = []
             while sqlite3_step(statement) == SQLITE_ROW {
                 if let chunk = readChunk(statement) {

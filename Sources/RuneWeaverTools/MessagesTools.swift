@@ -107,9 +107,16 @@ public struct MessagesSendResult: Sendable, Equatable, Codable {
 /// Interface for executing Messages operations.
 public protocol MessagesGateway: Sendable {
     /// Searches messages across all conversations.
-    func search(query: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem]
+    ///
+    /// Bounds are already-resolved instants: `since` is inclusive and `until`
+    /// is exclusive, with nil meaning unbounded on that side. Undated rows
+    /// never match once either bound is present.
+    func search(query: String?, recipient: String?, limit: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem]
     /// Reads conversation history for a given chat or recipient.
-    func read(chatID: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem]
+    ///
+    /// Bounds follow the same inclusive-since, exclusive-until contract as
+    /// search, with nil meaning unbounded on that side.
+    func read(chatID: String?, recipient: String?, limit: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem]
     /// Sends a message to a recipient.
     func send(recipient: String, text: String) async throws -> MessagesSendResult
 }
@@ -124,7 +131,7 @@ public struct ProductionMessagesGateway: MessagesGateway {
         self.chatDatabasePath = chatDatabasePath
     }
 
-    public func search(query: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem] {
+    public func search(query: String?, recipient: String?, limit: Int, since: Date? = nil, until: Date? = nil) async throws -> [MessagesMessageItem] {
         #if canImport(SQLite3)
             let snapshotURL: URL
             do {
@@ -159,7 +166,9 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 handle: handle,
                 query: query,
                 recipient: recipient,
-                limit: max(limit * 2, 20)
+                limit: max(limit * 2, 20),
+                since: since,
+                until: until
             )
 
             let names = MessagesContactNameResolver().displayNames()
@@ -175,7 +184,7 @@ public struct ProductionMessagesGateway: MessagesGateway {
                     }
                 }
                 let sender = row.isFromMe ? "Me" : MessagesIndexer.displayName(for: row, names: names)
-                let dateStr = row.date.map { isoFormatter.string(from: MessagesIndexer.date(fromMacEpoch: $0)) } ?? ""
+                let dateStr = row.date.map { isoFormatter.string(from: TemporalFilter.date(fromMacEpoch: $0)) } ?? ""
                 let atts = (try? MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)) ?? []
                 let attNames = atts.map { MessagesIndexer.attachmentName(for: $0) }
                 let tapback = MessagesTapback.description(for: row.associatedMessageType)
@@ -204,7 +213,7 @@ public struct ProductionMessagesGateway: MessagesGateway {
         #endif
     }
 
-    public func read(chatID: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem] {
+    public func read(chatID: String?, recipient: String?, limit: Int, since: Date? = nil, until: Date? = nil) async throws -> [MessagesMessageItem] {
         #if canImport(SQLite3)
             let snapshotURL: URL
             do {
@@ -239,7 +248,9 @@ public struct ProductionMessagesGateway: MessagesGateway {
                 handle: handle,
                 chatID: chatID,
                 recipient: recipient,
-                limit: limit
+                limit: limit,
+                since: since,
+                until: until
             )
 
             let names = MessagesContactNameResolver().displayNames()
@@ -249,7 +260,7 @@ public struct ProductionMessagesGateway: MessagesGateway {
             for row in rows.reversed() {
                 let resolved = MessagesIndexer.resolveText(for: row).text ?? ""
                 let sender = row.isFromMe ? "Me" : MessagesIndexer.displayName(for: row, names: names)
-                let dateStr = row.date.map { isoFormatter.string(from: MessagesIndexer.date(fromMacEpoch: $0)) } ?? ""
+                let dateStr = row.date.map { isoFormatter.string(from: TemporalFilter.date(fromMacEpoch: $0)) } ?? ""
                 let atts = (try? MessagesDatabaseIO.attachments(handle: handle, messageID: row.rowID)) ?? []
                 let attNames = atts.map { MessagesIndexer.attachmentName(for: $0) }
                 let tapback = MessagesTapback.description(for: row.associatedMessageType)
@@ -345,20 +356,26 @@ public struct MessagesSearchArgs: Sendable, Equatable, Decodable {
     public let query: String?
     public let recipient: String?
     public let limit: Int
+    public let since: String?
+    public let until: String?
 
     public static let defaultLimit = 10
     public static let maxLimit = 50
 
-    public init(query: String? = nil, recipient: String? = nil, limit: Int = defaultLimit) {
+    public init(query: String? = nil, recipient: String? = nil, limit: Int = defaultLimit, since: String? = nil, until: String? = nil) {
         self.query = query
         self.recipient = recipient
         self.limit = min(max(limit, 1), Self.maxLimit)
+        self.since = Self.normalizedBound(since)
+        self.until = Self.normalizedBound(until)
     }
 
     private enum CodingKeys: String, CodingKey {
         case query
         case recipient
         case limit
+        case since
+        case until
     }
 
     public init(from decoder: Decoder) throws {
@@ -366,7 +383,17 @@ public struct MessagesSearchArgs: Sendable, Equatable, Decodable {
         let query = try container.decodeIfPresent(String.self, forKey: .query)
         let recipient = try container.decodeIfPresent(String.self, forKey: .recipient)
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        self.init(query: query, recipient: recipient, limit: rawLimit)
+        let since = try container.decodeIfPresent(String.self, forKey: .since)
+        let until = try container.decodeIfPresent(String.self, forKey: .until)
+        self.init(query: query, recipient: recipient, limit: rawLimit, since: since, until: until)
+    }
+
+    /// Blank strings behave as omitted so whitespace-only bounds stay unbounded.
+    private static func normalizedBound(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 
@@ -388,14 +415,18 @@ public struct MessagesReadArgs: Sendable, Equatable, Decodable {
     public let chatID: String?
     public let recipient: String?
     public let limit: Int
+    public let since: String?
+    public let until: String?
 
     public static let defaultLimit = 20
     public static let maxLimit = 100
 
-    public init(chatID: String? = nil, recipient: String? = nil, limit: Int = defaultLimit) {
+    public init(chatID: String? = nil, recipient: String? = nil, limit: Int = defaultLimit, since: String? = nil, until: String? = nil) {
         self.chatID = chatID
         self.recipient = recipient
         self.limit = min(max(limit, 1), Self.maxLimit)
+        self.since = Self.normalizedBound(since)
+        self.until = Self.normalizedBound(until)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -403,6 +434,8 @@ public struct MessagesReadArgs: Sendable, Equatable, Decodable {
         case chatIDUnderscore = "chat_id"
         case recipient
         case limit
+        case since
+        case until
     }
 
     public init(from decoder: Decoder) throws {
@@ -411,7 +444,17 @@ public struct MessagesReadArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(String.self, forKey: .chatIDUnderscore)
         let recipient = try container.decodeIfPresent(String.self, forKey: .recipient)
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        self.init(chatID: chatID, recipient: recipient, limit: rawLimit)
+        let since = try container.decodeIfPresent(String.self, forKey: .since)
+        let until = try container.decodeIfPresent(String.self, forKey: .until)
+        self.init(chatID: chatID, recipient: recipient, limit: rawLimit, since: since, until: until)
+    }
+
+    /// Blank strings behave as omitted so whitespace-only bounds stay unbounded.
+    private static func normalizedBound(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 }
 
@@ -507,7 +550,9 @@ public struct MessagesSearchTool: Tool, Sendable {
         rawValue: #"{"type":"object","properties":{"query":{"type":"string","description":"Search term to match "#
             + #"against message text; omitted, empty, or \"*\" returns newest messages"},"#
             + #""recipient":{"type":"string","description":"Optional phone number, email address, or contact name to filter by"},"#
-            + #""limit":{"type":"integer","description":"Maximum messages to return (1-50, default 10)","minimum":1,"maximum":50}},"#
+            + #""limit":{"type":"integer","description":"Maximum messages to return (1-50, default 10)","minimum":1,"maximum":50},"#
+            + #""since":{"type":"string","description":"Optional lower bound YYYY-MM-DD (00:00:00 local inclusive) or full ISO8601 datetime"},"#
+            + #""until":{"type":"string","description":"Optional upper bound YYYY-MM-DD (00:00:00 local exclusive) or full ISO8601 datetime"}},"#
             + #""additionalProperties":false}"#
     )
 
@@ -531,8 +576,16 @@ public struct MessagesSearchTool: Tool, Sendable {
             return .failure(errorMsg, callID: input.callID)
         }
 
+        let range: TemporalRange
         do {
-            let messages = try await gateway.search(query: args.query, recipient: args.recipient, limit: args.limit)
+            range = try TemporalFilter.parse(since: args.since, until: args.until)
+        } catch {
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return .failure(detail, callID: input.callID)
+        }
+
+        do {
+            let messages = try await gateway.search(query: args.query, recipient: args.recipient, limit: args.limit, since: range.since, until: range.until)
             let envelope = MessagesSearchEnvelope(query: args.query, recipient: args.recipient, messages: messages)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
@@ -558,7 +611,9 @@ public struct MessagesReadTool: Tool, Sendable {
         rawValue: #"{"type":"object","properties":{"chatId":{"type":"string","description":"Chat identifier or GUID from messages.search"},"#
             + #""chat_id":{"type":"string","description":"Alias for chatId"},"#
             + #""recipient":{"type":"string","description":"Recipient phone number, email, or handle"},"#
-            + #""limit":{"type":"integer","description":"Maximum messages to return (1-100, default 20)","minimum":1,"maximum":100}},"#
+            + #""limit":{"type":"integer","description":"Maximum messages to return (1-100, default 20)","minimum":1,"maximum":100},"#
+            + #""since":{"type":"string","description":"Optional lower bound YYYY-MM-DD (00:00:00 local inclusive) or full ISO8601 datetime"},"#
+            + #""until":{"type":"string","description":"Optional upper bound YYYY-MM-DD (00:00:00 local exclusive) or full ISO8601 datetime"}},"#
             + #""additionalProperties":false}"#
     )
 
@@ -582,6 +637,14 @@ public struct MessagesReadTool: Tool, Sendable {
             return .failure(errorMsg, callID: input.callID)
         }
 
+        let range: TemporalRange
+        do {
+            range = try TemporalFilter.parse(since: args.since, until: args.until)
+        } catch {
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return .failure(detail, callID: input.callID)
+        }
+
         let chatID = args.chatID?.trimmingCharacters(in: .whitespacesAndNewlines)
         let recipient = args.recipient?.trimmingCharacters(in: .whitespacesAndNewlines)
         if chatID == nil || chatID!.isEmpty, recipient == nil || recipient!.isEmpty {
@@ -590,7 +653,7 @@ public struct MessagesReadTool: Tool, Sendable {
         }
 
         do {
-            let messages = try await gateway.read(chatID: chatID, recipient: recipient, limit: args.limit)
+            let messages = try await gateway.read(chatID: chatID, recipient: recipient, limit: args.limit, since: range.since, until: range.until)
             let envelope = MessagesReadEnvelope(chatID: chatID, recipient: recipient, messages: messages)
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys, .prettyPrinted]

@@ -117,15 +117,15 @@ public actor EpisodeStore {
         }
     }
 
-    /// Full-text search over episode content.
-    public func search(query: String, limit: Int = 10) async throws -> [Episode] {
+    /// Full-text search over episode content, optionally restricted to a dated window.
+    public func search(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [Episode] {
         guard limit > 0 else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
         let dbPath = self.dbPath
         let clamped = min(limit, Self.maxResults)
         return try await SQLiteSerialIO.run {
-            try EpisodeStoreIO.search(query: trimmed, dbPath: dbPath, limit: clamped)
+            try EpisodeStoreIO.search(query: trimmed, dbPath: dbPath, limit: clamped, since: since, until: until)
         }
     }
 
@@ -288,11 +288,11 @@ enum EpisodeStoreIO {
     }
 
     /// Full-text search over episode content.
-    static func search(query: String, dbPath: String, limit: Int) throws -> [Episode] {
+    static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
         #if canImport(SQLite3)
-            return try SQLiteEpisodeStore.search(query: query, dbPath: dbPath, limit: limit)
+            return try SQLiteEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
         #else
-            return try JSONEpisodeStore.search(query: query, dbPath: dbPath, limit: limit)
+            return try JSONEpisodeStore.search(query: query, dbPath: dbPath, limit: limit, since: since, until: until)
         #endif
     }
 
@@ -613,22 +613,44 @@ enum EpisodeStoreIO {
         }
 
         /// Full-text search over episode content (FTS5 with LIKE fallback).
-        static func search(query: String, dbPath: String, limit: Int) throws -> [Episode] {
+        ///
+        /// A dated window filters on `timestamp` before ranking: `since` is
+        /// inclusive and `until` is exclusive, so adjacent day windows tile
+        /// without overlap. Both the FTS5 path and the LIKE fallback carry
+        /// the same predicates so stemming gaps cannot dodge the window.
+        static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let expanded = (dbPath as NSString).expandingTildeInPath
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
             let ftsQuery = ftsEscaped(query)
-            let sql = """
-            SELECT e.id, e.session_id, e.role, e.content, e.timestamp, e.metadata
-            FROM episodes_fts JOIN episodes e ON e.rowid = episodes_fts.rowid
-            WHERE episodes_fts MATCH ? ORDER BY rank, e.rowid DESC LIMIT ?;
-            """
+            var sql = "SELECT e.id, e.session_id, e.role, e.content, e.timestamp, e.metadata "
+                + "FROM episodes_fts JOIN episodes e ON e.rowid = episodes_fts.rowid "
+                + "WHERE episodes_fts MATCH ?"
+            if since != nil {
+                sql += " AND e.timestamp >= ?"
+            }
+            if until != nil {
+                sql += " AND e.timestamp < ?"
+            }
+            sql += " ORDER BY rank, e.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
             if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
-                bindText(statement, index: 1, value: ftsQuery)
-                sqlite3_bind_int(statement, 2, SQLiteHelpers.sqliteLimit(limit))
+                var bindIndex: Int32 = 1
+                bindText(statement, index: bindIndex, value: ftsQuery)
+                bindIndex += 1
+                let range = TemporalRange(since: since, until: until)
+                let bounds = TemporalFilter.unixBounds(for: range)
+                if let lower = bounds.since {
+                    sqlite3_bind_double(statement, bindIndex, lower)
+                    bindIndex += 1
+                }
+                if let upper = bounds.until {
+                    sqlite3_bind_double(statement, bindIndex, upper)
+                    bindIndex += 1
+                }
+                sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
                 var results: [Episode] = []
                 var step = sqlite3_step(statement)
                 while step == SQLITE_ROW {
@@ -661,17 +683,36 @@ enum EpisodeStoreIO {
                 guard patterns.count < maxLikePatterns else { break }
             }
             let conditions = patterns.map { _ in "content LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
-            let likeSQL = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
-                + "WHERE (\(conditions)) ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
+            var likeSQL = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
+                + "WHERE (\(conditions))"
+            if since != nil {
+                likeSQL += " AND timestamp >= ?"
+            }
+            if until != nil {
+                likeSQL += " AND timestamp < ?"
+            }
+            likeSQL += " ORDER BY timestamp DESC, rowid DESC LIMIT ?;"
             var fallback: OpaquePointer?
             guard sqlite3_prepare_v2(handle, likeSQL, -1, &fallback, nil) == SQLITE_OK else {
                 throw EpisodeStoreError.persistenceFailed("Could not prepare episode search")
             }
             defer { sqlite3_finalize(fallback) }
-            for (index, pattern) in patterns.enumerated() {
-                bindText(fallback, index: Int32(index + 1), value: pattern)
+            var fallbackIndex: Int32 = 1
+            for pattern in patterns {
+                bindText(fallback, index: fallbackIndex, value: pattern)
+                fallbackIndex += 1
             }
-            sqlite3_bind_int(fallback, Int32(patterns.count + 1), SQLiteHelpers.sqliteLimit(limit))
+            let likeRange = TemporalRange(since: since, until: until)
+            let likeBounds = TemporalFilter.unixBounds(for: likeRange)
+            if let lower = likeBounds.since {
+                sqlite3_bind_double(fallback, fallbackIndex, lower)
+                fallbackIndex += 1
+            }
+            if let upper = likeBounds.until {
+                sqlite3_bind_double(fallback, fallbackIndex, upper)
+                fallbackIndex += 1
+            }
+            sqlite3_bind_int(fallback, fallbackIndex, SQLiteHelpers.sqliteLimit(limit))
             var results: [Episode] = []
             while sqlite3_step(fallback) == SQLITE_ROW {
                 if let episode = readEpisode(fallback) {
@@ -1025,12 +1066,23 @@ enum EpisodeStoreIO {
         }
 
         /// Token-overlap search over episode content.
-        static func search(query: String, dbPath: String, limit: Int) throws -> [Episode] {
+        static func search(query: String, dbPath: String, limit: Int, since: Date? = nil, until: Date? = nil) throws -> [Episode] {
             guard limit > 0 else { return [] }
             let all = try readAll(dbPath: dbPath)
             let queryTokens = Tokenization.tokenize(query)
             guard !queryTokens.isEmpty else { return [] }
-            let scored = all.compactMap { episode -> (Episode, Int)? in
+            // The dated window filters before scoring so the JSON fallback
+            // matches the SQLite predicates (`since` inclusive, `until` exclusive).
+            let windowed = all.filter { episode in
+                if let since, episode.timestamp < since {
+                    return false
+                }
+                if let until, episode.timestamp >= until {
+                    return false
+                }
+                return true
+            }
+            let scored = windowed.compactMap { episode -> (Episode, Int)? in
                 let contentTokens = Tokenization.tokenize(episode.content)
                 guard let raw = Tokenization.keywordScore(
                     queryTokens: queryTokens,

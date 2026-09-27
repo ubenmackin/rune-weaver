@@ -176,6 +176,44 @@ public protocol EmailIMAPGateway: Sendable {
         hasAttachment: Bool?
     ) async throws -> [EmailSearchHit]
 
+    /// Searches one mailbox for `query` within an optional temporal window.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to search.
+    ///   - query: Free-text query matched against subject, sender, and body.
+    ///   - limit: Maximum hits, bounded to `1...50`.
+    ///   - since: Inclusive lower bound, or nil for unbounded below.
+    ///   - until: Exclusive upper bound, or nil for unbounded above.
+    /// - Returns: Matching hits, newest first.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        since: Date?,
+        until: Date?
+    ) async throws -> [EmailSearchHit]
+
+    /// Searches one mailbox for `query` with attachment and temporal filters.
+    /// - Parameters:
+    ///   - credentials: Resolved connection fields plus password.
+    ///   - mailbox: Mailbox to search.
+    ///   - query: Free-text query matched against subject, sender, and body.
+    ///   - limit: Maximum hits, bounded to `1...50`.
+    ///   - hasAttachment: Optional attachment-presence filter.
+    ///   - since: Inclusive lower bound, or nil for unbounded below.
+    ///   - until: Exclusive upper bound, or nil for unbounded above.
+    /// - Returns: Matching hits, newest first.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?,
+        since: Date?,
+        until: Date?
+    ) async throws -> [EmailSearchHit]
+
     /// Fetches one message from one mailbox.
     func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
 
@@ -219,6 +257,51 @@ public extension EmailIMAPGateway {
     ) async throws -> [EmailSearchHit] {
         let hits = try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit)
         return hits.filter { $0.matches(hasAttachment: hasAttachment) }
+    }
+
+    /// Default temporal shim routing through the combined filter so stubs without
+    /// IMAP date support still honor the window via local post-filtering.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        since: Date?,
+        until: Date?
+    ) async throws -> [EmailSearchHit] {
+        try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            hasAttachment: nil,
+            since: since,
+            until: until
+        )
+    }
+
+    /// Default combined shim for gateways that only implement the older shapes.
+    /// Reapplies the window locally with the shared date parser so day-granular
+    /// bridges still honor exact datetimes; undated hits only survive unbounded windows.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?,
+        since: Date?,
+        until: Date?
+    ) async throws -> [EmailSearchHit] {
+        let hits = try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            hasAttachment: hasAttachment
+        )
+        guard since != nil || until != nil else { return hits }
+        let range = TemporalRange(since: since, until: until)
+        return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
     }
 
     /// Default compatibility shim over the single required `mailboxListing`.
@@ -369,9 +452,21 @@ struct EmailIMAPBridgeRequest: Encodable {
     let markAsRead: Bool?
     /// Optional filter for whether the email has attachments (search only).
     let hasAttachment: Bool?
+    /// IMAP `DD-Mon-YYYY` lower bound for `SINCE` (search only, nil means unbounded below).
+    let since: String?
+    /// IMAP `DD-Mon-YYYY` upper bound for `BEFORE` (search only, nil means unbounded above).
+    let until: String?
 
     /// Creates a search request.
-    static func search(credentials: ResolvedEmailCredentials, query: String, limit: Int, mailbox: String = "INBOX", hasAttachment: Bool? = nil) -> Self {
+    static func search(
+        credentials: ResolvedEmailCredentials,
+        query: String,
+        limit: Int,
+        mailbox: String = "INBOX",
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil
+    ) -> Self {
         Self(
             op: "search",
             host: credentials.host,
@@ -386,7 +481,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: nil,
             markAsRead: nil,
-            hasAttachment: hasAttachment
+            hasAttachment: hasAttachment,
+            since: since.map { TemporalFilter.imapDateString(from: $0) },
+            until: until.map { TemporalFilter.imapUntilDateString(from: $0) }
         )
     }
 
@@ -406,7 +503,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: nil,
             markAsRead: nil,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 
@@ -431,7 +530,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: nil,
             markAsRead: nil,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 
@@ -453,7 +554,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: nil,
             markAsRead: nil,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 
@@ -486,7 +589,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: destination,
             markAsRead: markAsRead,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 
@@ -506,7 +611,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: rawMessage.base64EncodedString(),
             destination: nil,
             markAsRead: nil,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 
@@ -530,7 +637,9 @@ struct EmailIMAPBridgeRequest: Encodable {
             rawMessageBase64: nil,
             destination: nil,
             markAsRead: nil,
-            hasAttachment: nil
+            hasAttachment: nil,
+            since: nil,
+            until: nil
         )
     }
 }
@@ -558,13 +667,17 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
-    /// Searches one mailbox via the Python helper, optionally filtering by attachment presence.
+    /// Searches one mailbox via the Python helper with attachment and temporal filters.
+    /// Date bounds ride as IMAP `DD-Mon-YYYY` `since`/`until` keys and are re-applied
+    /// exactly in Swift so day-granular IMAP results still honor full datetimes.
     public func search(
         credentials: ResolvedEmailCredentials,
         mailbox: String,
         query: String,
         limit: Int,
-        hasAttachment: Bool?
+        hasAttachment: Bool?,
+        since: Date?,
+        until: Date?
     ) async throws -> [EmailSearchHit] {
         // Reject out-of-range limits before touching the subprocess so an unchecked
         // value can never reach the Python slice and widen the result window.
@@ -580,12 +693,14 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             query: effectiveQuery,
             limit: limit,
             mailbox: trimmedMailbox,
-            hasAttachment: hasAttachment
+            hasAttachment: hasAttachment,
+            since: since,
+            until: until
         )
         let data = try await run(request: request)
         do {
             let hits = try EmailBridgeParsing.parseSearchPayload(data)
-            return hits.map {
+            let labeled = hits.map {
                 EmailSearchHit(
                     id: $0.id,
                     subject: $0.subject,
@@ -597,6 +712,9 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
                     attachmentCount: $0.attachmentCount
                 )
             }
+            guard since != nil || until != nil else { return labeled }
+            let range = TemporalRange(since: since, until: until)
+            return labeled.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
         } catch let error as EmailIMAPError {
             throw error
         } catch {
@@ -604,9 +722,48 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         }
     }
 
+    /// Searches one mailbox via the Python helper within an optional temporal window.
+    public func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        since: Date?,
+        until: Date?
+    ) async throws -> [EmailSearchHit] {
+        try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            hasAttachment: nil,
+            since: since,
+            until: until
+        )
+    }
+
+    /// Searches one mailbox via the Python helper, optionally filtering by attachment presence.
+    public func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool?
+    ) async throws -> [EmailSearchHit] {
+        try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            hasAttachment: hasAttachment,
+            since: nil,
+            until: nil
+        )
+    }
+
     /// Searches one mailbox via the Python helper.
     public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
-        try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit, hasAttachment: nil)
+        try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit, hasAttachment: nil, since: nil, until: nil)
     }
 
     /// Lists selectable mailboxes plus the common hierarchy delimiter.

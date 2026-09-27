@@ -55,6 +55,10 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public let mailbox: String?
     /// Optional filter for whether the email has attachments (nil means no filtering).
     public let hasAttachment: Bool?
+    /// Optional inclusive lower bound (`YYYY-MM-DD` local day or full ISO8601; nil means unbounded below).
+    public let since: String?
+    /// Optional exclusive upper bound (`YYYY-MM-DD` local day or full ISO8601; nil means unbounded above).
+    public let until: String?
 
     /// Default hit count when the caller omits `limit`.
     public static let defaultLimit = 10
@@ -62,12 +66,14 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     public static let maxLimit = 50
 
     /// Memberwise initializer with limit clamping.
-    public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil, hasAttachment: Bool? = nil) {
+    public init(account: String, query: String, limit: Int = defaultLimit, mailbox: String? = nil, hasAttachment: Bool? = nil, since: String? = nil, until: String? = nil) {
         self.account = account
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
         self.mailbox = mailbox
         self.hasAttachment = hasAttachment
+        self.since = EmailMailboxNormalization.trimmed(since)
+        self.until = EmailMailboxNormalization.trimmed(until)
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -80,6 +86,8 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
         case hasAttachments
         case hasAttachmentSnake = "has_attachment"
         case hasAttachmentsSnake = "has_attachments"
+        case since
+        case until
     }
 
     /// Decodes arguments, trimming whitespace and clamping `limit`.
@@ -95,7 +103,9 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachments)
             ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachmentSnake)
             ?? container.decodeIfPresent(Bool.self, forKey: .hasAttachmentsSnake)
-        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox, hasAttachment: hasAttachment)
+        let rawSince = try container.decodeIfPresent(String.self, forKey: .since)
+        let rawUntil = try container.decodeIfPresent(String.self, forKey: .until)
+        self.init(account: account, query: query, limit: rawLimit, mailbox: mailbox, hasAttachment: hasAttachment, since: rawSince, until: rawUntil)
     }
 
     /// Trimmed account nickname.
@@ -111,6 +121,16 @@ public struct EmailSearchArgs: Sendable, Equatable, Decodable {
     /// Trimmed mailbox narrowing, or nil when omitted or blank (meaning every selectable mailbox).
     public var trimmedMailbox: String? {
         EmailMailboxNormalization.trimmed(mailbox)
+    }
+
+    /// Trimmed inclusive lower bound, or nil when omitted or blank (meaning unbounded below).
+    public var trimmedSince: String? {
+        EmailMailboxNormalization.trimmed(since)
+    }
+
+    /// Trimmed exclusive upper bound, or nil when omitted or blank (meaning unbounded above).
+    public var trimmedUntil: String? {
+        EmailMailboxNormalization.trimmed(until)
     }
 }
 
