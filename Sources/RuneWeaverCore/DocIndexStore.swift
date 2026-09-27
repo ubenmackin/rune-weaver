@@ -277,27 +277,38 @@ public actor DocIndexStore {
         }
     }
 
-    /// Full-text search over chunk text.
+    /// Full-text search over chunk text, optionally restricted to a dated window on the parent document event time.
     /// - Parameters:
     ///   - query: Raw search text.
     ///   - limit: Maximum chunks returned.
+    ///   - since: Inclusive lower bound on `indexed_documents.mtime`, or nil for unbounded.
+    ///   - until: Exclusive upper bound on `indexed_documents.mtime`, or nil for unbounded.
     /// - Returns: Matching chunks, best-ranked first.
-    public func searchKeyword(query: String, limit: Int = 10) async throws -> [IndexedChunk] {
+    public func searchKeyword(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
         let dbPath = self.dbPath
+        // Canonicalize the dated window through the shared temporal type so
+        // since stays inclusive and until stays exclusive by construction.
+        let range = TemporalRange(since: since, until: until)
         return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath)
+            try DocIndexStoreIO.searchKeyword(query: query, limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         }
     }
 
-    /// Reads chunks that carry an embedding for the semantic path.
+    /// Reads chunks that carry an embedding for the semantic path, optionally restricted to a dated window.
     /// The store returns the newest vector chunks first, bounded by `limit`,
     /// so a capped pool favors recent writes over the oldest rows.
-    /// - Parameter limit: Maximum chunks returned.
+    /// - Parameters:
+    ///   - limit: Maximum chunks returned.
+    ///   - since: Inclusive lower bound on `indexed_documents.mtime`, or nil for unbounded.
+    ///   - until: Exclusive upper bound on `indexed_documents.mtime`, or nil for unbounded.
     /// - Returns: Vector chunks, newest first.
-    public func chunkVectors(limit: Int = 100) async throws -> [IndexedChunk] {
+    public func chunkVectors(limit: Int = 100, since: Date? = nil, until: Date? = nil) async throws -> [IndexedChunk] {
         let dbPath = self.dbPath
+        // Canonicalize the dated window through the shared temporal type so
+        // since stays inclusive and until stays exclusive by construction.
+        let range = TemporalRange(since: since, until: until)
         return try await SQLiteSerialIO.run(lane: .indexing) {
-            try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath)
+            try DocIndexStoreIO.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         }
     }
 
@@ -520,18 +531,26 @@ enum DocIndexStoreIO {
     }
 
     /// Full-text search over chunk text.
-    static func searchKeyword(query: String, limit: Int, dbPath: String) throws -> [IndexedChunk] {
+    ///
+    /// The dated window rides the shared temporal type so since stays
+    /// inclusive and until stays exclusive by construction.
+    static func searchKeyword(query: String, limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
         #if canImport(SQLite3)
-            return try SQLiteDocIndexStore.searchKeyword(query: query, limit: limit, dbPath: dbPath)
+            let range = TemporalRange(since: since, until: until)
+            return try SQLiteDocIndexStore.searchKeyword(query: query, limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif
     }
 
     /// Reads the newest chunks that carry an embedding, bounded by `limit`.
-    static func chunkVectors(limit: Int, dbPath: String) throws -> [IndexedChunk] {
+    ///
+    /// The dated window rides the shared temporal type so since stays
+    /// inclusive and until stays exclusive by construction.
+    static func chunkVectors(limit: Int, dbPath: String, since: Date? = nil, until: Date? = nil) throws -> [IndexedChunk] {
         #if canImport(SQLite3)
-            return try SQLiteDocIndexStore.chunkVectors(limit: limit, dbPath: dbPath)
+            let range = TemporalRange(since: since, until: until)
+            return try SQLiteDocIndexStore.chunkVectors(limit: limit, dbPath: dbPath, since: range.since, until: range.until)
         #else
             throw DocIndexError.storeUnavailable("SQLite3 is unavailable on this platform")
         #endif

@@ -239,12 +239,12 @@ public actor MemoryEngine {
         try await episodeStore.compactSessions(olderThan: olderThan)
     }
 
-    /// Searches episodic memory by keyword.
-    public func searchEpisodes(query: String, limit: Int = 10) async throws -> [MemoryResult] {
+    /// Searches episodic memory by keyword, optionally restricted to a dated window.
+    public func searchEpisodes(query: String, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [MemoryResult] {
         guard limit > 0 else { return [] }
         let clamped = min(limit, Self.maxPerTierResults)
         let episodes = try await withEpisodic {
-            try await episodeStore.search(query: query, limit: clamped)
+            try await episodeStore.search(query: query, limit: clamped, since: since, until: until)
         }
         return episodes.enumerated().map { index, episode in
             MemoryResult(

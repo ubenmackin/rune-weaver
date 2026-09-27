@@ -607,6 +607,15 @@ private enum EmailIMAPBridgeScriptTail {
                 except Exception:
                     limit = 10
                 limit = max(1, min(limit, \#(EmailIMAPLimits.maxSearchLimit)))
+                since_imap = str(req.get("since") or "").strip()
+                until_imap = str(req.get("until") or "").strip()
+                date_prefix = ""
+                if since_imap and until_imap:
+                    date_prefix = "SINCE %s BEFORE %s" % (since_imap, until_imap)
+                elif since_imap:
+                    date_prefix = "SINCE %s" % since_imap
+                elif until_imap:
+                    date_prefix = "BEFORE %s" % until_imap
                 try:
                     if re.fullmatch(r"UID \d+:\d+", query):
                         # Bounded backfill paging uses a verbatim fixed window so
@@ -615,12 +624,23 @@ private enum EmailIMAPBridgeScriptTail {
                         # window builder, and the shared limit slice below keeps
                         # each window to one bounded page. The mailbox select
                         # above stays quoted through the shared quoter.
-                        typ, data = conn.uid("search", None, query)
+                        # A dated UID window intersects the date prefix; undated
+                        # windows send the criterion byte for byte.
+                        if date_prefix:
+                            typ, data = conn.uid("search", None, date_prefix + " " + query)
+                        else:
+                            typ, data = conn.uid("search", None, query)
                     elif not query or query == "*":
-                        typ, data = conn.uid("search", None, "ALL")
+                        if date_prefix:
+                            typ, data = conn.uid("search", None, date_prefix)
+                        else:
+                            typ, data = conn.uid("search", None, "ALL")
                     else:
                         esc = query.replace("\\", "\\\\").replace('"', '\\"')
-                        criteria = 'OR OR SUBJECT "%s" FROM "%s" BODY "%s"' % (esc, esc, esc)
+                        if date_prefix:
+                            criteria = '%s OR OR SUBJECT "%s" FROM "%s" BODY "%s"' % (date_prefix, esc, esc, esc)
+                        else:
+                            criteria = 'OR OR SUBJECT "%s" FROM "%s" BODY "%s"' % (esc, esc, esc)
                         ctyp, cdata = None, None
                         try:
                             ctyp, cdata = conn.uid("search", "CHARSET", "UTF-8", criteria)

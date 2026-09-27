@@ -721,8 +721,10 @@ public actor EmailIMAPSession {
     ///   - mailbox: Mailbox to search.
     ///   - query: Free-text query matched against subject, sender, and body.
     ///   - limit: Maximum hits, bounded to `1...50`.
+    ///   - since: Inclusive lower bound, or nil for unbounded below.
+    ///   - until: Exclusive upper bound, or nil for unbounded above.
     /// - Returns: Matching hits, newest first.
-    public func search(mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+    public func search(mailbox: String, query: String, limit: Int, since: Date?, until: Date?) async throws -> [EmailSearchHit] {
         guard (1 ... EmailSearchArgs.maxLimit).contains(limit) else {
             throw EmailIMAPError.validationFailed(
                 "Invalid search limit: limit must be 1...\(EmailSearchArgs.maxLimit)"
@@ -733,17 +735,37 @@ public actor EmailIMAPSession {
         let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let effectiveQuery = EmailIMAPValidation.isAllQuery(trimmedQuery) ? "" : trimmedQuery
+        var payload: [String: String] = ["mailbox": trimmedMailbox, "query": effectiveQuery, "limit": String(limit)]
+        if let since {
+            payload["since"] = TemporalFilter.imapDateString(from: since)
+        }
+        if let until {
+            payload["until"] = TemporalFilter.imapUntilDateString(from: until)
+        }
         let data = try await send(
             op: "search",
-            payload: ["mailbox": trimmedMailbox, "query": effectiveQuery, "limit": String(limit)]
+            payload: payload
         )
         do {
-            return try EmailBridgeParsing.parseSearchPayload(data)
+            let hits = try EmailBridgeParsing.parseSearchPayload(data)
+            guard since != nil || until != nil else { return hits }
+            let range = TemporalRange(since: since, until: until)
+            return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
         } catch let error as EmailIMAPError {
             throw error
         } catch {
             throw EmailIMAPError.decodeFailed(error.localizedDescription)
         }
+    }
+
+    /// Searches one mailbox over the open session.
+    /// - Parameters:
+    ///   - mailbox: Mailbox to search.
+    ///   - query: Free-text query matched against subject, sender, and body.
+    ///   - limit: Maximum hits, bounded to `1...50`.
+    /// - Returns: Matching hits, newest first.
+    public func search(mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
+        try await search(mailbox: mailbox, query: query, limit: limit, since: nil, until: nil)
     }
 
     /// Fetches one message over the open session.

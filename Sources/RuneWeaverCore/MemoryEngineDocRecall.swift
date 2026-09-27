@@ -14,10 +14,10 @@ import Foundation
 
 public extension MemoryEngine {
     /// Recalls across episodic, semantic, document-index, and profile tiers.
-    func recall(query: String, embedding: [Float]? = nil, limit: Int = 10) async throws -> [MemoryResult] {
+    func recall(query: String, embedding: [Float]? = nil, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [MemoryResult] {
         guard limit > 0 else { return [] }
         let perTier = min(limit, Self.maxPerTierResults)
-        let episodic = try await searchEpisodes(query: query, limit: perTier)
+        let episodic = try await searchEpisodes(query: query, limit: perTier, since: since, until: until)
         let semanticRaw = await querySemantic(query: query, embedding: embedding ?? [], limit: perTier)
         let semantic: [MemoryResult] = if (embedding ?? []).isEmpty {
             semanticRaw.map { Self.normalizedSemantic($0) }
@@ -25,7 +25,7 @@ public extension MemoryEngine {
             semanticRaw
         }
         let profile = profileResults(query: query, limit: perTier)
-        let docIndex = await recallDocuments(query: query, embedding: embedding, limit: perTier)
+        let docIndex = await recallDocuments(query: query, embedding: embedding, limit: perTier, since: since, until: until)
         let merged = episodic + semantic + docIndex + profile
         let calibrated = merged.map { Self.calibrated($0) }
         let sorted = calibrated.sorted(by: Self.recallOrder)
@@ -47,11 +47,15 @@ public extension MemoryEngine {
     ///   - query: Raw user query.
     ///   - embedding: Query embedding for the vector path, or nil for keyword-only.
     ///   - limit: Maximum chunk results.
+    ///   - since: Inclusive lower bound on the parent document event time, or nil for unbounded.
+    ///   - until: Exclusive upper bound on the parent document event time, or nil for unbounded.
     /// - Returns: Calibrated doc-index results carrying the index watermark.
     func recallDocuments(
         query: String,
         embedding: [Float]? = nil,
-        limit: Int = 5
+        limit: Int = 5,
+        since: Date? = nil,
+        until: Date? = nil
     ) async -> [MemoryResult] {
         guard limit > 0, let docIndexStore else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -60,9 +64,11 @@ public extension MemoryEngine {
         // Keep the vector scan wider than the returned page so a strong
         // semantic match is not crowded out by keyword hits. The store caps
         // the pool to the newest rows, keeping recent writes visible at scale.
+        // The dated window filters candidates before ranking so calibration,
+        // watermark, and per-tier caps stay unchanged.
         let pool = min(max(clamped * Self.docIndexCandidateMultiplier, clamped), Self.maxPerTierResults)
-        let keyword = await (try? docIndexStore.searchKeyword(query: trimmed, limit: pool)) ?? []
-        let vectors = await (try? docIndexStore.chunkVectors(limit: pool)) ?? []
+        let keyword = await (try? docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)) ?? []
+        let vectors = await (try? docIndexStore.chunkVectors(limit: pool, since: since, until: until)) ?? []
         let queryEmbedding = (embedding?.isEmpty == false) ? embedding : nil
         let candidates = Self.docIndexCandidates(keyword: keyword, vectors: vectors, queryEmbedding: queryEmbedding)
         guard !candidates.isEmpty else { return [] }

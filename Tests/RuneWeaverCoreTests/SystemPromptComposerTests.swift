@@ -200,6 +200,48 @@ struct SystemPromptComposerTests {
     }
 
     @Test
+    func `Temporal rule guides since-until windows with July example`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let prompt = SystemPromptComposer.compose(tools: tools)
+        let lowered = prompt.lowercased()
+        // Temporal windows must use explicit ranges instead of keyword guesses.
+        #expect(lowered.contains("yesterday"))
+        #expect(lowered.contains("single-date"))
+        #expect(lowered.contains("month-window"))
+        #expect(lowered.contains("since plus until instead of keyword guessing"))
+        // July vacation is the canonical fan-out shape across recall plus live tools.
+        #expect(prompt.contains("since 2026-07-01 until 2026-08-01"))
+        #expect(prompt.contains("memories.recall"))
+        #expect(prompt.contains("email.search"))
+        #expect(prompt.contains("messages.search"))
+        // Date-only days stay local with inclusive start and exclusive end.
+        #expect(lowered.contains("local calendar days"))
+        #expect(lowered.contains("since inclusive"))
+        #expect(lowered.contains("until exclusive"))
+        #expect(prompt.contains("Current date: grounds relative terms"))
+    }
+
+    @Test
+    func `Temporal rule sits alongside freshness guardrail and scheduled prompts inherit it`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let prompt = SystemPromptComposer.compose(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
+        // Freshness guardrail stays intact next to the temporal rule.
+        #expect(prompt.contains("current as of last night"))
+        #expect(prompt.lowercased().contains("prefer live"))
+        #expect(prompt.contains("since 2026-07-01 until 2026-08-01"))
+        // Current-date line still grounds relative terms.
+        #expect(prompt.contains("Current date: 2026-09-19"))
+        // Scheduled runs share the base prompt so they inherit the same rule.
+        let scheduled = SystemPromptComposer.composeScheduled(tools: tools, supportsVision: true, includeToolSchemas: true, currentDate: "2026-09-19")
+        #expect(scheduled.contains("since 2026-07-01 until 2026-08-01"))
+        #expect(scheduled.lowercased().contains("since inclusive"))
+        #expect(scheduled.lowercased().contains("until exclusive"))
+        #expect(scheduled.contains("current as of last night"))
+        #expect(scheduled.contains("Current date: 2026-09-19"))
+        #expect(scheduled.contains("Scheduled task guidance:"))
+    }
+
+    @Test
     func `Tool schema omission reduces prompt byte audit and empties perTool list`() {
         let tools: [any Tool] = [ComposerReadStub(), ComposerWriteStub()]
         let fullAudit = SystemPromptComposer.byteAudit(tools: tools, supportsVision: true, includeToolSchemas: true)

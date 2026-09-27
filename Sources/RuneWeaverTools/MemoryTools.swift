@@ -147,30 +147,47 @@ public struct RecallMemoriesArgs: Sendable, Equatable, Decodable {
     public let query: String
     /// Maximum results to return, clamped to `1...50`.
     public let limit: Int
+    /// Optional inclusive lower bound text (`YYYY-MM-DD` or ISO8601), nil when omitted or blank.
+    public let since: String?
+    /// Optional exclusive upper bound text (`YYYY-MM-DD` or ISO8601), nil when omitted or blank.
+    public let until: String?
 
     /// Default hit count when the caller omits `limit`.
     public static let defaultLimit = 5
     /// Upper bound for `limit` so recall stays bounded.
     public static let maxLimit = 50
 
-    /// Memberwise initializer with limit clamping.
-    public init(query: String, limit: Int = defaultLimit) {
+    /// Memberwise initializer with limit clamping and blank-as-omitted bounds.
+    public init(query: String, limit: Int = defaultLimit, since: String? = nil, until: String? = nil) {
         self.query = query
         self.limit = min(max(limit, 1), Self.maxLimit)
+        self.since = Self.normalizedBound(since)
+        self.until = Self.normalizedBound(until)
     }
 
     private enum CodingKeys: String, CodingKey {
         case query
         case limit
+        case since
+        case until
     }
 
-    /// Decodes arguments, clamping `limit`.
+    /// Decodes arguments, clamping `limit` and treating blank bounds as omitted.
     /// - Parameter decoder: Decoder for the arguments document.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let decodedQuery = try container.decode(String.self, forKey: .query)
         let rawLimit = try container.decodeIfPresent(Int.self, forKey: .limit) ?? Self.defaultLimit
-        self.init(query: decodedQuery, limit: rawLimit)
+        let rawSince = try container.decodeIfPresent(String.self, forKey: .since)
+        let rawUntil = try container.decodeIfPresent(String.self, forKey: .until)
+        self.init(query: decodedQuery, limit: rawLimit, since: rawSince, until: rawUntil)
+    }
+
+    /// Trims a bound, mapping blank to nil so omission and whitespace stay equivalent.
+    private static func normalizedBound(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     /// Trimmed query text.
@@ -375,13 +392,18 @@ public struct RecallMemoriesTool: Tool, Sendable {
             + "Returns ranked memories and document excerpts best first. "
             + "Indexed hits carry a date field holding the original document event time; "
             + "use date for when-things-happened questions and never infer event dates from index_as_of, "
-            + "which marks index time only."
-    /// Function-calling contract for `query` and `limit`.
+            + "which marks index time only. "
+            + "Pass since and until as YYYY-MM-DD or full ISO8601 datetimes to restrict to a dated window "
+            + "(since inclusive, until exclusive; date-only days are local calendar days). "
+            + "Undated items never match a dated query."
+    /// Function-calling contract for `query`, `limit`, and the dated window.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"query":{"type":"string","description":"Free-text query "#
                 + #"matched against past turns, stored facts, and indexed documents"},"limit":{"type":"integer","description":"Maximum "#
-                + #"memories (1-50, default 5)","minimum":1,"maximum":50}},"required":["query"],"additionalProperties":false}"#
+                + #"memories (1-50, default 5)","minimum":1,"maximum":50},"since":{"type":"string","description":"Optional inclusive lower bound "#
+                + #"as YYYY-MM-DD or ISO8601 datetime; date-only means local midnight inclusive"},"until":{"type":"string","description":"Optional "#
+                + #"exclusive upper bound as YYYY-MM-DD or ISO8601 datetime; date-only means local midnight exclusive"}},"required":["query"],"additionalProperties":false}"#
         )
     /// Auto-allowed per the owner memory-write trust ruling; no approval prompts.
     public let permissionLevel = PermissionLevel.trusted
@@ -404,11 +426,24 @@ public struct RecallMemoriesTool: Tool, Sendable {
         do {
             args = try JSONDecoder().decode(RecallMemoriesArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
-            return .failure("Invalid memories.recall arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>}.", callID: input.callID)
+            return .failure(
+                "Invalid memories.recall arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>, \"since\": \"<YYYY-MM-DD>\", \"until\": \"<YYYY-MM-DD>\"}.",
+                callID: input.callID
+            )
         }
         let query = args.trimmedQuery
         guard !query.isEmpty else {
             return .failure("Invalid memories.recall arguments: 'query' must not be empty.", callID: input.callID)
+        }
+        // Resolve the dated window before any embedding work so malformed
+        // bounds fail closed without side effects; blank behaves as omitted
+        // via the args normalizer and TemporalFilter enforces field-named rejection.
+        let range: TemporalRange
+        do {
+            range = try TemporalFilter.parse(since: args.since, until: args.until)
+        } catch {
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return .failure(detail, callID: input.callID)
         }
         // Embed the query best-effort when a producer is configured: vector hits then rank by
         // cosine similarity while keyword tiers stay unchanged, and any embedding failure keeps
@@ -419,7 +454,7 @@ public struct RecallMemoriesTool: Tool, Sendable {
             nil
         }
         do {
-            let results = try await engine.recall(query: query, embedding: embedding, limit: args.limit)
+            let results = try await engine.recall(query: query, embedding: embedding, limit: args.limit, since: range.since, until: range.until)
             let hits = results.map(MemoryHit.init)
             let content = try MemoryToolEncoding.encodeRecallEnvelope(RecallMemoriesEnvelope(query: query, memories: hits))
             return .success(content, callID: input.callID)

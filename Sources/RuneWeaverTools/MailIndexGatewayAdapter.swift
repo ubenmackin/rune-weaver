@@ -458,7 +458,7 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
                 query = ""
             }
         }
-        let hits = try await session.search(mailbox: mailbox, query: query, limit: clamped)
+        let hits = try await session.search(mailbox: mailbox, query: query, limit: clamped, since: nil, until: nil)
         return try await fetchIndexedMessages(hits: hits) { hitID in
             try await session.fetch(mailbox: mailbox, messageID: hitID)
         }
@@ -506,7 +506,7 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
                 query = ""
             }
         }
-        let hits = try await gateway.search(credentials: resolved, mailbox: mailbox, query: query, limit: clamped)
+        let hits = try await gateway.search(credentials: resolved, mailbox: mailbox, query: query, limit: clamped, since: nil, until: nil)
         return try await fetchIndexedMessages(hits: hits) { hitID in
             try await gateway.fetch(credentials: resolved, mailbox: mailbox, messageID: hitID)
         }

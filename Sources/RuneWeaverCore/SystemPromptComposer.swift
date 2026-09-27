@@ -463,6 +463,15 @@ public enum SystemPromptComposer {
                 + "or just-arrived questions prefer live email.search and files.grep over indexed results; "
                 + "the \(LiveSearchGuidance.forceLiveFlagName) flag forces the live path."
         )
+        // Prompt-level temporal-window guidance: calendar-bounded questions need
+        // explicit since/until ranges instead of keyword guesses, with the July
+        // shape as the canonical fan-out. Static wording keeps the cache key unchanged.
+        lines.append(
+            "- Yesterday, single-date, and month-window questions use since plus until instead of keyword guessing "
+                + "(e.g. July vacation spans since 2026-07-01 until 2026-08-01 across memories.recall plus email.search plus messages.search); "
+                + "date-only days are local calendar days with since inclusive plus until exclusive, "
+                + "and Current date: grounds relative terms."
+        )
         if supportsVision {
             lines.append(
                 "- browser.navigate screenshot opt-in: includeScreenshot defaults false; "

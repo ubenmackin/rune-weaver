@@ -769,7 +769,7 @@ extension MessagesIndexer {
             path: nil,
             messageID: NormalizedText.value(row.guid),
             mailbox: row.chatID.map { String($0) },
-            mtime: row.date.map(Self.date(fromMacEpoch:)),
+            mtime: row.date.map(TemporalFilter.date(fromMacEpoch:)),
             sizeBytes: nil,
             contentHash: Self.contentHash(for: combined),
             mime: "text/plain",
@@ -921,18 +921,6 @@ extension MessagesIndexer {
             return (file as NSString).lastPathComponent
         }
         return "attachment"
-    }
-
-    /// Converts a Mac-epoch tick to a wall-clock date.
-    ///
-    /// Messages stores seconds on older databases and nanoseconds on current
-    /// ones; the magnitude distinguishes them because a seconds value cannot
-    /// reach the nanosecond lower bound within any realistic date range.
-    /// - Parameter raw: Raw `message.date` value relative to 2001-01-01.
-    /// - Returns: Converted date.
-    public static func date(fromMacEpoch raw: Int64) -> Date {
-        let seconds = raw > 1_000_000_000_000 ? Double(raw) / 1_000_000_000 : Double(raw)
-        return Date(timeIntervalSinceReferenceDate: seconds)
     }
 
     /// Stable content hash gating re-indexing of an unchanged body.
@@ -1104,15 +1092,26 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
         }
 
         /// Searches messages matching an optional query text and optional recipient handle.
+        ///
+        /// Temporal bounds filter at the SQL layer: `since` is inclusive and
+        /// `until` is exclusive, normalized through the `TemporalFilter`
+        /// seconds expression so seconds and nanosecond rows share one bound.
+        /// A NULL `m.date` never satisfies a comparison, so bounded queries
+        /// exclude undated rows while unbounded ones stay byte-identical to
+        /// the legacy shape. Ordering and the caller's pre-fetch limit are untouched.
         public static func searchMessages(
             handle: OpaquePointer?,
             query: String? = nil,
             recipient: String? = nil,
-            limit: Int = 20
+            limit: Int = 20,
+            since: Date? = nil,
+            until: Date? = nil
         ) throws -> [MessagesDatabaseRow] {
             guard limit > 0 else { return [] }
             var conditions: [String] = []
             var bindStrings: [String] = []
+            var bindDoubles: [Double] = []
+            let macEpochSeconds = TemporalFilter.macEpochSecondsExpression(column: "m.date")
 
             let trimmedRecipient = recipient?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             if !trimmedRecipient.isEmpty {
@@ -1127,6 +1126,15 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             if !trimmedQuery.isEmpty && trimmedQuery != "*" {
                 conditions.append("(m.text LIKE ? OR (m.text IS NULL AND m.attributedBody IS NOT NULL))")
                 bindStrings.append("%\(trimmedQuery)%")
+            }
+
+            if let since {
+                conditions.append("(\(macEpochSeconds)) >= ?")
+                bindDoubles.append(TemporalFilter.macEpochValue(for: since))
+            }
+            if let until {
+                conditions.append("(\(macEpochSeconds)) < ?")
+                bindDoubles.append(TemporalFilter.macEpochValue(for: until))
             }
 
             let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
@@ -1153,6 +1161,10 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
                 SQLiteHelpers.bindText(statement, index: bindIndex, value: text)
                 bindIndex += 1
             }
+            for value in bindDoubles {
+                SQLiteHelpers.bindDouble(statement, index: bindIndex, value: value)
+                bindIndex += 1
+            }
             sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
             var rows: [MessagesDatabaseRow] = []
             while sqlite3_step(statement) == SQLITE_ROW {
@@ -1162,15 +1174,25 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
         }
 
         /// Fetches conversation messages for a chat ID or recipient.
+        ///
+        /// Temporal bounds share the search contract: `since` inclusive,
+        /// `until` exclusive, normalized through the `TemporalFilter` seconds
+        /// expression so seconds and nanosecond rows share one bound. NULL
+        /// dates never satisfy a bound, so bounded windows exclude undated
+        /// rows while unbounded reads keep the legacy ordering and limit behavior.
         public static func conversationMessages(
             handle: OpaquePointer?,
             chatID: String? = nil,
             recipient: String? = nil,
-            limit: Int = 20
+            limit: Int = 20,
+            since: Date? = nil,
+            until: Date? = nil
         ) throws -> [MessagesDatabaseRow] {
             guard limit > 0 else { return [] }
             var conditions: [String] = []
             var bindStrings: [String] = []
+            var bindDoubles: [Double] = []
+            let macEpochSeconds = TemporalFilter.macEpochSecondsExpression(column: "m.date")
 
             let trimmedChatID = chatID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let trimmedRecipient = recipient?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -1185,6 +1207,15 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
                 let pat = "%\(trimmedRecipient)%"
                 bindStrings.append(pat)
                 bindStrings.append(pat)
+            }
+
+            if let since {
+                conditions.append("(\(macEpochSeconds)) >= ?")
+                bindDoubles.append(TemporalFilter.macEpochValue(for: since))
+            }
+            if let until {
+                conditions.append("(\(macEpochSeconds)) < ?")
+                bindDoubles.append(TemporalFilter.macEpochValue(for: until))
             }
 
             let whereClause = conditions.isEmpty ? "" : "WHERE " + conditions.joined(separator: " AND ")
@@ -1209,6 +1240,10 @@ public struct MessagesAttachmentRow: Sendable, Equatable {
             var bindIndex: Int32 = 1
             for text in bindStrings {
                 SQLiteHelpers.bindText(statement, index: bindIndex, value: text)
+                bindIndex += 1
+            }
+            for value in bindDoubles {
+                SQLiteHelpers.bindDouble(statement, index: bindIndex, value: value)
                 bindIndex += 1
             }
             sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))

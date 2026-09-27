@@ -20,7 +20,7 @@ final class StubMessagesGateway: MessagesGateway, @unchecked Sendable {
         self.readResults = readResults
     }
 
-    func search(query: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem] {
+    func search(query: String?, recipient: String?, limit: Int, since _: Date? = nil, until _: Date? = nil) async throws -> [MessagesMessageItem] {
         var results = searchResults
         if let query, !query.isEmpty, query != "*" {
             results = results.filter { $0.text.localizedCaseInsensitiveContains(query) }
@@ -34,7 +34,7 @@ final class StubMessagesGateway: MessagesGateway, @unchecked Sendable {
         return Array(results.prefix(limit))
     }
 
-    func read(chatID: String?, recipient: String?, limit: Int) async throws -> [MessagesMessageItem] {
+    func read(chatID: String?, recipient: String?, limit: Int, since _: Date? = nil, until _: Date? = nil) async throws -> [MessagesMessageItem] {
         var results = readResults
         if let chatID, !chatID.isEmpty {
             results = results.filter { $0.chatID == chatID }
