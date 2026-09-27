@@ -1,6 +1,7 @@
 // Rune Weaver Tools Tests — Persistent IMAP session script coverage.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
@@ -11,23 +12,21 @@ import Testing
 /// suites: lines are retained in emission order behind one lock, and the
 /// derived log fronts the same sink so ordering, attribution, and redaction
 /// coverage stays identical without duplicating the collector per suite.
-private final class SharedEventCollector: @unchecked Sendable {
-    /// Guards retained lines.
-    private let lock = NSLock()
-    /// Lines observed in emission order.
-    private var stored: [String] = []
+private final class SharedEventCollector: Sendable {
+    /// Lines observed in emission order guarded by unfair lock.
+    private let stored = OSAllocatedUnfairLock(initialState: [String]())
 
     /// Appends one line.
     /// - Parameter line: JSON line without a trailing newline.
     func append(_ line: String) {
-        lock.withLock {
-            stored.append(line)
+        stored.withLock {
+            $0.append(line)
         }
     }
 
     /// Snapshot of observed lines in order.
     var lines: [String] {
-        lock.withLock { stored }
+        stored.withLock { $0 }
     }
 
     /// Event log fronting this collector.
@@ -46,13 +45,14 @@ private final class SharedEventCollector: @unchecked Sendable {
 /// Actor tests draw transports via `next()` while pool tests build sessions
 /// via `make(credentials:)` sharing one event sink, so count, serve, and
 /// factory logic cannot drift between suites.
-private final class SharedFakeSessionFactory: @unchecked Sendable {
+private final class SharedFakeSessionFactory: Sendable {
+    private struct State: Sendable {
+        var fakes: [FakeSessionLineTransport]
+        var calls = 0
+    }
+
     /// Guards creation state.
-    private let lock = NSLock()
-    /// Fakes served one per creation, last reused when over-requested.
-    private var fakes: [FakeSessionLineTransport]
-    /// Number of creations observed.
-    private var calls = 0
+    private let state: OSAllocatedUnfairLock<State>
     /// Shared sink so session lines share pids with pool lines; nil keeps a
     /// discarded sink for suites that assert framing without events.
     private let sharedLog: MailSessionEventLog?
@@ -62,24 +62,24 @@ private final class SharedFakeSessionFactory: @unchecked Sendable {
     ///   - fakes: One fake per expected creation.
     ///   - log: Shared sink for built sessions, or nil for a discarded sink.
     init(_ fakes: [FakeSessionLineTransport], log: MailSessionEventLog? = nil) {
-        self.fakes = fakes
+        self.state = OSAllocatedUnfairLock(initialState: State(fakes: fakes, calls: 0))
         self.sharedLog = log
     }
 
     /// Number of creations so far.
     var count: Int {
-        lock.withLock { calls }
+        state.withLock { $0.calls }
     }
 
     /// Returns the next fake, reusing the last when over-requested.
     /// - Returns: Fake for the current creation.
     func next() -> FakeSessionLineTransport {
-        lock.withLock {
-            calls += 1
-            if calls <= fakes.count {
-                return fakes[calls - 1]
+        state.withLock { s in
+            s.calls += 1
+            if s.calls <= s.fakes.count {
+                return s.fakes[s.calls - 1]
             }
-            return fakes[fakes.count - 1]
+            return s.fakes[s.fakes.count - 1]
         }
     }
 
@@ -88,9 +88,7 @@ private final class SharedFakeSessionFactory: @unchecked Sendable {
     /// - Returns: Session fronted by the next fake sharing the event sink.
     func make(credentials: ResolvedEmailCredentials) -> EmailIMAPSession {
         let fake = next()
-        let captured: MailSessionEventLog = lock.withLock {
-            sharedLog ?? MailSessionEventLog(sink: { _ in })
-        }
+        let captured: MailSessionEventLog = sharedLog ?? MailSessionEventLog(sink: { _ in })
         return EmailIMAPSession(
             credentials: credentials,
             transportFactory: { fake },
@@ -917,42 +915,43 @@ struct MailIndexSessionPoolTests {
     }
 
     /// Lock-guarded box recording queries plus limits for parity assertions.
-    private final class QueriesBox: @unchecked Sendable {
+    private final class QueriesBox: Sendable {
+        private struct State: Sendable {
+            var queries: [String] = []
+            var limits: [Int] = []
+        }
+
         /// Guards recorded values.
-        private let lock = NSLock()
-        /// Queries observed in call order.
-        private var queries: [String] = []
-        /// Limits observed in call order.
-        private var limits: [Int] = []
+        private let state = OSAllocatedUnfairLock(initialState: State())
 
         /// Creates an empty box.
         init() {}
 
         /// Records one query.
         func recordQuery(_ query: String) async {
-            lock.withLock {
-                queries.append(query)
+            state.withLock {
+                $0.queries.append(query)
             }
         }
 
         /// Records one limit.
         func recordLimit(_ limit: Int) async {
-            lock.withLock {
-                limits.append(limit)
+            state.withLock {
+                $0.limits.append(limit)
             }
         }
 
         /// Returns the observed queries.
         var queriesSnapshot: [String] {
-            lock.withLock {
-                queries
+            state.withLock {
+                $0.queries
             }
         }
 
         /// Returns the observed limits.
         var limitsSnapshot: [Int] {
-            lock.withLock {
-                limits
+            state.withLock {
+                $0.limits
             }
         }
     }

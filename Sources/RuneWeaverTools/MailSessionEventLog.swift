@@ -8,6 +8,7 @@
 // emission points and pass only sizes, latencies, and outcomes.
 
 import Foundation
+import RuneWeaverCore
 
 /// JSONL event log for persistent mail sessions.
 ///
@@ -65,6 +66,7 @@ public struct MailSessionEventLog: Sendable {
                     }
                 } catch {
                     // Best-effort: event failures never fail the session.
+                    RuneWeaverLog.tools.debug("MailSessionEventLog append failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -222,6 +224,6 @@ public struct MailSessionEventLog: Sendable {
         while !tail.isEmpty, String(data: Data(tail), encoding: .utf8) == nil {
             tail = tail.dropFirst()
         }
-        return String(decoding: tail, as: UTF8.self)
+        return String(bytes: tail, encoding: .utf8) ?? ""
     }
 }

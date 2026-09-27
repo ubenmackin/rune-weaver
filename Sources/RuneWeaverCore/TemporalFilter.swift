@@ -348,10 +348,17 @@ public enum TemporalFilter: Sendable {
         }
     }
 
+    /// Intermediate representation for numeric date components parsed from `YYYY-MM-DD`.
+    private struct DateOnlyParts {
+        let year: Int
+        let month: Int
+        let day: Int
+    }
+
     /// Strict `YYYY-MM-DD` shape check: exactly ten characters, dashes at
     /// fixed positions, digits elsewhere. Zero-padded two-digit month and day
     /// are required so `2026-9-5` fails closed instead of guessing intent.
-    private static func dateOnlyParts(from text: String) -> (year: Int, month: Int, day: Int)? {
+    private static func dateOnlyParts(from text: String) -> DateOnlyParts? {
         guard text.count == 10 else {
             return nil
         }
@@ -370,7 +377,7 @@ public enum TemporalFilter: Sendable {
         else {
             return nil
         }
-        return (year, month, day)
+        return DateOnlyParts(year: year, month: month, day: day)
     }
 
     /// Resolves a date-only day to midnight in the device timezone.

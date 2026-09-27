@@ -403,7 +403,8 @@ public struct RecallMemoriesTool: Tool, Sendable {
                 + #"matched against past turns, stored facts, and indexed documents"},"limit":{"type":"integer","description":"Maximum "#
                 + #"memories (1-50, default 5)","minimum":1,"maximum":50},"since":{"type":"string","description":"Optional inclusive lower bound "#
                 + #"as YYYY-MM-DD or ISO8601 datetime; date-only means local midnight inclusive"},"until":{"type":"string","description":"Optional "#
-                + #"exclusive upper bound as YYYY-MM-DD or ISO8601 datetime; date-only means local midnight exclusive"}},"required":["query"],"additionalProperties":false}"#
+                + #"exclusive upper bound as YYYY-MM-DD or ISO8601 datetime; date-only means local midnight exclusive"}},"#
+                + #""required":["query"],"additionalProperties":false}"#
         )
     /// Auto-allowed per the owner memory-write trust ruling; no approval prompts.
     public let permissionLevel = PermissionLevel.trusted
@@ -427,7 +428,8 @@ public struct RecallMemoriesTool: Tool, Sendable {
             args = try JSONDecoder().decode(RecallMemoriesArgs.self, from: Data(input.argumentsJSON.utf8))
         } catch {
             return .failure(
-                "Invalid memories.recall arguments: expected {\"query\": \"<text>\", \"limit\": <1-50>, \"since\": \"<YYYY-MM-DD>\", \"until\": \"<YYYY-MM-DD>\"}.",
+                "Invalid memories.recall arguments: expected "
+                    + "{\"query\": \"<text>\", \"limit\": <1-50>, \"since\": \"<YYYY-MM-DD>\", \"until\": \"<YYYY-MM-DD>\"}.",
                 callID: input.callID
             )
         }

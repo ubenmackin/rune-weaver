@@ -602,7 +602,11 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
             try await gateway.fetch(credentials: resolved, mailbox: mailbox, messageID: hitID)
         }
     }
+}
 
+// MARK: - Message Mapping & Helpers
+
+extension EmailIMAPMailIndexGateway {
     /// Builds the newest-window criterion from a STATUS `uidNext`.
     ///
     /// Shared by the session plus one-shot anchors so the window top cannot

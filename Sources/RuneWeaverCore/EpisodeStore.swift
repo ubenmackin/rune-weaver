@@ -624,6 +624,13 @@ enum EpisodeStoreIO {
             guard FileManager.default.fileExists(atPath: expanded) else { return [] }
             let handle = try open(dbPath: dbPath)
             defer { sqlite3_close(handle) }
+            if let ftsResults = searchFTS(handle: handle, query: query, limit: limit, since: since, until: until), !ftsResults.isEmpty {
+                return ftsResults
+            }
+            return try searchLike(handle: handle, query: query, limit: limit, since: since, until: until)
+        }
+
+        private static func searchFTS(handle: OpaquePointer?, query: String, limit: Int, since: Date?, until: Date?) -> [Episode]? {
             let ftsQuery = ftsEscaped(query)
             var sql = "SELECT e.id, e.session_id, e.role, e.content, e.timestamp, e.metadata "
                 + "FROM episodes_fts JOIN episodes e ON e.rowid = episodes_fts.rowid "
@@ -636,40 +643,43 @@ enum EpisodeStoreIO {
             }
             sql += " ORDER BY rank, e.rowid DESC LIMIT ?;"
             var statement: OpaquePointer?
-            if sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK {
-                var bindIndex: Int32 = 1
-                bindText(statement, index: bindIndex, value: ftsQuery)
-                bindIndex += 1
-                let range = TemporalRange(since: since, until: until)
-                let bounds = TemporalFilter.unixBounds(for: range)
-                if let lower = bounds.since {
-                    sqlite3_bind_double(statement, bindIndex, lower)
-                    bindIndex += 1
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                if statement != nil {
+                    sqlite3_finalize(statement)
                 }
-                if let upper = bounds.until {
-                    sqlite3_bind_double(statement, bindIndex, upper)
-                    bindIndex += 1
-                }
-                sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
-                var results: [Episode] = []
-                var step = sqlite3_step(statement)
-                while step == SQLITE_ROW {
-                    if let episode = readEpisode(statement) {
-                        results.append(episode)
-                    }
-                    step = sqlite3_step(statement)
-                }
-                let succeeded = (step == SQLITE_DONE)
-                sqlite3_finalize(statement)
-                if succeeded, !results.isEmpty {
-                    return results
-                }
-                // Fall through to the LIKE scan when FTS succeeds empty
-                // or errors after prepare, so stemming gaps and token
-                // mismatches still recall literal matches.
-            } else if statement != nil {
-                sqlite3_finalize(statement)
+                return nil
             }
+            defer { sqlite3_finalize(statement) }
+            var bindIndex: Int32 = 1
+            bindText(statement, index: bindIndex, value: ftsQuery)
+            bindIndex += 1
+            let range = TemporalRange(since: since, until: until)
+            let bounds = TemporalFilter.unixBounds(for: range)
+            if let lower = bounds.since {
+                sqlite3_bind_double(statement, bindIndex, lower)
+                bindIndex += 1
+            }
+            if let upper = bounds.until {
+                sqlite3_bind_double(statement, bindIndex, upper)
+                bindIndex += 1
+            }
+            sqlite3_bind_int(statement, bindIndex, SQLiteHelpers.sqliteLimit(limit))
+            var results: [Episode] = []
+            var step = sqlite3_step(statement)
+            while step == SQLITE_ROW {
+                if let episode = readEpisode(statement) {
+                    results.append(episode)
+                }
+                step = sqlite3_step(statement)
+            }
+            let succeeded = (step == SQLITE_DONE)
+            if succeeded, !results.isEmpty {
+                return results
+            }
+            return nil
+        }
+
+        private static func likePatterns(for query: String) -> [String] {
             let maxLikePatterns = 50
             let tokens = Array(Tokenization.tokenize(query).sorted().prefix(maxLikePatterns - 1))
             guard !tokens.isEmpty else { return [] }
@@ -682,6 +692,12 @@ enum EpisodeStoreIO {
                 }
                 guard patterns.count < maxLikePatterns else { break }
             }
+            return patterns
+        }
+
+        private static func searchLike(handle: OpaquePointer?, query: String, limit: Int, since: Date?, until: Date?) throws -> [Episode] {
+            let patterns = likePatterns(for: query)
+            guard !patterns.isEmpty else { return [] }
             let conditions = patterns.map { _ in "content LIKE ? ESCAPE '\\'" }.joined(separator: " OR ")
             var likeSQL = "SELECT id, session_id, role, content, timestamp, metadata FROM episodes "
                 + "WHERE (\(conditions))"

@@ -201,8 +201,7 @@ public protocol EmailIMAPGateway: Sendable {
     ///   - query: Free-text query matched against subject, sender, and body.
     ///   - limit: Maximum hits, bounded to `1...50`.
     ///   - hasAttachment: Optional attachment-presence filter.
-    ///   - since: Inclusive lower bound, or nil for unbounded below.
-    ///   - until: Exclusive upper bound, or nil for unbounded above.
+    ///   - range: Optional temporal window bounding message date.
     /// - Returns: Matching hits, newest first.
     func search(
         credentials: ResolvedEmailCredentials,
@@ -210,8 +209,7 @@ public protocol EmailIMAPGateway: Sendable {
         query: String,
         limit: Int,
         hasAttachment: Bool?,
-        since: Date?,
-        until: Date?
+        range: TemporalRange?
     ) async throws -> [EmailSearchHit]
 
     /// Fetches one message from one mailbox.
@@ -275,8 +273,7 @@ public extension EmailIMAPGateway {
             query: query,
             limit: limit,
             hasAttachment: nil,
-            since: since,
-            until: until
+            range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil
         )
     }
 
@@ -289,8 +286,7 @@ public extension EmailIMAPGateway {
         query: String,
         limit: Int,
         hasAttachment: Bool?,
-        since: Date?,
-        until: Date?
+        range: TemporalRange?
     ) async throws -> [EmailSearchHit] {
         let hits = try await search(
             credentials: credentials,
@@ -299,9 +295,28 @@ public extension EmailIMAPGateway {
             limit: limit,
             hasAttachment: hasAttachment
         )
-        guard since != nil || until != nil else { return hits }
-        let range = TemporalRange(since: since, until: until)
+        guard let range, !range.isUnbounded else { return hits }
         return hits.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
+    }
+
+    /// Default search overload accepting separate `since` and `until` date bounds.
+    func search(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int,
+        hasAttachment: Bool? = nil,
+        since: Date? = nil,
+        until: Date? = nil
+    ) async throws -> [EmailSearchHit] {
+        try await search(
+            credentials: credentials,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            hasAttachment: hasAttachment,
+            range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil
+        )
     }
 
     /// Default compatibility shim over the single required `mailboxListing`.
@@ -676,8 +691,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         query: String,
         limit: Int,
         hasAttachment: Bool?,
-        since: Date?,
-        until: Date?
+        range: TemporalRange?
     ) async throws -> [EmailSearchHit] {
         // Reject out-of-range limits before touching the subprocess so an unchecked
         // value can never reach the Python slice and widen the result window.
@@ -694,8 +708,8 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             limit: limit,
             mailbox: trimmedMailbox,
             hasAttachment: hasAttachment,
-            since: since,
-            until: until
+            since: range?.since,
+            until: range?.until
         )
         let data = try await run(request: request)
         do {
@@ -712,8 +726,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
                     attachmentCount: $0.attachmentCount
                 )
             }
-            guard since != nil || until != nil else { return labeled }
-            let range = TemporalRange(since: since, until: until)
+            guard let range, !range.isUnbounded else { return labeled }
             return labeled.filter { TemporalFilter.matches(date: EmailSearchMerge.date(of: $0), in: range) }
         } catch let error as EmailIMAPError {
             throw error
@@ -737,8 +750,7 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             query: query,
             limit: limit,
             hasAttachment: nil,
-            since: since,
-            until: until
+            range: (since != nil || until != nil) ? TemporalRange(since: since, until: until) : nil
         )
     }
 
@@ -756,14 +768,13 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
             query: query,
             limit: limit,
             hasAttachment: hasAttachment,
-            since: nil,
-            until: nil
+            range: nil
         )
     }
 
     /// Searches one mailbox via the Python helper.
     public func search(credentials: ResolvedEmailCredentials, mailbox: String, query: String, limit: Int) async throws -> [EmailSearchHit] {
-        try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit, hasAttachment: nil, since: nil, until: nil)
+        try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit, hasAttachment: nil, range: nil)
     }
 
     /// Lists selectable mailboxes plus the common hierarchy delimiter.

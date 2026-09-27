@@ -7,6 +7,7 @@
 // field while the full snapshot round-trips through the same merge path.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverServer
 import Testing
@@ -1080,50 +1081,43 @@ private struct FilesPoolAllowGuard: FilesIndexAccessGuard, Sendable {
 }
 
 /// Lock-guarded monotonically increasing identifier source for pool slots.
-private final class FilesPoolIDSource: @unchecked Sendable {
-    /// Guarded counter state.
-    private let lock = NSLock()
-    /// Next identifier to hand out.
-    private var nextValue = 0
-    /// Call count observed so far.
-    private var callCount = 0
+private final class FilesPoolIDSource: Sendable {
+    private struct State: Sendable {
+        var nextValue = 0
+        var callCount = 0
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
 
     /// Hands out the next identifier and records the call.
     func next() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        nextValue += 1
-        callCount += 1
-        return nextValue
+        state.withLock { s in
+            s.nextValue += 1
+            s.callCount += 1
+            return s.nextValue
+        }
     }
 
     /// Number of factory invocations observed.
     var count: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return callCount
+        state.withLock { $0.callCount }
     }
 }
 
 /// Lock-guarded collector retaining every backend the factory minted.
-private final class FilesPoolCollector: @unchecked Sendable {
-    /// Guarded backends in mint order.
-    private let lock = NSLock()
-    /// Retained backends.
-    private var stored: [any EmbeddingsBackend] = []
+private final class FilesPoolCollector: Sendable {
+    private let state = OSAllocatedUnfairLock(initialState: [any EmbeddingsBackend]())
 
     /// Retains one minted backend.
     func append(_ backend: any EmbeddingsBackend) {
-        lock.lock()
-        defer { lock.unlock() }
-        stored.append(backend)
+        state.withLock { s in
+            s.append(backend)
+        }
     }
 
     /// Retained backends in mint order.
     var all: [any EmbeddingsBackend] {
-        lock.lock()
-        defer { lock.unlock() }
-        return stored
+        state.withLock { $0 }
     }
 }
 

@@ -2313,6 +2313,7 @@ struct MailIndexerTests {
         } catch is PauseAborted {
             // The pause aborts the fetch with the error propagating to the caller,
             // where the mailbox loop degrades it to the existing skip path.
+            #expect(Bool(true))
         } catch {
             Issue.record("Expected PauseAborted, got \(error)")
         }

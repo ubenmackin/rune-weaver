@@ -138,6 +138,7 @@ public actor AppleIntelligenceAssessor {
                     _ = try await session.respond(to: "ok")
                 } catch {
                     // Intentionally discarded: warm-up is best-effort only.
+                    RuneWeaverLog.tools.debug("AppleIntelligenceAssessor warm-up discarded: \(error.localizedDescription)")
                 }
             }
         }

@@ -1027,6 +1027,7 @@ struct DocIndexStoreTests {
             #expect(Bool(false), "Expected the colliding chunk identifiers to throw")
         } catch {
             // The colliding primary key aborts the commit; nothing may survive.
+            #expect(!error.localizedDescription.isEmpty)
         }
         let missing = try await store.document(source: .files, externalID: "rollback-new")
         #expect(missing == nil)
@@ -1056,6 +1057,7 @@ struct DocIndexStoreTests {
             #expect(Bool(false), "Expected the rewrite collision to throw")
         } catch {
             // A failed rewrite rolls back to the seeded revision.
+            #expect(!error.localizedDescription.isEmpty)
         }
         let kept = try await store.document(source: .files, externalID: "rollback-existing")
         #expect(kept?.contentHash == "hash-old")

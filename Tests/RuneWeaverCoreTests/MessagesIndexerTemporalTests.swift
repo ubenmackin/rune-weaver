@@ -12,6 +12,7 @@
 // unbounded queries remain byte-identical to the legacy shape.
 
 import Foundation
+import os
 @testable import RuneWeaverCore
 @testable import RuneWeaverTools
 import Testing
@@ -160,24 +161,58 @@ private func temporalMacEpochNanosTick(for date: Date) -> Int64 {
 }
 
 /// Recording gateway proving tools forward resolved dates instead of raw strings.
-private final class TemporalRecordingMessagesGateway: MessagesGateway, @unchecked Sendable {
-    var searchSince: Date?
-    var searchUntil: Date?
-    var readSince: Date?
-    var readUntil: Date?
-    var searchResults: [MessagesMessageItem] = []
-    var readResults: [MessagesMessageItem] = []
+private final class TemporalRecordingMessagesGateway: MessagesGateway, Sendable {
+    private struct State: Sendable {
+        var searchSince: Date?
+        var searchUntil: Date?
+        var readSince: Date?
+        var readUntil: Date?
+        var searchResults: [MessagesMessageItem] = []
+        var readResults: [MessagesMessageItem] = []
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    var searchSince: Date? {
+        state.withLock { $0.searchSince }
+    }
+
+    var searchUntil: Date? {
+        state.withLock { $0.searchUntil }
+    }
+
+    var readSince: Date? {
+        state.withLock { $0.readSince }
+    }
+
+    var readUntil: Date? {
+        state.withLock { $0.readUntil }
+    }
+
+    var searchResults: [MessagesMessageItem] {
+        get { state.withLock { $0.searchResults } }
+        set { state.withLock { $0.searchResults = newValue } }
+    }
+
+    var readResults: [MessagesMessageItem] {
+        get { state.withLock { $0.readResults } }
+        set { state.withLock { $0.readResults = newValue } }
+    }
 
     func search(query _: String?, recipient _: String?, limit _: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem] {
-        searchSince = since
-        searchUntil = until
-        return searchResults
+        state.withLock { s in
+            s.searchSince = since
+            s.searchUntil = until
+            return s.searchResults
+        }
     }
 
     func read(chatID _: String?, recipient _: String?, limit _: Int, since: Date?, until: Date?) async throws -> [MessagesMessageItem] {
-        readSince = since
-        readUntil = until
-        return readResults
+        state.withLock { s in
+            s.readSince = since
+            s.readUntil = until
+            return s.readResults
+        }
     }
 
     func send(recipient: String, text: String) async throws -> MessagesSendResult {
