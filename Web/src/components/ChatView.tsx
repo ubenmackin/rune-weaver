@@ -40,6 +40,7 @@ import {
 import SessionSidebar from "./SessionSidebar";
 import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
+import { appendLiveDelta } from "./liveTextBuffer";
 import ToolActionRow from "./ToolActionRow";
 import { AlertTriangleIcon, SettingsIcon, WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
@@ -85,7 +86,11 @@ interface MessageItem {
 
 interface InFlightTurn {
   toolActions: ToolAction[];
+  // Committed grapheme-safe prefix rendered through live MarkdownText. The
+  // trailing incomplete cluster lives in `held` so partial emoji never
+  // flashes; the full turn text is always `text + held` with zero loss.
   text: string;
+  held: string;
   // Live chronological timeline built incrementally: the current text segment
   // closes when a tool starts and a fresh text segment opens on the next delta
   // after tools, mirroring the persisted per-round note boundaries for reloads.
@@ -1002,6 +1007,24 @@ function turnTimeoutMs(contextTokens: number): number {
   return Math.min(Math.max(TURN_TIMEOUT_BASE_MS, scaled), TURN_TIMEOUT_MAX_MS);
 }
 
+// Reports whether the user holds a non-collapsed text selection inside the
+// message list. A collapsed caret is no selection for scroll purposes, and
+// whitespace-only or out-of-list selections never suppress auto-scroll.
+export function messageListHasActiveSelection(
+  list: HTMLElement | null,
+): boolean {
+  if (!list) return false;
+  const selection = window.getSelection();
+  if (!selection) return false;
+  if (selection.isCollapsed) return false;
+  if (selection.rangeCount === 0) return false;
+  if (selection.toString().trim().length === 0) return false;
+  const anchor = selection.anchorNode;
+  const focus = selection.focusNode;
+  if (!anchor || !focus) return false;
+  return list.contains(anchor) && list.contains(focus);
+}
+
 interface ChatViewProps {
   health?: HealthResponse | null;
 }
@@ -1557,31 +1580,26 @@ export default function ChatView({ health }: ChatViewProps) {
     if (turnTimeoutRef.current != null) {
       clearTimeout(turnTimeoutRef.current);
     }
-    // Prefer the owning session captured at turn start so a re-arm after a
-    // mid-turn session switch still cancels the orphaned turn, falling back
-    // to the live session only before the first turn marker lands.
-    const turnSID = turnSessionIDRef.current ?? sessionIDRef.current;
-    const budgetMs = turnTimeoutMs(contextLimitRef.current);
-    turnTimeoutRef.current = setTimeout(() => {
-      turnTimeoutRef.current = null;
-      // Best-effort cancel the orphaned server turn so a retry does not
-      // duplicate it, then release the input lock with a retry message.
-      void cancelChat(turnSID).catch(() => {
-        // Cancel is best-effort; timeout recovery proceeds even when it fails.
-      });
-      turnSessionIDRef.current = null;
-      activeTurnStartMsRef.current = null;
-      setInFlightTurn(null);
-      setPending(false);
-      // Honest liveness copy: with heartbeats re-arming healthy evals, reaching
-      // here means no frames at all for the whole budget while the socket stayed
-      // open — a large prompt stalled on slow local inference, not a routine
-      // pause. Name the cause instead of a bare timed-out line.
-      const budgetMinutes = Math.max(1, Math.round(budgetMs / 60000));
-      setError(
-        `Still thinking took longer than expected — no progress for ${budgetMinutes} minutes with a large prompt on local inference. The interrupted turn was cancelled; retry your message.`,
-      );
-    }, budgetMs);
+    // Notice-only liveness timer: expiry never cancels the server turn, never
+    // clears pending, and never clears the live bubble. It surfaces a
+    // long-running notice and re-arms for the next interval so a healthy
+    // multi-round local-inference turn can run past the interval with zero
+    // error state; explicit Cancel stays the sole path that aborts a turn.
+    const schedule = () => {
+      const budgetMs = turnTimeoutMs(contextLimitRef.current);
+      turnTimeoutRef.current = setTimeout(() => {
+        turnTimeoutRef.current = null;
+        // Long-running notice: the turn is still running and Cancel remains
+        // available. Re-arm for the next interval without touching turn
+        // ownership, pending, or the live bubble.
+        const budgetMinutes = Math.max(1, Math.round(budgetMs / 60000));
+        setError(
+          `Still working — no progress for ${budgetMinutes} minutes but the turn is still running. Cancel remains available if you want to stop it.`,
+        );
+        schedule();
+      }, budgetMs);
+    };
+    schedule();
   }, []);
 
   // Marks one normalized session as running or idle in the background set,
@@ -1794,7 +1812,7 @@ export default function ChatView({ health }: ChatViewProps) {
         break;
       }
     }
-    const shell: InFlightTurn = { toolActions: [], text: "", segments: [] };
+    const shell: InFlightTurn = { toolActions: [], text: "", held: "", segments: [] };
     inFlightTurnRef.current = shell;
     setInFlightTurn(shell);
     setPending(true);
@@ -1916,13 +1934,14 @@ export default function ChatView({ health }: ChatViewProps) {
         ? {
             toolActions: [...snapshot.toolActions],
             text: snapshot.text,
+            held: snapshot.held ?? "",
             segments: snapshot.segments.map((segment) =>
               segment.kind === "tools"
                 ? { kind: "tools" as const, actions: [...segment.actions] }
                 : { ...segment },
             ),
           }
-        : { toolActions: [], text: "", segments: [] },
+        : { toolActions: [], text: "", held: "", segments: [] },
       pending: true,
       // Carry the banner and running sum so returning restores the exact live
       // footer instead of resetting to zero mid-turn.
@@ -2046,7 +2065,7 @@ export default function ChatView({ health }: ChatViewProps) {
         }
         const base = loadSessionTokens(frameSessionID);
         const created: ParkedFlight = {
-          turn: { toolActions: [], text: "", segments: [] },
+          turn: { toolActions: [], text: "", held: "", segments: [] },
           pending: true,
           warnings: [],
           turnTokens: null,
@@ -2082,7 +2101,7 @@ export default function ChatView({ health }: ChatViewProps) {
       ) {
         const flight = ensureFlight();
         if (!flight.turn) {
-          flight.turn = { toolActions: [], text: "", segments: [] };
+          flight.turn = { toolActions: [], text: "", held: "", segments: [] };
         }
         flight.pending = true;
         flight.updatedAt = Date.now();
@@ -2093,7 +2112,13 @@ export default function ChatView({ health }: ChatViewProps) {
           const rawDelta: unknown = (data as unknown as Record<string, unknown>).delta;
           const deltaText = typeof rawDelta === "string" ? rawDelta : "";
           if (deltaText) {
-            flight.turn.text += deltaText;
+            const next = appendLiveDelta(
+              flight.turn.text ?? "",
+              flight.turn.held ?? "",
+              deltaText,
+            );
+            flight.turn.text = next.committed;
+            flight.turn.held = next.held;
             flight.turn.segments = appendDeltaToSegments(
               flight.turn.segments,
               deltaText,
@@ -2622,6 +2647,7 @@ export default function ChatView({ health }: ChatViewProps) {
         return {
           toolActions: currentActions,
           text: prev ? prev.text : "",
+          held: prev ? (prev.held ?? "") : "",
           segments,
         };
       });
@@ -2798,13 +2824,23 @@ export default function ChatView({ health }: ChatViewProps) {
           return false;
         }),
       );
-      setInFlightTurn((prev) => ({
-        toolActions: prev ? prev.toolActions : [],
-        text: (prev ? prev.text : "") + deltaText,
-        // Opening a fresh text segment after tools preserves round bounds so the
-        // live timeline interleaves exactly like the persisted note boundaries.
-        segments: appendDeltaToSegments(prev ? prev.segments : [], deltaText),
-      }));
+      setInFlightTurn((prev) => {
+        const prevCommitted = prev ? prev.text : "";
+        const prevHeld = prev ? (prev.held ?? "") : "";
+        const prevSegments = prev ? prev.segments : [];
+        // Buffer by grapheme cluster so a split emoji never flashes as a
+        // replacement character: only complete clusters reach MarkdownText
+        // while the trailing incomplete cluster waits in `held`.
+        const next = appendLiveDelta(prevCommitted, prevHeld, deltaText);
+        return {
+          toolActions: prev ? prev.toolActions : [],
+          text: next.committed,
+          held: next.held,
+          // Opening a fresh text segment after tools preserves round bounds so the
+          // live timeline interleaves exactly like the persisted note boundaries.
+          segments: appendDeltaToSegments(prevSegments, deltaText),
+        };
+      });
     } else if (frameType === "reasoning_delta") {
       armTurnTimeout();
       if (cancelledRef.current) return;
@@ -2819,6 +2855,7 @@ export default function ChatView({ health }: ChatViewProps) {
         setInFlightTurn((prev) => ({
           toolActions: prev ? prev.toolActions : [],
           text: prev ? prev.text : "",
+          held: prev ? (prev.held ?? "") : "",
           segments: appendReasoningDeltaToSegments(
             prev ? prev.segments : [],
             deltaText,
@@ -3005,6 +3042,11 @@ export default function ChatView({ health }: ChatViewProps) {
       // stays pure; nesting a message append inside a turn updater would
       // run twice under double-invoke and duplicate the assistant message.
       const snapshot = inFlightTurnRef.current;
+      // The live text is grapheme-buffered, so the terminal merge sees the
+      // lossless full turn (committed plus held) while live MarkdownText keeps
+      // rendering only the committed prefix with no component swap on done.
+      const snapshotFullText =
+        (snapshot?.text ?? "") + (snapshot?.held ?? "");
       const orderedDoneActions = deduplicateToolActionsByCallID([
         ...(doneToolActions ?? []),
       ]).sort(compareToolActionsByRound);
@@ -3021,12 +3063,12 @@ export default function ChatView({ health }: ChatViewProps) {
         snapshot?.segments ?? [],
         finalActions,
         doneText,
-        snapshot?.text ?? "",
+        snapshotFullText,
       );
       const legacyText =
         doneSegments.length > 0
           ? flatTextFromSegments(doneSegments)
-          : (doneText ?? snapshot?.text ?? "");
+          : (doneText ?? snapshotFullText ?? "");
       const legacyActions = flatActionsFromSegments(doneSegments);
       // Completion stamps stay grounded in the server instant so live cards
       // agree with history reloads: an omitted stamp renders no footer rather
@@ -3169,6 +3211,8 @@ export default function ChatView({ health }: ChatViewProps) {
       }
 
       const snapshot = inFlightTurnRef.current;
+      const snapshotFullText =
+        (snapshot?.text ?? "") + (snapshot?.held ?? "");
       const orderedDoneActions = deduplicateToolActionsByCallID([
         ...(snapshot?.toolActions ?? []),
       ]).sort(compareToolActionsByRound);
@@ -3178,10 +3222,10 @@ export default function ChatView({ health }: ChatViewProps) {
           : [];
       if (
         errorSegments.length === 0 &&
-        snapshot?.text &&
-        snapshot.text.trim().length > 0
+        snapshotFullText &&
+        snapshotFullText.trim().length > 0
       ) {
-        errorSegments.push({ kind: "text", text: snapshot.text });
+        errorSegments.push({ kind: "text", text: snapshotFullText });
       }
 
       const errorMsg: MessageItem = {
@@ -3189,7 +3233,7 @@ export default function ChatView({ health }: ChatViewProps) {
         role: "assistant",
         // Keep the streamed reply verbatim so the inline bubble never repeats
         // the failure: the dedicated error card below owns the failure text.
-        text: snapshot?.text ?? "",
+        text: snapshotFullText ?? "",
         toolActions:
           orderedDoneActions.length > 0 ? orderedDoneActions : undefined,
         segments: errorSegments.length > 0 ? errorSegments : undefined,
@@ -3667,7 +3711,13 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     // Own sends reset the lock before appending, so this suppresses only remote
     // deltas while the user reviews history; the user's own bubble always lands in view.
-    if (!userHasScrolledUpRef.current && chatSettings.autoScrollOnStream) {
+    // An active in-list text selection also suppresses auto-scroll so reading
+    // a highlighted passage never loses the range to a scroll jump.
+    if (
+      !userHasScrolledUpRef.current &&
+      chatSettings.autoScrollOnStream &&
+      messageListHasActiveSelection(messageListRef.current) === false
+    ) {
       messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
     }
   }, [messages, pending, inFlightTurn, chatSettings.autoScrollOnStream]);
@@ -3762,10 +3812,12 @@ export default function ChatView({ health }: ChatViewProps) {
     // the live turn's call identities verbatim, so the later done frame
     // collapses it by callID overlap instead of doubling one execution.
     const currentTurn = inFlightTurnRef.current;
+    const currentFullText =
+      (currentTurn?.text ?? "") + (currentTurn?.held ?? "");
     const hasPreSteerActivity =
       currentTurn &&
       (currentTurn.toolActions.length > 0 ||
-        currentTurn.text.trim().length > 0 ||
+        currentFullText.trim().length > 0 ||
         (currentTurn.segments && currentTurn.segments.length > 0));
 
     let preSteerMsg: MessageItem | null = null;
@@ -3773,7 +3825,7 @@ export default function ChatView({ health }: ChatViewProps) {
       preSteerMsg = {
         id: newSessionId(),
         role: "assistant",
-        text: currentTurn.text,
+        text: currentFullText,
         toolActions:
           currentTurn.toolActions.length > 0
             ? [...currentTurn.toolActions]
@@ -3788,6 +3840,7 @@ export default function ChatView({ health }: ChatViewProps) {
     // Reset in-flight turn so post-steer work streams into a fresh bubble below the steer message.
     const freshTurn: InFlightTurn = {
       text: "",
+      held: "",
       toolActions: [],
       segments: [],
     };
@@ -4013,7 +4066,7 @@ export default function ChatView({ health }: ChatViewProps) {
       textareaRef.current.style.height = "auto";
     }
 
-    setInFlightTurn({ toolActions: [], text: "", segments: [] });
+    setInFlightTurn({ toolActions: [], text: "", held: "", segments: [] });
     // A fresh turn owns a fresh progress map: any prior turn's rows are gone,
     // so stale call identities never resurface under the new reply.
     clearAllToolProgress();
@@ -4325,10 +4378,26 @@ export default function ChatView({ health }: ChatViewProps) {
   // Liveness helpers for the persistent footer below: a tool with no result is
   // still running on the engine, while completed tools plus partial text mean
   // the next prompt round is processing silently with no frames to render.
+  // The full turn text (committed plus held) decides liveness so a held-only
+  // emoji still counts as progress, while the live bubble below renders only
+  // the committed prefix with zero render-mode flip on done.
   const hasRunningTools =
     inFlightTurn?.toolActions.some((action) => !action.result) ?? false;
   const hasPartialText =
-    (inFlightTurn?.text.trim().length ?? 0) > 0;
+    ((inFlightTurn?.text ?? "") + (inFlightTurn?.held ?? "")).trim().length >
+    0;
+  // Last text segment index for the live bubble: only that piece can carry
+  // the held suffix, so trimming there shows the committed prefix while the
+  // stored segments keep the full delta for the terminal merge.
+  const liveHeld = inFlightTurn?.held ?? "";
+  const liveSegments = inFlightTurn?.segments ?? [];
+  let liveLastTextIndex = -1;
+  for (let liveIndex = liveSegments.length - 1; liveIndex >= 0; liveIndex--) {
+    if (liveSegments[liveIndex].kind === "text") {
+      liveLastTextIndex = liveIndex;
+      break;
+    }
+  }
 
   return (
     <div className="chat-layout">
@@ -4628,14 +4697,28 @@ export default function ChatView({ health }: ChatViewProps) {
                         defaultExpanded={chatSettings.thinkingDefault === "expanded"}
                         isLive
                       />
-                    ) : segment.text.trim().length > 0 ? (
-                      <div
-                        key={`live-text-${segmentIndex}`}
-                        className="message-text"
-                      >
-                        <MarkdownText text={segment.text} />
-                      </div>
-                    ) : null,
+                    ) : (() => {
+                      // Grapheme hold lives only in the trailing text piece:
+                      // strip the held suffix for display while the stored
+                      // segments keep the full delta for the terminal merge.
+                      const rawText =
+                        segment.kind === "text" ? segment.text : "";
+                      const liveDisplay =
+                        segmentIndex === liveLastTextIndex &&
+                        liveHeld.length > 0 &&
+                        rawText.endsWith(liveHeld)
+                          ? rawText.slice(0, rawText.length - liveHeld.length)
+                          : rawText;
+                      if (liveDisplay.trim().length === 0) return null;
+                      return (
+                        <div
+                          key={`live-text-${segmentIndex}`}
+                          className="message-text"
+                        >
+                          <MarkdownText text={liveDisplay} />
+                        </div>
+                      );
+                    })(),
                   )}
                 </>
               ) : (

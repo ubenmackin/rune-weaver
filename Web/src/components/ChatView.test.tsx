@@ -8,7 +8,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import ChatView from "./ChatView";
+import ChatView, { messageListHasActiveSelection } from "./ChatView";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
@@ -713,6 +713,327 @@ describe("reconstructMessages with structured tool actions", () => {
     // Only one "Done" tool pill should exist, and no "Pending" tool pill
     expect(screen.queryByText("Pending")).not.toBeInTheDocument();
     expect(screen.getByText("Done")).toBeInTheDocument();
+  });
+
+  it("returns false for null or empty lists with no active selection", async () => {
+    // Null lists and empty containers never count as an active selection,
+    // and collapsed or out-of-list ranges stay non-suppressing.
+    window.getSelection()?.removeAllRanges();
+    expect(messageListHasActiveSelection(null)).toBe(false);
+    const empty = document.createElement("div");
+    document.body.appendChild(empty);
+    try {
+      expect(messageListHasActiveSelection(empty)).toBe(false);
+      const caret = document.createRange();
+      caret.selectNodeContents(empty);
+      caret.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(caret);
+      expect(messageListHasActiveSelection(empty)).toBe(false);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      empty.remove();
+    }
+    const list = document.createElement("div");
+    const outside = document.createElement("div");
+    outside.textContent = "outside text";
+    document.body.appendChild(list);
+    document.body.appendChild(outside);
+    try {
+      const outer = document.createRange();
+      outer.selectNodeContents(outside);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(outer);
+      expect(messageListHasActiveSelection(list)).toBe(false);
+      list.textContent = "   ";
+      const whitespace = document.createRange();
+      whitespace.selectNodeContents(list);
+      sel?.removeAllRanges();
+      sel?.addRange(whitespace);
+      expect(messageListHasActiveSelection(list)).toBe(false);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      list.remove();
+      outside.remove();
+    }
+  });
+
+  it("suppresses auto-scroll across 20 rapid deltas while a selection is active", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await user.type(screen.getByLabelText("Chat input"), "selection lock");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+        .sessionID;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "streaming base text ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/streaming base text/)).toBeInTheDocument();
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      expect(list).not.toBeNull();
+      const target =
+        screen.getByText(/streaming base text/).closest(".message-text") ?? list;
+      const range = document.createRange();
+      range.selectNodeContents(target as Node);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      expect(messageListHasActiveSelection(list)).toBe(true);
+      scrollSpy.mockClear();
+      for (let i = 0; i < 20; i++) {
+        await dispatchFrameOrThrow(capture.onMessage, {
+          type: "delta",
+          delta: ` chunk-${i} `,
+          sessionID: turnSID,
+        });
+      }
+      expect(scrollSpy).not.toHaveBeenCalled();
+      const afterSel = window.getSelection();
+      expect(afterSel?.rangeCount).toBe(1);
+      expect(afterSel?.isCollapsed).toBe(false);
+      expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
+      expect(list.contains(afterSel?.focusNode ?? null)).toBe(true);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+
+  it("allows auto-scroll when the caret is collapsed", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await user.type(screen.getByLabelText("Chat input"), "caret check");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+        .sessionID;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "caret base text ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/caret base text/)).toBeInTheDocument();
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      const caret = document.createRange();
+      caret.selectNodeContents(list);
+      caret.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(caret);
+      expect(messageListHasActiveSelection(list)).toBe(false);
+      scrollSpy.mockClear();
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: " more after caret ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/more after caret/)).toBeInTheDocument();
+      });
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+
+  it("preserves the scrolled-up lock without a selection", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await user.type(screen.getByLabelText("Chat input"), "history review");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+        .sessionID;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "history base ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/history base/)).toBeInTheDocument();
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      window.getSelection()?.removeAllRanges();
+      expect(messageListHasActiveSelection(list)).toBe(false);
+      Object.defineProperty(list, "scrollHeight", {
+        value: 2000,
+        configurable: true,
+      });
+      Object.defineProperty(list, "scrollTop", { value: 0, configurable: true });
+      Object.defineProperty(list, "clientHeight", {
+        value: 500,
+        configurable: true,
+      });
+      fireEvent.scroll(list);
+      scrollSpy.mockClear();
+      for (let i = 0; i < 5; i++) {
+        await dispatchFrameOrThrow(capture.onMessage, {
+          type: "delta",
+          delta: ` locked-${i} `,
+          sessionID: turnSID,
+        });
+      }
+      expect(scrollSpy).not.toHaveBeenCalled();
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+
+  it("lands own sends in view after a scrolled-up lock", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      Object.defineProperty(list, "scrollHeight", {
+        value: 2000,
+        configurable: true,
+      });
+      Object.defineProperty(list, "scrollTop", { value: 0, configurable: true });
+      Object.defineProperty(list, "clientHeight", {
+        value: 500,
+        configurable: true,
+      });
+      fireEvent.scroll(list);
+      scrollSpy.mockClear();
+      window.getSelection()?.removeAllRanges();
+      await user.type(screen.getByLabelText("Chat input"), "own send lands");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(screen.getByText("own send lands")).toBeInTheDocument();
+      });
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+
+  it("keeps the selection range alive across live updates with stable keys", async () => {
+    const user = userEvent.setup();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await user.type(screen.getByLabelText("Chat input"), "stable keys");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => {
+        expect(capture.sentFrames.length).toBe(1);
+      });
+      const turnSID = (JSON.parse(capture.sentFrames[0]) as { sessionID?: string })
+        .sessionID;
+      await dispatchFrameOrThrow(capture.onMessage, {
+        type: "delta",
+        delta: "stable base text ",
+        sessionID: turnSID,
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/stable base text/)).toBeInTheDocument();
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      const liveTextBefore = document.querySelector(
+        ".streaming-bubble .message-text",
+      );
+      expect(liveTextBefore).not.toBeNull();
+      const beforeText = (liveTextBefore as HTMLElement).textContent;
+      const range = document.createRange();
+      range.selectNodeContents(liveTextBefore as Node);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      const selectedBefore = window.getSelection()?.toString();
+      expect(selectedBefore?.trim().length).toBeGreaterThan(0);
+      scrollSpy.mockClear();
+      for (let i = 0; i < 5; i++) {
+        await dispatchFrameOrThrow(capture.onMessage, {
+          type: "delta",
+          delta: ` live-${i} `,
+          sessionID: turnSID,
+        });
+      }
+      expect(scrollSpy).not.toHaveBeenCalled();
+      const liveTextAfter = document.querySelector(
+        ".streaming-bubble .message-text",
+      );
+      expect(liveTextAfter).toBe(liveTextBefore);
+      expect((liveTextAfter as HTMLElement).textContent).toContain(
+        (beforeText ?? "").trim().slice(0, 6),
+      );
+      const afterSel = window.getSelection();
+      expect(afterSel?.rangeCount).toBe(1);
+      expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
+      expect(afterSel?.toString().trim().length).toBeGreaterThan(0);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
   });
 });
 

@@ -2064,49 +2064,37 @@ struct WebSocketTurnDetachmentTests {
     }
 
     @Test
-    func `Watchdog expiry settles error with timeout detail`() async throws {
-        #expect(WebSocketTurnWatchdog.timeoutNanoseconds == 15 * 60 * 1_000_000_000)
-        let detail = WebSocketTurnTimeoutError().errorDescription ?? ""
-        #expect(detail.contains("timed out") == true)
-        #expect(detail.contains("15 minutes") == true)
-        // Timeout never masquerades as cooperative cancellation.
-        let timeout: Error = WebSocketTurnTimeoutError()
-        #expect((timeout is CancellationError) == false)
-        #expect((timeout is WebSocketTurnTimeoutError) == true)
-        // A hanging operation loses the race to the watchdog.
-        do {
-            _ = try await withWebSocketTurnWatchdog(timeoutNanoseconds: 20_000_000) {
-                try await Task.sleep(nanoseconds: 500_000_000)
-                return "hung"
-            }
-            Issue.record("Expected watchdog timeout")
-        } catch is WebSocketTurnTimeoutError {
-            // Expected failed-turn path.
-        } catch {
-            Issue.record("Unexpected watchdog error: \(error)")
+    func `Long turn bounded only by cancel, no absolute timeout`() async throws {
+        // No absolute turn watchdog: a healthy turn runs until explicit cancel,
+        // same-session supersede, or its terminal frame. The tracker cap stays
+        // the only bound.
+        #expect(ActiveTurnTracker.maxConcurrentTurns == 3)
+        let tracker = ActiveTurnTracker()
+        let firstSession = UUID()
+        let secondSession = UUID()
+        let thirdSession = UUID()
+        let first = try #require(await tracker.tryAcquire(sessionID: firstSession, onCancel: {}))
+        let second = try #require(await tracker.tryAcquire(sessionID: secondSession, onCancel: {}))
+        let third = try #require(await tracker.tryAcquire(sessionID: thirdSession, onCancel: {}))
+        #expect(first.replaced == false)
+        #expect(second.replaced == false)
+        #expect(third.replaced == false)
+        // Over-cap fresh session is rejected with no slot.
+        let rejectedSession = UUID()
+        #expect(await tracker.tryAcquire(sessionID: rejectedSession, onCancel: {}) == nil)
+        #expect(await tracker.isActive(sessionID: rejectedSession) == false)
+        // Explicit cancel clears the slot so a fresh session fits.
+        #expect(await tracker.cancel(sessionID: secondSession) == true)
+        #expect(await tracker.isActive(sessionID: secondSession) == false)
+        let admitted = try #require(await tracker.tryAcquire(sessionID: rejectedSession, onCancel: {}))
+        #expect(admitted.replaced == false)
+        #expect(await tracker.isActive(sessionID: rejectedSession) == true)
+        // Same-session supersede still replaces its own slot past the cap.
+        let superseding = await tracker.tryAcquire(sessionID: firstSession, onCancel: {})
+        #expect(superseding?.replaced == true)
+        for session in await tracker.runningSessionIDs() {
+            _ = await tracker.cancel(sessionID: session)
         }
-        // A fast operation wins before the timer fires.
-        let fast = try await withWebSocketTurnWatchdog(timeoutNanoseconds: 500_000_000) {
-            "fast"
-        }
-        #expect(fast == "fast")
-        // Failed-turn audit shape keeps the timeout detail when no partial text exists.
-        let runs = RunLogStore()
-        let sessionID = UUID()
-        let entry = await runs.append(kind: "chat", status: "running", message: "slow", sessionID: sessionID)
-        let audit = ChatTurnAuditSnapshot(partialText: "", toolActions: [], totalTokens: nil)
-        let auditResponse = audit.partialText.isEmpty
-            ? (WebSocketTurnTimeoutError().errorDescription ?? "timeout")
-            : audit.partialText
-        let updated = await runs.update(
-            id: entry.id,
-            status: "error",
-            response: auditResponse,
-            toolActions: audit.toolActions,
-            totalTokens: audit.totalTokens
-        )
-        #expect(updated?.status == "error")
-        #expect(updated?.response?.contains("timed out") == true)
     }
 
     @Test
