@@ -5,12 +5,12 @@
 // dismissing via backdrop, Escape, or session select, while the footer
 // collapses to a glanceable line on mobile and expands to full metrics.
 
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatView, { messageListHasActiveSelection } from "./ChatView";
 import { resetSharedSocket } from "../hooks/useSharedWebSocket";
-import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
+import { resetSharedRunsForTesting, useRunningRuns } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
 import { installViewport } from "../test-utils/viewport";
 import {
@@ -3543,6 +3543,157 @@ describe("Poll-tick selection survival", () => {
       await waitFor(() => {
         expect(screen.getByText(/Alpha line one/)).toBeInTheDocument();
       });
+      const selectedAfter = window.getSelection()?.toString() ?? "";
+      expect(selectedAfter).toBe(selectedBefore);
+      expect(selectedAfter).toContain("Alpha line one");
+      expect(selectedAfter).toContain("Beta line two");
+      expect(scrollSpy).not.toHaveBeenCalled();
+      const paraAfter = document.querySelector("p.chat-p");
+      expect(paraAfter).toBe(paraBefore);
+      const afterSel = window.getSelection();
+      expect(afterSel?.rangeCount).toBe(1);
+      expect(afterSel?.isCollapsed).toBe(false);
+      expect(list.contains(afterSel?.anchorNode ?? null)).toBe(true);
+    } finally {
+      window.getSelection()?.removeAllRanges();
+      delete (window.HTMLElement.prototype as unknown as Record<string, unknown>)
+        .scrollIntoView;
+    }
+  });
+
+  it("preserves selection string across three identical run-log ticks", async () => {
+    // Identical polls keep the cached snapshot with no notify, so an idle
+    // history selection never re-renders while background ticks land.
+    const sessionID = "poll-identical-aaaa-2222";
+    localStorage.setItem("rw_active_session_id", sessionID);
+    const now = new Date().toISOString();
+    const capture = createMockWebSocketCapture();
+    vi.stubGlobal("WebSocket", createMockWebSocket(capture));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string) => {
+        if (input === "/sessions") {
+          return jsonResponse({
+            sessions: [
+              {
+                id: sessionID,
+                title: "Poll Session",
+                messageCount: 2,
+                createdAt: now,
+                updatedAt: now,
+                source: "chat",
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.endsWith("/tool-actions")) {
+          return jsonResponse({ sessionID, actions: [], count: 0 });
+        }
+        if (typeof input === "string" && input.startsWith("/sessions/")) {
+          return jsonResponse({
+            id: sessionID,
+            title: "Poll Session",
+            messages: [
+              {
+                id: "u1",
+                role: "user",
+                content: "history prompt",
+                createdAt: now,
+              },
+              {
+                id: "a1",
+                role: "assistant",
+                content: "Alpha line one\n\nBeta line two",
+                createdAt: now,
+              },
+            ],
+            createdAt: now,
+            updatedAt: now,
+            source: "chat",
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/runs")) {
+          // Fresh object per tick with identical values so equality comes
+          // from content, never from shared references.
+          return jsonResponse({
+            runs: [
+              {
+                id: "run-identical-1",
+                kind: "chat",
+                status: "ok",
+                message: "earlier prompt",
+                sessionID: "other-session-identical",
+                timestamp: now,
+                response: "earlier reply",
+                totalTokens: 12,
+                durationMs: 345,
+              },
+            ],
+            count: 1,
+          });
+        }
+        if (typeof input === "string" && input.startsWith("/approvals")) {
+          return jsonResponse({ approvals: [], count: 0 });
+        }
+        return jsonResponse({});
+      }),
+    );
+    const scrollSpy = vi.fn();
+    (window.HTMLElement.prototype as unknown as Record<string, unknown>).scrollIntoView =
+      scrollSpy;
+    try {
+      render(<ChatView />);
+      await waitFor(() => {
+        expect(capture.onMessage).not.toBeNull();
+      });
+      await waitFor(() => {
+        expect(screen.getByText(/Alpha line one/)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/Beta line two/)).toBeInTheDocument();
+      // Settle the shared run cache before selecting so the measured ticks
+      // are purely identical with no initial population mixed in.
+      const { result } = renderHook(() => useRunningRuns());
+      await waitFor(() => {
+        expect(result.current.runs).toHaveLength(1);
+      });
+      const list = document.querySelector(".message-list") as HTMLElement;
+      expect(list).not.toBeNull();
+      const messageText = screen
+        .getByText(/Alpha line one/)
+        .closest(".message-text") as HTMLElement;
+      expect(messageText).not.toBeNull();
+      expect(messageText.textContent).toContain("Beta line two");
+      const range = document.createRange();
+      range.selectNodeContents(messageText);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      expect(messageListHasActiveSelection(list)).toBe(true);
+      const selectedBefore = window.getSelection()?.toString() ?? "";
+      expect(selectedBefore).toContain("Alpha line one");
+      expect(selectedBefore).toContain("Beta line two");
+      const paraBefore = document.querySelector("p.chat-p");
+      expect(paraBefore).not.toBeNull();
+      scrollSpy.mockClear();
+      // Drive three identical poll ticks through the shared poller; each
+      // refresh fetches the same run row with fresh identities.
+      const snapshotBefore = result.current.runs;
+      const refresh = result.current.refresh;
+      for (let i = 0; i < 3; i++) {
+        await act(async () => {
+          refresh();
+          await Promise.resolve();
+        });
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      }
+      await waitFor(() => {
+        expect(screen.getByText(/Alpha line one/)).toBeInTheDocument();
+      });
+      // Identical ticks never swap the snapshot, so the view never re-renders.
+      expect(result.current.runs).toBe(snapshotBefore);
       const selectedAfter = window.getSelection()?.toString() ?? "";
       expect(selectedAfter).toBe(selectedBefore);
       expect(selectedAfter).toContain("Alpha line one");

@@ -7,6 +7,7 @@
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import {
   listRuns,
+  parseRunTimestamp,
   RUN_LOG_POLL_LIMIT,
   RUN_POLL_INTERVAL_MS,
   runningSessionIDsFromRuns,
@@ -80,13 +81,75 @@ function freezeRunsSnapshot(
   return Object.freeze(next.map(freezeRunCopy));
 }
 
+// Normalizes one fingerprint field so absent shapes compare stable. Null,
+// undefined, and empty string all read as empty while numbers and other
+// values stringify, keeping omitted keys aligned with explicit nulls.
+function fingerprintField(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+  return text === "" ? "" : text;
+}
+
+// Builds the equality key for one frozen snapshot in incoming order with no
+// sorting. Each row joins its scalar fields with newlines, each action joins
+// its fields with pipes and actions join with pipes inside the row, and rows
+// join with double newlines; timestamps normalize to epoch millis through
+// the shared parser so both wire shapes compare as one value.
+export function runsFingerprint(
+  runs: ReadonlyArray<FrozenRunLogEntry>,
+): string {
+  return runs
+    .map((run) => {
+      const actions = run.toolActions ?? [];
+      const actionKeys = actions.map((action) => {
+        const resultContent =
+          action.result === null || action.result === undefined
+            ? ""
+            : fingerprintField(action.result.content);
+        let resultError = "";
+        if (action.result !== null && action.result !== undefined) {
+          if (action.result.isError === true) resultError = "1";
+          else if (action.result.isError === false) resultError = "0";
+        }
+        return [
+          fingerprintField(action.callID),
+          fingerprintField(action.toolName),
+          fingerprintField(action.argumentsJSON),
+          fingerprintField(action.roundIndex),
+          resultContent,
+          resultError,
+        ].join("|");
+      });
+      const actionsSection = actionKeys.join("|");
+      return [
+        fingerprintField(run.id),
+        fingerprintField(run.jobID),
+        fingerprintField(run.sessionID),
+        fingerprintField(run.kind),
+        fingerprintField(run.status),
+        fingerprintField(run.message),
+        String(parseRunTimestamp(run.timestamp).getTime()),
+        fingerprintField(run.response),
+        fingerprintField(run.totalTokens),
+        fingerprintField(run.durationMs),
+        actionsSection,
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
 function publishRuns(
   next: ReadonlyArray<RunLogEntry | FrozenRunLogEntry>,
 ): void {
-  // Replace the snapshot instead of mutating it so readers holding the
-  // previous reference keep a consistent view while new readers see the
-  // update; notifying after the swap keeps getSnapshot tear-free.
-  cachedRuns = freezeRunsSnapshot(next);
+  // Freeze first so the fingerprint compares the exact rows that would be
+  // published; a matching fingerprint keeps the cached reference with no
+  // notify so identical ticks never re-render idle views, while a mismatch
+  // swaps before notifying to keep snapshot reads tear-free.
+  const frozen = freezeRunsSnapshot(next);
+  if (runsFingerprint(frozen) === runsFingerprint(cachedRuns)) {
+    return;
+  }
+  cachedRuns = frozen;
   for (const listener of [...listeners]) {
     try {
       listener();
