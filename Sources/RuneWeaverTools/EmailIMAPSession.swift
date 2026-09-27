@@ -136,13 +136,74 @@ private final class SessionLineReadState: @unchecked Sendable {
 ///
 /// Both the live Process pipe and the hermetic fake report timeouts with one
 /// identical transport-phrased message so timeout and reconnect tests assert
-/// the exact copy without drift between the live and hermetic paths.
+/// the exact copy without drift between the live and hermetic paths. A
+/// non-empty helper stderr tail rides after a separator so a silent helper
+/// still leaves its dying words; empty stderr keeps the base copy unchanged.
 public enum SessionLineTimeout {
     /// Builds the transport-phrased timeout message for a read budget.
     /// - Parameter timeout: Seconds waited before reporting the timeout.
     /// - Returns: Timeout detail shared by live and fake transports.
     public static func timeoutMessage(timeout: TimeInterval) -> String {
-        "IMAP session command timed out after \(String(format: "%g", timeout))s"
+        timeoutMessage(timeout: timeout, stderrTail: nil)
+    }
+
+    /// Builds the transport-phrased timeout message with an optional stderr tail.
+    ///
+    /// The tail carries only helper diagnostics; the session script contract
+    /// keeps secrets out of stderr, and the 500-char cap bounds the detail
+    /// even if that contract ever changes. An empty tail keeps the base copy
+    /// so existing assertions without diagnostics stay exact.
+    /// - Parameters:
+    ///   - timeout: Seconds waited before reporting the timeout.
+    ///   - stderrTail: Retained helper stderr, or nil/empty for the base copy.
+    /// - Returns: Base timeout detail, plus the truncated tail after a separator when present.
+    public static func timeoutMessage(timeout: TimeInterval, stderrTail: String?) -> String {
+        let base = "IMAP session command timed out after \(String(format: "%g", timeout))s"
+        let trimmed = (stderrTail ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return base }
+        let cap = ProcessSessionLineTransport.maxStderrTailChars
+        let tail = trimmed.count > cap ? String(trimmed.suffix(cap)) : trimmed
+        return base + " | stderr: " + tail
+    }
+}
+
+/// Retained tail of helper stderr for timeout diagnostics.
+///
+/// The live drain appends incrementally and keeps only the newest bytes so a
+/// hung helper's last words survive without unbounded growth. Decoding is
+/// lossy-tolerant so a byte-boundary split never drops the whole tail.
+private final class SessionStderrTail: @unchecked Sendable {
+    /// Guards retained bytes.
+    private let lock = NSLock()
+    /// Newest retained bytes, capped at the transport bound.
+    private var data = Data()
+    /// Maximum bytes retained.
+    private let cap: Int
+
+    /// Creates a tail store with a byte cap.
+    /// - Parameter cap: Maximum bytes retained.
+    init(cap: Int) {
+        self.cap = cap
+    }
+
+    /// Appends a chunk, keeping only the newest capped bytes.
+    /// - Parameter chunk: Fresh stderr bytes from the drain.
+    func append(_ chunk: Data) {
+        guard !chunk.isEmpty else { return }
+        lock.withLock {
+            data.append(chunk)
+            if data.count > cap {
+                data.removeSubrange(0 ..< (data.count - cap))
+            }
+        }
+    }
+
+    /// Returns the retained tail as trimmed text.
+    /// - Returns: Trimmed stderr text, or empty when nothing was captured.
+    func snapshot() -> String {
+        lock.withLock {
+            String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
     }
 }
 
@@ -151,7 +212,9 @@ public enum SessionLineTimeout {
 /// Spawns `python3 -u -c` with piped stdin and stdout so each command is one
 /// unbuffered JSON line each way. Standard error drains in the background so
 /// helper diagnostics never block a read. All secrets stay in the written line;
-/// nothing here logs connection fields.
+/// nothing here logs connection fields. Named owner for stderr retention: this
+/// transport keeps the last 500 stderr bytes and appends them to timeout
+/// errors so a stalled helper still leaves its dying words.
 ///
 /// Sendable proof: `Process` and `FileHandle` are not `Sendable`, so the class
 /// stays `@unchecked Sendable`. All handle and process touches hold `ioLock`:
@@ -167,6 +230,12 @@ public enum SessionLineTimeout {
 /// its handle, and the child is reaped with `waitUntilExit` off the
 /// cooperative pool.
 public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked Sendable {
+    /// Maximum stderr characters retained for timeout diagnostics.
+    ///
+    /// Keeps timeout errors readable while preserving the helper's last words;
+    /// the session script contract keeps secrets out of stderr, and this bound
+    /// holds even if that contract ever changes.
+    public static let maxStderrTailChars = 500
     /// Underlying helper process. Touched only while holding `ioLock`.
     private let process: Process
     /// Writable stdin handle. Written and closed only while holding `ioLock`.
@@ -175,6 +244,8 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     private let stdoutHandle: FileHandle
     /// Readable stderr handle. Drained off-pool; closed under `ioLock`.
     private let stderrHandle: FileHandle
+    /// Retained stderr tail feeding timeout errors. Appended only by the drain.
+    private let stderrTail: SessionStderrTail
     /// Buffered stdout bytes awaiting a newline boundary.
     private var pending = Data()
     /// Guards buffered stdout bytes across concurrent readers.
@@ -205,11 +276,23 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
         spawned.standardOutput = stdoutPipe
         spawned.standardError = stderrPipe
         let stderrReading = stderrPipe.fileHandleForReading
-        // Drain diagnostics off-pool so stderr never blocks the helper.
-        // Closing this handle in `terminate` (or on natural exit) unblocks
-        // the drain, which is the cancellation mechanism for this blocking read.
+        let tailStore = SessionStderrTail(cap: Self.maxStderrTailChars)
+        self.stderrTail = tailStore
+        // Drain diagnostics off-pool so stderr never blocks the helper while
+        // retaining the last words for timeout errors. Closing this handle in
+        // `terminate` (or on natural exit) unblocks the drain, which is the
+        // cancellation mechanism for this blocking read.
         DispatchQueue.global(qos: .utility).async {
-            _ = stderrReading.readDataToEndOfFile()
+            while true {
+                let chunk: Data?
+                do {
+                    chunk = try stderrReading.read(upToCount: 4096)
+                } catch {
+                    break
+                }
+                guard let chunk, !chunk.isEmpty else { break }
+                tailStore.append(chunk)
+            }
         }
         self.process = spawned
         self.stdinHandle = stdinPipe.fileHandleForWriting
@@ -254,9 +337,10 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     ///
     /// The blocking drain runs off the cooperative pool so a hung helper never
     /// stalls the executor. The first finisher wins; a timeout surfaces with a
-    /// transport-phrased message while the stray reader exits once teardown
-    /// unblocks it. Cancellation abandons the reader, drops the timer, and
-    /// resumes with `CancellationError` instead of waiting out the budget.
+    /// transport-phrased message plus the retained stderr tail while the stray
+    /// reader exits once teardown unblocks it. Cancellation abandons the
+    /// reader, drops the timer, and resumes with `CancellationError` instead
+    /// of waiting out the budget.
     /// - Parameter timeout: Seconds to wait before reporting a timeout.
     /// - Returns: Single response line without the trailing newline.
     public func readLine(timeout: TimeInterval) async throws -> String {
@@ -274,10 +358,13 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
                         state.resume(throwing: error)
                     }
                 }
-                let timer = DispatchWorkItem {
+                let timer = DispatchWorkItem { [self] in
+                    // Read the retained tail at fire time so diagnostics written
+                    // just before the stall still ride the timeout detail.
+                    let tail = self.stderrTail.snapshot()
                     state.resume(
                         throwing: EmailIMAPError.bridgeFailed(
-                            SessionLineTimeout.timeoutMessage(timeout: timeout)
+                            SessionLineTimeout.timeoutMessage(timeout: timeout, stderrTail: tail)
                         )
                     )
                 }
@@ -365,12 +452,14 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
 /// Records every written line and serves queued response lines in order. An
 /// optional hang mode reports the same transport-phrased timeout as the live
 /// pipe without waiting out the budget, so timeout and reconnect tests stay
-/// fast while still asserting the exact copy and the requested budget.
+/// fast while still asserting the exact copy and the requested budget. Canned
+/// stderr mirrors the live retained tail through the same timeout helper, so
+/// live-drain retention is covered through this seam without spawning helpers.
 ///
-/// Sendable proof: every queue, counter, flag, and budget access holds `mutex`
+/// Sendable proof: every queue, counter, flag, budget, and stderr access holds `mutex`
 /// via `withLock` or `lock`/`unlock`. All stored state is value types, and the
 /// lock is the single synchronization point across `writeLine`, `readLine`,
-/// `enqueue`, `setHang`, and `terminate`. The class stays `@unchecked Sendable`
+/// `enqueue`, `setHang`, `setStderr`, and `terminate`. The class stays `@unchecked Sendable`
 /// only because the compiler cannot verify the manual lock discipline.
 public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Sendable {
     /// Every line written through `writeLine`, in order.
@@ -415,6 +504,13 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
         return _timeouts
     }
 
+    /// Canned stderr tail surfaced on timeouts, mirroring the live drain.
+    public var stderrText: String {
+        mutex.lock()
+        defer { mutex.unlock() }
+        return _stderrText
+    }
+
     /// Guards in-memory queues and counters.
     private let mutex = NSLock()
     /// Recorded writes in arrival order.
@@ -423,6 +519,8 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     private var _responses: [String]
     /// When true, reads report a timeout without serving the queue.
     private var _hang: Bool
+    /// Canned stderr tail appended to timeout errors via the shared helper.
+    private var _stderrText: String
     /// Whether termination ran.
     private var _terminated = false
     /// Termination call count.
@@ -436,9 +534,11 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     /// - Parameters:
     ///   - responses: Response lines served first-in first-out, one per read.
     ///   - hangReads: When true, every read reports a timeout instead of serving the queue.
-    public init(responses: [String] = [], hangReads: Bool = false) {
+    ///   - stderrText: Canned stderr tail appended to timeout errors, mirroring the live drain.
+    public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "") {
         self._responses = responses
         self._hang = hangReads
+        self._stderrText = stderrText
     }
 
     /// Queues one more response line for the next read.
@@ -457,6 +557,17 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
         }
     }
 
+    /// Sets the canned stderr tail for upcoming timeout errors.
+    ///
+    /// Mirrors the live stderr drain through the shared timeout helper so
+    /// timeout copy stays identical between the live and hermetic paths.
+    /// - Parameter text: Stderr text retained for the next hung read.
+    public func setStderr(_ text: String) {
+        mutex.withLock {
+            _stderrText = text
+        }
+    }
+
     /// Records one written line.
     /// - Parameter line: Single JSON document without a trailing newline.
     public func writeLine(_ line: String) async throws {
@@ -468,18 +579,21 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     /// Serves one queued line or reports a timeout when hanging.
     ///
     /// An empty queue surfaces as a closed connection so tests fail fast
-    /// instead of blocking. Hang mode mirrors the live timeout wording exactly
-    /// without waiting out the budget, keeping timeout tests hermetic and fast.
+    /// instead of blocking. Hang mode mirrors the live timeout wording exactly,
+    /// including the retained stderr tail, without waiting out the budget,
+    /// keeping timeout tests hermetic and fast.
     /// - Parameter timeout: Budget used for the timeout message and recording.
     /// - Returns: Next queued response line.
     public func readLine(timeout: TimeInterval) async throws -> String {
-        let hanging: Bool = mutex.withLock {
+        let (hanging, tail): (Bool, String) = mutex.withLock {
             _reads += 1
             _timeouts.append(timeout)
-            return _hang
+            return (_hang, _stderrText)
         }
         if hanging {
-            throw EmailIMAPError.bridgeFailed(SessionLineTimeout.timeoutMessage(timeout: timeout))
+            throw EmailIMAPError.bridgeFailed(
+                SessionLineTimeout.timeoutMessage(timeout: timeout, stderrTail: tail)
+            )
         }
         return try mutex.withLock {
             guard !_responses.isEmpty else {
@@ -501,7 +615,7 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
 /// Persistent read-only IMAP session owning one piped helper connection.
 ///
 /// The actor serializes one in-flight command at a time: `start` spawns the
-/// helper and opens with a 60s budget, `send` writes one line and reads one
+/// helper and opens with a 150s budget, `send` writes one line and reads one
 /// response line with a 120s budget, and `close` sends close with a 10s budget
 /// before terminating regardless. Concurrent starters coalesce onto one
 /// in-flight open handshake, and concurrent senders await their turn so line
@@ -510,10 +624,15 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
 /// failure terminates and surfaces without an internal respawn; the pooled
 /// caller owns the single reconnect, preserving reconnect-once budgets, while
 /// auth failures never retry. Close is non-throwing and idempotent, so a
-/// second close no-ops.
+/// second close no-ops. Named owner for open/command/close budgets is this actor.
 public actor EmailIMAPSession {
     /// Budget for the opening exchange.
-    public static let openTimeoutSeconds: TimeInterval = 60
+    ///
+    /// Covers the worst-case bounded open: 4 addresses times 30s plus 30s login
+    /// (150s total), so a stalled server surfaces its honest `Could not connect`
+    /// error instead of a Swift timeout. Per-command 120s and close 10s stay
+    /// unchanged.
+    public static let openTimeoutSeconds: TimeInterval = 150
     /// Budget for each status, search, or fetch exchange.
     public static let commandTimeoutSeconds: TimeInterval = 120
     /// Budget for the best-effort close exchange.
@@ -561,12 +680,14 @@ public actor EmailIMAPSession {
         self.factory = transportFactory
     }
 
-    /// Spawns the helper and opens the connection with a 60s budget.
+    /// Spawns the helper and opens the connection with a 150s budget.
     ///
     /// A second start after success no-ops; concurrent starters join one
     /// in-flight handshake instead of double-spawning. Starting after close
     /// reports that the session is no longer open. Open failures preserve the
     /// helper copy verbatim, including the one-shot `Could not connect` wording.
+    /// The 150s bound outlasts the worst-case dial (4 addresses times 30s plus
+    /// 30s login) so stalled servers stay honest server errors.
     /// - Throws: `EmailIMAPError.bridgeFailed` when closed or the open fails.
     public func start() async throws {
         guard !closed else {
@@ -597,7 +718,7 @@ public actor EmailIMAPSession {
     /// a 120s budget. Concurrent callers await their turn so one command owns
     /// the line framing at a time. A `{ok false}` envelope throws `bridgeFailed`;
     /// a hung command terminates the helper and throws a transport-phrased
-    /// timeout. Any `bridgeFailed` terminates and surfaces without an internal
+    /// timeout carrying the retained stderr tail. Any `bridgeFailed` terminates and surfaces without an internal
     /// respawn so the pooled caller owns retry; auth never retries per the
     /// shared retry classifier, which the outer open/start path consults to
     /// avoid reconnecting on auth, while `send` itself never branches on the

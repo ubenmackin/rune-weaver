@@ -23,7 +23,8 @@ enum EmailIMAPLimits {
 /// The one-shot and session programs decode the same wire shapes, so the header, body,
 /// attachment, snippet, and quoter helpers live here once. The spelling uses `+`
 /// concatenation instead of `append` so the session program keeps its read-only shape
-/// without introducing extra operation names.
+/// without introducing extra operation names. Address ordering also lives here once so
+/// both programs dial IPv4 first without drifting apart on dual-stack hosts.
 enum EmailIMAPSharedPrelude {
     /// Shared Python source prepended ahead of each helper-specific body.
     static let text = #"""
@@ -123,6 +124,33 @@ enum EmailIMAPSharedPrelude {
         # CR/LF stays rejected by callers before quoting to block injection.
         esc = name.replace("\\", "\\\\").replace('"', '\\"')
         return '"%s"' % esc
+
+    def prefer_ipv4():
+        # Dial IPv4 first on dual-stack hosts where IPv6 stalls while IPv4
+        # stays reachable; single-family hosts are untouched because the
+        # wrapper only reorders. Sorting is a stable partition so relative
+        # order inside each family survives, and create_connection still
+        # walks all results so a refused IPv4 falls through to IPv6.
+        try:
+            import socket as _prefer_socket
+        except Exception:
+            return
+        try:
+            _orig_getaddrinfo = _prefer_socket.getaddrinfo
+        except Exception:
+            return
+        if getattr(_orig_getaddrinfo, "_runeweaver_ipv4_first", False):
+            return
+        def _ipv4_first_getaddrinfo(*args, **kwargs):
+            results = _orig_getaddrinfo(*args, **kwargs)
+            try:
+                v4 = [r for r in results if r[0] == _prefer_socket.AF_INET]
+                rest = [r for r in results if r[0] != _prefer_socket.AF_INET]
+                return v4 + rest
+            except Exception:
+                return results
+        _ipv4_first_getaddrinfo._runeweaver_ipv4_first = True
+        _prefer_socket.getaddrinfo = _ipv4_first_getaddrinfo
     """#
 }
 
@@ -221,6 +249,10 @@ private enum EmailIMAPBridgeScriptHead {
         sys.stdout.flush()
 
     def main():
+        # Order addresses once at startup so the first dial already prefers
+        # IPv4; the helper itself never raises, so a bad socket shim cannot
+        # fail the request before validation runs.
+        prefer_ipv4()
         try:
             req = json.loads(sys.stdin.read() or "{}")
         except Exception:

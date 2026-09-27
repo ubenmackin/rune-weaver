@@ -297,6 +297,105 @@ struct EmailIMAPSessionTests {
         #expect(Self.countMarker("LOGIN", in: result.stderr) == 1)
         #expect(Self.countMarker("LOGOUT", in: result.stderr) == 1)
     }
+
+    @Test
+    func `Session source orders IPv4 first before connecting`() throws {
+        // The persistent helper reuses one connection across turns, so the
+        // address order is fixed once at startup rather than per command.
+        let source = EmailIMAPSessionScript.source
+        #expect(source.contains("def prefer_ipv4"))
+        #expect(source.contains("getaddrinfo"))
+        #expect(source.contains("AF_INET"))
+        #expect(source.contains("prefer_ipv4()"))
+        if let call = source.range(of: "prefer_ipv4()"),
+           let connect = source.range(of: "IMAP4_SSL")
+        {
+            #expect(call.lowerBound < connect.lowerBound)
+        } else {
+            Issue.record("Expected prefer_ipv4 call before IMAP4_SSL")
+        }
+        if let definition = source.range(of: "def prefer_ipv4"),
+           let connect = source.range(of: "IMAP4_SSL")
+        {
+            #expect(definition.lowerBound < connect.lowerBound)
+        } else {
+            Issue.record("Expected prefer_ipv4 definition before IMAP4_SSL")
+        }
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
+
+    @Test
+    func `Session prelude prefers IPv4 with fallback over stub socket`() throws {
+        // Same ordering contract through the session composition: stub
+        // results starting with IPv6 must dial IPv4 first, a refused IPv4
+        // must fall through, and IPv6-only hosts must stay reachable.
+        let probe = #"""
+        AF4 = socket.AF_INET
+        AF6 = socket.AF_INET6
+        def v4(addr):
+            return (AF4, socket.SOCK_STREAM, 6, "", (addr, 993))
+        def v6(addr):
+            return (AF6, socket.SOCK_STREAM, 6, "", (addr, 993, 0, 0))
+        out = {}
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::1"), v4("192.0.2.1")]
+        prefer_ipv4()
+        ordered = socket.getaddrinfo("mail.example.com", 993)
+        out["firstIsV4"] = (ordered[0][0] == AF4)
+        dialed = []
+        connected = None
+        for fam, typ, proto, canon, sa in ordered:
+            dialed.append("v4" if fam == AF4 else "v6")
+            try:
+                if fam == AF4:
+                    raise OSError("refused")
+                connected = sa
+                break
+            except OSError:
+                continue
+        out["dialed"] = dialed
+        out["fellThrough"] = (connected is not None and dialed == ["v4", "v6"])
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::2")]
+        prefer_ipv4()
+        only = socket.getaddrinfo("mail.example.com", 993)
+        out["v6Only"] = (len(only) == 1 and only[0][0] == AF6)
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::a"), v4("192.0.2.10"), v6("2001:db8::b"), v4("192.0.2.11")]
+        prefer_ipv4()
+        stable = socket.getaddrinfo("mail.example.com", 993)
+        out["stable"] = ([s[4][0] for s in stable] == ["192.0.2.10", "192.0.2.11", "2001:db8::a", "2001:db8::b"])
+        sys.stdout.write(json.dumps(out))
+        """#
+        let fullSource = "import sys, json, socket, re\nfrom email.header import decode_header\n"
+            + EmailIMAPSharedPrelude.text + "\n" + probe
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-c", fullSource]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        let stdoutData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        struct ProbeResult: Decodable {
+            /// Whether the first entry dials IPv4.
+            let firstIsV4: Bool
+            /// Families dialed in order.
+            let dialed: [String]
+            /// Whether a refused IPv4 fell through to IPv6.
+            let fellThrough: Bool
+            /// Whether an IPv6-only stub connects unchanged.
+            let v6Only: Bool
+            /// Whether mixed lists keep relative order per family.
+            let stable: Bool
+        }
+        let result = try JSONDecoder().decode(ProbeResult.self, from: stdoutData)
+        #expect(result.firstIsV4)
+        #expect(result.dialed == ["v4", "v6"])
+        #expect(result.fellThrough)
+        #expect(result.v6Only)
+        #expect(result.stable)
+    }
 }
 
 /// Hermetic actor coverage over the line-framing seam.
@@ -445,6 +544,91 @@ struct EmailIMAPSessionActorTests {
         #expect(fake.terminateCount == 1)
         #expect(spawner.spawnCount == 1)
         await session.close()
+        await session.close()
+    }
+
+    @Test
+    func `Open budget outlasts worst-case dial plus login`() {
+        // A stalled server must surface its honest error: the helper tries
+        // IPv4 first with a 30s bound per attempt, so four addresses plus the
+        // login need 150s before Swift may time out first.
+        #expect(EmailIMAPSession.openTimeoutSeconds == 150)
+        #expect(EmailIMAPSession.commandTimeoutSeconds == 120)
+        #expect(EmailIMAPSession.closeTimeoutSeconds == 10)
+        #expect(ProcessSessionLineTransport.maxStderrTailChars == 500)
+    }
+
+    @Test
+    func `Fake timeout with empty stderr keeps base copy`() async throws {
+        // Empty diagnostics must not perturb the long-standing timeout wording,
+        // so existing assertions without a helper tail stay exact.
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let spawner = TestSpawner([fake])
+        let session = Self.makeSession(spawner: spawner)
+        try await session.start()
+        fake.setHang(true)
+        do {
+            _ = try await session.send(op: "status", payload: ["mailbox": "INBOX"])
+            #expect(Bool(false), "Expected timeout")
+        } catch {
+            let detail = Self.bridgeDetail(error)
+            let base = SessionLineTimeout.timeoutMessage(timeout: EmailIMAPSession.commandTimeoutSeconds)
+            #expect(detail == base)
+        }
+        await session.close()
+    }
+
+    @Test
+    func `Fake timeout carries canned stderr after separator`() async throws {
+        // The live drain and the fake share one timeout helper, so asserting
+        // the canned tail here covers the live retention through the seam
+        // without spawning a helper for a timing-sensitive stall.
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let spawner = TestSpawner([fake])
+        let session = Self.makeSession(spawner: spawner)
+        try await session.start()
+        fake.setHang(true)
+        fake.setStderr("helper dying words")
+        do {
+            _ = try await session.send(op: "status", payload: ["mailbox": "INBOX"])
+            #expect(Bool(false), "Expected timeout")
+        } catch {
+            let detail = Self.bridgeDetail(error)
+            let base = SessionLineTimeout.timeoutMessage(timeout: EmailIMAPSession.commandTimeoutSeconds)
+            #expect(detail.hasPrefix(base))
+            #expect(detail.contains(" | stderr: "))
+            #expect(detail.contains("helper dying words"))
+        }
+        #expect(fake.isTerminated)
+        await session.close()
+    }
+
+    @Test
+    func `Fake timeout truncates overlong stderr at bound`() async throws {
+        // An unbounded helper log must never inflate the error: only the last
+        // 500 characters ride the timeout detail after the separator.
+        let overlong = String(repeating: "x", count: 2000)
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": true}"#],
+            stderrText: overlong
+        )
+        #expect(fake.stderrText == overlong)
+        let spawner = TestSpawner([fake])
+        let session = Self.makeSession(spawner: spawner)
+        try await session.start()
+        fake.setHang(true)
+        do {
+            _ = try await session.send(op: "status", payload: ["mailbox": "INBOX"])
+            #expect(Bool(false), "Expected timeout")
+        } catch {
+            let detail = Self.bridgeDetail(error)
+            let base = SessionLineTimeout.timeoutMessage(timeout: EmailIMAPSession.commandTimeoutSeconds)
+            #expect(detail.hasPrefix(base))
+            #expect(detail.contains(" | stderr: "))
+            let expectedTail = String(repeating: "x", count: ProcessSessionLineTransport.maxStderrTailChars)
+            #expect(detail.hasSuffix(expectedTail))
+            #expect(detail == base + " | stderr: " + expectedTail)
+        }
         await session.close()
     }
 

@@ -2088,4 +2088,105 @@ struct EmailToolsTests {
         #expect(EmailIMAPMailIndexGateway.uidRangeCriterion(beforeUID: 51) == "UID 1:50")
         try ToolsTestSupport.assertBridgeSourceParses(source)
     }
+
+    @Test
+    func `Bridge source orders IPv4 first before connecting`() throws {
+        // Dual-stack hosts stall on IPv6 while IPv4 stays reachable, so the
+        // one-shot program reorders once at startup without changing
+        // single-family behavior.
+        let source = EmailIMAPBridgeScript.source
+        #expect(source.contains("def prefer_ipv4"))
+        #expect(source.contains("getaddrinfo"))
+        #expect(source.contains("AF_INET"))
+        #expect(source.contains("prefer_ipv4()"))
+        if let call = source.range(of: "prefer_ipv4()"),
+           let connect = source.range(of: "IMAP4_SSL")
+        {
+            #expect(call.lowerBound < connect.lowerBound)
+        } else {
+            Issue.record("Expected prefer_ipv4 call before IMAP4_SSL")
+        }
+        if let definition = source.range(of: "def prefer_ipv4"),
+           let connect = source.range(of: "IMAP4_SSL")
+        {
+            #expect(definition.lowerBound < connect.lowerBound)
+        } else {
+            Issue.record("Expected prefer_ipv4 definition before IMAP4_SSL")
+        }
+        try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
+
+    @Test
+    func `Shared prelude prefers IPv4 with fallback over stub socket`() throws {
+        // Hermetic ordering proof: a stub getaddrinfo returning IPv6 first
+        // must dial IPv4 first, a refused IPv4 must fall through to IPv6,
+        // IPv6-only hosts must connect unchanged, and mixed lists must keep
+        // relative order inside each family.
+        let probe = #"""
+        AF4 = socket.AF_INET
+        AF6 = socket.AF_INET6
+        def v4(addr):
+            return (AF4, socket.SOCK_STREAM, 6, "", (addr, 993))
+        def v6(addr):
+            return (AF6, socket.SOCK_STREAM, 6, "", (addr, 993, 0, 0))
+        out = {}
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::1"), v4("192.0.2.1")]
+        prefer_ipv4()
+        ordered = socket.getaddrinfo("mail.example.com", 993)
+        out["firstIsV4"] = (ordered[0][0] == AF4)
+        dialed = []
+        connected = None
+        for fam, typ, proto, canon, sa in ordered:
+            dialed.append("v4" if fam == AF4 else "v6")
+            try:
+                if fam == AF4:
+                    raise OSError("refused")
+                connected = sa
+                break
+            except OSError:
+                continue
+        out["dialed"] = dialed
+        out["fellThrough"] = (connected is not None and dialed == ["v4", "v6"])
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::2")]
+        prefer_ipv4()
+        only = socket.getaddrinfo("mail.example.com", 993)
+        out["v6Only"] = (len(only) == 1 and only[0][0] == AF6)
+        socket.getaddrinfo = lambda *a, **k: [v6("2001:db8::a"), v4("192.0.2.10"), v6("2001:db8::b"), v4("192.0.2.11")]
+        prefer_ipv4()
+        stable = socket.getaddrinfo("mail.example.com", 993)
+        out["stable"] = ([s[4][0] for s in stable] == ["192.0.2.10", "192.0.2.11", "2001:db8::a", "2001:db8::b"])
+        sys.stdout.write(json.dumps(out))
+        """#
+        let fullSource = "import sys, json, socket, re\nfrom email.header import decode_header\n"
+            + EmailIMAPSharedPrelude.text + "\n" + probe
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-c", fullSource]
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        let stdoutData = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        struct ProbeResult: Decodable {
+            /// Whether the first entry dials IPv4.
+            let firstIsV4: Bool
+            /// Families dialed in order.
+            let dialed: [String]
+            /// Whether a refused IPv4 fell through to IPv6.
+            let fellThrough: Bool
+            /// Whether an IPv6-only stub connects unchanged.
+            let v6Only: Bool
+            /// Whether mixed lists keep relative order per family.
+            let stable: Bool
+        }
+        let result = try JSONDecoder().decode(ProbeResult.self, from: stdoutData)
+        #expect(result.firstIsV4)
+        #expect(result.dialed == ["v4", "v6"])
+        #expect(result.fellThrough)
+        #expect(result.v6Only)
+        #expect(result.stable)
+    }
 }
