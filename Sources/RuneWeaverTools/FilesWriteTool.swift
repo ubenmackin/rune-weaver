@@ -443,103 +443,145 @@ public struct FilesWriteTool: Tool, Sendable {
             filepath: filename
         )
 
+        let target = WriteTarget(
+            liveURL: liveURL,
+            parentDir: parentDir,
+            filename: filename,
+            stagingURL: stagingURL,
+            stagingFilename: stagingFilename,
+            backupURL: backupURL,
+            backupFilename: backupFilename,
+            resolvedPath: decision.resolvedPath,
+            fileExists: fileExists
+        )
+
         // Previews compute the same diff without touching the filesystem, so
         // approval screens and dry runs observe the change with no staging
         // copy, backup clone, directory creation, or live overwrite.
         if context.dryRun {
-            let preview = if args.isStaged {
-                FilesWriteEnvelope(
-                    status: "preview",
-                    path: decision.resolvedPath,
-                    stagingPath: stagingURL.path,
-                    backupPath: nil,
-                    diff: diffResult.diff,
-                    additions: diffResult.additions,
-                    deletions: diffResult.deletions,
-                    message: "Dry run: would stage changes to \(stagingFilename). Live file is unchanged."
-                )
-            } else {
-                FilesWriteEnvelope(
-                    status: "preview",
-                    path: decision.resolvedPath,
-                    stagingPath: nil,
-                    backupPath: fileExists ? backupURL.path : nil,
-                    diff: diffResult.diff,
-                    additions: diffResult.additions,
-                    deletions: diffResult.deletions,
-                    message: "Dry run: would apply changes live to \(filename)."
-                        + (fileExists ? " Backup would save to \(backupFilename)." : "")
-                )
-            }
-            do {
-                let data = try JSONEncoder().encode(preview)
-                let jsonString = String(bytes: data, encoding: .utf8) ?? "{}"
-                return .success(jsonString, callID: input.callID)
-            } catch {
-                return .failure("Failed encoding write output: \(error.localizedDescription)", callID: input.callID)
-            }
+            return makePreviewOutput(target: target, args: args, diffResult: diffResult, callID: input.callID)
         }
 
+        return performDiskWrite(target: target, args: args, diffResult: diffResult, callID: input.callID)
+    }
+
+    private struct WriteTarget {
+        let liveURL: URL
+        let parentDir: URL
+        let filename: String
+        let stagingURL: URL
+        let stagingFilename: String
+        let backupURL: URL
+        let backupFilename: String
+        let resolvedPath: String
+        let fileExists: Bool
+    }
+
+    private func makePreviewOutput(
+        target: WriteTarget,
+        args: FilesWriteArgs,
+        diffResult: UnifiedDiffEngine.DiffResult,
+        callID: String?
+    ) -> ToolOutput {
+        let preview = if args.isStaged {
+            FilesWriteEnvelope(
+                status: "preview",
+                path: target.resolvedPath,
+                stagingPath: target.stagingURL.path,
+                backupPath: nil,
+                diff: diffResult.diff,
+                additions: diffResult.additions,
+                deletions: diffResult.deletions,
+                message: "Dry run: would stage changes to \(target.stagingFilename). Live file is unchanged."
+            )
+        } else {
+            FilesWriteEnvelope(
+                status: "preview",
+                path: target.resolvedPath,
+                stagingPath: nil,
+                backupPath: target.fileExists ? target.backupURL.path : nil,
+                diff: diffResult.diff,
+                additions: diffResult.additions,
+                deletions: diffResult.deletions,
+                message: "Dry run: would apply changes live to \(target.filename)."
+                    + (target.fileExists ? " Backup would save to \(target.backupFilename)." : "")
+            )
+        }
         do {
-            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(preview)
+            let jsonString = String(bytes: data, encoding: .utf8) ?? "{}"
+            return .success(jsonString, callID: callID)
         } catch {
-            return .failure("Could not create directory \(parentDir.path): \(error.localizedDescription)", callID: input.callID)
+            return .failure("Failed encoding write output: \(error.localizedDescription)", callID: callID)
+        }
+    }
+
+    private func performDiskWrite(
+        target: WriteTarget,
+        args: FilesWriteArgs,
+        diffResult: UnifiedDiffEngine.DiffResult,
+        callID: String?
+    ) -> ToolOutput {
+        do {
+            try FileManager.default.createDirectory(at: target.parentDir, withIntermediateDirectories: true)
+        } catch {
+            return .failure("Could not create directory \(target.parentDir.path): \(error.localizedDescription)", callID: callID)
         }
 
         // Staged edits leave the live file untouched, so only the live path
         // pays the copy-on-write backup cost; staging must not fail when a
         // backup clone would have failed.
-        if !args.isStaged, fileExists {
+        if !args.isStaged, target.fileExists {
             do {
-                try Self.backupExistingFile(liveURL: liveURL, backupURL: backupURL)
+                try Self.backupExistingFile(liveURL: target.liveURL, backupURL: target.backupURL)
             } catch {
-                return .failure("Could not clone file for backup: \(error.localizedDescription)", callID: input.callID)
+                return .failure("Could not clone file for backup: \(error.localizedDescription)", callID: callID)
             }
         }
 
         let envelope: FilesWriteEnvelope
         if args.isStaged {
             do {
-                try Data(args.content.utf8).write(to: stagingURL, options: .atomic)
+                try Data(args.content.utf8).write(to: target.stagingURL, options: .atomic)
             } catch {
-                return .failure("Failed staging changes to \(stagingURL.path): \(error.localizedDescription)", callID: input.callID)
+                return .failure("Failed staging changes to \(target.stagingURL.path): \(error.localizedDescription)", callID: callID)
             }
 
             envelope = FilesWriteEnvelope(
                 status: "staged",
-                path: decision.resolvedPath,
-                stagingPath: stagingURL.path,
+                path: target.resolvedPath,
+                stagingPath: target.stagingURL.path,
                 backupPath: nil,
                 diff: diffResult.diff,
                 additions: diffResult.additions,
                 deletions: diffResult.deletions,
-                message: "Changes staged to \(stagingFilename). Live file is unchanged pending user review."
+                message: "Changes staged to \(target.stagingFilename). Live file is unchanged pending user review."
             )
         } else {
             do {
-                try Data(args.content.utf8).write(to: liveURL, options: .atomic)
+                try Data(args.content.utf8).write(to: target.liveURL, options: .atomic)
             } catch {
-                return .failure("Failed writing to live file \(liveURL.path): \(error.localizedDescription)", callID: input.callID)
+                return .failure("Failed writing to live file \(target.liveURL.path): \(error.localizedDescription)", callID: callID)
             }
 
             envelope = FilesWriteEnvelope(
                 status: "live",
-                path: decision.resolvedPath,
+                path: target.resolvedPath,
                 stagingPath: nil,
-                backupPath: fileExists ? backupURL.path : nil,
+                backupPath: target.fileExists ? target.backupURL.path : nil,
                 diff: diffResult.diff,
                 additions: diffResult.additions,
                 deletions: diffResult.deletions,
-                message: "Changes applied live to \(filename)." + (fileExists ? " Backup saved to \(backupFilename)." : "")
+                message: "Changes applied live to \(target.filename)." + (target.fileExists ? " Backup saved to \(target.backupFilename)." : "")
             )
         }
 
         do {
             let data = try JSONEncoder().encode(envelope)
             let jsonString = String(bytes: data, encoding: .utf8) ?? "{}"
-            return .success(jsonString, callID: input.callID)
+            return .success(jsonString, callID: callID)
         } catch {
-            return .failure("Failed encoding write output: \(error.localizedDescription)", callID: input.callID)
+            return .failure("Failed encoding write output: \(error.localizedDescription)", callID: callID)
         }
     }
 }

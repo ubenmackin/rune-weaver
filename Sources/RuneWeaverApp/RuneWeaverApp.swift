@@ -75,8 +75,10 @@ struct AppMenuView: View {
     var body: some View {
         // The embedded service can refuse a bind (for example an all-interfaces
         // address without an owner token), and that refusal is otherwise only
-        // visible in the log. Surfacing the live status line plus the failure
-        // reason keeps token recovery inside the menu: Owner Access, then retry.
+        // visible in the log. The title stays short via the model helper and
+        // the detail stays a one-line summary so the menu keeps a narrow
+        // width; token recovery flows through the single bottom Owner Access
+        // entry plus a full restart, never a live endpoint.
         Section("Server") {
             Text(model.serverStatus)
             if model.isRestarting {
@@ -85,41 +87,38 @@ struct AppMenuView: View {
                 // concurrent Retry that would race the bind.
                 ProgressView("Restarting…")
             }
-            if model.serverStatus.hasPrefix("Failed") {
-                // Token recovery stays Terminal-free through Owner Access plus
-                // Retry; a bad hostname has no native editor and Web Settings
-                // needs a live loopback server, so it requires a config.toml
-                // file edit before Retry.
-                Text(
-                    "Missing owner token? Add one in Owner Access below, then Retry — no Terminal needed. "
-                        + "To fix the hostname, edit ~/.runeweaver/config.toml ([server] hostname), then Retry. "
-                        + "Web Settings is unavailable while the server is down."
-                )
-                .foregroundStyle(.secondary)
-                Button("Open Settings") {
-                    model.openSettings()
+            if model.isServerFailed {
+                // Failed banner shows only while the flag holds; the detail is
+                // a short summary so a long bind error never widens the menu.
+                if let detail = model.serverStatusDetail {
+                    Text(detail)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
                 }
-                .disabled(!model.isDashboardAvailable)
-                Button("Owner Access...") {
-                    model.openOwnerAccess()
-                }
+                // Single token path lives at the bottom Owner Access entry;
+                // this hint points there so no duplicate button widens the menu.
+                Text("Add a token in Owner Access below, then Retry.")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                // A bad hostname has no native editor, so recovery is a config
+                // file edit followed by a full restart via Retry.
+                Text("To fix the hostname, edit config.toml [server] hostname, then Retry.")
+                    .foregroundStyle(.secondary)
+                    .lineLimit(3)
+                    .truncationMode(.tail)
+                // Full restart adopts a new token or hostname; never
+                // live-reloads, and never navigates while the server is down.
                 Button(model.isRestarting ? "Restarting…" : "Retry Server") {
                     model.restartServerToAdoptToken()
                 }
                 .disabled(model.isRestarting)
             } else if model.needsOwnerToken {
-                // Loopback stays usable before a token exists, but any LAN bind
-                // stays refused; pointing at Settings here keeps first-run
-                // onboarding one click away instead of a silent local-only boot.
-                Text("Local use only — generate an owner token in Settings to enable LAN binds.")
+                // Healthy loopback boot without a token stays local-only; the
+                // bottom Owner Access entry remains the sole token action.
+                Text("Local only — add a token in Owner Access to enable LAN binds.")
                     .foregroundStyle(.secondary)
-                Button("Open Settings") {
-                    model.openSettings()
-                }
-                .disabled(!model.isDashboardAvailable)
-                Button("Set Up Owner Access...") {
-                    model.openOwnerAccess()
-                }
+                    .lineLimit(2)
             }
         }
 
