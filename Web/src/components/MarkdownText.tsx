@@ -160,6 +160,9 @@ function isSafeUrl(url?: string): boolean {
   if (!url) return false;
   const normalized = normalizeUrlForCheck(url);
   if (!normalized) return false;
+  // Browsers normalize backslashes to slashes, so any decoded backslash is a
+  // protocol-relative or scheme camouflage and fails closed.
+  if (normalized.includes("\\")) return false;
   if (normalized.startsWith("//") || normalized.startsWith("\\\\")) return false;
   const lower = normalized.toLowerCase();
   const schemeMatch = /^[a-zA-Z][a-zA-Z0-9+.-]*:/.exec(normalized);
@@ -193,7 +196,151 @@ function isSafeUrl(url?: string): boolean {
   return false;
 }
 
-export default function MarkdownText({
+// Wraps tables so wide content scrolls inside the bubble.
+function MarkdownTable({ children, ...props }: React.ComponentPropsWithoutRef<"table"> & { node?: unknown }) {
+  void props.node;
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"table"> & { node?: unknown };
+  void _node;
+  return (
+    <div className="chat-table-wrapper">
+      <table className="chat-table" {...rest}>
+        {children}
+      </table>
+    </div>
+  );
+}
+
+// Renders dividers with bubble styling.
+function MarkdownHr(props: React.ComponentPropsWithoutRef<"hr"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props;
+  void _node;
+  return <hr className="chat-hr" {...rest} />;
+}
+
+// Renders safe links in a new tab and inert text for blocked URIs.
+function MarkdownLink({ href, children, ...props }: React.ComponentPropsWithoutRef<"a"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"a"> & { node?: unknown };
+  void _node;
+  if (!href || !isSafeUrl(href)) {
+    // Blocked links render as inert text without the raw URI so an
+    // attacker URI never reaches the DOM or the readable text.
+    return <span>[{children}]</span>;
+  }
+  const safeHref = normalizeUrlForCheck(href);
+  return (
+    <a
+      href={safeHref}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="chat-markdown-link"
+      {...rest}
+    >
+      {children}
+    </a>
+  );
+}
+
+// Renders safe images and alt-only fallback for blocked sources.
+function MarkdownImage({ src, alt, ...props }: React.ComponentPropsWithoutRef<"img"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"img"> & { node?: unknown };
+  void _node;
+  if (!src || !isSafeUrl(src)) {
+    // Blocked images render alt text only so an unsafe source URI
+    // never reaches the DOM or the readable text.
+    return <span>[Image: {alt || "Blocked image"}]</span>;
+  }
+  const safeSrc = normalizeUrlForCheck(src);
+  return <img src={safeSrc} alt={alt} className="chat-markdown-img" {...rest} />;
+}
+
+// Steps headings down so chat titles stay below the app header.
+function MarkdownH1({ children, ...props }: React.ComponentPropsWithoutRef<"h1"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"h1"> & { node?: unknown };
+  void _node;
+  return <h3 className="chat-h3" {...rest}>{children}</h3>;
+}
+
+// Steps headings down so chat titles stay below the app header.
+function MarkdownH2({ children, ...props }: React.ComponentPropsWithoutRef<"h2"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"h2"> & { node?: unknown };
+  void _node;
+  return <h4 className="chat-h4" {...rest}>{children}</h4>;
+}
+
+// Steps headings down so chat titles stay below the app header.
+function MarkdownH3({ children, ...props }: React.ComponentPropsWithoutRef<"h3"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"h3"> & { node?: unknown };
+  void _node;
+  return <h5 className="chat-h5" {...rest}>{children}</h5>;
+}
+
+// Renders quotes with bubble styling.
+function MarkdownBlockquote({ children, ...props }: React.ComponentPropsWithoutRef<"blockquote"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"blockquote"> & { node?: unknown };
+  void _node;
+  return (
+    <blockquote className="chat-blockquote" {...rest}>
+      {children}
+    </blockquote>
+  );
+}
+
+// Renders bulleted lists with bubble styling.
+function MarkdownUl({ children, ...props }: React.ComponentPropsWithoutRef<"ul"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"ul"> & { node?: unknown };
+  void _node;
+  return (
+    <ul className="chat-ul" {...rest}>
+      {children}
+    </ul>
+  );
+}
+
+// Renders numbered lists with bubble styling.
+function MarkdownOl({ children, ...props }: React.ComponentPropsWithoutRef<"ol"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"ol"> & { node?: unknown };
+  void _node;
+  return (
+    <ol className="chat-ol" {...rest}>
+      {children}
+    </ol>
+  );
+}
+
+// Renders paragraphs with bubble styling.
+function MarkdownParagraph({ children, ...props }: React.ComponentPropsWithoutRef<"p"> & { node?: unknown }) {
+  const { node: _node, ...rest } = props as React.ComponentPropsWithoutRef<"p"> & { node?: unknown };
+  void _node;
+  return (
+    <p className="chat-p" {...rest}>
+      {children}
+    </p>
+  );
+}
+
+// Shared renderer map with stable identities so background refreshes keep DOM nodes.
+const markdownComponents = {
+  table: MarkdownTable,
+  hr: MarkdownHr,
+  pre: MarkdownPre,
+  code: MarkdownCode,
+  a: MarkdownLink,
+  img: MarkdownImage,
+  h1: MarkdownH1,
+  h2: MarkdownH2,
+  h3: MarkdownH3,
+  blockquote: MarkdownBlockquote,
+  ul: MarkdownUl,
+  ol: MarkdownOl,
+  p: MarkdownParagraph,
+};
+
+// Skips re-render when text and styling match so selections survive refreshes.
+function areMarkdownPropsEqual(prev: MarkdownTextProps, next: MarkdownTextProps): boolean {
+  return prev.text === next.text && prev.className === next.className;
+}
+
+function MarkdownText({
   text,
   className = "markdown-content",
 }: MarkdownTextProps) {
@@ -205,90 +352,12 @@ export default function MarkdownText({
     <div className={className}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        components={{
-          table({ children, ...props }) {
-            return (
-              <div className="chat-table-wrapper">
-                <table className="chat-table" {...props}>
-                  {children}
-                </table>
-              </div>
-            );
-          },
-          hr({ ...props }) {
-            return <hr className="chat-hr" {...props} />;
-          },
-          pre: MarkdownPre,
-          code: MarkdownCode,
-          a({ href, children, ...props }) {
-            if (!href || !isSafeUrl(href)) {
-              // Blocked links render as inert text without the raw URI so an
-              // attacker URI never reaches the DOM or the readable text.
-              return <span>[{children}]</span>;
-            }
-            const safeHref = normalizeUrlForCheck(href);
-            return (
-              <a
-                href={safeHref}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="chat-markdown-link"
-                {...props}
-              >
-                {children}
-              </a>
-            );
-          },
-          img({ src, alt, ...props }) {
-            if (!src || !isSafeUrl(src)) {
-              // Blocked images render alt text only so an unsafe source URI
-              // never reaches the DOM or the readable text.
-              return <span>[Image: {alt || "Blocked image"}]</span>;
-            }
-            const safeSrc = normalizeUrlForCheck(src);
-            return <img src={safeSrc} alt={alt} className="chat-markdown-img" {...props} />;
-          },
-          h1({ children, ...props }) {
-            return <h3 className="chat-h3" {...props}>{children}</h3>;
-          },
-          h2({ children, ...props }) {
-            return <h4 className="chat-h4" {...props}>{children}</h4>;
-          },
-          h3({ children, ...props }) {
-            return <h5 className="chat-h5" {...props}>{children}</h5>;
-          },
-          blockquote({ children, ...props }) {
-            return (
-              <blockquote className="chat-blockquote" {...props}>
-                {children}
-              </blockquote>
-            );
-          },
-          ul({ children, ...props }) {
-            return (
-              <ul className="chat-ul" {...props}>
-                {children}
-              </ul>
-            );
-          },
-          ol({ children, ...props }) {
-            return (
-              <ol className="chat-ol" {...props}>
-                {children}
-              </ol>
-            );
-          },
-          p({ children, ...props }) {
-            return (
-              <p className="chat-p" {...props}>
-                {children}
-              </p>
-            );
-          },
-        }}
+        components={markdownComponents}
       >
         {preparedText}
       </ReactMarkdown>
     </div>
   );
 }
+
+export default React.memo(MarkdownText, areMarkdownPropsEqual);
