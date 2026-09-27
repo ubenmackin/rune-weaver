@@ -556,6 +556,86 @@ extension FilesConfig: Codable {
     }
 }
 
+/// Action for a granular bash execution rule.
+public enum BashPermissionAction: String, Sendable, Codable, Equatable, CaseIterable {
+    case allow
+    case ask
+    case deny
+}
+
+/// A pattern-matching rule for granular bash command permissions.
+public struct BashRule: Sendable, Codable, Equatable {
+    /// Command or pattern to match (e.g. "echo", "echo *", "git status", "*", "rm *").
+    public var pattern: String
+    /// Permission action to take when matched.
+    public var action: BashPermissionAction
+
+    public init(pattern: String, action: BashPermissionAction) {
+        self.pattern = pattern
+        self.action = action
+    }
+}
+
+/// `[bash]` — granular shell execution policy.
+public struct BashConfig: Sendable, Codable, Equatable {
+    /// Whether the bash tool is enabled. Defaults to true.
+    public var enabled: Bool
+    /// Default action if no rule matches. Defaults to `ask`.
+    public var defaultAction: BashPermissionAction
+    /// Ordered permission rules evaluated first-to-last.
+    public var rules: [BashRule]
+    /// Default execution timeout in seconds.
+    public var timeoutSeconds: Int
+    /// Whether outbound and inbound network access is permitted in sandbox. Defaults to false.
+    public var allowNetwork: Bool
+
+    /// Default rules: all commands require approval (`*` -> `ask`).
+    public static let defaultRules: [BashRule] = [
+        BashRule(pattern: "*", action: .ask)
+    ]
+    public static let defaultTimeoutSeconds: Int = 30
+
+    public init(
+        enabled: Bool = true,
+        defaultAction: BashPermissionAction = .ask,
+        rules: [BashRule] = defaultRules,
+        timeoutSeconds: Int = defaultTimeoutSeconds,
+        allowNetwork: Bool = false
+    ) {
+        self.enabled = enabled
+        self.defaultAction = defaultAction
+        self.rules = rules
+        self.timeoutSeconds = timeoutSeconds
+        self.allowNetwork = allowNetwork
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case enabled
+        case defaultAction = "default_action"
+        case rules
+        case timeoutSeconds = "timeout_seconds"
+        case allowNetwork = "allow_network"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        self.defaultAction = try container.decodeIfPresent(BashPermissionAction.self, forKey: .defaultAction) ?? .ask
+        self.rules = try container.decodeIfPresent([BashRule].self, forKey: .rules) ?? Self.defaultRules
+        self.timeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .timeoutSeconds) ?? Self.defaultTimeoutSeconds
+        self.allowNetwork = try container.decodeIfPresent(Bool.self, forKey: .allowNetwork) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(enabled, forKey: .enabled)
+        try container.encode(defaultAction, forKey: .defaultAction)
+        try container.encode(rules, forKey: .rules)
+        try container.encode(timeoutSeconds, forKey: .timeoutSeconds)
+        try container.encode(allowNetwork, forKey: .allowNetwork)
+    }
+}
+
 /// SMTP transport security for an `[[email.accounts]]` entry.
 public enum EmailSMTPSecurity: String, Sendable, Codable, Equatable, CaseIterable {
     /// Implicit TLS (typically port 465).
@@ -1148,6 +1228,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var security = SecurityConfig()
     /// Steady pursuit of long-horizon goals. Off by default.
     public var goals = GoalsConfig()
+    /// Granular shell execution policy.
+    public var bash = BashConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1168,7 +1250,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         index: IndexConfig = IndexConfig(),
         desktop: DesktopConfig = DesktopConfig(),
         security: SecurityConfig = SecurityConfig(),
-        goals: GoalsConfig = GoalsConfig()
+        goals: GoalsConfig = GoalsConfig(),
+        bash: BashConfig = BashConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1188,6 +1271,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.desktop = desktop
         self.security = security
         self.goals = goals
+        self.bash = bash
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1280,6 +1364,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case desktop
         case security
         case goals
+        case bash
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
@@ -1312,6 +1397,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.desktop = try container.decode(DesktopConfig.self, forKey: .desktop)
         self.security = try container.decodeIfPresent(SecurityConfig.self, forKey: .security) ?? SecurityConfig()
         self.goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
+        self.bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
     }
 
     /// Encodes every section, including the defense policy and goal pursuit.
@@ -1336,6 +1422,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(desktop, forKey: .desktop)
         try container.encode(security, forKey: .security)
         try container.encode(goals, forKey: .goals)
+        try container.encode(bash, forKey: .bash)
     }
 }
 

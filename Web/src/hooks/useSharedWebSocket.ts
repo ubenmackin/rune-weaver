@@ -183,6 +183,41 @@ export interface WSApprovalFrame {
   request: PermissionRequest;
 }
 
+export interface WSFileAcceptedFrame {
+  type: "file_accepted";
+  path?: string;
+  sessionID?: string;
+}
+
+export interface WSFileDiscardedFrame {
+  type: "file_discarded";
+  path?: string;
+  sessionID?: string;
+}
+
+export interface WSRunFrame {
+  type: "run_started" | "run_completed";
+  run?: unknown;
+  sessionID?: string;
+}
+
+export interface WSApprovalLifecycleFrame {
+  type:
+    | "approval_decided"
+    | "approval_resolved"
+    | "approval_removed"
+    | "approval_deleted"
+    | "approval_completed"
+    | "approval_cancelled";
+  sessionID?: string;
+  id?: string;
+  approvalID?: string;
+  approvalId?: string;
+  request?: unknown;
+  approval?: unknown;
+  approved?: boolean;
+}
+
 export interface WSGenericFrame {
   type: string;
   sessionID?: string;
@@ -205,7 +240,11 @@ export type WSIncomingFrame =
   | WSTurnAliveFrame
   | WSTurnTokensFrame
   | WSToolProgressFrame
-  | WSToolCancelMissFrame;
+  | WSToolCancelMissFrame
+  | WSRunFrame
+  | WSApprovalLifecycleFrame
+  | WSFileAcceptedFrame
+  | WSFileDiscardedFrame;
 
 export type MessageHandler = (data: WSIncomingFrame) => void;
 

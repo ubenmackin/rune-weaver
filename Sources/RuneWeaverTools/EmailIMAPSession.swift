@@ -104,19 +104,25 @@ private final class SessionLineReadState: @unchecked Sendable {
         resume(with: .failure(error))
     }
 
+    private struct ResumeOutcome {
+        let won: Bool
+        let held: CheckedContinuation<String, Error>?
+        let pending: DispatchWorkItem?
+    }
+
     /// Settles the read unless already settled, cancelling the pending timer.
     /// - Parameter result: Winning verdict.
     /// - Returns: True when this caller won, false for late losers.
     private func resume(with result: Result<String, Error>) -> Bool {
-        let outcome: (won: Bool, held: CheckedContinuation<String, Error>?, pending: DispatchWorkItem?) = mutex.withLock {
-            guard !settled else { return (won: false, held: nil, pending: nil) }
+        let outcome = mutex.withLock {
+            guard !settled else { return ResumeOutcome(won: false, held: nil, pending: nil) }
             settled = true
             stored = result
             let held = continuation
             continuation = nil
             let pending = timer
             timer = nil
-            return (won: true, held: held, pending: pending)
+            return ResumeOutcome(won: true, held: held, pending: pending)
         }
         outcome.pending?.cancel()
         if let held = outcome.held {

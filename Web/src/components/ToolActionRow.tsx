@@ -8,6 +8,7 @@ import { useState, useEffect, useRef } from "react";
 import type { ToolAction, ToolProgress, ToolResult } from "../api";
 import { formatToolProgressCounts } from "../api";
 import { ChevronDownIcon, ChevronRightIcon, WrenchIcon } from "./icons";
+import DiffCard from "./DiffCard";
 
 export interface ToolActionRowProps {
   action: ToolAction;
@@ -789,7 +790,11 @@ export default function ToolActionRow({
             </div>
             {browser ? <BrowserSummary browser={browser} /> : null}
             {browser ? <BrowserDetails browser={browser} /> : null}
-            {result ? (
+            {action.toolName === "files.write" && result && !result.isError ? (
+              <div className="tool-section">
+                <DiffCard action={action} result={result} />
+              </div>
+            ) : result ? (
               <div className="tool-section">
                 <div className="tool-label">Result</div>
                 <pre
@@ -862,6 +867,12 @@ export default function ToolActionRow({
         <ToolProgressLine progress={progress} />
       ) : null}
 
+      {action.toolName === "files.write" && result && !result.isError ? (
+        <div style={{ marginTop: 8 }}>
+          <DiffCard action={action} result={result} />
+        </div>
+      ) : null}
+
       {open ? (
         <div className="chat-tool-details">
           <div className="chat-tool-detail-section">
@@ -874,7 +885,7 @@ export default function ToolActionRow({
           </div>
           {browser ? <BrowserSummary browser={browser} /> : null}
           {browser ? <BrowserDetails browser={browser} /> : null}
-          {result ? (
+          {action.toolName !== "files.write" && result ? (
             <div className="chat-tool-detail-section">
               <span className="chat-tool-detail-label">Output:</span>
               <pre
@@ -882,6 +893,13 @@ export default function ToolActionRow({
                   result.isError ? "error-text" : ""
                 }`}
               >
+                {result.content}
+              </pre>
+            </div>
+          ) : result?.isError ? (
+            <div className="chat-tool-detail-section">
+              <span className="chat-tool-detail-label">Output:</span>
+              <pre className="chat-tool-code error-text">
                 {result.content}
               </pre>
             </div>

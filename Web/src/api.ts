@@ -3302,4 +3302,42 @@ export function deleteSecret(key: string): Promise<void> {
   });
 }
 
+export interface StagedFile {
+  path: string;
+  stagingPath: string;
+  diff: string;
+  additions: number;
+  deletions: number;
+  updatedAt?: string;
+}
+
+export interface StagedFilesResponse {
+  files: StagedFile[];
+}
+
+export interface FileActionResponse {
+  status: string;
+  count?: number;
+}
+
+export async function getStagedFiles(path?: string): Promise<StagedFilesResponse> {
+  const url = path ? `/files/staged?path=${encodeURIComponent(path)}` : "/files/staged";
+  return fetchJson<StagedFilesResponse>(url);
+}
+
+export async function acceptStagedFile(path?: string, all?: boolean): Promise<FileActionResponse> {
+  return fetchJson<FileActionResponse>("/files/accept", {
+    method: "POST",
+    body: JSON.stringify({ path, all }),
+  });
+}
+
+export async function discardStagedFile(path?: string, all?: boolean): Promise<FileActionResponse> {
+  return fetchJson<FileActionResponse>("/files/discard", {
+    method: "POST",
+    body: JSON.stringify({ path, all }),
+  });
+}
+
+
 

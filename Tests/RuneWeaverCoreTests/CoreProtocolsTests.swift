@@ -205,3 +205,45 @@ struct ConversationManagerTruncationTests {
         #expect(rawSession?.messages.last?.content == "System 3 (Tertiary)")
     }
 }
+
+@Suite("Conversation Manager Orphan Recovery")
+struct ConversationManagerOrphanRecoveryTests {
+    @Test
+    func `Reconciles unclosed tool placeholders with interrupted tool messages`() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_conversations.db").path
+
+        let manager1 = ConversationManager(episodesDBPath: dbPath)
+        let session = await manager1.createSession()
+        let userMsg = Message(role: .user, content: "Read a file please")
+        await manager1.append(userMsg, to: session.id)
+        let assistantNote = Message(
+            role: .assistant,
+            content: "I will read the file.\nCalling files.read {\"path\":\"test.txt\"} [call-orphan-99]"
+        )
+        await manager1.append(assistantNote, to: session.id)
+
+        // Session has 2 messages, tool call [call-orphan-99] has no matching .tool result
+        let toolsBefore = await manager1.toolActionsByMessage(for: session.id)
+        #expect(toolsBefore[assistantNote.id]?.first?.result == nil)
+
+        // Simulate application restart by loading a fresh manager from the same db
+        let manager2 = ConversationManager(episodesDBPath: dbPath)
+        try await manager2.loadAll()
+
+        let reloadedSession = await manager2.session(id: session.id)
+        #expect(reloadedSession?.messages.count == 3)
+        let syntheticTool = reloadedSession?.messages.last
+        #expect(syntheticTool?.role == .tool)
+        #expect(syntheticTool?.toolCallID == "call-orphan-99")
+        #expect(syntheticTool?.isError == true)
+
+        let toolsAfter = await manager2.toolActionsByMessage(for: session.id)
+        let action = toolsAfter[assistantNote.id]?.first
+        #expect(action?.result != nil)
+        #expect(action?.result?.isError == true)
+        #expect(action?.result?.content.contains("interrupted") == true)
+    }
+}

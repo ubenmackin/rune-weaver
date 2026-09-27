@@ -68,6 +68,7 @@ struct StatusCommand: AsyncParsableCommand {
         let toolBus = await CLIShared.makeToolBus(
             emailConfig: config.email,
             filesConfig: config.files,
+            bashConfig: config.bash,
             memoryEngine: engine,
             sandboxConfig: config.sandbox,
             pluginConfig: config.plugins,

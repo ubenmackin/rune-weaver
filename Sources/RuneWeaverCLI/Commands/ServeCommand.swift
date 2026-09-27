@@ -247,6 +247,7 @@ extension ServeCommand {
         await CLIShared.makeToolBus(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
+            bashConfig: loaded.config.bash,
             memoryEngine: deps.memoryEngine,
             permissionGate: permissionGate,
             sandboxConfig: loaded.config.sandbox,
@@ -397,6 +398,7 @@ extension ServeCommand {
             engineConfig: loaded.config.engine,
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
+            bashConfig: loaded.config.bash,
             mediaConfig: resolvedMediaConfig,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
@@ -448,6 +450,7 @@ extension ServeCommand {
         CLIShared.pluginTools(
             emailConfig: loaded.config.email,
             filesConfig: loaded.config.files,
+            bashConfig: loaded.config.bash,
             memoryEngine: deps.memoryEngine,
             sandboxConfig: loaded.config.sandbox,
             embedder: deps.embedder,

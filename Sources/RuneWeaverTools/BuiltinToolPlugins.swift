@@ -25,6 +25,7 @@ public enum BuiltinToolPlugins {
         EmailTools.toolNames
             + MessagesTools.toolNames
             + FilesTools.toolNames
+            + ["bash.exec"]
             + MemoryTools.toolNames
             + GoalTools.toolNames
             + toolNames
@@ -93,6 +94,7 @@ public enum BuiltinToolPlugins {
     public static func makeAllTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
+        bashConfig: BashConfig = BashConfig(),
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -131,6 +133,9 @@ public enum BuiltinToolPlugins {
         }
         tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
+        if bashConfig.enabled {
+            tools.append(BashTool(bashConfig: bashConfig, filesConfig: filesConfig ?? FilesConfig()))
+        }
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }
@@ -185,6 +190,7 @@ public enum BuiltinToolPlugins {
         return makeAllTools(
             emailConfig: config.email,
             filesConfig: config.files,
+            bashConfig: config.bash,
             sandboxConfig: config.sandbox,
             browserConfig: config.browser,
             mediaConfig: config.media,
@@ -222,6 +228,7 @@ public enum BuiltinToolPlugins {
         on bus: ToolBus,
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
+        bashConfig: BashConfig = BashConfig(),
         sandboxConfig: SandboxConfig? = nil,
         browserConfig: BrowserConfig = BrowserConfig(),
         mediaConfig: MediaConfig? = nil,
@@ -251,6 +258,7 @@ public enum BuiltinToolPlugins {
         for tool in makeAllTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
+            bashConfig: bashConfig,
             sandboxConfig: sandboxConfig,
             browserConfig: browserConfig,
             mediaConfig: mediaConfig,

@@ -18,6 +18,7 @@ import { ToastStack } from "./Toast";
 import {
   BellIcon,
   ChevronDownIcon,
+  FileDiffIcon,
   RuneGlyph,
   SearchIcon,
   SettingsIcon,
@@ -42,6 +43,8 @@ interface TopNavProps {
   runsBadge?: number;
   approvalsBadge?: number;
   warningsBadge?: number;
+  stagedFilesCount?: number;
+  onOpenStagedDrawer?: () => void;
   notificationsEnabled: boolean;
   // Wiring owned upstream (badge clearing plus permission prompt); the bell
   // awaits it for the resolved outcome but toasts and navigates locally so an
@@ -58,6 +61,8 @@ export default function TopNav({
   runsBadge = 0,
   approvalsBadge = 0,
   warningsBadge = 0,
+  stagedFilesCount = 0,
+  onOpenStagedDrawer,
   notificationsEnabled,
   onRequestNotifications,
 }: TopNavProps) {
@@ -465,6 +470,22 @@ export default function TopNav({
             </span>
           ) : null}
         </button>
+
+        {/* Staged Changes Drawer Trigger */}
+        {stagedFilesCount > 0 ? (
+          <button
+            type="button"
+            className="top-nav-staged-btn"
+            data-testid="top-nav-staged-btn"
+            onClick={onOpenStagedDrawer}
+            title={`${stagedFilesCount} staged file change${stagedFilesCount === 1 ? "" : "s"} waiting for review`}
+            aria-label={`Open staged changes drawer (${stagedFilesCount} files)`}
+          >
+            <FileDiffIcon size={16} />
+            <span>Files</span>
+            <span className="top-nav-staged-badge">{stagedFilesCount}</span>
+          </button>
+        ) : null}
 
         {/* Profile Dropdown: click/keyboard driven with Escape to close and
             focus return. No hover-open path so pointer and keyboard orderings

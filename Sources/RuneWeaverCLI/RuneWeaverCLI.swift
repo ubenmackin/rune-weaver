@@ -213,6 +213,7 @@ enum CLIShared {
     static func pluginTools(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
+        bashConfig: BashConfig = BashConfig(),
         memoryEngine: MemoryEngine? = nil,
         sandboxConfig: SandboxConfig? = nil,
         embedder: (any EmbeddingsBackend)? = nil,
@@ -234,6 +235,7 @@ enum CLIShared {
         return BuiltinToolPlugins.makeAllTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
+            bashConfig: bashConfig,
             sandboxConfig: sandboxConfig,
             browserConfig: browser,
             mediaConfig: mediaConfig,
@@ -266,6 +268,7 @@ enum CLIShared {
     static func makeToolBus(
         emailConfig: EmailConfig? = nil,
         filesConfig: FilesConfig? = nil,
+        bashConfig: BashConfig = BashConfig(),
         memoryEngine: MemoryEngine? = nil,
         permissionGate: PermissionGate? = nil,
         approvalHandler: ToolApprovalHandler? = nil,
@@ -306,6 +309,7 @@ enum CLIShared {
         for tool in pluginTools(
             emailConfig: emailConfig,
             filesConfig: filesConfig,
+            bashConfig: bashConfig,
             memoryEngine: memoryEngine,
             sandboxConfig: sandboxConfig,
             embedder: embedder,

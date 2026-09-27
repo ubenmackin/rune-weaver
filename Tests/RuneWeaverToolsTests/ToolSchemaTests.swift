@@ -138,10 +138,19 @@ struct ToolSchemaTests {
                 }
                 #expect(raw.contains(#""required":["pattern","path"]"#))
             case "files.glob":
-                for key in ["pattern", "baseDir", "maxResults"] {
+                for key in ["pattern", "baseDir", "maxResults", "recursive"] {
                     #expect(properties[key] != nil, "files.glob missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["pattern"]"#))
+            case "files.list":
+                for key in ["path", "showHidden", "limit"] {
+                    #expect(properties[key] != nil, "files.list missing property \(key)")
+                }
+            case "files.write":
+                for key in ["path", "content", "mode"] {
+                    #expect(properties[key] != nil, "files.write missing property \(key)")
+                }
+                #expect(raw.contains(#""required":["path","content"]"#))
             case "remember_fact", "memories.store":
                 for key in ["text", "category"] {
                     #expect(properties[key] != nil, "\(tool.name) missing property \(key)")

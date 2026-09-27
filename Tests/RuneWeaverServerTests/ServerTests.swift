@@ -410,6 +410,43 @@ struct RunLogStoreTests {
         let reloadedEmpty = await RunLogStore.load(capacity: 10, dbPath: dbPath)
         #expect(await reloadedEmpty.count() == 0)
     }
+
+    @Test
+    func `Startup crash recovery reconciles running runs and unfinished tool actions`() async {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let dbPath = tempDir.appendingPathComponent("test_runs_recovery.db").path
+
+        let store1 = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        let unclosedAction = ToolAction(
+            toolName: "files.read",
+            callID: "call-crash-1",
+            argumentsJSON: "{\"path\":\"foo.swift\"}",
+            result: nil,
+            roundIndex: 0
+        )
+        let crashedEntry = await store1.append(
+            kind: "chat",
+            status: "running",
+            message: "in-flight prompt before crash",
+            toolActions: [unclosedAction]
+        )
+        #expect(crashedEntry.status == "running")
+        #expect(crashedEntry.toolActions.first?.result == nil)
+
+        // Simulate app crash / restart by re-bootstrapping store2
+        let store2 = await RunLogStore.load(capacity: 10, dbPath: dbPath)
+        let reloadedRuns = await store2.list(limit: 10)
+        #expect(reloadedRuns.count == 1)
+        let recovered = reloadedRuns.first
+        #expect(recovered?.id == crashedEntry.id)
+        #expect(recovered?.status == "interrupted")
+        #expect(recovered?.toolActions.count == 1)
+        #expect(recovered?.toolActions.first?.result != nil)
+        #expect(recovered?.toolActions.first?.result?.isError == true)
+        #expect(recovered?.toolActions.first?.result?.content.contains("interrupted") == true)
+    }
 }
 
 @Suite("Approval Queue")
@@ -1516,7 +1553,8 @@ private struct SurfaceProbeResponder: AsyncResponder, Sendable {
 private func makeSurfaceAuth(token: String = "owner-token") -> ServerAuth {
     let store = ServerAuthTokenStore(
         authConfig: AuthConfig(tokenEnv: "RUNEWEAVER_AUTH_TEST_UNSET", tokenFile: nil),
-        service: "com.runeweaver.tests.\(UUID().uuidString)"
+        service: "com.runeweaver.tests.\(UUID().uuidString)",
+        inMemory: true
     )
     return ServerAuth(initialToken: token, store: store)
 }

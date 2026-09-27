@@ -420,6 +420,7 @@ extension RuneWeaverConfig {
         try Self.decodeDesktop(root, into: &config)
         try Self.decodeSecurity(root, into: &config)
         try Self.decodeGoals(root, into: &config)
+        try Self.decodeBash(root, into: &config)
         self = config
     }
 
@@ -912,6 +913,42 @@ extension RuneWeaverConfig {
         }
         if let timeout = try goals.strictInt("plan_timeout_seconds", field: "goals.plan_timeout_seconds") {
             config.goals.planTimeoutSeconds = timeout
+        }
+    }
+
+    /// Decodes the additive `[bash]` section, defaulting omitted keys.
+    static func decodeBash(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let bash = root.tables["bash"] else { return }
+        if let enabled = try bash.strictBool("enabled", field: "bash.enabled") {
+            config.bash.enabled = enabled
+        }
+        if let defaultActionStr = try bash.strictString("default_action", field: "bash.default_action") {
+            guard let action = BashPermissionAction(rawValue: defaultActionStr.lowercased()) else {
+                throw ConfigError.validationError(field: "bash.default_action", message: "must be allow, ask, or deny")
+            }
+            config.bash.defaultAction = action
+        }
+        if let timeout = try bash.strictInt("timeout_seconds", field: "bash.timeout_seconds") {
+            config.bash.timeoutSeconds = timeout
+        }
+        if let allowNetwork = try bash.strictBool("allow_network", field: "bash.allow_network") {
+            config.bash.allowNetwork = allowNetwork
+        }
+        if let ruleTables = root.arrays["bash.rules"] ?? root.tables["bash"]?.arrays["rules"] {
+            var rules: [BashRule] = []
+            for (idx, node) in ruleTables.enumerated() {
+                guard let pattern = try node.strictString("pattern", field: "bash.rules[\(idx)].pattern") else {
+                    throw ConfigError.validationError(field: "bash.rules[\(idx)].pattern", message: "missing required")
+                }
+                let actionStr = try node.strictString("action", field: "bash.rules[\(idx)].action") ?? "ask"
+                guard let action = BashPermissionAction(rawValue: actionStr.lowercased()) else {
+                    throw ConfigError.validationError(field: "bash.rules[\(idx)].action", message: "must be allow, ask, or deny")
+                }
+                rules.append(BashRule(pattern: pattern, action: action))
+            }
+            // An explicit empty rule list clears the built-in default so an
+            // empty `[[bash.rules]]` section falls through to `defaultAction`.
+            config.bash.rules = rules
         }
     }
 }
