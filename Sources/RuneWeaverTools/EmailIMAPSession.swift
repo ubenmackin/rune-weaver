@@ -16,6 +16,18 @@ import RuneWeaverCore
 /// line per command. Live Process pipes and hermetic fakes share this contract
 /// so framing, timeout, and reconnect behavior stays testable without dialing.
 public protocol SessionLineTransport: Sendable {
+    /// Helper child pid when known, nil for hermetic fakes.
+    ///
+    /// The live pipe returns the spawned child pid so session events can tie
+    /// log lines to the owning helper; fakes return nil so hermetic runs stay
+    /// pid-free while still emitting the shared envelope.
+    var processIdentifier: Int32? { get }
+    /// Newest retained helper stderr for failure dumps.
+    ///
+    /// The live drain keeps up to 8KB for `session.stderr` dumps while the
+    /// 500-char timeout tail stays separate; fakes mirror the seam with canned
+    /// text so dump coverage stays hermetic.
+    var retainedStderr: String { get }
     /// Writes one JSON document line to the session helper.
     /// - Parameter line: Single JSON document without a trailing newline.
     func writeLine(_ line: String) async throws
@@ -213,14 +225,15 @@ private final class SessionStderrTail: @unchecked Sendable {
 /// unbuffered JSON line each way. Standard error drains in the background so
 /// helper diagnostics never block a read. All secrets stay in the written line;
 /// nothing here logs connection fields. Named owner for stderr retention: this
-/// transport keeps the last 500 stderr bytes and appends them to timeout
-/// errors so a stalled helper still leaves its dying words.
+/// transport keeps the last 500 stderr bytes for timeout errors plus the full
+/// 8KB dump for failure events so a stalled helper still leaves its dying words.
 ///
 /// Sendable proof: `Process` and `FileHandle` are not `Sendable`, so the class
 /// stays `@unchecked Sendable`. All handle and process touches hold `ioLock`:
-/// `writeLine` performs the stdin write under `ioLock`, `terminate` performs
-/// `terminate` plus stdin/stdout/stderr closes under `ioLock` exactly once via
-/// `didTerminate`, the termination handler closes the stderr drain under
+/// `writeLine` performs the stdin write under `ioLock`, `processIdentifier`
+/// reads the child pid under `ioLock` so it serializes against `terminate`,
+/// `terminate` performs `terminate` plus stdin/stdout/stderr closes under
+/// `ioLock` exactly once via `didTerminate`, the termination handler closes the stderr drain under
 /// `ioLock` after checking `didTerminate` so it serializes against
 /// `terminate` instead of racing its guarded closes, and `blockingReadLine`
 /// captures the stdout handle under `ioLock` then reads outside the lock so
@@ -236,6 +249,12 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     /// the session script contract keeps secrets out of stderr, and this bound
     /// holds even if that contract ever changes.
     public static let maxStderrTailChars = 500
+    /// Maximum stderr bytes retained for failure dumps.
+    ///
+    /// Single-sourced from `MailSessionEventLog.maxStderrDumpBytes` so the
+    /// live drain bound and the log dump bound cannot drift; the 500-char
+    /// timeout tail stays unchanged for readable timeout errors.
+    public static let maxStderrDumpBytes = MailSessionEventLog.maxStderrDumpBytes
     /// Underlying helper process. Touched only while holding `ioLock`.
     private let process: Process
     /// Writable stdin handle. Written and closed only while holding `ioLock`.
@@ -246,6 +265,8 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
     private let stderrHandle: FileHandle
     /// Retained stderr tail feeding timeout errors. Appended only by the drain.
     private let stderrTail: SessionStderrTail
+    /// Retained stderr dump feeding failure events. Appended only by the drain.
+    private let stderrDump: SessionStderrTail
     /// Buffered stdout bytes awaiting a newline boundary.
     private var pending = Data()
     /// Guards buffered stdout bytes across concurrent readers.
@@ -277,11 +298,14 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
         spawned.standardError = stderrPipe
         let stderrReading = stderrPipe.fileHandleForReading
         let tailStore = SessionStderrTail(cap: Self.maxStderrTailChars)
+        let dumpStore = SessionStderrTail(cap: Self.maxStderrDumpBytes)
         self.stderrTail = tailStore
+        self.stderrDump = dumpStore
         // Drain diagnostics off-pool so stderr never blocks the helper while
-        // retaining the last words for timeout errors. Closing this handle in
-        // `terminate` (or on natural exit) unblocks the drain, which is the
-        // cancellation mechanism for this blocking read.
+        // retaining the last words for timeout errors plus the fuller dump for
+        // failure events. Closing this handle in `terminate` (or on natural
+        // exit) unblocks the drain, which is the cancellation mechanism for
+        // this blocking read.
         DispatchQueue.global(qos: .utility).async {
             while true {
                 let chunk: Data?
@@ -292,6 +316,7 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
                 }
                 guard let chunk, !chunk.isEmpty else { break }
                 tailStore.append(chunk)
+                dumpStore.append(chunk)
             }
         }
         self.process = spawned
@@ -405,6 +430,24 @@ public final class ProcessSessionLineTransport: SessionLineTransport, @unchecked
         }
     }
 
+    /// Spawned helper pid for session events.
+    ///
+    /// Read under `ioLock` so it serializes against a concurrent `terminate`;
+    /// the pid is stable once the spawn succeeds, and the lock keeps the
+    /// non-`Sendable` process touch inside the single synchronization point.
+    /// Lets event lines tie diagnostics to the owning helper.
+    public var processIdentifier: Int32? {
+        ioLock.withLock { process.processIdentifier }
+    }
+
+    /// Newest retained helper stderr for failure dumps.
+    ///
+    /// Returns the full 8KB dump snapshot; timeout errors keep using the
+    /// separate 500-char tail so the existing warning copy never grows.
+    public var retainedStderr: String {
+        stderrDump.snapshot()
+    }
+
     /// Blocks the calling thread until one newline-terminated line arrives.
     ///
     /// The stdout handle is captured under `ioLock` and read outside it so a
@@ -511,6 +554,28 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
         return _stderrText
     }
 
+    /// Hermetic pid for the seam, nil unless a test injects one.
+    ///
+    /// Keeps hermetic runs pid-free by default while the live pipe returns the
+    /// child pid; session events omit the pid field when nil so fake lines stay
+    /// parseable. A supplied pid lets pool tests correlate pool lines with the
+    /// spawn line through one shared value without dialing.
+    public var processIdentifier: Int32? {
+        mutex.lock()
+        defer { mutex.unlock() }
+        return _pid
+    }
+
+    /// Canned stderr dump for failure events, mirroring the live 8KB drain.
+    ///
+    /// Caps through `MailSessionEventLog.cappedDump` so the hermetic bound
+    /// shares one owner with the live drain and the log event.
+    public var retainedStderr: String {
+        mutex.lock()
+        defer { mutex.unlock() }
+        return MailSessionEventLog.cappedDump(_stderrText)
+    }
+
     /// Guards in-memory queues and counters.
     private let mutex = NSLock()
     /// Recorded writes in arrival order.
@@ -521,6 +586,8 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     private var _hang: Bool
     /// Canned stderr tail appended to timeout errors via the shared helper.
     private var _stderrText: String
+    /// Hermetic pid returned for pool correlation, nil for pid-free runs.
+    private var _pid: Int32?
     /// Whether termination ran.
     private var _terminated = false
     /// Termination call count.
@@ -535,10 +602,12 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
     ///   - responses: Response lines served first-in first-out, one per read.
     ///   - hangReads: When true, every read reports a timeout instead of serving the queue.
     ///   - stderrText: Canned stderr tail appended to timeout errors, mirroring the live drain.
-    public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "") {
+    ///   - pid: Hermetic pid for spawn correlation, nil keeps runs pid-free.
+    public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "", pid: Int32? = nil) {
         self._responses = responses
         self._hang = hangReads
         self._stderrText = stderrText
+        self._pid = pid
     }
 
     /// Queues one more response line for the next read.
@@ -624,7 +693,9 @@ public final class FakeSessionLineTransport: SessionLineTransport, @unchecked Se
 /// failure terminates and surfaces without an internal respawn; the pooled
 /// caller owns the single reconnect, preserving reconnect-once budgets, while
 /// auth failures never retry. Close is non-throwing and idempotent, so a
-/// second close no-ops. Named owner for open/command/close budgets is this actor.
+/// second close no-ops. Named owner for open/command/close budgets plus all
+/// session event emission points is this actor; event shapes live in
+/// `MailSessionEventLog`.
 public actor EmailIMAPSession {
     /// Budget for the opening exchange.
     ///
@@ -646,8 +717,19 @@ public actor EmailIMAPSession {
     private let pythonExecutable: String?
     /// Factory returning a fresh line transport per spawn. Nil means live pipes.
     private let factory: (@Sendable () async throws -> any SessionLineTransport)?
+    /// JSONL event log receiving spawn, open, command, and close outcomes.
+    ///
+    /// Always on with no knob; only sizes, latencies, and outcomes ride the
+    /// events so passwords and payload content never enter the log.
+    private let eventLog: MailSessionEventLog
     /// Current line transport, nil when unstarted or torn down.
     private var transport: (any SessionLineTransport)?
+    /// Last helper pid seen, retained for pool correlation after teardown.
+    ///
+    /// Command failures terminate the transport before the pool reads the pid,
+    /// so this keeps the failing helper identity for `pool.evict` lines while
+    /// the live transport still supplies the current pid when present.
+    private var lastPid: Int32?
     /// Whether the open exchange has succeeded.
     private var started = false
     /// Whether close has run. Guards idempotent close.
@@ -670,14 +752,29 @@ public actor EmailIMAPSession {
     ///   - credentials: Resolved connection fields plus password for open and re-open.
     ///   - pythonExecutable: Explicit interpreter path, or nil to mirror gateway precedence.
     ///   - transportFactory: Fresh-transport factory per spawn, or nil for live pipes.
+    ///   - eventLog: JSONL event log, defaulting to the live file sink.
     public init(
         credentials: ResolvedEmailCredentials,
         pythonExecutable: String? = nil,
-        transportFactory: (@Sendable () async throws -> any SessionLineTransport)? = nil
+        transportFactory: (@Sendable () async throws -> any SessionLineTransport)? = nil,
+        eventLog: MailSessionEventLog = .live
     ) {
         self.credentials = credentials
         self.pythonExecutable = Self.resolvePythonExecutable(explicit: pythonExecutable)
         self.factory = transportFactory
+        self.eventLog = eventLog
+    }
+
+    /// Current helper pid for pool correlation, nil when unstarted or hermetic.
+    ///
+    /// The pool layer reads this after a successful start so its `pool.open`,
+    /// `pool.close`, and `pool.evict` lines carry the same pid as the session
+    /// `session.spawn` line; timestamp plus pid then tie the two layers
+    /// together while the session itself stays mailbox-agnostic. Falls back to
+    /// the last seen pid after teardown so evict lines keep the failing helper
+    /// identity even though the transport is already gone.
+    public var processIdentifier: Int32? {
+        transport?.processIdentifier ?? lastPid
     }
 
     /// Spawns the helper and opens the connection with a 150s budget.
@@ -705,11 +802,11 @@ public actor EmailIMAPSession {
         }
         inFlightOpen = flight
         defer { inFlightOpen = nil }
-        return try await withTaskCancellationHandler {
-            try await flight.value
-        } onCancel: {
-            flight.cancel()
-        }
+        // A single waiter cancelling must never abort the shared handshake:
+        // awaiting the shared flight propagates nothing into it, so a
+        // cancelled starter stops waiting while the remaining starters still
+        // join the same in-flight open.
+        try await flight.value
     }
 
     /// Sends one command and returns the raw envelope bytes.
@@ -911,27 +1008,51 @@ public actor EmailIMAPSession {
 
     /// Best-effort close that never throws and idempotently terminates.
     ///
-    /// Sends close inside a 10s budget, then terminates the helper regardless
-    /// of the outcome. A second close no-ops without writing or reading, and a
-    /// close after failure still terminates without throwing.
+    /// Waits for an in-flight open handshake to settle before touching the
+    /// transport so close never runs a second write/read pair on the same
+    /// line framing while the open read is still pending, then sends close
+    /// inside a 10s budget and terminates the helper regardless of the
+    /// outcome. A second close no-ops without writing or reading, and a
+    /// close after failure still terminates without throwing. The close event
+    /// carries `clean` only when the handshake wrote and read without throwing;
+    /// every other teardown records `terminate` with only the outcome logged.
     public func close() async {
         guard !closed else { return }
         closed = true
         failCommandWaiters()
+        // Serialize against a mid-handshake open: the spawn assigns the
+        // transport before suspending on its write/read, so touching the
+        // transport here would run a second write/read pair on the same line
+        // framing while the open read is still pending. Waiting for the
+        // shared flight lets the handshake settle first; a close that arrived
+        // mid-handshake then tears down the established transport once, and
+        // the spawn's own closed check already terminates when close won.
+        if let flight = inFlightOpen {
+            _ = await flight.result
+        }
+        let account = credentials.accountName
         guard let current = transport else {
             started = false
+            eventLog.logClose(account: account, pid: lastPid, outcome: "terminate")
             return
         }
+        let pid = current.processIdentifier
+        var clean = false
         do {
             let line = try encodeLine(op: "close", payload: [:])
             try await current.writeLine(line)
-            _ = try? await current.readLine(timeout: Self.closeTimeoutSeconds)
+            _ = try await current.readLine(timeout: Self.closeTimeoutSeconds)
+            // A throw-free handshake counts as clean even when the close line
+            // itself reports failure; termination below still runs regardless.
+            clean = true
         } catch {
             // Close stays non-throwing by design; termination below still runs.
+            clean = false
         }
         await current.terminate()
         transport = nil
         started = false
+        eventLog.logClose(account: account, pid: pid, outcome: clean ? "clean" : "terminate")
     }
 
     /// Resolves the interpreter mirroring the one-shot gateway precedence.
@@ -1019,30 +1140,76 @@ public actor EmailIMAPSession {
         guard let current = transport, !closed, started else {
             throw EmailIMAPError.bridgeFailed("session not open")
         }
-        let line: String
+        let account = credentials.accountName
+        let pid = current.processIdentifier
+        let start = Date()
         do {
-            line = try encodeLine(op: op, payload: payload)
+            let line: String
+            do {
+                line = try encodeLine(op: op, payload: payload)
+            } catch {
+                throw EmailIMAPError.bridgeFailed(
+                    "Could not encode IMAP session request: \(error.localizedDescription)"
+                )
+            }
+            do {
+                try await current.writeLine(line)
+            } catch let error as EmailIMAPError {
+                throw error
+            } catch {
+                throw EmailIMAPError.bridgeFailed("IMAP session write failed: \(error.localizedDescription)")
+            }
+            let response: String
+            do {
+                response = try await current.readLine(timeout: timeout)
+            } catch let error as EmailIMAPError {
+                throw error
+            } catch {
+                throw EmailIMAPError.bridgeFailed("IMAP session read failed: \(error.localizedDescription)")
+            }
+            let data = try checkedEnvelope(response)
+            let latencyMs = Date().timeIntervalSince(start) * 1000
+            // Only sizes, latencies, and outcomes ride the event; op names the
+            // exchange while query text and payloads stay out of the log.
+            eventLog.logCommand(account: account, pid: pid, op: op, latencyMs: latencyMs, ok: true)
+            return data
         } catch {
-            throw EmailIMAPError.bridgeFailed(
-                "Could not encode IMAP session request: \(error.localizedDescription)"
-            )
-        }
-        do {
-            try await current.writeLine(line)
-        } catch let error as EmailIMAPError {
+            let latencyMs = Date().timeIntervalSince(start) * 1000
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            eventLog.logCommand(account: account, pid: pid, op: op, latencyMs: latencyMs, ok: false, error: detail)
             throw error
-        } catch {
-            throw EmailIMAPError.bridgeFailed("IMAP session write failed: \(error.localizedDescription)")
         }
-        let response: String
-        do {
-            response = try await current.readLine(timeout: timeout)
-        } catch let error as EmailIMAPError {
-            throw error
-        } catch {
-            throw EmailIMAPError.bridgeFailed("IMAP session read failed: \(error.localizedDescription)")
+    }
+
+    /// Logs an open failure with write-to-line latency.
+    ///
+    /// Single owner for open-failure logging so factory-spawn, live-spawn,
+    /// and open-exchange failures cannot drift; only the verbatim helper
+    /// detail rides the event while payloads stay out.
+    /// - Parameters:
+    ///   - pid: Helper child pid when known, nil for spawn failures.
+    ///   - writeStart: Attempt start for latency measurement.
+    ///   - error: Failure under test.
+    private func logOpenFailure(pid: Int32?, writeStart: Date, error: Error) {
+        let latencyMs = Date().timeIntervalSince(writeStart) * 1000
+        let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        eventLog.logOpenResult(account: credentials.accountName, pid: pid, ok: false, error: detail, latencyMs: latencyMs)
+    }
+
+    /// Terminates a fresh transport, emitting its stderr dump, and clears started state.
+    ///
+    /// Single owner for open-failure teardown so decode and generic paths
+    /// cannot drift; the dump rides `session.stderr` before termination so a
+    /// failed open still leaves its dying words. Empty dumps stay silent.
+    /// - Parameter fresh: Fresh transport to dump, terminate, and clear.
+    private func terminateAndClear(_ fresh: any SessionLineTransport) async {
+        let dump = fresh.retainedStderr
+        if !dump.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            eventLog.logStderr(account: credentials.accountName, pid: fresh.processIdentifier, stderr: dump)
         }
-        return try checkedEnvelope(response)
+        await fresh.terminate()
+        transport = nil
+        started = false
     }
 
     /// Spawns a fresh transport and opens with a bounded wait.
@@ -1050,16 +1217,22 @@ public actor EmailIMAPSession {
     /// Failures terminate the fresh transport before throwing so a bad open
     /// never leaks a half-open helper. The helper copy surfaces verbatim. A
     /// close racing the handshake terminates instead of leaving a started
-    /// session behind.
+    /// session behind. Spawn, sent, result, and stderr events carry only the
+    /// interpreter path, byte counts, latencies, and outcomes so the password
+    /// and request payload never enter the log.
     /// - Parameter timeout: Seconds to wait for the single open response.
     private func spawnAndOpen(timeout: TimeInterval) async throws {
+        let account = credentials.accountName
+        let attemptStart = Date()
         let next: any SessionLineTransport
         if let factory {
             do {
                 next = try await factory()
-            } catch let error as EmailIMAPError {
-                throw error
             } catch {
+                logOpenFailure(pid: nil, writeStart: attemptStart, error: error)
+                if let sessionError = error as? EmailIMAPError {
+                    throw sessionError
+                }
                 throw EmailIMAPError.pythonUnavailable(
                     "Could not launch python3 for IMAP session access: \(error.localizedDescription)"
                 )
@@ -1070,31 +1243,51 @@ public actor EmailIMAPSession {
                     pythonExecutable: pythonExecutable,
                     scriptSource: EmailIMAPSessionScript.source
                 )
-            } catch let error as EmailIMAPError {
-                throw error
             } catch {
+                logOpenFailure(pid: nil, writeStart: attemptStart, error: error)
+                if let sessionError = error as? EmailIMAPError {
+                    throw sessionError
+                }
                 throw EmailIMAPError.pythonUnavailable(
                     "Could not launch python3 for IMAP session access: \(error.localizedDescription)"
                 )
             }
         }
         transport = next
+        let pid = next.processIdentifier
+        lastPid = pid
+        let binary = pythonExecutable ?? "python3"
+        eventLog.logSpawn(account: account, pid: pid, binaryPath: binary)
+        let writeStart = Date()
         do {
             let line = try encodeLine(op: "open", payload: openPayload())
             try await next.writeLine(line)
+            // Only the byte count rides the event; the open line holds the
+            // password and stays out of the log.
+            eventLog.logOpenSent(account: account, pid: pid, byteCount: line.utf8.count)
             let response = try await next.readLine(timeout: timeout)
+            let latencyMs = Date().timeIntervalSince(writeStart) * 1000
             _ = try checkedEnvelope(response)
             guard !closed else {
                 await next.terminate()
                 transport = nil
                 started = false
+                eventLog.logOpenResult(
+                    account: account,
+                    pid: pid,
+                    ok: false,
+                    error: "session not open",
+                    latencyMs: latencyMs
+                )
                 throw EmailIMAPError.bridgeFailed("session not open")
             }
+            eventLog.logOpenResult(account: account, pid: pid, ok: true, error: nil, latencyMs: latencyMs)
             started = true
         } catch {
-            await next.terminate()
-            transport = nil
-            started = false
+            // A decode failure still records the open outcome with its detail;
+            // the caller sees the same verbatim error it would without logging.
+            logOpenFailure(pid: pid, writeStart: writeStart, error: error)
+            await terminateAndClear(next)
             if let sessionError = error as? EmailIMAPError {
                 throw sessionError
             }

@@ -5,6 +5,105 @@ import Foundation
 @testable import RuneWeaverTools
 import Testing
 
+/// Shared lock-guarded collector for emitted session JSON lines.
+///
+/// Single owner for hermetic event assertions across the session plus pool
+/// suites: lines are retained in emission order behind one lock, and the
+/// derived log fronts the same sink so ordering, attribution, and redaction
+/// coverage stays identical without duplicating the collector per suite.
+private final class SharedEventCollector: @unchecked Sendable {
+    /// Guards retained lines.
+    private let lock = NSLock()
+    /// Lines observed in emission order.
+    private var stored: [String] = []
+
+    /// Appends one line.
+    /// - Parameter line: JSON line without a trailing newline.
+    func append(_ line: String) {
+        lock.withLock {
+            stored.append(line)
+        }
+    }
+
+    /// Snapshot of observed lines in order.
+    var lines: [String] {
+        lock.withLock { stored }
+    }
+
+    /// Event log fronting this collector.
+    var log: MailSessionEventLog {
+        MailSessionEventLog(sink: { [weak self] line in
+            self?.append(line)
+        })
+    }
+}
+
+/// Shared lock-guarded factory serving fake session transports in order.
+///
+/// Single owner for hermetic spawn counting plus fake selection across the
+/// session plus pool suites: creations are counted behind one lock and fakes
+/// are served first-in first-out with the last reused when over-requested.
+/// Actor tests draw transports via `next()` while pool tests build sessions
+/// via `make(credentials:)` sharing one event sink, so count, serve, and
+/// factory logic cannot drift between suites.
+private final class SharedFakeSessionFactory: @unchecked Sendable {
+    /// Guards creation state.
+    private let lock = NSLock()
+    /// Fakes served one per creation, last reused when over-requested.
+    private var fakes: [FakeSessionLineTransport]
+    /// Number of creations observed.
+    private var calls = 0
+    /// Shared sink so session lines share pids with pool lines; nil keeps a
+    /// discarded sink for suites that assert framing without events.
+    private let sharedLog: MailSessionEventLog?
+
+    /// Creates a factory serving the given fakes in order.
+    /// - Parameters:
+    ///   - fakes: One fake per expected creation.
+    ///   - log: Shared sink for built sessions, or nil for a discarded sink.
+    init(_ fakes: [FakeSessionLineTransport], log: MailSessionEventLog? = nil) {
+        self.fakes = fakes
+        self.sharedLog = log
+    }
+
+    /// Number of creations so far.
+    var count: Int {
+        lock.withLock { calls }
+    }
+
+    /// Returns the next fake, reusing the last when over-requested.
+    /// - Returns: Fake for the current creation.
+    func next() -> FakeSessionLineTransport {
+        lock.withLock {
+            calls += 1
+            if calls <= fakes.count {
+                return fakes[calls - 1]
+            }
+            return fakes[fakes.count - 1]
+        }
+    }
+
+    /// Builds a session for credentials, counting the call.
+    /// - Parameter credentials: Resolved fields for open plus re-open.
+    /// - Returns: Session fronted by the next fake sharing the event sink.
+    func make(credentials: ResolvedEmailCredentials) -> EmailIMAPSession {
+        let fake = next()
+        let captured: MailSessionEventLog = lock.withLock {
+            sharedLog ?? MailSessionEventLog(sink: { _ in })
+        }
+        return EmailIMAPSession(
+            credentials: credentials,
+            transportFactory: { fake },
+            eventLog: captured
+        )
+    }
+
+    /// Factory closure injected into the adapter.
+    var factory: MailIndexSessionFactory {
+        { [self] credentials in self.make(credentials: credentials) }
+    }
+}
+
 /// Serialized session pipe coverage: each case spawns `python3` with piped
 /// stdio, so cases run one at a time to keep output drains deterministic.
 @Suite("Email IMAP Session", .serialized)
@@ -410,41 +509,6 @@ struct EmailIMAPSessionActorTests {
         let op: String
     }
 
-    /// Counts spawns and serves fakes in order for reconnect assertions.
-    private final class TestSpawner: @unchecked Sendable {
-        /// Guards spawn state.
-        private let lock = NSLock()
-        /// Fakes served first-in first-out, one per spawn.
-        private var fakes: [FakeSessionLineTransport]
-        /// Number of factory calls observed.
-        private var spawns = 0
-
-        /// Creates a spawner serving the given fakes in order.
-        /// - Parameter fakes: One fake per expected spawn.
-        init(_ fakes: [FakeSessionLineTransport]) {
-            self.fakes = fakes
-        }
-
-        /// Returns the next fake, reusing the last when over-requested.
-        /// - Returns: Fake for the current spawn.
-        func next() -> FakeSessionLineTransport {
-            lock.lock()
-            defer { lock.unlock() }
-            spawns += 1
-            if spawns <= fakes.count {
-                return fakes[spawns - 1]
-            }
-            return fakes[fakes.count - 1]
-        }
-
-        /// Number of factory calls so far.
-        var spawnCount: Int {
-            lock.lock()
-            defer { lock.unlock() }
-            return spawns
-        }
-    }
-
     /// Credentials for hermetic opens; the password never leaves the session line.
     private static func testCredentials() -> ResolvedEmailCredentials {
         ResolvedEmailCredentials(
@@ -464,13 +528,14 @@ struct EmailIMAPSessionActorTests {
     /// Builds a session serving fakes from the spawner.
     private static func makeSession(
         credentials: ResolvedEmailCredentials? = nil,
-        spawner: TestSpawner
+        spawner: SharedFakeSessionFactory
     ) -> EmailIMAPSession {
         EmailIMAPSession(
             credentials: credentials ?? testCredentials(),
             transportFactory: {
                 spawner.next()
-            }
+            },
+            eventLog: MailSessionEventLog(sink: { _ in })
         )
     }
 
@@ -487,7 +552,7 @@ struct EmailIMAPSessionActorTests {
         let openOK = #"{"ok": true}"#
         let statusOK = #"{"ok": true, "mailbox": "INBOX", "uidNext": 2001, "uidValidity": 7}"#
         let fake = FakeSessionLineTransport(responses: [openOK, statusOK])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         let status = try await session.status(mailbox: "INBOX")
@@ -502,14 +567,14 @@ struct EmailIMAPSessionActorTests {
         #expect(fake.readTimeouts.count == 2)
         #expect(fake.readTimeouts[0] == EmailIMAPSession.openTimeoutSeconds)
         #expect(fake.readTimeouts[1] == EmailIMAPSession.commandTimeoutSeconds)
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         await session.close()
     }
 
     @Test
     func `Fake session send before start fails fast without I O`() async throws {
         let fake = FakeSessionLineTransport(responses: [])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         do {
             _ = try await session.send(op: "status", payload: ["mailbox": "INBOX"])
@@ -519,14 +584,14 @@ struct EmailIMAPSessionActorTests {
         }
         #expect(fake.writeCount == 0)
         #expect(fake.readCount == 0)
-        #expect(spawner.spawnCount == 0)
+        #expect(spawner.count == 0)
         await session.close()
     }
 
     @Test
     func `Fake session hung command terminates with transport copy`() async throws {
         let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         fake.setHang(true)
@@ -542,7 +607,7 @@ struct EmailIMAPSessionActorTests {
         #expect(fake.readCount == 2)
         #expect(fake.isTerminated)
         #expect(fake.terminateCount == 1)
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         await session.close()
         await session.close()
     }
@@ -563,7 +628,7 @@ struct EmailIMAPSessionActorTests {
         // Empty diagnostics must not perturb the long-standing timeout wording,
         // so existing assertions without a helper tail stay exact.
         let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         fake.setHang(true)
@@ -584,7 +649,7 @@ struct EmailIMAPSessionActorTests {
         // the canned tail here covers the live retention through the seam
         // without spawning a helper for a timing-sensitive stall.
         let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         fake.setHang(true)
@@ -613,7 +678,7 @@ struct EmailIMAPSessionActorTests {
             stderrText: overlong
         )
         #expect(fake.stderrText == overlong)
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         fake.setHang(true)
@@ -644,7 +709,7 @@ struct EmailIMAPSessionActorTests {
             #"{"ok": true}"#,
             #"{"ok": false, "error": "IMAP search failed: still gone"}"#
         ])
-        let spawner = TestSpawner([first, second])
+        let spawner = SharedFakeSessionFactory([first, second])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         do {
@@ -653,7 +718,7 @@ struct EmailIMAPSessionActorTests {
         } catch {
             #expect(Self.bridgeDetail(error).contains("IMAP search failed"))
         }
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         #expect(first.writeCount == 2)
         #expect(first.readCount == 2)
         #expect(first.isTerminated)
@@ -671,7 +736,7 @@ struct EmailIMAPSessionActorTests {
             #"{"ok": true}"#,
             #"{"ok": false, "error": "IMAP login failed for you@example.com: bad password"}"#
         ])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         do {
@@ -681,7 +746,7 @@ struct EmailIMAPSessionActorTests {
             let detail = Self.bridgeDetail(error)
             #expect(detail.contains("login failed"))
         }
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         #expect(fake.writeCount == 2)
         #expect(fake.readCount == 2)
         await session.close()
@@ -696,7 +761,7 @@ struct EmailIMAPSessionActorTests {
             #"{"ok": true, "mailbox": "INBOX", "uidNext": 2001, "uidValidity": 7}"#,
             #"{"ok": true}"#
         ])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         _ = try await session.status(mailbox: "INBOX")
@@ -718,7 +783,7 @@ struct EmailIMAPSessionActorTests {
         ])
         // Single-ownership model: the failed command terminates without an
         // internal respawn, so close after failure only tears down once.
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         try await session.start()
         do {
@@ -727,7 +792,7 @@ struct EmailIMAPSessionActorTests {
         } catch {
             #expect(Self.bridgeDetail(error).contains("IMAP fetch failed"))
         }
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         #expect(fake.writeCount == 2)
         #expect(fake.readCount == 2)
         await session.close()
@@ -740,7 +805,7 @@ struct EmailIMAPSessionActorTests {
         let fake = FakeSessionLineTransport(responses: [
             #"{"ok": false, "error": "Could not connect to you@mail.example.com:993: refused"}"#
         ])
-        let spawner = TestSpawner([fake])
+        let spawner = SharedFakeSessionFactory([fake])
         let session = Self.makeSession(spawner: spawner)
         do {
             try await session.start()
@@ -748,7 +813,7 @@ struct EmailIMAPSessionActorTests {
         } catch {
             #expect(Self.bridgeDetail(error).contains("Could not connect"))
         }
-        #expect(spawner.spawnCount == 1)
+        #expect(spawner.count == 1)
         #expect(fake.writeCount == 1)
         #expect(fake.readCount == 1)
         #expect(try Self.writtenOp(fake.writtenLines[0]) == "open")
@@ -764,53 +829,6 @@ struct EmailIMAPSessionActorTests {
 /// redaction parity assert without spawning helpers.
 @Suite("Email IMAP Mail Index Session Pool")
 struct MailIndexSessionPoolTests {
-    /// Counts adapter factory calls while serving fakes in creation order.
-    private final class PoolCountingFactory: @unchecked Sendable {
-        /// Guards creation state.
-        private let lock = NSLock()
-        /// Fakes served one per session creation, last reused when over-requested.
-        private var fakes: [FakeSessionLineTransport]
-        /// Number of factory calls observed.
-        private var calls = 0
-
-        /// Creates a counter serving the given fakes in order.
-        /// - Parameter fakes: One fake per expected session creation.
-        init(_ fakes: [FakeSessionLineTransport]) {
-            self.fakes = fakes
-        }
-
-        /// Number of factory calls so far.
-        var count: Int {
-            lock.lock()
-            defer { lock.unlock() }
-            return calls
-        }
-
-        /// Builds a session for credentials, counting the call.
-        /// - Parameter credentials: Resolved fields for open plus re-open.
-        /// - Returns: Session fronted by the next fake.
-        func make(credentials: ResolvedEmailCredentials) -> EmailIMAPSession {
-            lock.lock()
-            calls += 1
-            let index = calls - 1
-            let fake: FakeSessionLineTransport = if index < fakes.count {
-                fakes[index]
-            } else {
-                fakes[fakes.count - 1]
-            }
-            lock.unlock()
-            return EmailIMAPSession(
-                credentials: credentials,
-                transportFactory: { fake }
-            )
-        }
-
-        /// Factory closure injected into the adapter.
-        var factory: MailIndexSessionFactory {
-            { [self] credentials in self.make(credentials: credentials) }
-        }
-    }
-
     /// In-memory one-shot double recording queries plus limits.
     private struct PoolStubGateway: EmailIMAPGateway, Sendable {
         /// Hits returned by search, already newest-first.
@@ -976,8 +994,12 @@ struct MailIndexSessionPoolTests {
             #"{"ok": true, "mailbox": "INBOX", "uidNext": 11, "uidValidity": 1}"#,
             #"{"ok": true, "mailbox": "INBOX", "uidNext": 11, "uidValidity": 1}"#
         ])
-        let counter = PoolCountingFactory([fake])
-        let adapter = EmailIMAPMailIndexGateway(gateway: PoolStubGateway(), sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([fake])
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolStubGateway(),
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         let credentials = Self.poolCredentials()
         try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
         try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
@@ -995,8 +1017,12 @@ struct MailIndexSessionPoolTests {
         let inbox = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
         let archive = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
         let work = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
-        let counter = PoolCountingFactory([inbox, archive, work])
-        let adapter = EmailIMAPMailIndexGateway(gateway: PoolStubGateway(), sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([inbox, archive, work])
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolStubGateway(),
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         try await adapter.openMailboxSession(credentials: Self.poolCredentials(account: "personal"), mailbox: "INBOX")
         try await adapter.openMailboxSession(credentials: Self.poolCredentials(account: "personal"), mailbox: "Archive")
         try await adapter.openMailboxSession(credentials: Self.poolCredentials(account: "work"), mailbox: "INBOX")
@@ -1026,8 +1052,12 @@ struct MailIndexSessionPoolTests {
             #"{"ok": true, "mailbox": "INBOX", "uidNext": 11, "uidValidity": 1}"#,
             #"{"ok": true, "messages": []}"#
         ])
-        let counter = PoolCountingFactory([failing, fresh])
-        let adapter = EmailIMAPMailIndexGateway(gateway: PoolStubGateway(), sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([failing, fresh])
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolStubGateway(),
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         let credentials = Self.poolCredentials()
         try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
         do {
@@ -1050,8 +1080,12 @@ struct MailIndexSessionPoolTests {
     func `Pool close evicts plus no-ops when absent`() async throws {
         let first = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
         let second = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
-        let counter = PoolCountingFactory([first, second])
-        let adapter = EmailIMAPMailIndexGateway(gateway: PoolStubGateway(), sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([first, second])
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolStubGateway(),
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         let credentials = Self.poolCredentials()
         await adapter.closeMailboxSession(credentials: credentials, mailbox: "INBOX")
         #expect(counter.count == 0)
@@ -1091,8 +1125,12 @@ struct MailIndexSessionPoolTests {
         let limitsBox = QueriesBox()
         let gateway = PoolStubGateway(hits: hits, full: full, queriesBox: queriesBox, limitsBox: limitsBox)
         let fake = FakeSessionLineTransport(responses: [])
-        let counter = PoolCountingFactory([fake])
-        let adapter = EmailIMAPMailIndexGateway(gateway: gateway, sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([fake])
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: gateway,
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         let credentials = Self.poolCredentials()
         let messages = try await adapter.messages(credentials: credentials, mailbox: "INBOX", limit: 10, mode: .peek, beforeUID: 51)
         #expect(messages.count == 1)
@@ -1125,7 +1163,10 @@ struct MailIndexSessionPoolTests {
         let oneShotQueries = QueriesBox()
         let oneShotLimits = QueriesBox()
         let oneShot = PoolStubGateway(hits: [hit], full: full, queriesBox: oneShotQueries, limitsBox: oneShotLimits)
-        let oneShotAdapter = EmailIMAPMailIndexGateway(gateway: oneShot)
+        let oneShotAdapter = EmailIMAPMailIndexGateway(
+            gateway: oneShot,
+            eventLog: MailSessionEventLog(sink: { _ in })
+        )
         let credentials = Self.poolCredentials()
         let oneShotMessages = try await oneShotAdapter.messages(
             credentials: credentials,
@@ -1148,8 +1189,12 @@ struct MailIndexSessionPoolTests {
             searchPayload,
             fetchPayload
         ])
-        let counter = PoolCountingFactory([fake])
-        let sessionAdapter = EmailIMAPMailIndexGateway(gateway: PoolStubGateway(), sessionFactory: counter.factory)
+        let counter = SharedFakeSessionFactory([fake])
+        let sessionAdapter = EmailIMAPMailIndexGateway(
+            gateway: PoolStubGateway(),
+            eventLog: MailSessionEventLog(sink: { _ in }),
+            sessionFactory: counter.factory
+        )
         try await sessionAdapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
         let sessionMessages = try await sessionAdapter.messages(
             credentials: credentials,
@@ -1172,5 +1217,447 @@ struct MailIndexSessionPoolTests {
         let source = EmailIMAPSessionScript.source
         #expect(source.contains(#"re.fullmatch(r"UID \d+:\d+", query)"#))
         try ToolsTestSupport.assertBridgeSourceParses(source)
+    }
+}
+
+/// Hermetic event-log coverage for mail session lifecycle.
+///
+/// Each case drives `EmailIMAPSession` with an injectable sink so ordering,
+/// field presence, timestamp shape, redaction, and stderr dumps assert without
+/// touching the live log file.
+@Suite("Mail Session Event Log")
+struct MailSessionEventLogTests {
+    /// Credentials for hermetic opens; the password must never reach the log.
+    /// - Parameter password: Password carried only on the wire.
+    /// - Returns: Resolved credentials for one test account.
+    private static func eventCredentials(password: String = "test-secret") -> ResolvedEmailCredentials {
+        ResolvedEmailCredentials(
+            accountName: "personal",
+            host: "mail.example.com",
+            port: 993,
+            username: "you@example.com",
+            password: password
+        )
+    }
+
+    /// Decodes one event line to a field dictionary.
+    /// - Parameter line: Single JSON line.
+    /// - Returns: Decoded fields.
+    private static func decodeFields(_ line: String) throws -> [String: Any] {
+        let data = Data(line.utf8)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dict = object as? [String: Any] else {
+            throw SessionEventTestError(message: "Event line is not an object")
+        }
+        return dict
+    }
+
+    /// Failure thrown when an event line breaks the contract.
+    private struct SessionEventTestError: Error, LocalizedError {
+        /// Human-readable detail.
+        let message: String
+        /// Returns `message` for failure display.
+        var errorDescription: String? {
+            message
+        }
+    }
+
+    /// Parses fractional-second ISO8601 timestamps.
+    /// - Parameter value: Timestamp string from an event.
+    /// - Returns: True when the value parses with fractional seconds.
+    private static func parsesFractionalISO8601(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard formatter.date(from: value) != nil else { return false }
+        return value.contains("T") && value.contains(".")
+    }
+
+    /// Extracts the event name from a decoded line.
+    /// - Parameter fields: Decoded event fields.
+    /// - Returns: Event name or empty when missing.
+    private static func eventName(_ fields: [String: Any]) -> String {
+        fields["event"] as? String ?? ""
+    }
+
+    @Test
+    func `Hermetic open emits spawn sent result in order`() async throws {
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(password: "pw-OPEN-9f8a-secret"),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        try await session.start()
+        let lines = collector.lines
+        #expect(lines.count == 3)
+        let first = try Self.decodeFields(lines[0])
+        let second = try Self.decodeFields(lines[1])
+        let third = try Self.decodeFields(lines[2])
+        #expect(Self.eventName(first) == "session.spawn")
+        #expect(Self.eventName(second) == "session.open.sent")
+        #expect(Self.eventName(third) == "session.open.result")
+        for fields in [first, second, third] {
+            #expect(fields["ts"] as? String != nil)
+            #expect(fields["account"] as? String == "personal")
+            #expect(Self.parsesFractionalISO8601(fields["ts"] as? String ?? ""))
+        }
+        #expect(first["binaryPath"] as? String != nil)
+        #expect((second["bytes"] as? Int ?? 0) > 0)
+        #expect(third["ok"] as? Bool == true)
+        let latency = third["latencyMs"] as? Double ?? -1
+        #expect(latency >= 0)
+        #expect(latency < 10000)
+        for line in lines {
+            #expect(!line.contains("pw-OPEN-9f8a-secret"))
+        }
+        await session.close()
+    }
+
+    @Test
+    func `Failed open emits result plus stderr dump`() async throws {
+        let collector = SharedEventCollector()
+        let helperBytes = "helper-boom-marker-7c3d"
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect to you@mail.example.com:993: refused"}"#],
+            stderrText: helperBytes
+        )
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(password: "pw-FAIL-4b2e-secret"),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        let lines = collector.lines
+        #expect(lines.count == 4)
+        #expect(try Self.eventName(Self.decodeFields(lines[0])) == "session.spawn")
+        #expect(try Self.eventName(Self.decodeFields(lines[1])) == "session.open.sent")
+        let result = try Self.decodeFields(lines[2])
+        #expect(Self.eventName(result) == "session.open.result")
+        #expect(result["ok"] as? Bool == false)
+        #expect((result["error"] as? String ?? "").contains("Could not connect"))
+        let stderrEvent = try Self.decodeFields(lines[3])
+        #expect(Self.eventName(stderrEvent) == "session.stderr")
+        #expect((stderrEvent["stderr"] as? String ?? "").contains(helperBytes))
+        for line in lines {
+            #expect(!line.contains("pw-FAIL-4b2e-secret"))
+        }
+        await session.close()
+    }
+
+    @Test
+    func `Events never carry passwords bodies subjects or payloads`() async throws {
+        let password = "pw-NEVER-1a2b3c"
+        let querySecret = "query-NEVER-4d5e6f"
+        let bodySecret = "body-NEVER-7g8h9i"
+        let subjectSecret = "subject-NEVER-0j1k2l"
+        let collector = SharedEventCollector()
+        let searchPayload =
+            #"{"ok": true, "messages": [{"id": "7", "subject": ""# + subjectSecret + #"", "from": "sender@example.com", "date": "Mon, 01 Sep 2025 09:00:00 +0000", "snippet": "snippet", "mailbox": "INBOX"}]}"#
+        let fetchPayload =
+            #"{"ok": true, "message": {"id": "7", "subject": ""# + subjectSecret
+                + #"", "from": "sender@example.com", "to": "you@example.com", "date": "Mon, 01 Sep 2025 09:00:00 +0000", "body": ""#
+                + bodySecret + #"", "attachments": [], "attachmentsDeferred": false}}"#
+        let fake = FakeSessionLineTransport(responses: [
+            #"{"ok": true}"#,
+            searchPayload,
+            fetchPayload,
+            #"{"ok": true}"#
+        ])
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(password: password),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        try await session.start()
+        _ = try await session.search(mailbox: "INBOX", query: querySecret, limit: 10)
+        _ = try await session.fetch(mailbox: "INBOX", messageID: "7")
+        await session.close()
+        let lines = collector.lines
+        #expect(lines.count >= 5)
+        for line in lines {
+            #expect(!line.contains(password))
+            #expect(!line.contains(querySecret))
+            #expect(!line.contains(bodySecret))
+            #expect(!line.contains(subjectSecret))
+            let fields = try Self.decodeFields(line)
+            #expect(fields["ts"] as? String != nil)
+            #expect(Self.parsesFractionalISO8601(fields["ts"] as? String ?? ""))
+            #expect(fields["account"] as? String == "personal")
+        }
+        let commands = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.command" }
+        #expect(commands.count == 2)
+        for command in commands {
+            #expect(command["op"] as? String != nil)
+            #expect(command["ok"] as? Bool == true)
+            let latency = command["latencyMs"] as? Double ?? -1
+            #expect(latency >= 0)
+            #expect(latency < 10000)
+        }
+        let closes = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.close" }
+        #expect(closes.count == 1)
+        #expect(closes[0]["outcome"] as? String == "clean")
+    }
+
+    @Test
+    func `Live default resolves under home logs without writing`() {
+        let url = MailSessionEventLog.defaultLogURL()
+        #expect(url.lastPathComponent == "mail-session.jsonl")
+        #expect(url.path.contains(".runeweaver/logs"))
+        #expect(url.path.hasSuffix(".runeweaver/logs/mail-session.jsonl"))
+    }
+}
+
+/// Hermetic pool lifecycle coverage for the mail index adapter bracket.
+///
+/// Each case drives `EmailIMAPMailIndexGateway` with an injectable event sink
+/// plus fake transports carrying fixed pids, so pool open, close, and evict
+/// lines assert ordering, account plus mailbox attribution, and pid correlation
+/// with the session spawn line without dialing.
+@Suite("Mail Session Pool Events")
+struct MailSessionPoolEventTests {
+    /// In-memory one-shot double; pool paths ride sessions so it never dials.
+    private struct PoolEventStubGateway: EmailIMAPGateway, Sendable {
+        /// Lists one mailbox without dialing.
+        func mailboxListing(credentials _: ResolvedEmailCredentials) async throws -> EmailMailboxListing {
+            EmailMailboxListing(mailboxes: ["INBOX"], delimiter: "/")
+        }
+
+        /// Returns an empty hit list for fallback paths.
+        func search(
+            credentials _: ResolvedEmailCredentials,
+            mailbox _: String,
+            query _: String,
+            limit _: Int
+        ) async throws -> [EmailSearchHit] {
+            []
+        }
+
+        /// Returns a canned full message for fallback paths.
+        func fetch(credentials _: ResolvedEmailCredentials, mailbox _: String, messageID: String) async throws -> EmailFullMessage {
+            EmailFullMessage(
+                id: messageID,
+                subject: "Subject",
+                from: "sender@example.com",
+                to: "you@example.com",
+                date: "Mon, 01 Sep 2025 09:00:00 +0000",
+                body: "Body"
+            )
+        }
+
+        /// Never serves attachment bytes; pool tests use attachment-free mail.
+        func attachment(
+            credentials _: ResolvedEmailCredentials,
+            mailbox _: String,
+            messageID _: String,
+            attachmentIndex _: Int
+        ) async throws -> EmailAttachmentData {
+            throw EmailIMAPError.bridgeFailed("no attachment")
+        }
+
+        /// Append stub satisfying the contract; pool tests never append.
+        func append(credentials _: ResolvedEmailCredentials, mailbox _: String, rawMessage _: Data) async throws {}
+    }
+
+    /// Credentials for hermetic pool opens; the password never reaches the log.
+    /// - Returns: Resolved indexing credentials for one test account.
+    private static func poolCredentials() -> MailIndexCredentials {
+        MailIndexCredentials(
+            accountName: "personal",
+            host: "mail.example.com",
+            port: 993,
+            username: "you@example.com",
+            password: "test-secret"
+        )
+    }
+
+    /// Decodes one event line to a field dictionary.
+    /// - Parameter line: Single JSON line.
+    /// - Returns: Decoded fields.
+    private static func decodeFields(_ line: String) throws -> [String: Any] {
+        let data = Data(line.utf8)
+        let object = try JSONSerialization.jsonObject(with: data)
+        guard let dict = object as? [String: Any] else {
+            throw PoolEventError(message: "Event line is not an object")
+        }
+        return dict
+    }
+
+    /// Failure thrown when an event line breaks the contract.
+    private struct PoolEventError: Error, LocalizedError {
+        /// Human-readable detail.
+        let message: String
+        /// Returns `message` for failure display.
+        var errorDescription: String? {
+            message
+        }
+    }
+
+    /// Extracts the event name from a decoded line.
+    /// - Parameter fields: Decoded event fields.
+    /// - Returns: Event name or empty when missing.
+    private static func eventName(_ fields: [String: Any]) -> String {
+        fields["event"] as? String ?? ""
+    }
+
+    /// Extracts the pid value from a decoded line.
+    /// - Parameter fields: Decoded event fields.
+    /// - Returns: Pid when present, nil for hermetic runs without one.
+    private static func pidOf(_ fields: [String: Any]) -> Int? {
+        fields["pid"] as? Int
+    }
+
+    /// Parses fractional-second ISO8601 timestamps.
+    /// - Parameter value: Timestamp string from an event.
+    /// - Returns: True when the value parses with fractional seconds.
+    private static func parsesFractionalISO8601(_ value: String) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        guard formatter.date(from: value) != nil else { return false }
+        return value.contains("T") && value.contains(".")
+    }
+
+    @Test
+    func `Pool bracket emits open then close with matching pid`() async throws {
+        let collector = SharedEventCollector()
+        let log = collector.log
+        // Fixed pid ties pool lines to the spawn line without dialing.
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": true}"#, #"{"ok": true}"#],
+            pid: 4242
+        )
+        let counter = SharedFakeSessionFactory([fake], log: log)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolEventStubGateway(),
+            eventLog: log,
+            sessionFactory: counter.factory
+        )
+        let credentials = Self.poolCredentials()
+        try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+        await adapter.closeMailboxSession(credentials: credentials, mailbox: "INBOX")
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let names = decoded.map { Self.eventName($0) }
+        guard let spawnIndex = names.firstIndex(of: "session.spawn"),
+              let openIndex = names.firstIndex(of: "pool.open"),
+              let closeIndex = names.firstIndex(of: "pool.close")
+        else {
+            Issue.record("Expected session.spawn, pool.open, and pool.close in \(names)")
+            return
+        }
+        // Pool bracket order rides after the handshake and before teardown.
+        #expect(openIndex > spawnIndex)
+        #expect(closeIndex > openIndex)
+        let spawn = decoded[spawnIndex]
+        let opened = decoded[openIndex]
+        let closed = decoded[closeIndex]
+        for fields in [spawn, opened, closed] {
+            #expect(fields["account"] as? String == "personal")
+            #expect(Self.parsesFractionalISO8601(fields["ts"] as? String ?? ""))
+        }
+        #expect(opened["mailbox"] as? String == "INBOX")
+        #expect(closed["mailbox"] as? String == "INBOX")
+        // Timestamp plus pid tie the pool bracket to the owning helper.
+        #expect(Self.pidOf(spawn) == 4242)
+        #expect(Self.pidOf(opened) == 4242)
+        #expect(Self.pidOf(closed) == 4242)
+        for line in lines {
+            #expect(!line.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Pool transport failure emits evict with reason`() async throws {
+        let collector = SharedEventCollector()
+        let log = collector.log
+        let failing = FakeSessionLineTransport(
+            responses: [
+                #"{"ok": true}"#,
+                #"{"ok": false, "error": "IMAP session connection closed"}"#,
+                #"{"ok": true}"#
+            ],
+            pid: 4343
+        )
+        let counter = SharedFakeSessionFactory([failing], log: log)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolEventStubGateway(),
+            eventLog: log,
+            sessionFactory: counter.factory
+        )
+        let credentials = Self.poolCredentials()
+        try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+        do {
+            _ = try await adapter.messages(credentials: credentials, mailbox: "INBOX", limit: 10, mode: .peek, beforeUID: 51)
+            #expect(Bool(false), "Expected transport failure")
+        } catch {
+            #expect(error.localizedDescription.contains("connection closed"))
+        }
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let names = decoded.map { Self.eventName($0) }
+        guard let openIndex = names.firstIndex(of: "pool.open"),
+              let evictIndex = names.firstIndex(of: "pool.evict")
+        else {
+            Issue.record("Expected pool.open and pool.evict in \(names)")
+            return
+        }
+        #expect(evictIndex > openIndex)
+        let evicted = decoded[evictIndex]
+        #expect(evicted["account"] as? String == "personal")
+        #expect(evicted["mailbox"] as? String == "INBOX")
+        let reason = evicted["reason"] as? String ?? ""
+        #expect(!reason.isEmpty)
+        // The evict keeps the failing helper identity for correlation.
+        #expect(Self.pidOf(evicted) == 4343)
+        #expect(Self.parsesFractionalISO8601(evicted["ts"] as? String ?? ""))
+        #expect(failing.isTerminated)
+        for line in lines {
+            #expect(!line.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Pool open failure evicts with reason`() async throws {
+        let collector = SharedEventCollector()
+        let log = collector.log
+        let failing = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect to you@mail.example.com:993: refused"}"#],
+            pid: 4444
+        )
+        let counter = SharedFakeSessionFactory([failing], log: log)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolEventStubGateway(),
+            eventLog: log,
+            sessionFactory: counter.factory
+        )
+        let credentials = Self.poolCredentials()
+        do {
+            try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let names = decoded.map { Self.eventName($0) }
+        guard let evictIndex = names.firstIndex(of: "pool.evict") else {
+            Issue.record("Expected pool.evict in \(names)")
+            return
+        }
+        let evicted = decoded[evictIndex]
+        #expect(evicted["account"] as? String == "personal")
+        #expect(evicted["mailbox"] as? String == "INBOX")
+        #expect((evicted["reason"] as? String ?? "").contains("open-failed"))
+        #expect(Self.parsesFractionalISO8601(evicted["ts"] as? String ?? ""))
+        // A later open retries cleanly after the failed eviction.
+        #expect(counter.count == 1)
+        for line in lines {
+            #expect(!line.contains("test-secret"))
+        }
     }
 }

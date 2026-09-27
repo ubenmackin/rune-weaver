@@ -98,36 +98,54 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     private let sessionPool: MailIndexSessionPool
     /// Injectable session builder defaulting to the live actor.
     private let sessionFactory: MailIndexSessionFactory
+    /// JSONL event log for pool lifecycle lines.
+    ///
+    /// Always on with no knob; the same sink fronts pooled sessions built by
+    /// the default factory so `session.spawn` plus `pool.open` share one pid.
+    /// Only account, mailbox, pid, plus reason tokens ride pool lines so
+    /// passwords and payload content never enter the log.
+    private let eventLog: MailSessionEventLog
 
     /// Creates an adapter over an IMAP gateway.
     /// - Parameters:
     ///   - gateway: Gateway whose read-only operations back the seam.
     ///   - credentialFilterEnabled: False indexes raw bodies byte-identically.
-    ///   - sessionFactory: Builder for pooled sessions; defaults to the live actor.
+    ///   - eventLog: Pool lifecycle sink, defaulting to the live file.
+    ///   - sessionFactory: Builder for pooled sessions; nil builds the live actor fronted by `eventLog`.
     public init(
         gateway: any EmailIMAPGateway,
         credentialFilterEnabled: Bool = true,
-        sessionFactory: @escaping MailIndexSessionFactory = { EmailIMAPSession(credentials: $0) }
+        eventLog: MailSessionEventLog = .live,
+        sessionFactory: MailIndexSessionFactory? = nil
     ) {
         self.gateway = gateway
         self.credentialFilterEnabled = credentialFilterEnabled
         self.sessionPool = MailIndexSessionPool()
-        self.sessionFactory = sessionFactory
+        self.eventLog = eventLog
+        if let sessionFactory {
+            self.sessionFactory = sessionFactory
+        } else {
+            let captured = eventLog
+            self.sessionFactory = { credentials in EmailIMAPSession(credentials: credentials, eventLog: captured) }
+        }
     }
 
     /// Creates an adapter honoring the `[security]` defense policy.
     /// - Parameters:
     ///   - gateway: Gateway whose read-only operations back the seam.
     ///   - securityConfig: Defense policy carrying the filter toggle.
-    ///   - sessionFactory: Builder for pooled sessions; defaults to the live actor.
+    ///   - eventLog: Pool lifecycle sink, defaulting to the live file.
+    ///   - sessionFactory: Builder for pooled sessions; nil builds the live actor fronted by `eventLog`.
     public init(
         gateway: any EmailIMAPGateway,
         securityConfig: SecurityConfig,
-        sessionFactory: @escaping MailIndexSessionFactory = { EmailIMAPSession(credentials: $0) }
+        eventLog: MailSessionEventLog = .live,
+        sessionFactory: MailIndexSessionFactory? = nil
     ) {
         self.init(
             gateway: gateway,
             credentialFilterEnabled: securityConfig.emailCredentialFilter,
+            eventLog: eventLog,
             sessionFactory: sessionFactory
         )
     }
@@ -149,7 +167,10 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     /// The first opener spawns plus logs in; later openers join the same
     /// handle. The start stays idempotent so a join arriving mid-handshake
     /// waits on the session actor instead of redialing. An open failure
-    /// evicts so a later open retries cleanly with no half-open leak.
+    /// evicts so a later open retries cleanly with no half-open leak. A
+    /// successful start emits `pool.open` with the helper pid so the pool line
+    /// correlates with the session `session.spawn` line via timestamp plus pid;
+    /// an open failure emits `pool.evict` with an `open-failed` reason.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox the session will read.
@@ -164,19 +185,43 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
             // while later openers join the same handshake without redialing.
             try await session.start()
         } catch {
+            // Capture the pid before teardown closes the transport away; the
+            // evict line keeps the failing helper identity even when the close
+            // itself must run without it.
+            let pid = await session.processIdentifier
             if let removed = await sessionPool.remove(key: key) {
                 await removed.close()
             } else {
                 await session.close()
             }
+            // Only outcome tokens ride the pool line; the verbatim helper
+            // detail already lives on `session.open.result` plus `session.stderr`.
+            eventLog.emit(
+                event: "pool.evict",
+                account: credentials.accountName,
+                pid: pid,
+                fields: ["mailbox": trimmed, "reason": "open-failed"]
+            )
             throw error
         }
+        // The pid read after start matches the `session.spawn` pid because both
+        // come from the same live transport; hermetic fakes stay pid-free on
+        // both lines so correlation still holds as jointly absent.
+        let pid = await session.processIdentifier
+        eventLog.emit(
+            event: "pool.open",
+            account: credentials.accountName,
+            pid: pid,
+            fields: ["mailbox": trimmed]
+        )
     }
 
     /// Closes plus evicts the pooled session for one mailbox, no-op when absent.
     ///
     /// Close stays non-throwing by design so the indexer bracket always
-    /// terminates without masking the run outcome.
+    /// terminates without masking the run outcome. A removed handle emits
+    /// `pool.close` with its pre-close pid so the close line correlates with
+    /// the matching `pool.open` line; an absent key stays silent.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox whose session ends.
@@ -184,7 +229,16 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
         let trimmed = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = Self.sessionKey(account: credentials.accountName, mailbox: trimmed)
         if let removed = await sessionPool.remove(key: key) {
+            // Capture before close clears the transport; the close line then
+            // carries the same pid the open line carried for this bracket.
+            let pid = await removed.processIdentifier
             await removed.close()
+            eventLog.emit(
+                event: "pool.close",
+                account: credentials.accountName,
+                pid: pid,
+                fields: ["mailbox": trimmed]
+            )
         }
     }
 
@@ -193,11 +247,24 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     /// Every session-routed read funnels through here on transport, timeout,
     /// or bridge failures so the next call opens fresh instead of reusing a
     /// broken handle. Validation plus decode failures never reach here: they
-    /// leave a healthy connection pooled.
-    /// - Parameter key: Account plus mailbox key.
-    private func evictSession(key: String) async {
+    /// leave a healthy connection pooled. The evict line carries the pre-close
+    /// pid plus a short reason token so operators can tell open, status, and
+    /// message failures apart without any payload content.
+    /// - Parameters:
+    ///   - key: Account plus mailbox key.
+    ///   - account: Account nickname for the evict line.
+    ///   - mailbox: Mailbox name for the evict line.
+    ///   - reason: Short token naming the failing operation.
+    private func evictSession(key: String, account: String, mailbox: String, reason: String) async {
         if let removed = await sessionPool.remove(key: key) {
+            let pid = await removed.processIdentifier
             await removed.close()
+            eventLog.emit(
+                event: "pool.evict",
+                account: account,
+                pid: pid,
+                fields: ["mailbox": mailbox, "reason": reason]
+            )
         }
     }
 
@@ -334,7 +401,7 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
                     throw mapped
                 }
                 if Self.shouldEvictSession(for: error) {
-                    await evictSession(key: key)
+                    await evictSession(key: key, account: credentials.accountName, mailbox: trimmed, reason: "status-transport")
                 }
                 throw error
             }
@@ -398,7 +465,7 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
                 )
             } catch {
                 if Self.shouldEvictSession(for: error) {
-                    await evictSession(key: key)
+                    await evictSession(key: key, account: credentials.accountName, mailbox: trimmed, reason: "messages-transport")
                 }
                 throw error
             }
@@ -409,6 +476,24 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
             limit: limit,
             beforeUID: beforeUID
         )
+    }
+
+    /// Whether a STATUS probe failure means the server lacks STATUS support.
+    ///
+    /// Only this signal falls back to the legacy unanchored listing on the
+    /// same connection; transport, timeout, and auth failures rethrow so the
+    /// pooled caller evicts or surfaces them instead of silently paging
+    /// unbounded. Matches the `not supported` wording owned by the gateway
+    /// default plus helper failures carrying the same phrase.
+    /// - Parameter error: STATUS probe failure under test.
+    /// - Returns: True only for the unsupported-Server signal.
+    private static func isStatusUnsupported(_ error: Error) -> Bool {
+        let described: String = if let localized = (error as? LocalizedError)?.errorDescription {
+            localized + " " + String(describing: error)
+        } else {
+            error.localizedDescription + " " + String(describing: error)
+        }
+        return described.range(of: "not supported", options: .caseInsensitive) != nil
     }
 
     /// Reads one page through the pooled session with identical criterion plus redaction.
@@ -445,16 +530,22 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
             // Anchor the first fixed window from the session STATUS only when
             // the caller threaded no probe, so the newest page stays bounded
             // on the same connection. An empty mailbox holds no UIDs and
-            // returns without searching. Servers without STATUS support fall
-            // back to the legacy listing on the same connection so session
-            // coverage matches the one-shot path.
+            // returns without searching. Only servers without STATUS support
+            // fall back to the legacy listing on the same connection so
+            // session coverage matches the one-shot path; every other STATUS
+            // failure rethrows so transport, timeout, and auth errors evict
+            // or surface through the pooled caller instead of paging
+            // unbounded on a broken connection.
             do {
                 let status = try await session.status(mailbox: mailbox)
                 guard let criterion = Self.newestWindowCriterion(uidNext: status.uidNext) else {
                     return []
                 }
                 query = criterion
+            } catch let cancel as CancellationError {
+                throw cancel
             } catch {
+                guard Self.isStatusUnsupported(error) else { throw error }
                 query = ""
             }
         }
