@@ -43,6 +43,10 @@ def fail(message):
     send({"ok": False, "error": message})
 
 def run_session():
+    # Order addresses once at startup so the first dial already prefers
+    # IPv4; the helper itself never raises, so a bad socket shim cannot
+    # fail the session before the first open arrives.
+    prefer_ipv4()
     conn = None
     opened = False
     def do_close():

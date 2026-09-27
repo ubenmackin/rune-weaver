@@ -1010,6 +1010,11 @@ struct MailIndexerTests {
             let watermark = await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX")
             #expect(watermark == 40)
             #expect(!report.warnings.isEmpty)
+            #expect(report.warnings.contains(
+                "Mailbox 'INBOX' has more new messages than the gateway's widest page; "
+                    + "indexed the newest 50 and held the watermark at 40 "
+                    + "so older arrivals stay pending instead of being skipped."
+            ))
         }
     }
 
@@ -1628,6 +1633,7 @@ struct MailIndexerTests {
             let secondReport = try await second.run()
             #expect(secondReport.messagesDeduplicated == 10)
             #expect(secondReport.messagesIndexed == 0)
+            #expect(secondReport.warnings.contains("Mailbox 'INBOX' UIDVALIDITY changed; restarted from zero and deduplicating by content hash."))
             let stats = try await store.stats()
             #expect(stats.documents == 10)
             #expect(await checkpoints.watermark(account: testAccount.name, mailbox: "INBOX") == 10)
@@ -2064,7 +2070,7 @@ struct MailIndexerTests {
             #expect(report.messagesIndexed == 0)
             #expect(report.messagesSeen == 0)
             #expect(report.warnings.count == 1)
-            #expect(report.warnings[0].contains("Skipped mailbox 'INBOX'"))
+            #expect(report.warnings[0].contains("Skipped mailbox 'mailtest/INBOX'"))
             #expect(report.warnings[0].contains("connection reset by peer"))
             #expect(report.warnings[0].contains("(after 3 attempts)"))
         }
@@ -2097,7 +2103,7 @@ struct MailIndexerTests {
             let report = try await indexer.run()
             #expect(report.messagesIndexed == 0)
             #expect(report.warnings.count == 1)
-            #expect(report.warnings[0] == "Skipped mailbox 'INBOX': \(failureMessage)")
+            #expect(report.warnings[0] == "Skipped mailbox 'mailtest/INBOX': \(failureMessage)")
             #expect(!report.warnings[0].contains("after"))
         }
 
@@ -2367,6 +2373,7 @@ struct MailIndexerTests {
             let report = try await indexer.run()
             #expect(report.messagesIndexed == 0)
             #expect(report.warnings.count == 1)
+            #expect(report.warnings[0].contains("Skipped mailbox 'mailtest/INBOX'"))
         }
         #expect(await recorder.opensSnapshot() == ["mailtest/INBOX"])
         #expect(await recorder.closesSnapshot() == ["mailtest/INBOX"])
@@ -2426,6 +2433,8 @@ struct MailIndexerTests {
             let report = try await indexer.run()
             #expect(report.messagesIndexed == 0)
             #expect(report.warnings.count == 1)
+            #expect(report.warnings[0].contains("Skipped mailbox 'mailtest/INBOX'"))
+            #expect(report.warnings[0].contains("connection reset by peer"))
         }
         #expect(await recorder.opensSnapshot() == ["mailtest/INBOX"])
         #expect(await recorder.closesSnapshot() == [])

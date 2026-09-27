@@ -522,7 +522,7 @@ public actor MailIndexer {
         } catch let cancel as CancellationError {
             throw cancel
         } catch {
-            cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+            cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
             return
         }
         do {
@@ -577,7 +577,7 @@ public actor MailIndexer {
             // so a dead session never pays for a fresh handshake it cannot
             // reuse.
             if Self.isSkippableStatusError(error) {
-                cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                 return
             }
             if Self.isRetryableMailError(error) {
@@ -586,7 +586,7 @@ public actor MailIndexer {
                 } catch let cancel as CancellationError {
                     throw cancel
                 } catch {
-                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                     return
                 }
             }
@@ -612,7 +612,7 @@ public actor MailIndexer {
             } catch let cancel as CancellationError {
                 throw cancel
             } catch {
-                cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                 return
             }
         }
@@ -674,7 +674,7 @@ public actor MailIndexer {
                 throw cancel
             } catch {
                 guard Self.isRetryableMailError(error) else {
-                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                     return nil
                 }
                 if attempt >= Self.maxFetchAttempts {
@@ -690,14 +690,14 @@ public actor MailIndexer {
                 } catch let cancel as CancellationError {
                     throw cancel
                 } catch {
-                    cursor.report.warnings.append("Skipped mailbox '\(context.mailbox)': \(error.localizedDescription)")
+                    cursor.report.warnings.append("Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(error.localizedDescription)")
                     return nil
                 }
                 continue
             }
         }
         if let terminalTransportError {
-            let message = "Skipped mailbox '\(context.mailbox)': \(terminalTransportError.localizedDescription) "
+            let message = "Skipped mailbox '\(context.account.name)/\(context.mailbox)': \(terminalTransportError.localizedDescription) "
                 + "(after \(Self.maxFetchAttempts) attempts)"
             cursor.report.warnings.append(message)
         }
