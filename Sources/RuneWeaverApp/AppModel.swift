@@ -24,7 +24,19 @@ public struct ActiveChatInfo: Identifiable, Sendable, Equatable {
 @Observable
 @MainActor
 public final class AppModel {
-    public var serverStatus: String = "Starting..."
+    /// Single-line menu title for the embedded service. Holds only the
+    /// display title (at most 40 characters), never the full error text, so
+    /// the narrow menu stays readable while diagnostics live in the log plus
+    /// the one-line detail below.
+    public var serverStatus: String = "Starting…"
+    /// Whether the latest boot attempt failed. The sole selector for the
+    /// Failed menu affordance, so views never branch on title text and a
+    /// stale failure cannot linger past a healthy transition.
+    public var isServerFailed: Bool = false
+    /// One-line failure summary for the menu (at most 140 characters), nil
+    /// while the service is healthy. Kept in memory only and cleared on
+    /// every healthy transition, so no failure text persists past recovery.
+    public var serverStatusDetail: String?
     public var isRunning: Bool = false
     /// Bind address for the embedded service. The published values start at the
     /// built-in loopback default; `[server]` config supplies the operative
@@ -150,6 +162,74 @@ public final class AppModel {
         }
     }
 
+    /// Maximum characters for the single-line menu title, sized for the
+    /// narrow menu surface so a long hostname cannot widen it.
+    private static let serverStatusTitleLimit = 40
+    /// Maximum characters for the one-line failure summary, sized to carry
+    /// an actionable hint without embedding the full error text.
+    private static let serverStatusDetailLimit = 140
+
+    /// Marks boot as starting, clearing any stale failure so a retry never
+    /// renders a previous refusal beside fresh progress. Sole writer for the
+    /// starting title alongside the running and failed helpers.
+    public func setServerStarting() {
+        serverStatus = "Starting…"
+        isServerFailed = false
+        serverStatusDetail = nil
+    }
+
+    /// Marks boot as running, clearing any stale failure. The title names
+    /// the bound endpoint for healthy boots and appends the local-only cue
+    /// when no owner token was resolved, so a loopback boot is never
+    /// mistaken for a fully provisioned one.
+    public func setServerRunning(host: String, port: Int, authConfigured: Bool) {
+        // Trim here as well as at the bind site so a padded value set
+        // directly still renders the classified address.
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let base = "Running on \(trimmedHost):\(port)"
+        let title = authConfigured ? base : base + " — local only"
+        serverStatus = Self.truncatedServerTitle(title)
+        isServerFailed = false
+        serverStatusDetail = nil
+    }
+
+    /// Marks boot as failed with a one-line summary, keeping the menu title
+    /// fixed and short while the detail carries the actionable hint. The
+    /// full error stays in the log; only the truncated tail reaches the UI
+    /// and no secret ever flows through this path.
+    public func setServerFailed(detail: String) {
+        serverStatus = "Server failed"
+        isServerFailed = true
+        serverStatusDetail = Self.truncatedServerDetail(detail)
+    }
+}
+
+// MARK: - Server Status String Helpers & Boot Lifecycle
+
+extension AppModel {
+    /// Collapses text to a single trimmed line so menu rows never wrap on
+    /// an embedded newline from an underlying error.
+    private static func singleLineServerText(_ text: String) -> String {
+        text.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Caps the menu title to the narrow-surface limit, keeping the leading
+    /// portion where the endpoint address starts.
+    private static func truncatedServerTitle(_ title: String) -> String {
+        let oneLine = singleLineServerText(title)
+        guard oneLine.count > serverStatusTitleLimit else { return oneLine }
+        return String(oneLine.prefix(serverStatusTitleLimit - 1)) + "…"
+    }
+
+    /// Caps the failure summary to the one-line limit, keeping the trailing
+    /// portion where the actionable hint sits and prefixing an ellipsis to
+    /// mark the truncation.
+    private static func truncatedServerDetail(_ detail: String) -> String {
+        let oneLine = singleLineServerText(detail)
+        guard oneLine.count > serverStatusDetailLimit else { return oneLine }
+        return "…" + String(oneLine.suffix(serverStatusDetailLimit - 1))
+    }
+
     /// Preconditions a snapshot of the published bind values against the
     /// resolved owner-auth posture.
     ///
@@ -158,11 +238,32 @@ public final class AppModel {
     /// and an unauthenticated LAN bind is refused rather than silently
     /// downgraded to an open surface.
     private func validatedBootBind(host: String, port: Int, authConfigured: Bool, allowedHosts: [String] = []) -> ServerConfig? {
-        let bindConfig = ServerConfig(hostname: host, port: port, authConfigured: authConfigured, allowedHosts: allowedHosts)
+        // Trim before validation so a padded file value classifies as the
+        // loopback it names and the refusal message echoes the same address
+        // the policy evaluated.
+        let trimmedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let bindConfig = ServerConfig(hostname: trimmedHost, port: port, authConfigured: authConfigured, allowedHosts: allowedHosts)
         do {
             try bindConfig.requireBindable(authConfigured: authConfigured)
+        } catch let error as ServerConfigError {
+            if let full = error.errorDescription {
+                RuneWeaverLog.app.error("Server bind refused: \(full)")
+            }
+            switch error {
+            case .nonLoopbackRefused:
+                // Fail-closed LAN bind without a token stays refused with an
+                // actionable hint instead of the full policy text.
+                setServerFailed(detail: "Bind \(trimmedHost) refused — no owner token")
+            case .invalidPort:
+                // Port bounds stay enforced by the shared range; the truncated
+                // description carries the offending value without widening the menu.
+                setServerFailed(detail: error.localizedDescription)
+            }
+            self.hasStartedBoot = false
+            return nil
         } catch {
-            self.serverStatus = "Failed: \(error.localizedDescription)"
+            RuneWeaverLog.app.error("Server bind refused: \(error.localizedDescription)")
+            setServerFailed(detail: error.localizedDescription)
             self.hasStartedBoot = false
             return nil
         }
@@ -185,7 +286,9 @@ public final class AppModel {
         }
 
         self.isRunning = true
-        self.serverStatus = "Running on \(serverConfig.hostname):\(serverConfig.port)"
+        // The running helper owns the healthy title plus the flag reset, so a
+        // previous refusal cannot linger beside the live endpoint.
+        self.setServerRunning(host: serverConfig.hostname, port: serverConfig.port, authConfigured: serverConfig.authConfigured)
         // Record the endpoint actually bound so dashboard links follow it even
         // when `[server]` supplied the values.
         self.boundEndpoint = ServerEndpointConfig(
@@ -273,13 +376,19 @@ public final class AppModel {
             try? await app.asyncShutdown()
             self.vaporApp = nil
         }
-        self.serverStatus = "Failed: \(error.localizedDescription)"
+        // Keep the full failure in the log for diagnostics; only the
+        // truncated one-line tail reaches the menu.
+        RuneWeaverLog.app.error("Server boot failed: \(error.localizedDescription)")
+        setServerFailed(detail: error.localizedDescription)
         // Allow a later appearance to retry after a startup failure
         // instead of leaving the menu permanently failed.
         self.hasStartedBoot = false
     }
 
     private func bootServer() async {
+        // Clear any stale refusal up front so a retry starts from Starting…
+        // and only the fresh outcome decides the next failed or running state.
+        setServerStarting()
         // Retained outside the do so the catch can stop the trust reaper
         // when Application.make or configure throws after the gate started it.
         var bootGate: PermissionGate?
@@ -290,8 +399,10 @@ public final class AppModel {
             } catch let error as ConfigError {
                 // Refuse to boot from defaults when a stored file exists but
                 // fails validation, so corrupt settings are never mistaken
-                // for intentional defaults.
-                self.serverStatus = "Failed: invalid config: \(String(describing: error))"
+                // for intentional defaults. The full parse detail stays in
+                // the log; the menu carries only the actionable hint.
+                RuneWeaverLog.app.error("Invalid config: \(String(describing: error))")
+                setServerFailed(detail: "Invalid config — check ~/.runeweaver/config.toml")
                 self.hasStartedBoot = false
                 return
             }
@@ -317,7 +428,11 @@ public final class AppModel {
             do {
                 auth = try await ServerAuth.resolve(authConfig: config.auth)
             } catch {
-                self.serverStatus = "Failed: owner auth could not be resolved: \(error.localizedDescription)"
+                // A declared but unreadable credential fails here with guidance
+                // instead of surfacing at the request gate; the secret itself
+                // never reaches the log or the menu.
+                RuneWeaverLog.app.error("Owner auth resolve failed: \(error.localizedDescription)")
+                setServerFailed(detail: "Owner auth unreadable — check Keychain plus file permissions")
                 self.hasStartedBoot = false
                 return
             }
@@ -375,12 +490,11 @@ public final class AppModel {
 
             try await launchBootServer(context: context, serverConfig: bindConfig)
             // A loopback boot without a token stays live for local use, but
-            // the status must say what is missing and where to fix it so the
-            // owner never mistakes local-only for fully provisioned.
+            // the title must still name the local-only posture so the owner
+            // never mistakes it for a fully provisioned bind.
             if auth == nil {
                 self.needsOwnerToken = true
-                self.serverStatus = "Running on \(bindConfig.hostname):\(bindConfig.port) — "
-                    + "Owner token not configured (local use only; generate one to enable LAN binds)"
+                setServerRunning(host: bindConfig.hostname, port: bindConfig.port, authConfigured: false)
             } else {
                 self.needsOwnerToken = false
             }
@@ -391,7 +505,11 @@ public final class AppModel {
             await cleanupBootFailure(bootGate: bootGate, error: error)
         }
     }
+}
 
+// MARK: - State Refresh & Status Display
+
+extension AppModel {
     private func startPolling() {
         pollingTask?.cancel()
         pollingTask = Task { [weak self] in

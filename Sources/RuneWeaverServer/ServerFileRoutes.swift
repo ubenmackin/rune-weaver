@@ -331,7 +331,12 @@ enum StagedFilesManager {
 /// Registers staged files management routes.
 func registerFileRoutes(_ app: Application) {
     let filesGroup = app.grouped(PathComponent.constant(ServerPaths.files))
+    registerFileStagedRoute(filesGroup)
+    registerFileAcceptRoute(filesGroup)
+    registerFileDiscardRoute(filesGroup)
+}
 
+private func registerFileStagedRoute(_ filesGroup: RoutesBuilder) {
     // GET /files/staged
     filesGroup.get(PathComponent.constant(ServerPaths.filesStaged)) { req async throws -> StagedFilesResponse in
         let filesConfig = req.application.runeWeaver.filesConfig
@@ -344,7 +349,9 @@ func registerFileRoutes(_ app: Application) {
         let entries = StagedFilesManager.findStagedFiles(under: resolvedRoot, filesConfig: filesConfig)
         return StagedFilesResponse(files: entries)
     }
+}
 
+private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
     // POST /files/accept
     filesGroup.post(PathComponent.constant(ServerPaths.filesAccept)) { req async throws -> FileActionResponse in
         let actionReq = try req.content.decode(FileActionRequest.self)
@@ -402,7 +409,9 @@ func registerFileRoutes(_ app: Application) {
 
         return FileActionResponse(status: "accepted", count: 1)
     }
+}
 
+private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
     // POST /files/discard
     filesGroup.post(PathComponent.constant(ServerPaths.filesDiscard)) { req async throws -> FileActionResponse in
         let actionReq = try req.content.decode(FileActionRequest.self)

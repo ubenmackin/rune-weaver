@@ -41,8 +41,11 @@ import SessionSidebar from "./SessionSidebar";
 import InlineApprovalBanner from "./InlineApprovalBanner";
 import MarkdownText from "./MarkdownText";
 import ToolActionRow from "./ToolActionRow";
-import { AlertTriangleIcon, SparklesIcon, WrenchIcon } from "./icons";
+import { AlertTriangleIcon, SettingsIcon, WrenchIcon } from "./icons";
 import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
+import { useChatSettings } from "../chatSettings";
+import ChatSettingsModal from "./ChatSettingsModal";
+import ThoughtContainer from "./ThoughtContainer";
 import { useIsMobile, isMobileViewport } from "../hooks/useIsMobile";
 import { useRunningRuns, type FrozenRunLogEntry } from "../hooks/useRunningRuns";
 import type {
@@ -1341,6 +1344,12 @@ function getURLSessionID(): string | null {
 }
 
 export default function ChatView({ health }: ChatViewProps) {
+  const {
+    settings: chatSettings,
+    updateSettings: updateChatSettings,
+    resetSettings: resetChatSettings,
+  } = useChatSettings();
+  const [chatSettingsOpen, setChatSettingsOpen] = useState(false);
   const [messages, setMessages] = useState<MessageItem[]>([]);
   const [input, setInput] = useState("");
   const [sessionID, setSessionID] = useState<string>(() => {
@@ -3658,10 +3667,10 @@ export default function ChatView({ health }: ChatViewProps) {
   useEffect(() => {
     // Own sends reset the lock before appending, so this suppresses only remote
     // deltas while the user reviews history; the user's own bubble always lands in view.
-    if (!userHasScrolledUpRef.current) {
+    if (!userHasScrolledUpRef.current && chatSettings.autoScrollOnStream) {
       messageListEndRef.current?.scrollIntoView?.({ behavior: "smooth" });
     }
-  }, [messages, pending, inFlightTurn]);
+  }, [messages, pending, inFlightTurn, chatSettings.autoScrollOnStream]);
 
   // Track whether the user has scrolled away from the bottom of the message
   // list.  A 150 px threshold accounts for padding / partial-line reveals so
@@ -3876,7 +3885,11 @@ export default function ChatView({ health }: ChatViewProps) {
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    const isSubmit = chatSettings.sendOnEnter
+      ? event.key === "Enter" && !event.shiftKey
+      : event.key === "Enter" && (event.metaKey || event.ctrlKey);
+
+    if (isSubmit) {
       event.preventDefault();
       if (pending) {
         handleSteer();
@@ -4388,14 +4401,26 @@ export default function ChatView({ health }: ChatViewProps) {
             ) : null}
           </div>
 
-          <button
-            type="button"
-            className="ghost new-session-btn"
-            onClick={handleNewSession}
-            aria-label="New session"
-          >
-            New Session
-          </button>
+          <div className="chat-panel-actions">
+            <button
+              type="button"
+              className="ghost chat-settings-btn"
+              onClick={() => setChatSettingsOpen(true)}
+              aria-label="Chat Settings"
+              title="Chat Settings"
+            >
+              <SettingsIcon size={14} />
+              <span>Settings</span>
+            </button>
+            <button
+              type="button"
+              className="ghost new-session-btn"
+              onClick={handleNewSession}
+              aria-label="New session"
+            >
+              New Session
+            </button>
+          </div>
         </div>
 
         {/* Message Stream */}
@@ -4468,20 +4493,11 @@ export default function ChatView({ health }: ChatViewProps) {
                           </div>
                         </div>
                       ) : segment.kind === "thought" ? (
-                        segment.text.trim().length > 0 ? (
-                          <details
-                            key={`thought-${segmentIndex}`}
-                            className="chat-thought-container"
-                          >
-                            <summary className="chat-thought-heading">
-                              <SparklesIcon size={12} />
-                              <span>Thinking Process</span>
-                            </summary>
-                            <div className="chat-thought-content">
-                              <MarkdownText text={segment.text} />
-                            </div>
-                          </details>
-                        ) : null
+                        <ThoughtContainer
+                          key={`thought-${segmentIndex}`}
+                          text={segment.text}
+                          defaultExpanded={chatSettings.thinkingDefault === "expanded"}
+                        />
                       ) : segment.text.trim().length > 0 ? (
                         message.isError && isSuppressedErrorText(segment.text) ? null : (
                           <div
@@ -4606,21 +4622,12 @@ export default function ChatView({ health }: ChatViewProps) {
                         </div>
                       </div>
                     ) : segment.kind === "thought" ? (
-                      segment.text.trim().length > 0 ? (
-                        <details
-                          key={`live-thought-${segmentIndex}`}
-                          className="chat-thought-container"
-                          open
-                        >
-                          <summary className="chat-thought-heading">
-                            <SparklesIcon size={12} />
-                            <span>Thinking Process</span>
-                          </summary>
-                          <div className="chat-thought-content">
-                            <MarkdownText text={segment.text} />
-                          </div>
-                        </details>
-                      ) : null
+                      <ThoughtContainer
+                        key={`live-thought-${segmentIndex}`}
+                        text={segment.text}
+                        defaultExpanded={chatSettings.thinkingDefault === "expanded"}
+                        isLive
+                      />
                     ) : segment.text.trim().length > 0 ? (
                       <div
                         key={`live-text-${segmentIndex}`}
@@ -4782,9 +4789,13 @@ export default function ChatView({ health }: ChatViewProps) {
               rows={3}
               aria-label="Chat input"
               placeholder={
-                pending
-                  ? "Steer agent mid-turn… (Shift+Return for newline)"
-                  : "Message Rune Weaver… (Shift+Return for newline)"
+                chatSettings.sendOnEnter
+                  ? pending
+                    ? "Steer agent mid-turn… (Shift+Return for newline)"
+                    : "Message Rune Weaver… (Shift+Return for newline)"
+                  : pending
+                    ? "Steer agent mid-turn… (⌘+Return to send)"
+                    : "Message Rune Weaver… (⌘+Return to send)"
               }
               value={input}
               onChange={handleInputChange}
@@ -4940,6 +4951,14 @@ export default function ChatView({ health }: ChatViewProps) {
           </div>
         </div>
       </section>
+
+      <ChatSettingsModal
+        isOpen={chatSettingsOpen}
+        onClose={() => setChatSettingsOpen(false)}
+        settings={chatSettings}
+        onUpdateSettings={updateChatSettings}
+        onResetSettings={resetChatSettings}
+      />
     </div>
   );
 }

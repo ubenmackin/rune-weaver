@@ -498,7 +498,7 @@ enum SQLiteOpenHelper {
             let message: String
         }
 
-        private static func open(dbPath: String) throws -> OpaquePointer? {
+        fileprivate static func open(dbPath: String) throws -> OpaquePointer? {
             // Shared busy_timeout/WAL policy lives in `SQLiteHelpers.openHandle`.
             let handle = try SQLiteHelpers.openHandle(dbPath: dbPath, unavailable: { RunLogError(message: $0) })
             try SQLiteHelpers.exec(
@@ -648,7 +648,9 @@ enum SQLiteOpenHelper {
                         guard let repairedJSON = String(data: repairedData, encoding: .utf8) else { continue }
                         collected.append((id: idStr, payload: repairedJSON))
                     } catch {
-                        RuneWeaverLog.stores.error("SQLiteRunLogStore: failed to encode reconciled tool actions for run \(idStr): \(error.localizedDescription)")
+                        RuneWeaverLog.stores.error(
+                            "SQLiteRunLogStore: failed to encode reconciled tool actions for run \(idStr): \(error.localizedDescription)"
+                        )
                     }
                 }
                 return collected
@@ -657,7 +659,9 @@ enum SQLiteOpenHelper {
                 var update: OpaquePointer?
                 guard sqlite3_prepare_v2(handle, "UPDATE run_logs SET tool_actions = ? WHERE id = ?;", -1, &update, nil) == SQLITE_OK else {
                     let code = sqlite3_errcode(handle)
-                    RuneWeaverLog.stores.error("SQLiteRunLogStore: failed preparing interrupted tool-action write (code \(code)); run \(item.id) keeps pending actions on disk.")
+                    RuneWeaverLog.stores.error(
+                        "SQLiteRunLogStore: failed preparing interrupted tool-action write (code \(code)); run \(item.id) keeps pending actions on disk."
+                    )
                     continue
                 }
                 SQLiteHelpers.bindText(update, index: 1, value: item.payload)
@@ -669,7 +673,11 @@ enum SQLiteOpenHelper {
                 sqlite3_finalize(update)
             }
         }
+    }
 
+    // MARK: - CRUD Persistence Operations
+
+    extension SQLiteRunLogStore {
         static func read(dbPath: String, limit: Int) -> [RunLogEntry] {
             guard limit > 0 else { return [] }
             guard let handle = SQLiteOpenHelper.openLogged(
