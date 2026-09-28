@@ -39,11 +39,11 @@ func buildToolInfo(
     // keeps a name allowlist: media tools share the Sonarr/Radarr patch,
     // browser/web tools configure allowed homelab origins, desktop tools
     // configure capture dimensions, quality, and the control blocklist,
-    // and bash.exec plus files.* expose their shell and workspace policies
-    // alongside desktop, media, and browser/web. Provenance gates the flag
+    // and bash.exec exposes its shell policy alongside desktop, media, and
+    // browser/web. Files & Access lives under Security, so every `files.*`
+    // tool reports no Configure action. Provenance gates the flag
     // alongside the name so an external rune reusing a `files.` prefix never
-    // gains a Configure action, and only the known builtin file tools qualify
-    // rather than any future `files.*` spelling.
+    // gains a Configure action.
     let configurableName = tool.name == "media.arr"
         || tool.name == "media.arr.read"
         || tool.name == "browser.navigate"
@@ -52,11 +52,6 @@ func buildToolInfo(
         || tool.name == "desktop.screenshot"
         || tool.name == "desktop.action"
         || tool.name == "bash.exec"
-        || tool.name == "files.read"
-        || tool.name == "files.grep"
-        || tool.name == "files.glob"
-        || tool.name == "files.list"
-        || tool.name == "files.write"
     let hasConfig = isBuiltIn && configurableName
 
     return ToolInfo(

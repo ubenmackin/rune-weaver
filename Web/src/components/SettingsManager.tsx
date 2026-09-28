@@ -5,9 +5,12 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
   DEFAULT_FILES_ALLOW_ROOTS,
+  DEFAULT_FILES_ALLOW_ROOTS_TEXT,
   DEFAULT_FILES_DENY_PATTERNS,
   DEFAULT_FILES_DENY_PATTERNS_TEXT,
+  formatAllowRootsText,
   formatDenyPatternsText,
+  parseAllowRootsText,
   parseDenyPatternsText,
   DEFAULT_BROWSER_ALLOWED_ORIGINS_TEXT,
   formatAllowedOriginsText,
@@ -61,6 +64,9 @@ import {
   BASH_TIMEOUT_MAX_SECONDS,
   BASH_TIMEOUT_MIN_SECONDS,
   DEFAULT_BASH_CONFIG,
+  DEFAULT_BASH_RULES_TEXT,
+  formatBashRulesText,
+  parseBashRulesText,
   type BashConfigData,
   type BashRuleData,
   type BashSettingsUpdate,
@@ -137,9 +143,9 @@ function TerminalIcon(props: { size?: number; className?: string }) {
 }
 
 // Vertical navigation keeps every category visible without horizontal scrolling; Security
-// owns sandbox isolation plus access management only, while Files & Access lives under
-// Tools with its own Files modal so the sidebar stays within the width budget as settings
-// grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
+// owns sandbox isolation plus Files & Access plus access management, while Tools
+// has no Files editor so Security stays the single home and the sidebar stays
+// within the width budget as settings grow. The `search` id stays verbatim while the pane displays as Web: the search* API aliases and
 // the /search/* health routes are keyed to that id, so only the label moves. The `network` pane
 // owns the [server] bind (hostname, port, allowed_hosts) plus the restart banner.
 type SettingsTab =
@@ -198,7 +204,7 @@ const TOOL_CATEGORIES: readonly ToolCategoryMeta[] = [
   { id: "email", name: "Email & Mailboxes", description: "IMAP search, message read, attachment inspection, and drafts", icon: MailIcon },
   { id: "browser-web", name: "Browser & Web", description: "Web search, page fetch, navigation, and interaction", icon: GlobeIcon },
   { id: "bash", name: "Bash & Shell", description: "Sandboxed shell execution with per-command approval policy", icon: TerminalIcon },
-  { id: "files", name: "Files & Workspace", description: "Local filesystem reads, writes, listing, and search", icon: FolderIcon },
+  { id: "files", name: "Files & Workspace", description: "Allow and deny rules are managed under Security", icon: FolderIcon },
   { id: "memories", name: "Long-Term Memory", description: "Episodic and profile memory store and recall", icon: MemoryIcon },
   { id: "goal", name: "Autonomous Goals", description: "Multi-turn goal planning, tracking, and execution", icon: TargetIcon },
   { id: "media", name: "Media & Streaming", description: "Media search and client control", icon: WrenchIcon },
@@ -282,7 +288,9 @@ export function getToolCategory(tool: ToolInfo | string): string {
 // One Configure entry per integration surface keeps a single modal per editor:
 // desktop, media, and browser-web each own one existing modal, so the header
 // button opens that editor whenever any rendered tool in the category reports
-// hasConfig. The server hasConfig flag is the sole authority — a null key or
+// hasConfig. Files & Access is owned solely by the Security pane, so the
+// Tools Files category never offers a Configure modal. The server hasConfig
+// flag is the sole authority — a null key or
 // no flagged tool hides the button, which keeps unconfigurable categories
 // clean and avoids stale per-tool buttons when new tools gain editors later.
 // Edge case: a filtered view with zero flagged tools in a configurable
@@ -292,7 +300,7 @@ function getCategoryConfigKey(categoryId: string): string | null {
   if (categoryId === "media") return "media.arr";
   if (categoryId === "browser-web") return "browser.navigate";
   if (categoryId === "bash") return "bash.exec";
-  if (categoryId === "files") return "files";
+  if (categoryId === "files") return null;
   return null;
 }
 
@@ -737,14 +745,21 @@ export default function SettingsManager() {
   const [filesDenyText, setFilesDenyText] = useState<string>(
     DEFAULT_FILES_DENY_PATTERNS_TEXT
   );
-  const [filesAllowRoots, setFilesAllowRoots] = useState<string[]>([
-    ...DEFAULT_FILES_ALLOW_ROOTS,
-  ]);
+  // Allowed-roots editor holds raw textarea text (one root per line) so blank
+  // lines survive editing and only collapse on save; the parsed count drives
+  // the live badge. Copy and paste of root sets works through this text.
+  const [filesAllowRootsText, setFilesAllowRootsText] = useState<string>(
+    formatAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS)
+  );
   const [filesRequireApprovalOnDeny, setFilesRequireApprovalOnDeny] = useState(true);
   // Direct handle to the blocked-paths editor so Add Pattern can return
   // keyboard focus without a document-wide lookup that breaks with
   // multiple instances or strict-mode remounts.
   const denyTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Direct handle to the allowed-roots editor so Add Roots can return
+  // keyboard focus without a document-wide lookup that breaks with
+  // multiple instances or strict-mode remounts.
+  const allowRootsTextareaRef = useRef<HTMLTextAreaElement>(null);
   // Form-local reset confirmations: resetting only rewrites the in-progress
   // form and never persists until Save, so the modal must state counts and
   // the until-Save nature explicitly.
@@ -1012,7 +1027,7 @@ export default function SettingsManager() {
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const desktopSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Sandboxed shell execution ([bash]): per-command approval policy for
-  // bash.exec. Rules stay ordered top-to-bottom first-match-wins so the list
+  // bash.exec. Rules stay ordered top-to-bottom last-match-wins so the list
   // order is the policy; the modal and the full-save share one payload helper
   // below so both stay symmetric. The fresh form seeds from the combined
   // bash default so the editor matches the engine boundary before the first
@@ -1021,8 +1036,12 @@ export default function SettingsManager() {
   const [bashDefaultAction, setBashDefaultAction] = useState<string>(
     DEFAULT_BASH_CONFIG.default_action
   );
-  const [bashRules, setBashRules] = useState<BashRuleData[]>(() =>
-    DEFAULT_BASH_CONFIG.rules.map((rule) => ({ ...rule }))
+  // Bash rules editor holds raw textarea text (one `pattern = action` per
+  // line) so blank lines survive editing and only collapse on save; the
+  // parsed count drives the live badge while copy and paste of rule sets
+  // works through this text.
+  const [bashRulesText, setBashRulesText] = useState<string>(
+    DEFAULT_BASH_RULES_TEXT
   );
   const [bashTimeoutSeconds, setBashTimeoutSeconds] = useState<number | string>(
     DEFAULT_BASH_CONFIG.timeout_seconds
@@ -1036,14 +1055,18 @@ export default function SettingsManager() {
   // (not bare setTimeout) so unmount or a second save clears the pending tick
   // instead of firing setState on an unmounted pane or closing a fresh edit.
   const bashSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Files & Access modal save mirrors the Security-pane move: the same
-  // form state backs both the full-save and the modal-only save through one
-  // shared payload helper, so Tools is the only home without forking shapes.
+  // Direct handle to the bash rules editor so Add Rule can return keyboard
+  // focus without a document-wide lookup that breaks with multiple instances
+  // or strict-mode remounts.
+  const bashRulesTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Files & Access lives in the Security pane: the same form state backs
+  // both the full-save and the Security inline save through one shared
+  // payload helper, so Security is the only files editor without forking shapes.
   const [filesSaveLoading, setFilesSaveLoading] = useState(false);
   const [filesModalError, setFilesModalError] = useState<string | null>(null);
-  // Short-lived success-then-close timer for the files modal: held in a ref
-  // (not bare setTimeout) so unmount or a second save clears the pending tick
-  // instead of firing setState on an unmounted pane or closing a fresh edit.
+  // Short-lived success-then-close timer for the files inline save: held in a
+  // ref (not bare setTimeout) so unmount or a second save clears the pending
+  // tick instead of firing setState on an unmounted pane or closing a fresh edit.
   const filesSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Network bind ([server] hostname, port, allowed_hosts): the socket and the
   // Host gate are fixed at boot, so saves persist to the file and return
@@ -1758,6 +1781,8 @@ export default function SettingsManager() {
   // snake_case and camelCase DTO aliases and an absent [bash] section from
   // older engines by keeping the form defaults. Only overwrites sections the
   // engine returns so older engines without bash leave the form untouched.
+  // Rules arrive as an ordered array and render through the shared textarea
+  // codec so line order survives the round trip.
   const populateBashSettings = useCallback(
     (bash: BashConfigData | undefined | null) => {
       if (!bash) return;
@@ -1775,15 +1800,14 @@ export default function SettingsManager() {
         setBashDefaultAction(defaultAction);
       }
       if (Array.isArray(bash.rules)) {
-        setBashRules(
-          bash.rules.map((rule) => ({
-            pattern: typeof rule.pattern === "string" ? rule.pattern : "",
-            action:
-              typeof rule.action === "string" && rule.action.trim()
-                ? rule.action.trim().toLowerCase()
-                : "ask",
-          }))
-        );
+        const normalized: BashRuleData[] = bash.rules.map((rule) => ({
+          pattern: typeof rule.pattern === "string" ? rule.pattern : "",
+          action:
+            typeof rule.action === "string" && rule.action.trim()
+              ? rule.action.trim().toLowerCase()
+              : "ask",
+        }));
+        setBashRulesText(formatBashRulesText(normalized));
       }
       const timeout =
         typeof bash.timeout_seconds === "number"
@@ -1805,19 +1829,16 @@ export default function SettingsManager() {
 
   // Builds the [bash] delta from the shell policy form fields so the
   // full-settings save and the modal-only save share one shape. Rules preserve
-  // list order top-to-bottom first-match-wins; patterns trim while the action
-  // lowercases to the engine contract. Sends the snake_case keys the engine
-  // persists; the engine also accepts the camelCase aliases, so either
-  // spelling writes while reads accept both.
+  // textarea order top-to-bottom last-match-wins through the shared
+  // parseBashRulesText codec; blank lines collapse on save. Sends the
+  // snake_case keys the engine persists; the engine also accepts the camelCase
+  // aliases, so either spelling writes while reads accept both.
   const buildBashPayload = useCallback(
     (): BashSettingsUpdate => {
       return {
         enabled: bashEnabled,
         default_action: bashDefaultAction.trim().toLowerCase(),
-        rules: bashRules.map((rule) => ({
-          pattern: rule.pattern.trim(),
-          action: rule.action.trim().toLowerCase(),
-        })),
+        rules: parseBashRulesText(bashRulesText),
         timeout_seconds: Number(bashTimeoutSeconds),
         allow_network: bashAllowNetwork,
       };
@@ -1825,49 +1846,46 @@ export default function SettingsManager() {
     [
       bashEnabled,
       bashDefaultAction,
-      bashRules,
+      bashRulesText,
       bashTimeoutSeconds,
       bashAllowNetwork,
     ]
   );
 
   // Shared bash validation for the full-save and modal-save paths so both
-  // reject a bad default action, an empty rule list, a blank rule pattern,
+  // reject a bad default action, a malformed rule line, an empty rule list,
   // or an out-of-range timeout before any network write with one message.
-  // Mirrors BashSettingsUpdate.applyBash bounds through the shared
-  // BASH_PERMISSION_ACTIONS and BASH_TIMEOUT_* constants so the client and
-  // the server cannot drift. An empty list is rejected because an absent key
-  // would reload as the default catch-all instead of the saved empty.
+  // Rules parse through the shared parseBashRulesText codec so the modal and
+  // the full-save reject the same shapes with textarea line numbers. An empty
+  // list is rejected because an absent key would reload as the default
+  // catch-all instead of the saved empty.
   const validateBashFields = useCallback((): string | null => {
     const normalizedAction = bashDefaultAction.trim().toLowerCase();
     if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(normalizedAction)) {
       return 'Invalid bash default action: must be allow, ask, or deny.';
     }
-    if (bashRules.length === 0) {
-      return "Invalid bash rules: at least one rule is required.";
+    let parsed: BashRuleData[];
+    try {
+      parsed = parseBashRulesText(bashRulesText);
+    } catch (err) {
+      return err instanceof Error ? err.message : "Invalid bash rules.";
     }
-    for (let index = 0; index < bashRules.length; index += 1) {
-      const pattern = bashRules[index].pattern.trim();
-      if (!pattern) {
-        return `Invalid bash rule ${index + 1}: pattern must not be blank.`;
-      }
-      const action = bashRules[index].action.trim().toLowerCase();
-      if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(action)) {
-        return `Invalid bash rule ${index + 1}: action must be allow, ask, or deny.`;
-      }
+    if (parsed.length === 0) {
+      return "Invalid bash rules: at least one rule is required.";
     }
     const timeoutNum = Number(bashTimeoutSeconds);
     if (!Number.isInteger(timeoutNum) || timeoutNum < BASH_TIMEOUT_MIN_SECONDS || timeoutNum > BASH_TIMEOUT_MAX_SECONDS) {
       return `Invalid bash timeout: timeout must be between ${BASH_TIMEOUT_MIN_SECONDS} and ${BASH_TIMEOUT_MAX_SECONDS} seconds.`;
     }
     return null;
-  }, [bashDefaultAction, bashRules, bashTimeoutSeconds]);
+  }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds]);
 
   // Builds the [files] delta from the guard form fields so the full-settings
-  // save and the modal-only save share one shape. Reuses the existing
+  // save and the Security inline save share one shape. Reuses the existing
   // top-level keys (filesDenyPatterns, filesAllowRoots,
   // filesRequireApprovalOnDeny) so the wire contract never forks between the
-  // two paths.
+  // two paths. Both textareas parse one entry per line with blank lines
+  // ignored; allow-roots order is preserved for display only.
   const buildFilesPayload = useCallback(
     (): {
       filesDenyPatterns: string[];
@@ -1876,18 +1894,19 @@ export default function SettingsManager() {
     } => {
       return {
         filesDenyPatterns: parseDenyPatternsText(filesDenyText),
-        filesAllowRoots: filesAllowRoots.map((r) => r.trim()).filter(Boolean),
+        filesAllowRoots: parseAllowRootsText(filesAllowRootsText),
         filesRequireApprovalOnDeny,
       };
     },
-    [filesDenyText, filesAllowRoots, filesRequireApprovalOnDeny]
+    [filesDenyText, filesAllowRootsText, filesRequireApprovalOnDeny]
   );
 
-  // Shared files validation for the full-save and modal-save paths so both
-  // reject traversal escapes and empty roots before any network write with
-  // one message. Blocked-path lines validate with original numbers so a bad
-  // glob points at its editor row; blank lines collapse on save and an
-  // emptied editor stays a valid allow-all.
+  // Shared files validation for the full-save and Security inline-save paths
+  // so both reject traversal escapes and empty roots before any network write
+  // with one message. Both editors validate with original line numbers so a
+  // bad entry points at its editor row; blank lines collapse on save. Deny
+  // lines validate per-line while allow roots also reject an emptied editor,
+  // and `..` segments are rejected with line numbers in both editors.
   const validateFilesFields = useCallback((): string | null => {
     const denyLines = filesDenyText.split("\n");
     for (let lineIndex = 0; lineIndex < denyLines.length; lineIndex += 1) {
@@ -1897,17 +1916,19 @@ export default function SettingsManager() {
         return `Line ${lineIndex + 1}: Deny pattern must not contain '..': "${trimmed}".`;
       }
     }
-    for (let rootIndex = 0; rootIndex < filesAllowRoots.length; rootIndex += 1) {
-      const trimmed = filesAllowRoots[rootIndex].trim();
-      if (!trimmed) {
-        return `Line ${rootIndex + 1}: Allowed roots cannot be empty.`;
-      }
+    const allowLines = filesAllowRootsText.split("\n");
+    for (let lineIndex = 0; lineIndex < allowLines.length; lineIndex += 1) {
+      const trimmed = allowLines[lineIndex].trim();
+      if (!trimmed) continue;
       if (trimmed.includes("..")) {
-        return `Line ${rootIndex + 1}: Allowed root must not contain '..': "${trimmed}".`;
+        return `Line ${lineIndex + 1}: Allowed root must not contain '..': "${trimmed}".`;
       }
     }
+    if (parseAllowRootsText(filesAllowRootsText).length === 0) {
+      return "Allowed roots cannot be empty.";
+    }
     return null;
-  }, [filesDenyText, filesAllowRoots]);
+  }, [filesDenyText, filesAllowRootsText]);
 
   const populateForm = useCallback((data: SettingsResponse) => {
     setSettings(data);
@@ -1959,11 +1980,7 @@ export default function SettingsManager() {
       data.sandboxMaxConcurrentMachines ?? DEFAULT_SANDBOX_MAX_CONCURRENT_MACHINES
     );
     setFilesDenyText(formatDenyPatternsText(data.filesDenyPatterns));
-    setFilesAllowRoots(
-      Array.isArray(data.filesAllowRoots)
-        ? [...data.filesAllowRoots]
-        : [...DEFAULT_FILES_ALLOW_ROOTS]
-    );
+    setFilesAllowRootsText(formatAllowRootsText(data.filesAllowRoots));
     setFilesRequireApprovalOnDeny(data.filesRequireApprovalOnDeny ?? true);
     setMemoryVectorDBPath(data.memoryVectorDBPath);
     setMemoryEpisodesDBPath(data.memoryEpisodesDBPath);
@@ -2399,9 +2416,9 @@ export default function SettingsManager() {
     }
 
     // Blocked-paths plus allowed-roots validation shares the files helper so
-    // the full-save and the Tools Files modal reject the same shapes before
-    // any network write. Blank lines collapse on save and an emptied editor
-    // stays a valid allow-all, while `..` fails closed here and
+    // the full-save and the Security Files inline save reject the same shapes
+    // before any network write. Blank lines collapse on save and an emptied
+    // allow-roots editor is rejected, while `..` fails closed here and
     // authoritatively on the server guard.
     const filesValidationError = validateFilesFields();
     if (filesValidationError) {
@@ -2887,8 +2904,8 @@ export default function SettingsManager() {
   // Saves the [bash] delta for the Bash & Shell modal through PUT /settings,
   // mirroring the media-only save shape so unsaved edits in other tabs
   // survive. Validates through the shared bash helper so the modal and the
-  // full-save reject the same shapes; rules preserve list order
-  // top-to-bottom first-match-wins.
+  // full-save reject the same shapes; rules preserve textarea order
+  // top-to-bottom last-match-wins.
   const handleSaveBashConfig = async () => {
     await saveCategoryConfig({
       validate: validateBashFields,
@@ -2901,10 +2918,11 @@ export default function SettingsManager() {
     });
   };
 
-  // Saves the [files] delta for the Files & Access modal through PUT
-  // /settings, mirroring the media-only save shape so unsaved edits in other
-  // tabs survive. Validates through the shared files helper and reuses the
-  // existing top-level keys so the modal and the full-save stay symmetric.
+  // Saves the [files] delta for the Security Files & Access editor through
+  // PUT /settings, mirroring the media-only save shape so unsaved edits in
+  // other tabs survive. Validates through the shared files helper and reuses
+  // the existing top-level keys so the inline and the full-save stay symmetric.
+  // The parsed allow-roots array is what is sent on the wire.
   const handleSaveFilesConfig = async () => {
     await saveCategoryConfig({
       validate: validateFilesFields,
@@ -2917,24 +2935,18 @@ export default function SettingsManager() {
     });
   };
 
-  // Bash rule rows preserve list order top-to-bottom first-match-wins, so Add
-  // appends and Remove splices without reordering siblings.
-  const handleAddBashRule = () => {
-    setBashRules((prev) => [...prev, { pattern: "", action: "ask" }]);
-  };
-
-  const handleRemoveBashRule = (index: number) => {
-    setBashRules((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleBashRuleChange = (
-    index: number,
-    field: "pattern" | "action",
-    value: string
-  ) => {
-    setBashRules((prev) =>
-      prev.map((rule, i) => (i === index ? { ...rule, [field]: value } : rule))
-    );
+  // Bash rules editing is a single textarea (small-screen friendly for long
+  // rule sets, and copy and paste of rule sets works through this text); Add
+  // Rule focuses the editor for keyboard flow.
+  const handleFocusBashRules = () => {
+    // No row model exists for the textarea, so Add focuses the editor for
+    // keyboard flow; ensure a trailing newline exists so typed rules start
+    // on a fresh line without altering the parsed count by itself.
+    setBashRulesText((prev) => {
+      if (!prev) return prev;
+      return prev.endsWith("\n") ? prev : `${prev}\n`;
+    });
+    bashRulesTextareaRef.current?.focus();
   };
 
   // Provider CRUD helpers
@@ -3195,20 +3207,23 @@ export default function SettingsManager() {
     setPendingResetDeny(false);
   };
 
+  // Allowed-roots editing is a single textarea (small-screen friendly for
+  // long root sets, and copy and paste of root sets works through this text);
+  // Add focuses the editor for keyboard flow while reset only rewrites the
+  // form text after an explicit modal confirm and never persists until Save.
   const handleAddAllowRoot = () => {
-    setFilesAllowRoots((prev) => [...prev, ""]);
-  };
-
-  const handleRemoveAllowRoot = (index: number) => {
-    setFilesAllowRoots((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleAllowRootChange = (index: number, value: string) => {
-    setFilesAllowRoots((prev) => prev.map((r, i) => (i === index ? value : r)));
+    // No row model exists for the textarea, so Add focuses the editor for
+    // keyboard flow; ensure a trailing newline exists so typed roots start
+    // on a fresh line without altering the parsed count by itself.
+    setFilesAllowRootsText((prev) => {
+      if (!prev) return prev;
+      return prev.endsWith("\n") ? prev : `${prev}\n`;
+    });
+    allowRootsTextareaRef.current?.focus();
   };
 
   const handleConfirmResetAllowRoots = () => {
-    setFilesAllowRoots([...DEFAULT_FILES_ALLOW_ROOTS]);
+    setFilesAllowRootsText(DEFAULT_FILES_ALLOW_ROOTS_TEXT);
     setPendingResetRoots(false);
   };
 
@@ -3219,9 +3234,26 @@ export default function SettingsManager() {
   // Live parsed count keeps the badge and the textarea hint in sync without
   // storing a second source of truth beside the raw editor text.
   const denyPatternCount = parseDenyPatternsText(filesDenyText).length;
+  // Live parsed allowed-roots entries share the same single-source pattern:
+  // the badge and the save path read from the raw textarea text.
+  const allowRootsCount = parseAllowRootsText(filesAllowRootsText).length;
   // Live parsed allowed-hosts entries share the same single-source pattern:
   // the badge and the save path read from the raw textarea text.
   const serverAllowedHostsCount = parseServerAllowedHostsText(serverAllowedHostsText).length;
+  // Live parsed bash rule entries share the same single-source pattern: the
+  // badge and the save path read from the raw textarea text. A malformed line
+  // still counts as a non-blank row so the badge stays honest until
+  // validation reports the line number.
+  const bashRuleCount = (() => {
+    try {
+      return parseBashRulesText(bashRulesText).length;
+    } catch {
+      return bashRulesText
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean).length;
+    }
+  })();
   const serverAllowedHostsError = validateServerAllowedHosts(
     parseServerAllowedHostsText(serverAllowedHostsText),
   );
@@ -4375,9 +4407,7 @@ export default function SettingsManager() {
                           ? "Configure Sonarr & Radarr"
                           : categoryConfigKey === "bash.exec"
                             ? "Configure Bash & Shell"
-                            : categoryConfigKey === "files"
-                              ? "Configure Files & Access"
-                              : "Configure Browser & Web Automation";
+                            : "Configure Browser & Web Automation";
 
                     return (
                       <section key={cat.id} className="tool-category-section">
@@ -4423,6 +4453,11 @@ export default function SettingsManager() {
                             ) : null}
                           </div>
                         </div>
+                        {cat.id === "files" ? (
+                          <p className="settings-section-hint" style={{ margin: "0 0 12px 0" }}>
+                            Allow and deny rules are managed under Security
+                          </p>
+                        ) : null}
 
                         <div className="builtin-tools-grid">
                           {cat.tools.map((tool) => {
@@ -4541,10 +4576,10 @@ export default function SettingsManager() {
           </div>
         )}
 
-        {/* Security pane owns sandbox isolation plus access management only.
-            Files & Access lives under Tools & Runes as its own category so the
-            guard has a single home; the Tools Files modal reuses the same form
-            state through the shared files payload helper. */}
+        {/* Security pane owns sandbox isolation plus Files & Access plus access
+            management. Files & Access is the single files editor: both guard
+            textareas live here through the shared files payload helper, so
+            Security is the only home for file policy. */}
         {activeTab === "security" && (
           <>
             <div className="settings-section card">
@@ -4629,6 +4664,157 @@ export default function SettingsManager() {
                 </span>
               </div>
             </div>
+            </div>
+            {/* Single Files and Access editor: both guard textareas live here so
+                copy and paste of root sets works and Security is the only files
+                editor. Deny-then-containment stays server-side; the textareas
+                only edit the policy text. */}
+            <div className="settings-section card">
+              <div className="settings-section-title-group">
+                <h3>Files & Access</h3>
+                <p className="settings-section-hint">
+                  Home containment plus deny list for file tools, mirroring the engine guard.
+                </p>
+              </div>
+              {filesModalError && (
+                <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
+                  <AlertTriangleIcon size={16} />
+                  <span>{filesModalError}</span>
+                </div>
+              )}
+              <div className="settings-subsection-header">
+                <div className="settings-section-title-group">
+                  <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
+                  <p className="settings-section-hint">
+                    One glob per line. Denied paths escalate or fail per the toggle below.
+                  </p>
+                </div>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={() => setPendingResetDeny(true)}
+                  >
+                    <RefreshIcon size={14} />
+                    <span>Reset to Defaults</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={handleAddDenyPattern}
+                  >
+                    <PlusIcon size={14} />
+                    <span>Add Pattern</span>
+                  </button>
+                </div>
+              </div>
+              <div className="form-group" style={{ marginTop: "8px" }}>
+                <label htmlFor="deny-patterns-textarea">
+                  Deny patterns{" "}
+                  <span className="muted text-sm">
+                    ({denyPatternCount} {denyPatternCount === 1 ? "pattern" : "patterns"})
+                  </span>
+                </label>
+                <textarea
+                  id="deny-patterns-textarea"
+                  ref={denyTextareaRef}
+                  className="input-field deny-patterns-textarea"
+                  aria-label="Deny patterns, one per line"
+                  value={filesDenyText}
+                  onChange={(e) => setFilesDenyText(e.target.value)}
+                  placeholder="e.g. .env*, *.pem, .ssh/*"
+                  rows={8}
+                />
+                <span className="form-group-hint">
+                  Glob-like patterns: `*` matches within a name, directory prefixes like
+                  `.ssh/*` guard a whole subtree. `..` escapes are rejected with line
+                  numbers; blank lines are ignored.
+                </span>
+                {denyPatternCount === 0 && (
+                  <span className="form-group-hint">
+                    No deny patterns configured. File tools will allow all in-scope paths.
+                  </span>
+                )}
+              </div>
+              <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
+                <div className="settings-section-title-group">
+                  <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
+                  <p className="settings-section-hint">
+                    Home containment boundary (`~` expands to the home directory). Paths outside
+                    these roots escalate to approval.
+                  </p>
+                </div>
+                <div className="row">
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={() => setPendingResetRoots(true)}
+                  >
+                    <RefreshIcon size={14} />
+                    <span>Reset Roots</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost icon-text-btn"
+                    onClick={handleAddAllowRoot}
+                  >
+                    <PlusIcon size={14} />
+                    <span>Add Roots</span>
+                  </button>
+                </div>
+              </div>
+              <div className="form-group" style={{ marginTop: "8px" }}>
+                <label htmlFor="allow-roots-textarea">
+                  Allowed roots, one per line{" "}
+                  <span className="muted text-sm">
+                    ({allowRootsCount} {allowRootsCount === 1 ? "root" : "roots"})
+                  </span>
+                </label>
+                <textarea
+                  id="allow-roots-textarea"
+                  ref={allowRootsTextareaRef}
+                  className="input-field allow-roots-textarea"
+                  aria-label="Allowed roots, one per line"
+                  value={filesAllowRootsText}
+                  onChange={(e) => setFilesAllowRootsText(e.target.value)}
+                  placeholder="e.g. ~"
+                  rows={6}
+                />
+                <span className="form-group-hint">
+                  One root per line. `~` expands to the home directory for home containment.
+                  Blank lines are ignored. Order is display-only and never changes the access decision.
+                </span>
+              </div>
+              <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                  <input
+                    id="files-require-approval"
+                    type="checkbox"
+                    checked={filesRequireApprovalOnDeny}
+                    onChange={(e) => setFilesRequireApprovalOnDeny(e.target.checked)}
+                  />
+                  <span>Require approval on deny</span>
+                </label>
+                <span className="form-group-hint">
+                  When on, denied paths escalate to the approvals inbox instead of failing silently.
+                </span>
+              </div>
+              <p className="muted text-sm" data-testid="files-consumer-note" style={{ margin: "12px 0 0 0" }}>
+                Allow roots bound file tools, email attachment saves, bash working directories, and
+                staged-file review: those surfaces can only reach paths inside the allowed roots.
+                Denied paths are skipped everywhere including the document index, while allow roots
+                do not affect index coverage.
+              </p>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px", marginTop: "16px" }}>
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => void handleSaveFilesConfig()}
+                  disabled={filesSaveLoading}
+                >
+                  {filesSaveLoading ? "Saving…" : "Save Configuration"}
+                </button>
+              </div>
             </div>
             {/* Access management: the single owner token gate. Rotation lives
                 here rather than in a general settings save because it changes a
@@ -6566,7 +6752,7 @@ export default function SettingsManager() {
 
             <p className="muted text-sm" style={{ marginBottom: "16px" }}>
               Sandboxed shell execution with per-command approval policy. Rules evaluate
-              top-to-bottom first-match-wins; the default action applies when no rule matches.
+              top-to-bottom last-match-wins; the default action applies when no rule matches.
             </p>
 
             <div className="form-group checkbox-group" style={{ marginBottom: "12px" }}>
@@ -6599,7 +6785,7 @@ export default function SettingsManager() {
                 ))}
               </select>
               <span className="form-group-hint">
-                Action when no rule matches, top-to-bottom first-match-wins otherwise.
+                Action when no rule matches, top-to-bottom last-match-wins otherwise.
               </span>
             </div>
 
@@ -6607,74 +6793,42 @@ export default function SettingsManager() {
               <div className="settings-section-title-group">
                 <h4 style={{ margin: "0 0 4px 0" }}>Rules</h4>
                 <p className="settings-section-hint">
-                  Ordered top-to-bottom, first match wins. Patterns match the command line.
+                  Ordered top-to-bottom, last match wins. Patterns match the command line.
                 </p>
               </div>
               <div className="row">
                 <button
                   type="button"
                   className="ghost icon-text-btn"
-                  onClick={handleAddBashRule}
+                  onClick={handleFocusBashRules}
                 >
                   <PlusIcon size={14} />
                   <span>Add Rule</span>
                 </button>
               </div>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {bashRules.map((rule, index) => (
-                <div
-                  key={`bash-rule-${index}`}
-                  style={{ display: "flex", gap: "8px", alignItems: "center" }}
-                >
-                  <div className="form-group" style={{ flex: 2, margin: 0 }}>
-                    <label htmlFor={`bash-rule-pattern-${index}`} className="sr-only">
-                      Bash rule {index + 1} pattern
-                    </label>
-                    <input
-                      id={`bash-rule-pattern-${index}`}
-                      type="text"
-                      className="input-field"
-                      aria-label={`Bash rule ${index + 1} pattern`}
-                      value={rule.pattern}
-                      onChange={(e) => handleBashRuleChange(index, "pattern", e.target.value)}
-                      placeholder="e.g. git status, npm *, *"
-                    />
-                  </div>
-                  <div className="form-group" style={{ flex: 1, margin: 0 }}>
-                    <label htmlFor={`bash-rule-action-${index}`} className="sr-only">
-                      Bash rule {index + 1} action
-                    </label>
-                    <select
-                      id={`bash-rule-action-${index}`}
-                      className="input-field"
-                      aria-label={`Bash rule ${index + 1} action`}
-                      value={rule.action}
-                      onChange={(e) => handleBashRuleChange(index, "action", e.target.value)}
-                    >
-                      {BASH_PERMISSION_ACTIONS.map((action) => (
-                        <option key={action} value={action}>
-                          {action.charAt(0).toUpperCase() + action.slice(1)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    onClick={() => handleRemoveBashRule(index)}
-                    title={`Remove bash rule ${index + 1}`}
-                    aria-label={`Remove bash rule ${index + 1}`}
-                  >
-                    <TrashIcon size={14} />
-                  </button>
-                </div>
-              ))}
-              {bashRules.length === 0 && (
-                <span className="form-group-hint">
-                  At least one rule is required. Add a rule so commands have an explicit policy.
+            <div className="form-group" style={{ marginTop: "8px" }}>
+              <label htmlFor="bash-rules-textarea">
+                Rules, one per line{" "}
+                <span className="muted text-sm">
+                  ({bashRuleCount} {bashRuleCount === 1 ? "rule" : "rules"})
                 </span>
-              )}
+              </label>
+              <textarea
+                id="bash-rules-textarea"
+                ref={bashRulesTextareaRef}
+                className="input-field bash-rules-textarea"
+                aria-label="Rules, one per line"
+                value={bashRulesText}
+                onChange={(e) => setBashRulesText(e.target.value)}
+                placeholder={"* = deny\ngit status = allow\nnpm test = allow"}
+                rows={8}
+              />
+              <span className="form-group-hint">
+                One rule per line as `pattern = action` (allow, ask, or deny). Blank lines are
+                ignored. Rules evaluate top-to-bottom; the last matching rule wins
+                (last-match-wins). Put the catch-all first and specifics after.
+              </span>
             </div>
 
             <div className="form-group" style={{ marginTop: "16px", marginBottom: "12px" }}>
@@ -6733,189 +6887,6 @@ export default function SettingsManager() {
             </button>
           </div>
         </Modal>
-      ) : configuringToolName === "files" ? (
-        <Modal
-          label="Configure Files & Access"
-          onClose={() => {
-            if (!filesSaveLoading) setConfiguringToolName(null);
-          }}
-          containerClassName="modal-container"
-        >
-          <div className="modal-header">
-            <h3>Configure Files & Access</h3>
-            <button
-              type="button"
-              className="icon-button"
-              onClick={() => {
-                if (!filesSaveLoading) setConfiguringToolName(null);
-              }}
-              disabled={filesSaveLoading}
-              aria-label="Close"
-            >
-              <CloseIcon size={16} />
-            </button>
-          </div>
-          <div className="modal-body" style={{ maxHeight: "70vh", overflowY: "auto" }}>
-            {filesModalError && (
-              <div className="error-banner" style={{ marginBottom: "14px", display: "flex", alignItems: "center", gap: "8px" }}>
-                <AlertTriangleIcon size={16} />
-                <span>{filesModalError}</span>
-              </div>
-            )}
-
-            <p className="muted text-sm" style={{ marginBottom: "16px" }}>
-              Sensitive-path deny list for file tools, mirroring the engine guard.
-            </p>
-
-            <div className="settings-subsection-header">
-              <div className="settings-section-title-group">
-                <h4 style={{ margin: "0 0 4px 0" }}>Blocked Paths</h4>
-                <p className="settings-section-hint">
-                  One glob per line. Denied paths escalate or fail per the toggle below.
-                </p>
-              </div>
-              <div className="row">
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={() => setPendingResetDeny(true)}
-                >
-                  <RefreshIcon size={14} />
-                  <span>Reset to Defaults</span>
-                </button>
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={handleAddDenyPattern}
-                >
-                  <PlusIcon size={14} />
-                  <span>Add Pattern</span>
-                </button>
-              </div>
-            </div>
-            <div className="form-group" style={{ marginTop: "8px" }}>
-              <label htmlFor="deny-patterns-textarea">
-                Deny patterns{" "}
-                <span className="muted text-sm">
-                  ({denyPatternCount} {denyPatternCount === 1 ? "pattern" : "patterns"})
-                </span>
-              </label>
-              <textarea
-                id="deny-patterns-textarea"
-                ref={denyTextareaRef}
-                className="input-field deny-patterns-textarea"
-                aria-label="Deny patterns, one per line"
-                value={filesDenyText}
-                onChange={(e) => setFilesDenyText(e.target.value)}
-                placeholder="e.g. .env*, *.pem, .ssh/*"
-                rows={8}
-              />
-              <span className="form-group-hint">
-                Glob-like patterns: `*` matches within a name, directory prefixes like
-                `.ssh/*` guard a whole subtree. `..` escapes are rejected with line
-                numbers; blank lines are ignored.
-              </span>
-              {denyPatternCount === 0 && (
-                <span className="form-group-hint">
-                  No deny patterns configured. File tools will allow all in-scope paths.
-                </span>
-              )}
-            </div>
-
-            <div className="settings-subsection-header" style={{ marginTop: "20px" }}>
-              <div className="settings-section-title-group">
-                <h4 style={{ margin: "0 0 4px 0" }}>Allowed Roots</h4>
-                <p className="settings-section-hint">
-                  Home containment boundary (`~` expands to the home directory). Paths outside
-                  these roots escalate to approval.
-                </p>
-              </div>
-              <div className="row">
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={() => setPendingResetRoots(true)}
-                >
-                  <RefreshIcon size={14} />
-                  <span>Reset Roots</span>
-                </button>
-                <button
-                  type="button"
-                  className="ghost icon-text-btn"
-                  onClick={handleAddAllowRoot}
-                >
-                  <PlusIcon size={14} />
-                  <span>Add Root</span>
-                </button>
-              </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-              {filesAllowRoots.map((root, index) => (
-                <div
-                  key={`allow-${index}`}
-                  style={{ display: "flex", gap: "8px", alignItems: "center" }}
-                >
-                  <div className="form-group" style={{ flex: 1, margin: 0 }}>
-                    <label htmlFor={`allow-root-${index}`} className="sr-only">
-                      Allowed root {index + 1}
-                    </label>
-                    <input
-                      id={`allow-root-${index}`}
-                      type="text"
-                      className="input-field"
-                      aria-label={`Allowed root ${index + 1}`}
-                      value={root}
-                      onChange={(e) => handleAllowRootChange(index, e.target.value)}
-                      placeholder="e.g. ~"
-                      required
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-button danger"
-                    onClick={() => handleRemoveAllowRoot(index)}
-                    title={`Remove allowed root ${index + 1}`}
-                    aria-label={`Remove allowed root ${index + 1}`}
-                  >
-                    <TrashIcon size={14} />
-                  </button>
-                </div>
-              ))}
-            </div>
-            <div className="form-group checkbox-group" style={{ marginTop: "16px" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
-                <input
-                  id="files-require-approval"
-                  type="checkbox"
-                  checked={filesRequireApprovalOnDeny}
-                  onChange={(e) => setFilesRequireApprovalOnDeny(e.target.checked)}
-                />
-                <span>Require approval on deny</span>
-              </label>
-              <span className="form-group-hint">
-                When on, denied paths escalate to the approvals inbox instead of failing silently.
-              </span>
-            </div>
-          </div>
-          <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-            <button
-              type="button"
-              className="ghost"
-              onClick={() => setConfiguringToolName(null)}
-              disabled={filesSaveLoading}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary"
-              onClick={() => void handleSaveFilesConfig()}
-              disabled={filesSaveLoading}
-            >
-              {filesSaveLoading ? "Saving…" : "Save Configuration"}
-            </button>
-          </div>
-        </Modal>
       ) : configuringToolName !== null ? (
         // Honest fallback for any future hasConfig tool without a dedicated
         // editor: the Configure button stays flag-driven, so an unmapped name
@@ -6959,10 +6930,10 @@ export default function SettingsManager() {
         </Modal>
       ) : null}
 
-      {/* Form-local reset confirmations for the Tools Files & Access modal share
+      {/* Form-local reset confirmations for the Security Files & Access editor share
           the modal so destructive rewrites stay explicit: counts show what is
           lost and the copy stresses nothing persists until Save. They live
-          outside the Security pane so Tools is the only home for file policy. */}
+          alongside the Security pane so Security is the only home for file policy. */}
       {pendingResetDeny ? (
         <Modal
           label="Confirm reset deny patterns"
@@ -7026,8 +6997,8 @@ export default function SettingsManager() {
           </div>
           <div className="modal-body">
             <p className="muted" style={{ margin: 0 }}>
-              This will replace {filesAllowRoots.length}{" "}
-              {filesAllowRoots.length === 1 ? "custom root" : "custom roots"} with{" "}
+              This will replace {allowRootsCount}{" "}
+              {allowRootsCount === 1 ? "custom root" : "custom roots"} with{" "}
               {DEFAULT_FILES_ALLOW_ROOTS.length}{" "}
               {DEFAULT_FILES_ALLOW_ROOTS.length === 1 ? "default" : "defaults"} (
               {DEFAULT_FILES_ALLOW_ROOTS.join(", ")}). This only updates the form —

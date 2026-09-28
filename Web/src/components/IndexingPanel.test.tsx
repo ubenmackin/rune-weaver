@@ -13,19 +13,23 @@ import IndexingPanel, {
   describeAutoStartNotice,
   describeEffortReality,
   describeIndexScope,
+  findOutsideIndexRoots,
   formatIndexAge,
   formatIndexAsOf,
   formatIndexBytes,
   formatIndexLiveHeader,
   formatIndexRate,
   formatIndexReclaimResult,
+  formatIndexRootsText,
   formatIndexScopeRoots,
   indexDonutArcs,
   indexSourceBarPercent,
   indexSourceBarWidth,
   isIndexProgressFrame,
+  isIndexRootInsideAllowRoot,
   isLongIndexError,
   normalizeIndexEffortPreset,
+  parseIndexRootsText,
   resolveAlwaysSkipped,
   resolveDisplayIndexErrors,
   resolveEffortWorkers,
@@ -39,6 +43,7 @@ import IndexingPanel, {
   resolveIndexWorkersValue,
   resolveStatusEffort,
   truncateIndexError,
+  validateIndexRootsText,
 } from "./IndexingPanel";
 import {
   DEFAULT_INDEX_CONFIG,
@@ -3582,5 +3587,267 @@ describe("IndexingPanel vertical chart rows", () => {
     expect(screen.getByTestId("index-extract-pct-extracted")).toHaveTextContent(
       "100%",
     );
+  });
+});
+
+describe("IndexPolicyPanel index roots editor", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+  });
+
+  it("parses roots by trimming lines and dropping blanks", () => {
+    expect(parseIndexRootsText("  ~/Documents  \n\n~/Code\n   \n")).toEqual([
+      "~/Documents",
+      "~/Code",
+    ]);
+    expect(parseIndexRootsText("")).toEqual([]);
+    expect(parseIndexRootsText(null)).toEqual([]);
+    expect(parseIndexRootsText(undefined)).toEqual([]);
+    expect(formatIndexRootsText(["~/Documents", "~/Code"])).toBe(
+      "~/Documents\n~/Code",
+    );
+    expect(formatIndexRootsText(null)).toBe("");
+  });
+
+  it("rejects empty results and traversal escapes with line numbers", () => {
+    // Emptied editors fail closed instead of persisting whitespace rows.
+    expect(validateIndexRootsText("")).toBe("Index roots cannot be empty.");
+    expect(validateIndexRootsText("   \n  \n")).toBe(
+      "Index roots cannot be empty.",
+    );
+    expect(validateIndexRootsText(null)).toBe("Index roots cannot be empty.");
+    // Traversal escapes point at their editor row with a line number.
+    const traversal = validateIndexRootsText("~/Documents\n../secret\n~/Code");
+    expect(traversal).toContain("Line 2");
+    expect(traversal).toContain("..");
+    expect(validateIndexRootsText("~/Documents\n~/Code")).toBeNull();
+    expect(validateIndexRootsText("~")).toBeNull();
+  });
+
+  it("detects index roots outside the files allow roots", () => {
+    // Home containment: `~` contains every `~/...` entry.
+    expect(isIndexRootInsideAllowRoot("~/Documents", "~")).toBe(true);
+    expect(isIndexRootInsideAllowRoot("~", "~")).toBe(true);
+    expect(isIndexRootInsideAllowRoot("/tmp/outside", "~")).toBe(false);
+    // Child paths stay inside their allow root.
+    expect(isIndexRootInsideAllowRoot("~/Docs/Sub", "~/Docs")).toBe(true);
+    expect(isIndexRootInsideAllowRoot("~/Other", "~/Docs")).toBe(false);
+    expect(isIndexRootInsideAllowRoot("~/Docs", "~/Docs")).toBe(true);
+    // List helper returns exactly the outside entries.
+    expect(findOutsideIndexRoots(["~/Documents", "/tmp/outside"], ["~"])).toEqual([
+      "/tmp/outside",
+    ]);
+    expect(findOutsideIndexRoots(["~/Documents"], ["~"])).toEqual([]);
+    expect(findOutsideIndexRoots(["~/Documents"], null)).toEqual([]);
+    expect(findOutsideIndexRoots(["~/Documents"], [])).toEqual([]);
+  });
+
+  it("renders the roots editor seeded from loaded config roots", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, roots: ["~/Documents", "~/Code"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Index roots")).toBeInTheDocument();
+    });
+    const textarea = screen.getByLabelText("Index roots") as HTMLTextAreaElement;
+    expect(textarea.value).toContain("~/Documents");
+    expect(textarea.value).toContain("~/Code");
+    // Exclude and mailbox deny editors stay untouched alongside the roots editor.
+    expect(screen.getByLabelText(/Exclude patterns/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/Denied mailboxes/)).toBeInTheDocument();
+  });
+
+  it("saves edited roots through the existing roots key", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      settings: { ...indexConfig, roots: ["~"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Index roots")).toBeInTheDocument();
+    });
+    const textarea = screen.getByLabelText("Index roots") as HTMLTextAreaElement;
+    expect(textarea.value).toContain("~");
+    await user.clear(textarea);
+    await user.type(textarea, "~/Documents\n~/Code\n\n");
+    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Index settings saved.")).toBeInTheDocument();
+    });
+    const put = calls.find(
+      (call) => call.url === "/settings" && call.method === "PUT",
+    );
+    expect(put).toBeDefined();
+    // No API shape change: the save stays an [index]-only patch.
+    expect(Object.keys((put?.body as Record<string, unknown>) ?? {})).toEqual([
+      "index",
+    ]);
+    const patch = (put?.body as { index?: Record<string, unknown> })?.index;
+    expect(patch?.roots).toEqual(["~/Documents", "~/Code"]);
+    // Exclude and mailbox deny editors ride the same save untouched.
+    expect(patch?.exclude).toEqual([".git", "node_modules"]);
+    expect(patch?.mailbox_deny).toEqual(["Trash", "Junk", "Spam", "Deleted*"]);
+  });
+
+  it("names live roots in the subtitle without the hardcoded home copy", async () => {
+    const user = userEvent.setup();
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, roots: ["~/Documents", "~/Code"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-scope-subtitle")).toBeInTheDocument();
+    });
+    // Custom roots name exactly what the walker covers.
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+      "~/Documents",
+    );
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent("~/Code");
+    expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+      "Nothing outside the configured roots is ever scanned.",
+    );
+    // The hardcoded home copy never renders for custom roots.
+    expect(screen.getByTestId("index-scope-subtitle").textContent).not.toContain(
+      "~ (your home directory)",
+    );
+    // Live edits rename the subtitle without saving.
+    const textarea = screen.getByLabelText("Index roots") as HTMLTextAreaElement;
+    await user.clear(textarea);
+    await user.type(textarea, "~/LiveEdit");
+    await waitFor(() => {
+      expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+        "~/LiveEdit",
+      );
+    });
+  });
+
+  it("states that Security Files and Access denies are never indexed", async () => {
+    const { fetchMock } = stubFetch({
+      settings: { ...indexConfig, roots: ["~"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-always-skipped-block")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-always-skipped-block")).toHaveTextContent(
+      /Paths denied under Security Files and Access are never indexed/,
+    );
+  });
+
+  it("warns exactly when an index root sits outside files allow roots", async () => {
+    // Outside case: one index root escapes the loaded allow roots.
+    const outsideFetch = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse({ ...statusPayload, enabled: true, running: false });
+      }
+      if (url === "/settings" && (!init || !init.method || init.method === "GET")) {
+        return jsonResponse({
+          engineName: "Test Engine",
+          index: { ...indexConfig, roots: ["/tmp/outside"] },
+          filesAllowRoots: ["~"],
+        });
+      }
+      if (url === "/settings" && init?.method === "PUT") {
+        return jsonResponse({
+          engineName: "Test Engine",
+          index: { ...indexConfig, roots: ["/tmp/outside"] },
+          filesAllowRoots: ["~"],
+        });
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: { ...indexConfig, roots: ["/tmp/outside"] },
+        filesAllowRoots: ["~"],
+      });
+    });
+    vi.stubGlobal("fetch", outsideFetch);
+
+    const { unmount } = render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("index-roots-outside-warning")).toBeInTheDocument();
+    });
+    expect(screen.getByTestId("index-roots-outside-warning")).toHaveTextContent(
+      /recalled content from there may not be readable by live file tools/,
+    );
+    unmount();
+    vi.unstubAllGlobals();
+    resetSharedSocket();
+
+    // Inside case: the same allow roots contain the index root, so no warning.
+    const insideFetch = vi.fn(async (input: string) => {
+      const url = String(input);
+      if (url === "/index/status") {
+        return jsonResponse({ ...statusPayload, enabled: true, running: false });
+      }
+      return jsonResponse({
+        engineName: "Test Engine",
+        index: { ...indexConfig, roots: ["~/Documents"] },
+        filesAllowRoots: ["~"],
+      });
+    });
+    vi.stubGlobal("fetch", insideFetch);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Index roots")).toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("index-scope-subtitle")).toHaveTextContent(
+        "~/Documents",
+      );
+    });
+    expect(screen.queryByTestId("index-roots-outside-warning")).toBeNull();
+  });
+
+  it("rejects empty and traversal roots before any network write", async () => {
+    const user = userEvent.setup();
+    const { fetchMock, calls } = stubFetch({
+      settings: { ...indexConfig, roots: ["~"] },
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<IndexPolicyPanel />);
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("Index roots")).toBeInTheDocument();
+    });
+    const textarea = screen.getByLabelText("Index roots") as HTMLTextAreaElement;
+    // Traversal escape fails closed with a line number and no PUT.
+    await user.clear(textarea);
+    await user.type(textarea, "~/Documents\n../escape");
+    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Line 2.*\.\./)).toBeInTheDocument();
+    });
+    expect(
+      calls.some((call) => call.url === "/settings" && call.method === "PUT"),
+    ).toBe(false);
+
+    // Emptied editor fails closed with no PUT.
+    await user.clear(textarea);
+    await user.click(screen.getByRole("button", { name: "Save Index Settings" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Index roots cannot be empty.")).toBeInTheDocument();
+    });
   });
 });

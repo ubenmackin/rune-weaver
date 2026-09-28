@@ -26,7 +26,9 @@ import {
   INDEX_EFFORT_PRESET_LABELS,
   INDEX_ICLOUD_EVICTIONS,
   INDEX_MAIL_VECTOR_WINDOWS,
+  formatListToText,
   formatMailboxDenyText,
+  parseLinesToList,
   parseMailboxDenyText,
   cancelIndex,
   describeIndexRun,
@@ -640,6 +642,99 @@ export function formatIndexScopeRoots(roots: unknown): string {
 // the owner sees the walk boundary without opening the config file.
 export function describeIndexScope(roots: unknown): string {
   return `Builds a local search index of ${formatIndexScopeRoots(roots)}. Nothing outside the configured roots is ever scanned.`;
+}
+
+// Parses the index-roots textarea into the wire shape: one root per line,
+// trimmed, with blank lines dropped so an emptied editor reads as an explicit
+// empty list instead of persisting whitespace rows. Null input degrades to
+// empty so callers apply the empty-reject rule instead of guessing. Delegates
+// to the shared line-list codec so index roots stay symmetric with allow roots.
+export function parseIndexRootsText(text: string | undefined | null): string[] {
+  if (typeof text !== "string") return [];
+  return parseLinesToList(text ?? "", []);
+}
+
+// Formats an index-roots array for the multiline editor, joining one root per
+// line so the textarea and the stored array stay symmetric. Non-array payloads
+// degrade to empty so older engines without the field never seed stale text.
+// Delegates to the shared formatter so index roots stay symmetric with allow roots.
+export function formatIndexRootsText(
+  roots: string[] | undefined | null,
+): string {
+  return formatListToText(roots, "");
+}
+
+// Validates the index-roots textarea before any network write: blank lines
+// collapse on save, an emptied editor is rejected, and `..` escapes are
+// rejected with line numbers so a traversal escape points at its editor row.
+// Returns the error copy or null when valid.
+export function validateIndexRootsText(
+  text: string | undefined | null,
+): string | null {
+  const raw = typeof text === "string" ? text : "";
+  const lines = raw.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (!trimmed) continue;
+    if (trimmed.includes("..")) {
+      return `Line ${index + 1}: Index root must not contain '..': "${trimmed}".`;
+    }
+  }
+  if (parseIndexRootsText(text).length === 0) {
+    return "Index roots cannot be empty.";
+  }
+  return null;
+}
+
+// Normalizes one root for the outside-allow-roots comparison: trims and drops
+// trailing slashes so `~/Docs/` and `~/Docs` compare equal without changing
+// the stored value. `~` keeps its sigil so home containment reads honestly.
+function normalizeIndexRootForCompare(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "~" || trimmed === "/") return trimmed;
+  return trimmed.replace(/\/+$/, "");
+}
+
+// Reports whether one index root sits inside one files allow root: an exact
+// match or a child path under the allow root counts as inside, so
+// `~/Docs/Sub` stays inside `~/Docs` and `~` contains every `~/...` entry.
+// Absolute paths never match `~` without the sigil prefix, so an
+// outside-filesystem root reads as outside instead of guessing home expansion.
+export function isIndexRootInsideAllowRoot(
+  indexRoot: string,
+  allowRoot: string,
+): boolean {
+  const index = normalizeIndexRootForCompare(indexRoot);
+  const allow = normalizeIndexRootForCompare(allowRoot);
+  if (!index || !allow) return false;
+  if (index === allow) return true;
+  if (allow === "~") {
+    return index === "~" || index.startsWith("~/");
+  }
+  return index.startsWith(allow.endsWith("/") ? allow : `${allow}/`);
+}
+
+// Lists the index roots sitting outside every loaded files allow root, so the
+// policy form can warn that recalled content from there may not be readable
+// by live file tools. An absent allow list degrades to no warning instead of
+// guessing, and blank entries never count as outside.
+export function findOutsideIndexRoots(
+  indexRoots: unknown,
+  allowRoots: unknown,
+): string[] {
+  if (!Array.isArray(indexRoots) || !Array.isArray(allowRoots)) return [];
+  const cleanedAllow = allowRoots
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (cleanedAllow.length === 0) return [];
+  const cleanedIndex = indexRoots
+    .filter((entry): entry is string => typeof entry === "string")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return cleanedIndex.filter(
+    (root) => !cleanedAllow.some((allow) => isIndexRootInsideAllowRoot(root, allow)),
+  );
 }
 
 // Always-skipped names from the index settings payload: the engine's
@@ -2328,6 +2423,19 @@ export function IndexPolicyPanel() {
   const [mailboxDenyText, setMailboxDenyText] = useState<string>(
     DEFAULT_INDEX_MAILBOX_DENY_TEXT,
   );
+  // Index roots textarea state, seeded from the loaded `config.roots` so the
+  // walk boundary edits without TOML hand-edits. One root per line, trimmed
+  // with blanks dropped on save; validation rejects empties and `..` before
+  // any network write.
+  const [rootsText, setRootsText] = useState<string>(
+    DEFAULT_INDEX_CONFIG.roots.join("\n"),
+  );
+  // Loaded files allow roots from GET /settings for the outside-roots
+  // informational warning. Null until the settings fetch settles so the
+  // warning never fires on a default guess before the engine answers.
+  const [filesAllowRoots, setFilesAllowRoots] = useState<string[] | null>(
+    null,
+  );
   const [saving, setSaving] = useState(false);
   // Engine core count from GET /index/status for the effort reality line.
   // Null until the status fetch settles so resolveMachineCores falls back to
@@ -2388,6 +2496,23 @@ export function IndexPolicyPanel() {
     try {
       const settings = await getSettings();
       const index = settings?.index;
+      // Loaded files allow roots for the outside-roots warning: kept when the
+      // engine sends an array so the warning compares live roots against the
+      // live guard, otherwise cleared so no warning fires on a guess.
+      const allowRoots = (settings as { filesAllowRoots?: unknown })
+        ?.filesAllowRoots;
+      if (mountedRef.current) {
+        if (Array.isArray(allowRoots)) {
+          setFilesAllowRoots(
+            allowRoots
+              .filter((entry): entry is string => typeof entry === "string")
+              .map((entry) => entry.trim())
+              .filter(Boolean),
+          );
+        } else {
+          setFilesAllowRoots(null);
+        }
+      }
       if (index) {
         const merged: IndexConfigData = {
           ...DEFAULT_INDEX_CONFIG,
@@ -2435,6 +2560,9 @@ export function IndexPolicyPanel() {
         setMailboxDenyText(
           formatMailboxDenyText(merged.mailbox_deny),
         );
+        // Seed the roots textarea from the loaded `config.roots` so edits
+        // start from stored truth and reload without TOML hand-edits.
+        setRootsText(formatIndexRootsText(merged.roots));
       }
     } catch {
       // A settings read failure leaves the local defaults; the save path
@@ -2463,6 +2591,11 @@ export function IndexPolicyPanel() {
     // trimmed, blanks dropped so an emptied editor opts every mailbox back
     // in instead of persisting whitespace rows.
     const mailboxDeny = parseMailboxDenyText(mailboxDenyText);
+    // Index roots mirror the excludes editor: one root per line, trimmed with
+    // blanks dropped, saved through the existing `roots` key with no API
+    // shape change. Validation rejects empties and `..` in handleSave before
+    // this runs, so this stays a pure parse.
+    const roots = parseIndexRootsText(rootsText);
     const effort = normalizeIndexEffortPreset(config.effort);
     // Presets derive workers on the engine so they must save 0; only custom
     // carries an explicit 1..64 count. The stepper fallback stays
@@ -2480,7 +2613,7 @@ export function IndexPolicyPanel() {
         files: config.files,
         mail: config.mail,
         messages: config.messages,
-        roots: config.roots.map((root) => root.trim()).filter(Boolean),
+        roots,
         exclude,
         max_file_mb: config.max_file_mb,
         mail_vector_window: config.mail_vector_window,
@@ -2523,12 +2656,15 @@ export function IndexPolicyPanel() {
         setMailboxDenyText(
           formatMailboxDenyText(merged.mailbox_deny),
         );
+        // Keep the textarea synced to the saved echo so save-plus-reload
+        // stays honest without TOML hand-edits.
+        setRootsText(formatIndexRootsText(merged.roots));
       }
     }
     // Saved enabled truth for the restart gate: the engine echo wins so a
     // disable-then-save never restarts from a stale pre-save closure.
     return typeof index?.enabled === "boolean" ? index.enabled : config.enabled;
-  }, [config, excludeText, mailboxDenyText]);
+  }, [config, excludeText, mailboxDenyText, rootsText]);
 
   // Sole owner of save-and-restart: the settings patch never auto-starts a
   // run, so a policy saved mid-scan must stop the old generation and start a
@@ -2548,6 +2684,16 @@ export function IndexPolicyPanel() {
     // otherwise keep rendering the previous run under the fresh toast.
     setNotice(null);
     try {
+      // Roots validate before any network write: an emptied editor and `..`
+      // escapes fail closed here with line numbers, mirroring the files guard,
+      // so a bad walk boundary never persists to config.toml.
+      const rootsValidationError = validateIndexRootsText(rootsText);
+      if (rootsValidationError) {
+        if (!mountedRef.current) return;
+        setNotice(null);
+        pushErrorToast(rootsValidationError);
+        return;
+      }
       const savedEnabled = await persistConfig();
       if (!mountedRef.current) return;
       const fresh = await loadStatus();
@@ -2665,12 +2811,19 @@ export function IndexPolicyPanel() {
     resolveIndexVectorCapValue(config) ??
     (DEFAULT_INDEX_CONFIG.max_vector_chunks_per_document as number);
   const vectorCapMax = 4096;
-  // Root-scoped coverage plus the walker prune list, both read from the loaded
-  // [index] payload so the copy names exactly what the next run will cover and
-  // skip with no hardcoded names. The credential deny list stays out of the
-  // rendered names and is described generically in the detail block.
-  const scopeSubtitle = describeIndexScope(config.roots);
+  // Root-scoped coverage plus the walker prune list: the subtitle reads the
+  // live roots textarea so it names exactly what the next run will cover with
+  // no hardcoded home names, while the prune list stays read from the loaded
+  // [index] payload. The credential deny list stays out of the rendered names
+  // and is described generically in the detail block.
+  const liveRoots = parseIndexRootsText(rootsText);
+  const scopeSubtitle = describeIndexScope(liveRoots);
   const alwaysSkipped = resolveAlwaysSkipped(config);
+  // Informational outside-allow-roots warning: any live index root outside the
+  // loaded files allow roots means recalled content from there may not be
+  // readable by live file tools. Null allow roots (not yet loaded or older
+  // engines) degrade to no warning instead of guessing.
+  const outsideRoots = findOutsideIndexRoots(liveRoots, filesAllowRoots);
 
   return (
     <section className="panel indexing-panel" aria-label="Index Policy">
@@ -2709,7 +2862,8 @@ export function IndexPolicyPanel() {
             )}
             <p style={{ marginTop: 4, marginBottom: 0 }}>
               Credential and key files blocked by your file access rules are
-              never indexed either.
+              never indexed either. Paths denied under Security Files and
+              Access are never indexed.
             </p>
           </div>
         </div>
@@ -2768,6 +2922,45 @@ export function IndexPolicyPanel() {
             );
           })}
         </fieldset>
+
+        {/* Index roots editor: the file-walk boundary over IndexConfig.roots.
+            One root per line, trimmed with blanks dropped on save; an emptied
+            editor and `..` escapes fail closed with line numbers in handleSave.
+            Saved through the existing `roots` key with no API shape change.
+            The deny filter honors deny patterns only and ignores allow roots,
+            while paths denied under Security Files and Access are never
+            indexed. */}
+        <div className="form-group">
+          <label htmlFor="index-roots">Index roots (one per line)</label>
+          <textarea
+            id="index-roots"
+            aria-label="Index roots"
+            rows={3}
+            value={rootsText}
+            onChange={(event) => setRootsText(event.target.value)}
+          />
+          <p className="muted text-xs">
+            Folders the file walk covers. One root per line. Blank lines are
+            ignored. Paths denied under Security Files and Access are never
+            indexed.
+          </p>
+          {/* Informational outside-allow-roots warning: renders exactly when a
+              live index root sits outside the loaded files allow roots, since
+              recalled content from there may not be readable by live file
+              tools. Informational only — the save still persists. */}
+          {outsideRoots.length > 0 ? (
+            <p
+              className="muted text-xs"
+              data-testid="index-roots-outside-warning"
+              style={{ marginTop: 4, marginBottom: 0 }}
+            >
+              An index root sits outside your Files allow roots — recalled
+              content from there may not be readable by live file tools. Keep
+              index roots inside Security Files and Access allow roots, or
+              broaden those allow roots.
+            </p>
+          ) : null}
+        </div>
 
         {/* Effort control: the three scaling presets plus a custom worker
             stepper, with the resolved reality against the machine's core count

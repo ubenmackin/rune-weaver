@@ -709,4 +709,52 @@ struct SettingsRouteTests {
         #expect(!text.contains("timeoutSeconds"))
         #expect(!text.contains("allowNetwork"))
     }
+
+    @Test
+    func `Allow roots order is display-only for FilesAccessGuard decisions`() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent("settings_roots_order_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let dirA = base.appendingPathComponent("a", isDirectory: true)
+        let dirB = base.appendingPathComponent("b", isDirectory: true)
+        try FileManager.default.createDirectory(at: dirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dirB, withIntermediateDirectories: true)
+        let fileA = dirA.appendingPathComponent("notes.md").path
+        let fileB = dirB.appendingPathComponent("notes.md").path
+        let outside = base.appendingPathComponent("outside.md").path
+
+        // Two roots in opposite orders must decide identically: inside either
+        // root allows while outside denies, so order never changes the result.
+        var forward = FilesConfig()
+        forward.denyPatterns = []
+        forward.allowRoots = [dirA.path, dirB.path]
+        var reversed = FilesConfig()
+        reversed.denyPatterns = []
+        reversed.allowRoots = [dirB.path, dirA.path]
+        for path in [fileA, fileB] {
+            let fwd = FilesAccessGuard.evaluate(path: path, filesConfig: forward)
+            let rev = FilesAccessGuard.evaluate(path: path, filesConfig: reversed)
+            #expect(fwd.allowed == true)
+            #expect(rev.allowed == true)
+            #expect(fwd.allowed == rev.allowed)
+        }
+        let fwdOutside = FilesAccessGuard.evaluate(path: outside, filesConfig: forward)
+        let revOutside = FilesAccessGuard.evaluate(path: outside, filesConfig: reversed)
+        #expect(fwdOutside.allowed == false)
+        #expect(revOutside.allowed == false)
+        #expect(fwdOutside.allowed == revOutside.allowed)
+
+        // Deny-then-containment: a deny match denies first even when inside a
+        // root, and the denial is identical in both orders.
+        var forwardDeny = forward
+        forwardDeny.denyPatterns = ["*.pem"]
+        var reversedDeny = reversed
+        reversedDeny.denyPatterns = ["*.pem"]
+        let deniedA = dirA.appendingPathComponent("secret.pem").path
+        let fwdDenied = FilesAccessGuard.evaluate(path: deniedA, filesConfig: forwardDeny)
+        let revDenied = FilesAccessGuard.evaluate(path: deniedA, filesConfig: reversedDeny)
+        #expect(fwdDenied.allowed == false)
+        #expect(revDenied.allowed == false)
+        #expect(fwdDenied.allowed == revDenied.allowed)
+    }
 }

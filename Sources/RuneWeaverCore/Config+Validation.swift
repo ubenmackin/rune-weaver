@@ -1020,7 +1020,7 @@ public extension BashConfig {
     /// A present list replaces the built-in default in stored order, so an
     /// empty list fails closed instead of persisting a policy that reloads
     /// as the default star rule.
-    /// - Parameter rules: Ordered permission rules evaluated first-match-wins.
+    /// - Parameter rules: Ordered permission rules evaluated last-match-wins.
     /// - Throws: ``ConfigError/validationError(field:message:)`` when the list
     ///   is empty or a pattern is blank.
     static func validateRules(_ rules: [BashRule]) throws {

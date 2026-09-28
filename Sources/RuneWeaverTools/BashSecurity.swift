@@ -184,7 +184,8 @@ public enum BashSecurity: Sendable {
     /// 1. If chaining is detected (`&&`, `||`, `;`, `|`, `&`, `\n`, `$()`, backticks):
     ///    Any rule that would evaluate to `allow` is **immediately demoted to `ask`**.
     ///    `deny` remains `deny`.
-    /// 2. If single command: matches rules top to bottom, first match wins.
+    /// 2. Rules evaluate top-to-bottom and the last matching rule decides (last-match-wins).
+    ///    Put the catch-all first and specifics after.
     /// 3. If no rule matches, falls back to `config.defaultAction`.
     public static func evaluate(command: String, config: BashConfig = BashConfig()) -> BashDecision {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -200,8 +201,8 @@ public enum BashSecurity: Sendable {
 
         let isChained = detectChaining(in: trimmed)
 
-        // Find first matching rule
-        let matchedRule = config.rules.first { matches(command: trimmed, pattern: $0.pattern) }
+        // Find last matching rule (last-match-wins)
+        let matchedRule = config.rules.last { matches(command: trimmed, pattern: $0.pattern) }
 
         let baseAction = matchedRule?.action ?? config.defaultAction
 

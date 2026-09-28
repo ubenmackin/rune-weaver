@@ -1638,7 +1638,7 @@ export interface DesktopSettingsUpdate {
 
 // Sandboxed shell execution policy mirroring the engine `BashConfig`
 // (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom
-// first-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
+// last-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
 // live here; the enabled flag mirrors the stored `[bash]` section.
 export interface BashRuleData {
   pattern: string;
@@ -1718,6 +1718,58 @@ export const DEFAULT_BASH_CONFIG: BashConfigData = {
 // on the engine. Single source for the client validator and the Bash modal
 // option lists so the two cannot drift.
 export const BASH_PERMISSION_ACTIONS = ["allow", "ask", "deny"] as const;
+
+// Bash textarea codec: one rule per line as `pattern = action` with `allow`,
+// `ask`, or `deny` on the right, mirroring the engine
+// `BashSecurity.evaluate(command:config:)` contract
+// (Sources/RuneWeaverTools/BashSecurity.swift). Rules evaluate top-to-bottom
+// and the last matching rule decides, so the catch-all stays first and
+// specifics follow. Blank lines are ignored and line order is preserved so
+// copy and paste of rule sets works. Owner for parsing is parseBashRulesText
+// here; owner for saving is handleSaveBashConfig in SettingsManager.tsx.
+export function parseBashRulesText(text: string | undefined | null): BashRuleData[] {
+  if (typeof text !== "string") return [];
+  const rules: BashRuleData[] = [];
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim();
+    if (!trimmed) continue;
+    const lineNumber = index + 1;
+    const separator = trimmed.lastIndexOf("=");
+    if (separator === -1) {
+      throw new Error(
+        `Line ${lineNumber}: expected "pattern = action" (missing "=").`,
+      );
+    }
+    const pattern = trimmed.slice(0, separator).trim();
+    const rawAction = trimmed.slice(separator + 1).trim();
+    const action = rawAction.toLowerCase();
+    if (!pattern) {
+      throw new Error(`Line ${lineNumber}: pattern must not be blank.`);
+    }
+    if (!(BASH_PERMISSION_ACTIONS as readonly string[]).includes(action)) {
+      throw new Error(
+        `Line ${lineNumber}: action must be allow, ask, or deny (got '${rawAction}').`,
+      );
+    }
+    rules.push({ pattern, action });
+  }
+  return rules;
+}
+
+// Formats ordered bash rules for the textarea, one `pattern = action` per
+// line, preserving top-to-bottom order so the last matching rule decides.
+export function formatBashRulesText(
+  rules: BashRuleData[] | undefined | null,
+): string {
+  if (!Array.isArray(rules)) return "";
+  return rules.map((rule) => `${rule.pattern} = ${rule.action}`).join("\n");
+}
+
+// Textarea mirror of the bash rule defaults so the shell policy editor starts
+// from the same guard boundary without joining inline in every caller.
+export const DEFAULT_BASH_RULES_TEXT: string =
+  formatBashRulesText(DEFAULT_BASH_RULES);
 
 // Manual mirrors of DesktopConfig defaults in Sources/RuneWeaverCore/Config.swift.
 export const DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION = 1280;
@@ -2943,6 +2995,25 @@ export function formatDenyPatternsText(
   patterns: string[] | undefined | null
 ): string {
   return formatListToText(patterns, DEFAULT_FILES_DENY_PATTERNS_TEXT);
+}
+
+// Textarea mirror of the allow-roots defaults so the allowed-roots editor starts from the same
+// guard boundary without joining inline in every caller.
+export const DEFAULT_FILES_ALLOW_ROOTS_TEXT: string =
+  DEFAULT_FILES_ALLOW_ROOTS.join("\n");
+
+// Parses the allowed-roots textarea into the wire shape, defaulting to the
+// files guard boundary when no text is present.
+export function parseAllowRootsText(text: string | undefined | null): string[] {
+  return parseLinesToList(text, DEFAULT_FILES_ALLOW_ROOTS);
+}
+
+// Formats an allow-roots array for the multiline editor, falling back to the
+// guard defaults when an older engine omits the [files] section entirely.
+export function formatAllowRootsText(
+  roots: string[] | undefined | null
+): string {
+  return formatListToText(roots, DEFAULT_FILES_ALLOW_ROOTS_TEXT);
 }
 
 // Manual mirrors of SandboxConfig Tier-3 defaults in Sources/RuneWeaverCore/Config.swift.

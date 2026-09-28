@@ -193,4 +193,54 @@ struct FilesAccessGuardTests {
         let storedCredential = try await store.document(source: .files, externalID: credential.path)
         #expect(storedCredential == nil)
     }
+
+    @Test
+    func `Index adapter ignores allow roots while live guard enforces them`() throws {
+        let (base, home) = try GuardTestSupport.makeBaseAndHome()
+        defer { GuardTestSupport.cleanup(base) }
+        // Narrow the live `[files]` roots to one subdirectory so an ordinary
+        // sibling stays outside containment; the index walk is driven by index
+        // roots instead, so the adapter must ignore this boundary.
+        let allowedRoot = home.appendingPathComponent("allowed", isDirectory: true)
+        try FileManager.default.createDirectory(at: allowedRoot, withIntermediateDirectories: true)
+        let restrictive = FilesConfig(allowRoots: [allowedRoot.path])
+        let adapter = FilesIndexPolicyGuard(filesConfig: restrictive)
+
+        // A benign candidate outside allow roots stays indexable but refuses
+        // live access, pinning the deny-only versus containment split.
+        let outside = home.appendingPathComponent("notes.md").path
+        let liveOutside = FilesAccessGuard.evaluate(
+            path: outside,
+            homeDirectoryURL: home,
+            filesConfig: restrictive
+        )
+        #expect(liveOutside.allowed == false)
+        let indexOutside = adapter.evaluate(path: outside, homeDirectoryURL: home)
+        #expect(indexOutside.allowed == true)
+        #expect(indexOutside.requiresApproval == false)
+
+        // A deny match stays skipped on both seams, proving the adapter still
+        // honors deny patterns even while it ignores allow roots.
+        let deniedInside = allowedRoot.appendingPathComponent(".git-credentials").path
+        let liveDenied = FilesAccessGuard.evaluate(
+            path: deniedInside,
+            homeDirectoryURL: home,
+            filesConfig: restrictive
+        )
+        #expect(liveDenied.allowed == false)
+        let indexDenied = adapter.evaluate(path: deniedInside, homeDirectoryURL: home)
+        #expect(indexDenied.allowed == false)
+
+        // The same deny shape outside allow roots also stays skipped on both
+        // seams, so a sensitive name cannot slip through by leaving the roots.
+        let deniedOutside = home.appendingPathComponent(".git-credentials").path
+        let liveDeniedOutside = FilesAccessGuard.evaluate(
+            path: deniedOutside,
+            homeDirectoryURL: home,
+            filesConfig: restrictive
+        )
+        #expect(liveDeniedOutside.allowed == false)
+        let indexDeniedOutside = adapter.evaluate(path: deniedOutside, homeDirectoryURL: home)
+        #expect(indexDeniedOutside.allowed == false)
+    }
 }

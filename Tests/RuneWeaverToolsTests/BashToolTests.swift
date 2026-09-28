@@ -112,8 +112,8 @@ struct BashPolicyEvaluationTests {
     func `Allow rule executes directly without asking`() {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "echo", action: .allow),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "echo", action: .allow)
             ]
         )
         let decision = BashSecurity.evaluate(command: "echo hello", config: config)
@@ -126,8 +126,8 @@ struct BashPolicyEvaluationTests {
     func `Deny rule fails closed immediately`() {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "rm*", action: .deny),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "rm*", action: .deny)
             ]
         )
         let decision = BashSecurity.evaluate(command: "rm -rf /tmp/test", config: config)
@@ -139,8 +139,8 @@ struct BashPolicyEvaluationTests {
     func `Chained command demotes allow to ask`() {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "echo", action: .allow),
-                BashRule(pattern: "*", action: .deny)
+                BashRule(pattern: "*", action: .deny),
+                BashRule(pattern: "echo", action: .allow)
             ]
         )
         let decision = BashSecurity.evaluate(command: "echo hello && rm -rf /", config: config)
@@ -154,8 +154,8 @@ struct BashPolicyEvaluationTests {
     func `Command substitution demotes allow to ask`() {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "echo", action: .allow),
-                BashRule(pattern: "*", action: .deny)
+                BashRule(pattern: "*", action: .deny),
+                BashRule(pattern: "echo", action: .allow)
             ]
         )
         let decision = BashSecurity.evaluate(command: "echo $(cat /etc/passwd)", config: config)
@@ -167,8 +167,8 @@ struct BashPolicyEvaluationTests {
     func `Deny rule on chained command stays denied`() {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "rm*", action: .deny),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "rm*", action: .deny)
             ]
         )
         let decision = BashSecurity.evaluate(command: "rm -rf / && echo done", config: config)
@@ -191,14 +191,71 @@ struct BashPolicyEvaluationTests {
     }
 }
 
+@Suite("BashSecurity Last-Match Wins")
+struct BashLastMatchWinsTests {
+    @Test
+    func `Catch-all deny first plus specific allow later allows`() {
+        let config = BashConfig(
+            defaultAction: .deny,
+            rules: [
+                BashRule(pattern: "*", action: .deny),
+                BashRule(pattern: "swiftformat *", action: .allow)
+            ]
+        )
+        let decision = BashSecurity.evaluate(command: "swiftformat .", config: config)
+        #expect(decision.action == .allow)
+        #expect(decision.isAllowed)
+        #expect(!decision.isChained)
+        #expect(decision.matchedPattern == "swiftformat *")
+    }
+
+    @Test
+    func `Reversed order denies`() {
+        let config = BashConfig(
+            defaultAction: .allow,
+            rules: [
+                BashRule(pattern: "swiftformat *", action: .allow),
+                BashRule(pattern: "*", action: .deny)
+            ]
+        )
+        let decision = BashSecurity.evaluate(command: "swiftformat .", config: config)
+        #expect(decision.action == .deny)
+        #expect(decision.isDenied)
+        #expect(decision.matchedPattern == "*")
+    }
+
+    @Test
+    func `No match falls back to defaultAction`() {
+        let askConfig = BashConfig(
+            defaultAction: .ask,
+            rules: [
+                BashRule(pattern: "swiftformat *", action: .allow)
+            ]
+        )
+        let askDecision = BashSecurity.evaluate(command: "echo hello", config: askConfig)
+        #expect(askDecision.action == .ask)
+        #expect(askDecision.matchedPattern == nil)
+
+        let denyConfig = BashConfig(
+            defaultAction: .deny,
+            rules: [
+                BashRule(pattern: "swiftformat *", action: .allow)
+            ]
+        )
+        let denyDecision = BashSecurity.evaluate(command: "echo hello", config: denyConfig)
+        #expect(denyDecision.action == .deny)
+        #expect(denyDecision.matchedPattern == nil)
+    }
+}
+
 @Suite("BashTool Execution")
 struct BashToolExecutionTests {
     @Test
     func `Allowed command executes successfully and captures stdout`() async throws {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "echo", action: .allow),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "echo", action: .allow)
             ]
         )
         let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
@@ -218,8 +275,8 @@ struct BashToolExecutionTests {
     func `Denied command returns failure without executing`() async throws {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "rm*", action: .deny),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "rm*", action: .deny)
             ]
         )
         let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)
@@ -283,8 +340,8 @@ struct BashToolExecutionTests {
     func `Chained command with allow rule requires approval`() async throws {
         let config = BashConfig(
             rules: [
-                BashRule(pattern: "echo", action: .allow),
-                BashRule(pattern: "*", action: .ask)
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "echo", action: .allow)
             ]
         )
         let tool = BashTool(bashConfig: config, allowUnsandboxedFallback: true)

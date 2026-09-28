@@ -144,9 +144,17 @@ max_concurrent_machines = 3
 # Sensitive-path deny list for file tools, mirroring the engine guard.
 # Glob-like: `*` matches within a name, `dir/*` guards a subtree.
 # Changes apply live without a restart.
+# List order is display-only: reordering entries never changes the decision.
+# Live evaluation is deny-then-containment: a deny match denies first
+# (escalating or failing per require_approval_on_deny below), otherwise a path
+# inside any allow root is allowed, otherwise it denies as outside-roots.
+# Denied paths are skipped everywhere including the document index.
 deny_patterns = [".env*", ".netrc", "secrets.json", "config.toml", "*.pem", "*.key", "*keychain*", ".ssh/*", ".aws/*", ".runeweaver/memory/vectors/*", ".git-credentials", ".gitcookies", ".rclone.conf", ".npmrc", ".pypirc", ".Xauthority", ".emulator_console_auth_token", ".gnupg/*", ".kube/*", ".docker/*", ".config/gcloud/*", ".chia_keys/*", "*_history", ".zsh_sessions/*"]
-# Allowed roots for file reads (`~` expands to home); outside-home paths
-# escalate to approval.
+# Allowed roots for live file access (`~` expands to home); outside-root paths
+# escalate to approval. Order is display-only and never changes the decision.
+# Allow roots bound live access only and do not affect index coverage:
+# index coverage is driven by [index].roots, which walks its own roots while
+# still skipping denied paths.
 allow_roots = ["~"]
 # Whether deny hits escalate to the approvals inbox (true) or fail closed.
 require_approval_on_deny = true
@@ -250,9 +258,12 @@ jpeg_quality = 0.75
 blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "System Preferences", "1Password", "Bitwarden"]
 
 [bash]
-# Granular shell execution policy. Rules evaluate top-to-bottom
-# first-match-wins; the first matching pattern decides, otherwise
-# default_action applies.
+# Granular shell execution policy. Rules evaluate top-to-bottom and the
+# last matching rule decides (last-match-wins): put the catch-all first
+# and specifics after, otherwise a leading specific is shadowed by the
+# catch-all below it.
+# Example (last-match): `* = deny` first plus `swiftformat * = allow`
+# later allows `swiftformat .`; reversed order denies.
 enabled = true
 # Default action when no rule matches: allow | ask | deny.
 default_action = "ask"
@@ -262,12 +273,12 @@ timeout_seconds = 30
 allow_network = false
 
 [[bash.rules]]
-pattern = "git status"
-action = "allow"
-
-[[bash.rules]]
 pattern = "*"
 action = "ask"
+
+[[bash.rules]]
+pattern = "git status"
+action = "allow"
 
 [email]
 [[email.accounts]]
