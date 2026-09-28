@@ -1307,6 +1307,80 @@ extension GoalsConfig: Codable {
     }
 }
 
+// MARK: - Proactive surfacing policy
+
+/// Surfacing mode for proactive background interruptions.
+///
+/// The gate filters macOS notifications and dashboard interruption frames
+/// only; run history, WebSocket run frames, and the approvals inbox always
+/// record regardless of mode so auditing never loses a turn.
+public enum ProactiveMode: String, Sendable, Codable, CaseIterable, Equatable {
+    /// Surface every background outcome.
+    case all
+    /// Surface goal milestones, errors, and parked turns only.
+    case milestones
+    /// Milestones plus a judge call for routine scheduler successes.
+    case guarded
+    /// Never surface an interruption.
+    case off
+}
+
+/// `[proactive]` — interruption policy for background scheduler and goal turns.
+///
+/// Stock installs surface everything so behavior matches the pre-gate
+/// notifier byte-for-byte; owners quiet routine successes by moving to
+/// `milestones` (milestones plus errors plus parked only) or `guarded`
+/// (milestones plus one judge call for routine scheduler successes), or
+/// silence interruptions entirely with `off`. The judge timeout bounds the
+/// single model call the guarded path may spend before failing open.
+public struct ProactiveConfig: Sendable, Equatable {
+    /// Surfacing mode. Defaults to `all` for byte-for-byte legacy behavior.
+    public var mode: ProactiveMode
+    /// Seconds the guarded judge may spend before the gate fails open.
+    public var judgeTimeoutSeconds: Int
+
+    /// Default keeps every interruption surfacing like the legacy notifier.
+    public static let defaultMode = ProactiveMode.all
+    /// Default judge budget waits out slow local models without stalling the tick.
+    public static let defaultJudgeTimeoutSeconds = 15
+    /// Smallest judge budget that still allows one model round trip.
+    public static let minJudgeTimeoutSeconds = 1
+    /// Largest judge budget before a routine success holds the tick too long.
+    public static let maxJudgeTimeoutSeconds = 120
+
+    /// Creates a proactive config.
+    public init(
+        mode: ProactiveMode = defaultMode,
+        judgeTimeoutSeconds: Int = defaultJudgeTimeoutSeconds
+    ) {
+        self.mode = mode
+        self.judgeTimeoutSeconds = judgeTimeoutSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case mode
+        case judgeTimeoutSeconds = "judge_timeout_seconds"
+    }
+}
+
+extension ProactiveConfig: Codable {
+    /// Decodes a proactive config, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try container.decodeIfPresent(ProactiveMode.self, forKey: .mode) ?? Self.defaultMode
+        judgeTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .judgeTimeoutSeconds) ?? Self.defaultJudgeTimeoutSeconds
+    }
+
+    /// Encodes a proactive config.
+    /// - Parameter encoder: Encoder for the config document.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(judgeTimeoutSeconds, forKey: .judgeTimeoutSeconds)
+    }
+}
+
 // MARK: - Root config
 
 /// Root configuration mirroring `~/.runeweaver/config.toml`.
@@ -1349,6 +1423,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
     public var goals = GoalsConfig()
     /// Granular shell execution policy.
     public var bash = BashConfig()
+    /// Interruption policy for background scheduler and goal turns.
+    public var proactive = ProactiveConfig()
 
     /// Creates a root config from section configs.
     public init(
@@ -1370,7 +1446,8 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         desktop: DesktopConfig = DesktopConfig(),
         security: SecurityConfig = SecurityConfig(),
         goals: GoalsConfig = GoalsConfig(),
-        bash: BashConfig = BashConfig()
+        bash: BashConfig = BashConfig(),
+        proactive: ProactiveConfig = ProactiveConfig()
     ) {
         self.engine = engine
         self.server = server
@@ -1391,6 +1468,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.security = security
         self.goals = goals
         self.bash = bash
+        self.proactive = proactive
     }
 
     /// Config with sensible defaults matching `config.toml.example`.
@@ -1484,17 +1562,19 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         case security
         case goals
         case bash
+        case proactive
     }
 
     /// Decodes a persisted config, defaulting absent additive sections.
     ///
     /// TOML loading early-returns hardened when the section is missing, so JSON
-    /// must match: payloads written before the defense policy or goal pursuit
-    /// existed decode with hardened and disabled defaults instead of throwing.
+    /// must match: payloads written before the defense policy, goal pursuit, or
+    /// proactive surfacing existed decode with hardened, disabled, and
+    /// surfacing defaults instead of throwing.
     /// Present-but-wrong-typed values still throw like every prior section.
-    /// Only the security and goals sections are absent-tolerant; every other
-    /// section decodes strictly so a truncated payload cannot silently load
-    /// as hardened defaults.
+    /// Only the security, goals, bash, and proactive sections are
+    /// absent-tolerant; every other section decodes strictly so a truncated
+    /// payload cannot silently load as hardened defaults.
     /// - Parameter decoder: Source decoder.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -1517,9 +1597,10 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         self.security = try container.decodeIfPresent(SecurityConfig.self, forKey: .security) ?? SecurityConfig()
         self.goals = try container.decodeIfPresent(GoalsConfig.self, forKey: .goals) ?? GoalsConfig()
         self.bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
+        self.proactive = try container.decodeIfPresent(ProactiveConfig.self, forKey: .proactive) ?? ProactiveConfig()
     }
 
-    /// Encodes every section, including the defense policy and goal pursuit.
+    /// Encodes every section, including the defense policy, goal pursuit, and proactive surfacing.
     /// - Parameter encoder: Destination encoder.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
@@ -1542,6 +1623,7 @@ public struct RuneWeaverConfig: Sendable, Codable, Equatable {
         try container.encode(security, forKey: .security)
         try container.encode(goals, forKey: .goals)
         try container.encode(bash, forKey: .bash)
+        try container.encode(proactive, forKey: .proactive)
     }
 }
 

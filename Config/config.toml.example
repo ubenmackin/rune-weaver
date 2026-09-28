@@ -404,6 +404,15 @@ max_steps_per_goal = 12
 # fallback keeps the goal (must stay positive).
 plan_timeout_seconds = 60
 
+[proactive]
+# Interruption policy for background scheduler and goal turns. `all` surfaces
+# every background outcome; `milestones` surfaces goal milestones, errors, and
+# parked turns only; `guarded` adds one judge call for routine scheduler
+# successes; `off` never interrupts. Run history and the approvals inbox always
+# record regardless of mode, so auditing never loses a turn.
+# mode = "all"  # all | milestones | guarded | off
+# judge_timeout_seconds = 15  # Seconds the guarded judge may spend (1-120).
+
 [security]
 # Harness-level defense policy for external content. Both keys default ON;
 # an absent [security] section loads hardened so existing files need no

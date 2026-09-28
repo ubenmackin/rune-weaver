@@ -44,6 +44,12 @@ public actor ServerSchedulerWorker {
     /// Dedicated single-flight lock for goal fires so a slow goal turn never
     /// blocks job fires sharing the job lock, and vice versa.
     private let goalRunLock: SchedulerRunLock
+    /// Interruption gate for background notifications and dashboard frames.
+    ///
+    /// Filters macOS notifications and `proactive_message` frames only; run
+    /// history, run broadcasts, and the approvals inbox always record so the
+    /// audit trail never loses a turn the gate suppresses.
+    private let outcomeGate: OutcomeGate
 
     private let intervalSeconds: TimeInterval
     private var lastCheck: Date
@@ -68,7 +74,10 @@ public actor ServerSchedulerWorker {
         indexCoordinator: IndexCoordinator? = nil,
         goalStore: GoalStore? = nil,
         goalEngine: GoalEngine? = nil,
-        goalRunLock: SchedulerRunLock? = nil
+        goalRunLock: SchedulerRunLock? = nil,
+        outcomeGate: OutcomeGate? = nil,
+        proactiveConfig: ProactiveConfig = ProactiveConfig(),
+        judgeLLM: (any LLMProvider)? = nil
     ) {
         self.scheduler = scheduler
         self.runs = runs
@@ -86,6 +95,20 @@ public actor ServerSchedulerWorker {
         self.goalStore = goalStore
         self.goalEngine = goalEngine
         self.goalRunLock = goalRunLock ?? SchedulerRunLock()
+        if let outcomeGate {
+            self.outcomeGate = outcomeGate
+        } else if let judgeLLM, proactiveConfig.mode == .guarded {
+            self.outcomeGate = OutcomeGate(
+                mode: proactiveConfig.mode,
+                judgeTimeoutSeconds: proactiveConfig.judgeTimeoutSeconds,
+                judge: Self.makeProactiveJudge(llm: judgeLLM)
+            )
+        } else {
+            self.outcomeGate = OutcomeGate(
+                mode: proactiveConfig.mode,
+                judgeTimeoutSeconds: proactiveConfig.judgeTimeoutSeconds
+            )
+        }
     }
 
     // Explicit stop() ends the background loop; actor-isolated loop state
@@ -362,9 +385,19 @@ public actor ServerSchedulerWorker {
             ) ?? initialEntry
             await hub.broadcastRun(entry)
 
-            let short = schedulerRunPreview(response.text)
+            let short = ProactiveEvent.makePreview(response.text)
             await logger?("Scheduler fired '\(job.name)' (\(reason.displayName)): \(short)")
-            await notifier?.notify(title: "Rune Weaver: \(job.name)", body: short.isEmpty ? job.prompt : short)
+            // The gate filters interruptions only; the run row and its run
+            // broadcast above always record so suppressed turns stay auditable.
+            let eventKind: ProactiveEventKind = response.isParked ? .runParked : .schedulerOk
+            let outcomeText = response.text.isEmpty ? job.prompt : response.text
+            let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: job.name, outcome: outcomeText))
+            if decision.surface {
+                if let notifier {
+                    await notifier.notify(title: "Rune Weaver: \(job.name)", body: short.isEmpty ? job.prompt : short)
+                }
+                await broadcastProactive(kind: eventKind, title: job.name, headline: decision.headline, sessionID: sessionID)
+            }
 
             result = SchedulerRunResult(
                 jobName: job.name,
@@ -386,6 +419,17 @@ public actor ServerSchedulerWorker {
             ) ?? initialEntry
             await hub.broadcastRun(entry)
             await logger?("Scheduler failed '\(job.name)': \(detail)")
+            // Errors break through under every surfacing mode except off; the
+            // error row above always records so the gate never hides a failure
+            // from history.
+            let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: job.name, outcome: detail))
+            if errorDecision.surface {
+                let errorPreview = ProactiveEvent.makePreview(detail)
+                if let notifier {
+                    await notifier.notify(title: "Rune Weaver: \(job.name)", body: errorPreview.isEmpty ? job.prompt : errorPreview)
+                }
+                await broadcastProactive(kind: .schedulerError, title: job.name, headline: errorDecision.headline, sessionID: sessionID)
+            }
 
             result = SchedulerRunResult(
                 jobName: job.name,
@@ -445,7 +489,8 @@ extension ServerSchedulerWorker {
         sessionID: UUID,
         runID: UUID,
         outcome: GoalAdvancementTurn,
-        startTime: Date
+        startTime: Date,
+        eventKind: ProactiveEventKind = .goalStepDone
     ) async -> SchedulerRunResult {
         let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
         // Parked goal turns remain as awaiting_approval like scheduler
@@ -464,13 +509,22 @@ extension ServerSchedulerWorker {
         if let entry {
             await hub.broadcastRun(entry)
         }
-        let short = schedulerRunPreview(outcome.text)
+        let short = ProactiveEvent.makePreview(outcome.text)
         if outcome.isParked {
             await logger?("Goal '\(goal.title)' parked awaiting approval.")
         } else {
             await logger?("Goal fired '\(goal.title)': \(short)")
         }
-        await notifier?.notify(title: "Rune Weaver: \(goal.title)", body: short.isEmpty ? goal.title : short)
+        // The gate filters interruptions only; the goal row and its run
+        // broadcast above always record so suppressed steps stay auditable.
+        let outcomeText = outcome.text.isEmpty ? goal.title : outcome.text
+        let decision = await outcomeGate.decide(event: ProactiveEvent(kind: eventKind, title: goal.title, outcome: outcomeText))
+        if decision.surface {
+            if let notifier {
+                await notifier.notify(title: "Rune Weaver: \(goal.title)", body: short.isEmpty ? goal.title : short)
+            }
+            await broadcastProactive(kind: eventKind, title: goal.title, headline: decision.headline, sessionID: sessionID, goalID: goal.id)
+        }
         return SchedulerRunResult(
             jobName: goal.title,
             sessionID: sessionID,
@@ -503,6 +557,17 @@ extension ServerSchedulerWorker {
             await hub.broadcastRun(entry)
         }
         await logger?("Goal failed '\(goal.title)': \(detail)")
+        // Failures break through under every surfacing mode except off; the
+        // error row above always records so the gate never hides a failure
+        // from history.
+        let errorDecision = await outcomeGate.decide(event: ProactiveEvent(kind: .schedulerError, title: goal.title, outcome: detail))
+        if errorDecision.surface {
+            let errorPreview = ProactiveEvent.makePreview(detail)
+            if let notifier {
+                await notifier.notify(title: "Rune Weaver: \(goal.title)", body: errorPreview.isEmpty ? goal.title : errorPreview)
+            }
+            await broadcastProactive(kind: .schedulerError, title: goal.title, headline: errorDecision.headline, sessionID: sessionID, goalID: goal.id)
+        }
         return SchedulerRunResult(
             jobName: goal.title,
             sessionID: sessionID,
@@ -578,13 +643,19 @@ extension ServerSchedulerWorker {
                     await bumpLogger?("Goal '\(bumpTitle)' post-advance failed: \(error.localizedDescription)")
                 }
             )
+            let eventKind = await resolveGoalEventKind(goal: goal, store: store, outcome: outcome)
             result = await recordGoalSuccess(
                 goal: goal,
                 sessionID: sessionID,
                 runID: initialEntry.id,
                 outcome: outcome,
-                startTime: startTime
+                startTime: startTime,
+                eventKind: eventKind
             )
+            // The turn may have moved steps or flipped lifecycle state through
+            // `goal.progress`, so push the fresh row for live dashboards; the
+            // run broadcast above already carried the audit entry.
+            await broadcastGoalSnapshot(goalID: goal.id, store: store)
         } catch is CancellationError {
             // Cancelled turns did not advance, so they stay due: mark the run
             // cancelled (never error), release the lock, then propagate.
@@ -606,10 +677,136 @@ extension ServerSchedulerWorker {
                 error: error,
                 startTime: startTime
             )
+            // Even a failed turn bumps the due date (never pins due), so the
+            // row refresh keeps the new due instant visible without a refetch.
+            await broadcastGoalSnapshot(goalID: goal.id, store: store)
         }
 
         await goalRunLock.release(id: goal.id, name: goal.title)
         return result
+    }
+
+    /// Contention signal for manual goal advancement when the goal is already running.
+    ///
+    /// Thrown after recording the honest skipped audit row so the route can
+    /// answer 409 like the manual job run without inventing a second lock.
+    public struct GoalBusyError: Error, Sendable {
+        /// Creates a busy signal.
+        public init() {}
+    }
+
+    /// Advances one goal immediately, bypassing its due cadence.
+    ///
+    /// Shares the single-flight lock, per-run session, run-row lifecycle, and
+    /// proactive gating with the background tick so manual and automatic fires
+    /// cannot stack or drift. The returned identifiers let the route answer
+    /// with both the durable run row and its session without a second lookup.
+    /// - Parameter goalID: Goal to advance.
+    /// - Returns: Run-log identifier plus the per-run session identifier.
+    public func advanceGoalNow(goalID: UUID) async throws -> (runID: UUID, sessionID: UUID) {
+        guard let store = goalStore, let engine = goalEngine else {
+            throw GoalEngineError.disabled
+        }
+        guard await engine.isEnabled else {
+            throw GoalEngineError.disabled
+        }
+        guard let goal = try await store.goal(id: goalID) else {
+            throw GoalStoreError.notFound("No goal \(goalID)")
+        }
+        let startTime = Date()
+        guard await goalRunLock.tryAcquire(id: goal.id, name: goal.title) else {
+            _ = await recordGoalSkipped(goal: goal, startTime: startTime)
+            throw GoalBusyError()
+        }
+        let sessionID = await makeGoalRunSession(goal: goal, conversations: conversations)
+        let initialEntry = await runs.append(
+            kind: "goal",
+            status: "running",
+            message: goal.title,
+            sessionID: sessionID,
+            goalID: goal.id,
+            durationMs: 0
+        )
+        await hub.broadcastRun(initialEntry)
+        do {
+            let turnOrchestrator = orchestrator
+            let turnSessionID = sessionID
+            let turnGoalID = goal.id
+            let bumpLogger = logger
+            let bumpTitle = goal.title
+            let outcome = try await GoalAdvancementRunner.advance(
+                goal: goal,
+                store: store,
+                engine: engine,
+                runID: initialEntry.id,
+                turn: { prompt in
+                    let response = try await turnOrchestrator.process(input: UserInput(
+                        text: prompt,
+                        sessionID: turnSessionID,
+                        source: "goal",
+                        goalID: turnGoalID
+                    ))
+                    return GoalAdvancementTurn(
+                        text: response.text,
+                        isParked: response.isParked,
+                        toolActions: response.toolActions,
+                        totalTokens: response.totalTokens
+                    )
+                },
+                onPostAdvanceFailure: { error in
+                    await bumpLogger?("Goal '\(bumpTitle)' post-advance failed: \(error.localizedDescription)")
+                }
+            )
+            let eventKind = await resolveGoalEventKind(goal: goal, store: store, outcome: outcome)
+            _ = await recordGoalSuccess(
+                goal: goal,
+                sessionID: sessionID,
+                runID: initialEntry.id,
+                outcome: outcome,
+                startTime: startTime,
+                eventKind: eventKind
+            )
+            await broadcastGoalSnapshot(goalID: goal.id, store: store)
+            await goalRunLock.release(id: goal.id, name: goal.title)
+            return (runID: initialEntry.id, sessionID: sessionID)
+        } catch is CancellationError {
+            let durationMs = Int(Date().timeIntervalSince(startTime) * 1000)
+            if let entry = await runs.update(
+                id: initialEntry.id,
+                status: "cancelled",
+                durationMs: durationMs
+            ) {
+                await hub.broadcastRun(entry)
+            }
+            await goalRunLock.release(id: goal.id, name: goal.title)
+            throw CancellationError()
+        } catch {
+            _ = await recordGoalFailure(
+                goal: goal,
+                sessionID: sessionID,
+                runID: initialEntry.id,
+                error: error,
+                startTime: startTime
+            )
+            await broadcastGoalSnapshot(goalID: goal.id, store: store)
+            await goalRunLock.release(id: goal.id, name: goal.title)
+            throw error
+        }
+    }
+
+    /// Pushes the current goal row to live sockets after an advancement turn.
+    ///
+    /// Best-effort refresh so dashboards patch one row instead of refetching;
+    /// failures only log because the run row and its broadcast already landed.
+    private func broadcastGoalSnapshot(goalID: UUID, store: GoalStore) async {
+        do {
+            if let goal = try await store.goal(id: goalID) {
+                let steps = await (try? store.steps(goalID: goalID)) ?? []
+                await hub.broadcastGoal(GoalDTO(goal: goal, steps: steps))
+            }
+        } catch {
+            await logger?("Goal snapshot broadcast failed: \(error.localizedDescription)")
+        }
     }
 }
 
@@ -623,15 +820,167 @@ func makeGoalRunSession(goal: Goal, conversations: ConversationManager) async ->
     return sessionID
 }
 
-/// Truncates a run response for log and notification previews.
-///
-/// Shared by job and goal fires so both surfaces quote the same bounded
-/// prefix instead of each reimplementing the trim logic.
-/// - Parameter text: Full response text.
-/// - Returns: Trimmed prefix capped at 160 characters.
-func schedulerRunPreview(_ text: String) -> String {
-    let preview = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    return preview.count > 160 ? String(preview.prefix(160)) + "…" : preview
+// MARK: - Proactive surfacing helpers
+
+/// Judge failures mapped to throws so the gate fails open to surfacing.
+private enum ProactiveJudgeError: Error, Sendable {
+    /// The model returned no text to parse.
+    case emptyResponse
+    /// The model reply was not the demanded JSON shape.
+    case unparseable(String)
+    /// The stream reported a provider failure mid-judge.
+    case providerError(String)
+}
+
+extension ServerSchedulerWorker {
+    /// Broadcasts one surfaced interruption frame for dashboard badges.
+    ///
+    /// Called only when the gate surfaces so suppressed modes stay silent;
+    /// the run row broadcast already happened unconditionally, so this frame
+    /// carries the interruption alone and never duplicates audit history. The
+    /// shared `WSProactiveMessageFrame` shape carries kind, title, and
+    /// headline plus session and goal links so the dashboard can raise a Web
+    /// Notification or badge and deep-link without a second lookup, even with
+    /// no macOS notifier.
+    private func broadcastProactive(kind: ProactiveEventKind, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) async {
+        let frame = WSProactiveMessageFrame(kind: kind.rawValue, title: title, headline: headline, sessionID: sessionID, goalID: goalID)
+        guard let data = try? JSONEncoder().encode(frame),
+              let text = String(data: data, encoding: .utf8)
+        else { return }
+        await hub.broadcast(text: text)
+    }
+
+    /// Classifies a finished goal turn into its proactive kind.
+    ///
+    /// Parked turns map to the parked kind without touching the store; fresh
+    /// terminal states (achieved, needs input) win next, then any blocked
+    /// step, with routine step completion as the fallback. Best-effort: store
+    /// failures degrade to the routine kind rather than failing the turn, and
+    /// the gate still surfaces errors and parked turns from their own paths.
+    private func resolveGoalEventKind(goal: Goal, store: GoalStore, outcome: GoalAdvancementTurn) async -> ProactiveEventKind {
+        if outcome.isParked {
+            return .runParked
+        }
+        do {
+            if let fresh = try await store.goal(id: goal.id) {
+                switch fresh.status {
+                case .achieved:
+                    return .goalAchieved
+                case .needsInput:
+                    return .goalNeedsInput
+                case .active, .paused, .abandoned:
+                    break
+                }
+            }
+            let steps = try await store.steps(goalID: goal.id)
+            if steps.contains(where: { $0.status == .blocked }) {
+                return .goalBlocked
+            }
+        } catch {
+            // Classification never fails a turn; routine is the quiet fallback.
+        }
+        return .goalStepDone
+    }
+
+    /// Builds the single-exchange judge prompt for a routine scheduler success.
+    ///
+    /// Sets a high interruption bar (worth the owner's attention right now?)
+    /// and demands JSON only so the parser can fail closed to a throw, which
+    /// the gate then fails open to surfacing. The title is clamped to the
+    /// headline budget so an unbounded goal title cannot bloat the judge
+    /// exchange; the preview already carries the shared 160-character bound.
+    /// - Parameter event: Routine outcome awaiting a verdict.
+    /// - Returns: User prompt for the judge model.
+    public static func proactiveJudgePrompt(for event: ProactiveEvent) -> String {
+        let title = ProactiveEvent.clampHeadline(event.title)
+        return """
+        You are the interruption judge for Rune Weaver background runs. \
+        Decide whether this routine scheduler outcome is worth interrupting the owner right now. \
+        The bar is high: surface only when the owner must see it immediately; routine completions stay quiet. \
+        Respond with JSON only, no other text: {"surface": bool, "headline": string}. \
+        The headline must be at most 90 characters and summarize why this matters. \
+        Event kind: \(event.kind.rawValue). Title: \(title). Outcome preview: \(event.preview)
+        """
+    }
+
+    /// Parses one judge reply into a verdict, throwing on any drift.
+    ///
+    /// Strips fenced code wrappers before decoding so a helpful model that
+    /// wraps its JSON still parses; anything else (empty, non-JSON, missing
+    /// keys) throws so the gate fails open instead of silently swallowing the
+    /// outcome.
+    /// - Parameter text: Raw judge reply text.
+    /// - Returns: Decoded verdict.
+    public static func parseProactiveJudgeResponse(_ text: String) throws -> SurfacingVerdict {
+        struct Payload: Decodable {
+            let surface: Bool
+            let headline: String
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw ProactiveJudgeError.emptyResponse
+        }
+        let jsonText = stripJudgeFences(trimmed)
+        guard let start = jsonText.firstIndex(of: "{"),
+              let end = jsonText.lastIndex(of: "}"),
+              start <= end
+        else {
+            throw ProactiveJudgeError.unparseable(trimmed)
+        }
+        let slice = String(jsonText[start ... end])
+        guard let data = slice.data(using: .utf8) else {
+            throw ProactiveJudgeError.unparseable(trimmed)
+        }
+        do {
+            let payload = try JSONDecoder().decode(Payload.self, from: data)
+            return SurfacingVerdict(surface: payload.surface, headline: payload.headline)
+        } catch {
+            throw ProactiveJudgeError.unparseable(trimmed)
+        }
+    }
+
+    /// Strips a single fenced code wrapper from a judge reply.
+    private static func stripJudgeFences(_ text: String) -> String {
+        var working = text
+        if working.hasPrefix("```") {
+            if let firstNewline = working.firstIndex(of: "\n") {
+                working = String(working[working.index(after: firstNewline)...])
+            } else {
+                working = String(working.dropFirst(3))
+            }
+            if let fenceRange = working.range(of: "```", options: .backwards) {
+                working = String(working[..<fenceRange.lowerBound])
+            }
+        }
+        return working.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Builds a judge closure around one LLM provider.
+    ///
+    /// Runs one short text-in/JSON-out exchange with no tools; provider errors
+    /// and unparseable replies throw so the gate fails open to surfacing. The
+    /// gate itself enforces the judge timeout, so this closure never sleeps.
+    /// - Parameter llm: Provider serving the single judge exchange.
+    /// - Returns: Judge closure for a guarded gate.
+    public static func makeProactiveJudge(llm: any LLMProvider) -> ProactiveJudge {
+        let captured = llm
+        return { @Sendable event in
+            let prompt = proactiveJudgePrompt(for: event)
+            let messages = [Message(role: .user, content: prompt)]
+            var text = ""
+            let stream = captured.chat(messages: messages, tools: [])
+            for await chunk in stream {
+                if let failure = chunk.errorMessage, !failure.isEmpty {
+                    throw ProactiveJudgeError.providerError(failure)
+                }
+                text += chunk.delta
+                if chunk.isFinished {
+                    break
+                }
+            }
+            return try parseProactiveJudgeResponse(text)
+        }
+    }
 }
 
 /// Adapter delivering index run lifecycle events onto the server's durable run

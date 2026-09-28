@@ -197,3 +197,122 @@ public struct GoalEvent: Sendable, Codable, Equatable, Identifiable {
         self.createdAt = createdAt
     }
 }
+
+// MARK: - Shared goal input validation
+
+/// Neutral validation failures for goal inputs shared by the service and CLI.
+///
+/// Carries only the offending value so each surface keeps its own error idiom:
+/// the REST layer maps to `Abort(.badRequest)` while the CLI maps to
+/// `ValidationError`. Bounds and alias sets live here once so the two
+/// surfaces cannot drift on what counts as valid.
+public enum GoalValidationError: Error, Sendable, Equatable {
+    /// Title trimmed to empty.
+    case emptyTitle
+    /// Statement trimmed to empty.
+    case emptyStatement
+    /// Required goal status trimmed to empty.
+    case emptyGoalStatus
+    /// Required step status trimmed to empty.
+    case emptyStepStatus
+    /// Cadence hint outside the steady pursuit bounds.
+    case cadenceOutOfRange(Int)
+    /// Unknown goal lifecycle value after trimming.
+    case unknownGoalStatus(String)
+    /// Unknown step lifecycle value after trimming.
+    case unknownStepStatus(String)
+}
+
+/// Single-sourced validators for goal titles, statements, cadences, and statuses.
+///
+/// Trims once, accepts only exact `rawValue` spellings plus one documented
+/// camelCase alias per lifecycle family (`needsInput` for goals,
+/// `inProgress` for steps) so dashboard selects, CLI flags, and REST filters
+/// agree. Case-insensitive fallbacks are intentionally absent: `ACTIVE` must
+/// fail rather than silently list.
+public enum GoalValidation: Sendable {
+    /// Validates a goal title, rejecting whitespace-only input.
+    /// - Parameter raw: Raw title.
+    /// - Returns: Trimmed title.
+    public static func validatedTitle(_ raw: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw GoalValidationError.emptyTitle }
+        return trimmed
+    }
+
+    /// Validates a goal statement, rejecting whitespace-only input.
+    /// - Parameter raw: Raw statement.
+    /// - Returns: Trimmed statement.
+    public static func validatedStatement(_ raw: String) throws -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw GoalValidationError.emptyStatement }
+        return trimmed
+    }
+
+    /// Validates an optional cadence hint against the steady pursuit bounds.
+    ///
+    /// Nil passes through so creation falls back to the configured interval.
+    /// - Parameter raw: Raw interval, or nil when omitted.
+    /// - Returns: Validated interval, or nil.
+    public static func validateCadence(_ raw: Int?) throws -> Int? {
+        guard let raw else { return nil }
+        guard raw >= GoalsConfig.minStepIntervalMinutes, raw <= GoalsConfig.maxStepIntervalMinutes else {
+            throw GoalValidationError.cadenceOutOfRange(raw)
+        }
+        return raw
+    }
+
+    /// Parses a required goal lifecycle state, accepting only the exact
+    /// `rawValue` plus the `needsInput` camelCase alias for the parked state.
+    /// - Parameter raw: Raw status value.
+    /// - Returns: Parsed state.
+    public static func parseGoalStatus(_ raw: String) throws -> GoalStatus {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw GoalValidationError.emptyGoalStatus }
+        if trimmed == "needsInput" {
+            return .needsInput
+        }
+        if let parsed = GoalStatus(rawValue: trimmed) {
+            return parsed
+        }
+        throw GoalValidationError.unknownGoalStatus(trimmed)
+    }
+
+    /// Parses an optional goal status filter; blank and absent mean unfiltered.
+    /// - Parameter raw: Raw status value, or nil when unfiltered.
+    /// - Returns: Parsed filter, or nil.
+    public static func parseGoalStatusFilter(_ raw: String?) throws -> GoalStatus? {
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return try parseGoalStatus(trimmed)
+    }
+
+    /// Parses a required step state, accepting only the exact `rawValue` plus
+    /// the `inProgress` camelCase alias for the underway state.
+    /// - Parameter raw: Raw status value.
+    /// - Returns: Parsed state.
+    public static func parseStepStatus(_ raw: String) throws -> StepStatus {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw GoalValidationError.emptyStepStatus }
+        if trimmed == "inProgress" {
+            return .inProgress
+        }
+        if let parsed = StepStatus(rawValue: trimmed) {
+            return parsed
+        }
+        throw GoalValidationError.unknownStepStatus(trimmed)
+    }
+}
+
+public extension GoalsConfig {
+    /// Validates an optional cadence hint against the steady pursuit bounds.
+    ///
+    /// Thin forwarder over the shared validator so routes and CLI call the
+    /// config-owned bound without duplicating the range.
+    /// - Parameter raw: Raw interval, or nil when omitted.
+    /// - Returns: Validated interval, or nil.
+    static func validateCadence(_ raw: Int?) throws -> Int? {
+        try GoalValidation.validateCadence(raw)
+    }
+}

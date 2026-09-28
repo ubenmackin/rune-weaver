@@ -1636,6 +1636,102 @@ export interface DesktopSettingsUpdate {
   blocked_apps?: string[];
 }
 
+// Steady goal pursuit policy mirroring the engine `GoalsConfig`
+// (Sources/RuneWeaverCore/Config.swift). Goals stay opt-in so a fresh install
+// never spends planning calls until the owner enables them; the cadence hint
+// is stored on each new goal and the active cap bounds scheduler fan-out.
+export interface GoalsConfigData {
+  enabled: boolean;
+  step_interval_minutes: number;
+  max_active_goals: number;
+  max_steps_per_goal: number;
+  plan_timeout_seconds: number;
+}
+
+// Partial goals patch for `PUT /settings`, mirroring the engine
+// `GoalsUpdate`. Every field is optional so a request carrying one key leaves
+// the rest of the stored `[goals]` section untouched; the dashboard sends the
+// snake_case keys the engine persists while the engine also accepts the
+// camelCase aliases, so either spelling writes.
+export interface GoalsSettingsUpdate {
+  enabled?: boolean;
+  step_interval_minutes?: number;
+  stepIntervalMinutes?: number;
+  max_active_goals?: number;
+  maxActiveGoals?: number;
+}
+
+// Interruption policy for background scheduler and goal turns, mirroring the
+// engine `ProactiveConfig` (Sources/RuneWeaverCore/Config.swift). The gate
+// filters notifications and interruption frames only; run history and the
+// approvals inbox always record regardless of mode.
+export interface ProactiveConfigData {
+  mode: string;
+  judge_timeout_seconds: number;
+}
+
+// Partial proactive patch for `PUT /settings`, mirroring the engine
+// `ProactiveUpdate`. Every field is optional so a request carrying one key
+// leaves the rest of the stored `[proactive]` section untouched.
+export interface ProactiveSettingsUpdate {
+  mode?: string;
+  judge_timeout_seconds?: number;
+  judgeTimeoutSeconds?: number;
+}
+
+// Manual mirrors of GoalsConfig defaults so a fresh form matches the boundary
+// the engine enforces before the first settings fetch.
+export const DEFAULT_GOALS_ENABLED = false;
+export const DEFAULT_GOALS_STEP_INTERVAL_MINUTES = 1440;
+export const DEFAULT_GOALS_MAX_ACTIVE_GOALS = 10;
+
+// Goals cadence bounds mirroring GoalsConfig.minStepIntervalMinutes and
+// maxStepIntervalMinutes; the server owns the 5-20160 range and this mirror is
+// the single source for the client validator.
+export const GOALS_STEP_INTERVAL_MIN_MINUTES = 5;
+export const GOALS_STEP_INTERVAL_MAX_MINUTES = 20160;
+
+// Active-goal cap bounds mirroring GoalsConfig.minActiveGoalsBound and
+// maxActiveGoalsBound; the server owns the 1-50 range.
+export const GOALS_MAX_ACTIVE_MIN = 1;
+export const GOALS_MAX_ACTIVE_MAX = 50;
+
+// Closed set of valid proactive surfacing modes, mirroring ProactiveMode on
+// the engine. Single source for the client validator and the Proactivity
+// select so the two cannot drift.
+export const PROACTIVE_MODES = ["all", "milestones", "guarded", "off"] as const;
+
+// Canonical proactive mode spelling carried on the wire and in the select.
+export type ProactiveModeName = (typeof PROACTIVE_MODES)[number];
+
+// Normalizes a proactive mode to its canonical lowercase spelling so the
+// dashboard accepts the same values the file loader does. The TOML decoder
+// trims and lowercases before matching `ProactiveMode`, so `ALL` or padded
+// ` Guarded ` load from disk; the client must converge to the same spelling
+// before validating or sending instead of rejecting what the file accepts.
+export function normalizeProactiveMode(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+// Reports whether a value names a proactive surfacing mode, ignoring case
+// and surrounding whitespace to match the file loader. Single source for the
+// settings validator and populate path so both agree with the engine.
+export function isValidProactiveMode(value: unknown): boolean {
+  return (PROACTIVE_MODES as readonly string[]).includes(
+    normalizeProactiveMode(value),
+  );
+}
+
+// Manual mirrors of ProactiveConfig defaults; the server owns `all` plus the
+// 15-second judge budget and the contract test pins both ends.
+export const DEFAULT_PROACTIVE_MODE = "all";
+export const DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS = 15;
+
+// Judge timeout bounds mirroring ProactiveConfig.minJudgeTimeoutSeconds and
+// maxJudgeTimeoutSeconds; the server owns the 1-120 range.
+export const PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS = 1;
+export const PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS = 120;
+
 // Sandboxed shell execution policy mirroring the engine `BashConfig`
 // (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom
 // last-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
@@ -2532,6 +2628,12 @@ export interface SettingsResponse {
   // Sandboxed shell execution policy under [bash]; optional for back-compat
   // with older engines that predate the section.
   bash?: BashConfigData;
+  // Steady goal pursuit policy under [goals]; optional for back-compat with
+  // older engines that predate the section.
+  goals?: GoalsConfigData;
+  // Interruption policy under [proactive]; optional for back-compat with
+  // older engines that predate the section.
+  proactive?: ProactiveConfigData;
   // HTTP bind from [server]; optional for back-compat with older engines that
   // predate the bind keys. Absent degrades to the loopback defaults so the
   // Network pane never renders blank.
@@ -2589,6 +2691,10 @@ export interface UpdateSettingsInput {
   desktop?: DesktopSettingsUpdate;
   // Partial bash patch; an omitted patch preserves the stored [bash] section.
   bash?: BashSettingsUpdate;
+  // Partial goals patch; an omitted patch preserves the stored [goals] section.
+  goals?: GoalsSettingsUpdate;
+  // Partial proactive patch; an omitted patch preserves the stored [proactive] section.
+  proactive?: ProactiveSettingsUpdate;
   // Bind patch for [server]; an omitted patch preserves the stored section.
   // The engine persists these to the file and returns requiresRestart without
   // live-reloading the bind, so the dashboard shows a restart banner.

@@ -58,6 +58,20 @@ import {
   DEFAULT_DESKTOP_BLOCKED_APPS_TEXT,
   DEFAULT_DESKTOP_JPEG_QUALITY,
   DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION,
+  DEFAULT_GOALS_ENABLED,
+  DEFAULT_GOALS_MAX_ACTIVE_GOALS,
+  DEFAULT_GOALS_STEP_INTERVAL_MINUTES,
+  DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS,
+  DEFAULT_PROACTIVE_MODE,
+  GOALS_MAX_ACTIVE_MAX,
+  GOALS_MAX_ACTIVE_MIN,
+  GOALS_STEP_INTERVAL_MAX_MINUTES,
+  GOALS_STEP_INTERVAL_MIN_MINUTES,
+  PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS,
+  PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS,
+  PROACTIVE_MODES,
+  normalizeProactiveMode,
+  isValidProactiveMode,
   formatBlockedAppsText,
   parseBlockedAppsText,
   BASH_PERMISSION_ACTIONS,
@@ -73,6 +87,10 @@ import {
   type DesktopConfigData,
   type DesktopSettingsUpdate,
   type EmailAccountData,
+  type GoalsConfigData,
+  type GoalsSettingsUpdate,
+  type ProactiveConfigData,
+  type ProactiveSettingsUpdate,
   type MediaConfigData,
   type ProviderConfigData,
   type SettingsResponse,
@@ -1051,6 +1069,25 @@ export default function SettingsManager() {
   // focus without a document-wide lookup that breaks with multiple instances
   // or strict-mode remounts.
   const bashRulesTextareaRef = useRef<HTMLTextAreaElement>(null);
+  // Steady long-horizon pursuit ([goals]): enablement plus the cadence hint
+  // stored on each new goal and the active-goal cap bounding scheduler
+  // fan-out. Planning bounds stay file-owned. The fresh form seeds from the
+  // engine defaults so the editor matches the boundary before the first
+  // settings fetch.
+  const [goalsEnabled, setGoalsEnabled] = useState<boolean>(DEFAULT_GOALS_ENABLED);
+  const [goalsStepIntervalMinutes, setGoalsStepIntervalMinutes] = useState<number | string>(
+    DEFAULT_GOALS_STEP_INTERVAL_MINUTES
+  );
+  const [goalsMaxActiveGoals, setGoalsMaxActiveGoals] = useState<number | string>(
+    DEFAULT_GOALS_MAX_ACTIVE_GOALS
+  );
+  // Background interruption policy ([proactive]): surfacing mode plus the
+  // guarded judge budget. Off never interrupts while the approvals inbox and
+  // run history keep recording in every mode.
+  const [proactiveMode, setProactiveMode] = useState<string>(DEFAULT_PROACTIVE_MODE);
+  const [proactiveJudgeTimeoutSeconds, setProactiveJudgeTimeoutSeconds] = useState<number | string>(
+    DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS
+  );
   // Files & Access lives in the Security pane as the single files editor:
   // the page Save owns persistence through executeSave with
   // validateFilesFields and buildFilesPayload, so guard shapes never fork.
@@ -1866,6 +1903,112 @@ export default function SettingsManager() {
     return null;
   }, [bashDefaultAction, bashRulesText, bashTimeoutSeconds]);
 
+  // Copies one settings fetch into the goals fields, tolerating both
+  // snake_case and camelCase DTO aliases and an absent [goals] section from
+  // older engines by keeping the form defaults. Only overwrites sections the
+  // engine returns so older engines without goals leave the form untouched.
+  const populateGoalsSettings = useCallback(
+    (goals: GoalsConfigData | undefined | null) => {
+      if (!goals) return;
+      if (typeof goals.enabled === "boolean") {
+        setGoalsEnabled(goals.enabled);
+      }
+      if (typeof goals.step_interval_minutes === "number") {
+        setGoalsStepIntervalMinutes(goals.step_interval_minutes);
+      }
+      if (typeof goals.max_active_goals === "number") {
+        setGoalsMaxActiveGoals(goals.max_active_goals);
+      }
+    },
+    []
+  );
+
+  // Builds the [goals] delta from the pursuit form fields so the
+  // full-settings save shares one shape with future modal saves. Sends the
+  // snake_case keys the engine persists; the engine also accepts the camelCase
+  // aliases, so either spelling writes while reads accept both.
+  // Numeric fields preserve the raw input (including empty/invalid) so the
+  // page validation surfaces range errors instead of silently coercing back
+  // to defaults.
+  const buildGoalsPayload = useCallback(
+    (): GoalsSettingsUpdate => {
+      return {
+        enabled: goalsEnabled,
+        step_interval_minutes: Number(goalsStepIntervalMinutes),
+        max_active_goals: Number(goalsMaxActiveGoals),
+      };
+    },
+    [goalsEnabled, goalsStepIntervalMinutes, goalsMaxActiveGoals]
+  );
+
+  // Shared goals validation for the full-save path so it rejects an
+  // out-of-range cadence or cap before any network write with one message.
+  // Mirrors GoalsConfig bounds (5-20160, 1-50).
+  const validateGoalsFields = useCallback((): string | null => {
+    const intervalNum = Number(goalsStepIntervalMinutes);
+    if (!Number.isInteger(intervalNum) || intervalNum < GOALS_STEP_INTERVAL_MIN_MINUTES || intervalNum > GOALS_STEP_INTERVAL_MAX_MINUTES) {
+      return `Invalid goals cadence: step interval must be between ${GOALS_STEP_INTERVAL_MIN_MINUTES} and ${GOALS_STEP_INTERVAL_MAX_MINUTES} minutes.`;
+    }
+    const capNum = Number(goalsMaxActiveGoals);
+    if (!Number.isInteger(capNum) || capNum < GOALS_MAX_ACTIVE_MIN || capNum > GOALS_MAX_ACTIVE_MAX) {
+      return `Invalid goals cap: max active goals must be between ${GOALS_MAX_ACTIVE_MIN} and ${GOALS_MAX_ACTIVE_MAX}.`;
+    }
+    return null;
+  }, [goalsStepIntervalMinutes, goalsMaxActiveGoals]);
+
+  // Copies one settings fetch into the proactivity fields, tolerating an
+  // absent [proactive] section from older engines by keeping the form
+  // defaults. Only overwrites sections the engine returns. The mode converges
+  // to its canonical lowercase spelling so a file-configured `ALL` or padded
+  // value lands on the matching select option instead of blanking it.
+  const populateProactiveSettings = useCallback(
+    (proactive: ProactiveConfigData | undefined | null) => {
+      if (!proactive) return;
+      if (typeof proactive.mode === "string" && proactive.mode.trim()) {
+        const canonical = normalizeProactiveMode(proactive.mode);
+        if (canonical) {
+          setProactiveMode(canonical);
+        }
+      }
+      if (typeof proactive.judge_timeout_seconds === "number") {
+        setProactiveJudgeTimeoutSeconds(proactive.judge_timeout_seconds);
+      }
+    },
+    []
+  );
+
+  // Builds the [proactive] delta from the interruption form fields so the
+  // full-settings save shares one shape with future modal saves. Sends the
+  // snake_case keys the engine persists. The mode travels as its canonical
+  // lowercase spelling so a differently-cased edit sends what the file
+  // loader and the closed-set 400 both recognize.
+  const buildProactivePayload = useCallback(
+    (): ProactiveSettingsUpdate => {
+      return {
+        mode: normalizeProactiveMode(proactiveMode),
+        judge_timeout_seconds: Number(proactiveJudgeTimeoutSeconds),
+      };
+    },
+    [proactiveMode, proactiveJudgeTimeoutSeconds]
+  );
+
+  // Shared proactivity validation for the full-save path so it rejects an
+  // unknown mode or an out-of-range judge budget before any network write.
+  // Mirrors ProactiveMode plus the 1-120 judge bound. Matching is
+  // case-insensitive (trim plus lowercase) so the dashboard accepts the same
+  // spellings the file loader does.
+  const validateProactiveFields = useCallback((): string | null => {
+    const normalizedMode = normalizeProactiveMode(proactiveMode);
+    if (!isValidProactiveMode(normalizedMode)) {
+      return `Invalid proactive mode: must be one of ${(PROACTIVE_MODES as readonly string[]).join(", ")}.`;
+    }
+    const timeoutNum = Number(proactiveJudgeTimeoutSeconds);
+    if (!Number.isInteger(timeoutNum) || timeoutNum < PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS || timeoutNum > PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS) {
+      return `Invalid proactive judge timeout: timeout must be between ${PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS} and ${PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS} seconds.`;
+    }
+    return null;
+  }, [proactiveMode, proactiveJudgeTimeoutSeconds]);
+
   // Builds the [files] delta for the single page Save via executeSave; no section save remains.
   // Reuses the existing top-level keys (filesDenyPatterns, filesAllowRoots,
   // filesRequireApprovalOnDeny) so the wire contract stays single-shaped.
@@ -2012,6 +2155,12 @@ export default function SettingsManager() {
     // Bash fields share one helper so load and save stay symmetric; an
     // absent [bash] keeps the form defaults instead of blanking the modal.
     populateBashSettings(data.bash);
+    // Goals fields share one helper so load and save stay symmetric; an
+    // absent [goals] keeps the form defaults instead of blanking the pane.
+    populateGoalsSettings(data.goals);
+    // Proactivity fields share one helper so load and save stay symmetric; an
+    // absent [proactive] keeps the form defaults instead of blanking the pane.
+    populateProactiveSettings(data.proactive);
     // Network bind tolerates older engines without [server]: absent keys keep
     // the loopback defaults so the pane never renders blank, and the textarea
     // formats the stored list so blank lines only exist while editing.
@@ -2058,7 +2207,7 @@ export default function SettingsManager() {
       prev ?? { hostname: fileBindHostname, port: fileBindPort, allowedHosts: fileBindHosts }
     );
     setServerRestartRequired(Boolean(data.requiresRestart));
-  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings]);
+  }, [populateMediaSettings, populateDesktopSettings, populateBashSettings, populateGoalsSettings, populateProactiveSettings]);
 
   // Reconciles the boot snapshot from /health when the engine advertises its
   // live bind. Older engines omit the keys, in which case the pre-save file
@@ -2415,6 +2564,22 @@ export default function SettingsManager() {
       setSaving(false);
       return;
     }
+    // Goals and proactivity share their validation helpers so the full-save
+    // rejects the same shapes a modal would before any network write. Mirrors
+    // GoalsConfig bounds (5-20160, 1-50) plus the ProactiveMode closed set and
+    // the 1-120 judge bound.
+    const goalsValidationError = validateGoalsFields();
+    if (goalsValidationError) {
+      setError(goalsValidationError);
+      setSaving(false);
+      return;
+    }
+    const proactiveValidationError = validateProactiveFields();
+    if (proactiveValidationError) {
+      setError(proactiveValidationError);
+      setSaving(false);
+      return;
+    }
 
     // Reassemble email accounts array, preserving optional SMTP overrides. Blank smtp_host
     // collapses to omitted (derived fallback) and blank smtp_port omits so auto tries 587 then 465;
@@ -2661,6 +2826,8 @@ export default function SettingsManager() {
         media: buildMediaPayload(),
         desktop: buildDesktopPayload(),
         bash: buildBashPayload(),
+        goals: buildGoalsPayload(),
+        proactive: buildProactivePayload(),
         ...(serverDirty
           ? {
               serverHostname: trimmedServerHostname,
@@ -3847,6 +4014,7 @@ export default function SettingsManager() {
 
         {/* TAB 2: Engine & Logs */}
         {activeTab === "engine" && (
+          <>
           <div className="settings-section card">
             <div className="settings-section-title-group">
               <h3>Engine & Logging</h3>
@@ -3929,6 +4097,105 @@ export default function SettingsManager() {
               </div>
             </div>
           </div>
+          {/* Goals plus Proactivity: steady pursuit policy ([goals]) beside the
+              background interruption policy ([proactive]) in one grouped block
+              because both govern autonomous behavior. Both persist through the
+              partial-patch save and take effect after restart. */}
+          <div className="settings-section card" style={{ marginTop: "16px" }}>
+            <div className="settings-section-title-group">
+              <h3>Goals & Proactivity</h3>
+              <p className="settings-section-hint">
+                Steady long-horizon pursuit and background interruption policy.
+                Takes effect after restart.
+              </p>
+            </div>
+            <div className="form-group checkbox-group">
+              <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }}>
+                <input
+                  id="goals-enabled"
+                  type="checkbox"
+                  checked={goalsEnabled}
+                  onChange={(e) => setGoalsEnabled(e.target.checked)}
+                />
+                <span>Enable goal pursuit</span>
+              </label>
+              <span className="form-group-hint">
+                Off by default so a fresh install never spends planning calls
+                until you opt in. Goals advance on cadence via the service
+                worker and the CLI foreground loop.
+              </span>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="goals-step-interval">Default Cadence (minutes)</label>
+                <input
+                  id="goals-step-interval"
+                  type="number"
+                  className="input-field"
+                  min={GOALS_STEP_INTERVAL_MIN_MINUTES}
+                  max={GOALS_STEP_INTERVAL_MAX_MINUTES}
+                  step={1}
+                  value={goalsStepIntervalMinutes}
+                  onChange={(e) => setGoalsStepIntervalMinutes(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Cadence hint stored on each new goal. Range: {GOALS_STEP_INTERVAL_MIN_MINUTES}–{GOALS_STEP_INTERVAL_MAX_MINUTES}. Default is {DEFAULT_GOALS_STEP_INTERVAL_MINUTES} (daily).
+                </p>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="goals-max-active">Max Active Goals</label>
+                <input
+                  id="goals-max-active"
+                  type="number"
+                  className="input-field"
+                  min={GOALS_MAX_ACTIVE_MIN}
+                  max={GOALS_MAX_ACTIVE_MAX}
+                  step={1}
+                  value={goalsMaxActiveGoals}
+                  onChange={(e) => setGoalsMaxActiveGoals(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Maximum goals in the active state at once. Range: {GOALS_MAX_ACTIVE_MIN}–{GOALS_MAX_ACTIVE_MAX}. Default is {DEFAULT_GOALS_MAX_ACTIVE_GOALS}.
+                </p>
+              </div>
+            </div>
+            <div className="form-row" style={{ marginTop: "1rem" }}>
+              <div className="form-group flex-1">
+                <label htmlFor="proactive-mode">Proactivity Mode</label>
+                <select
+                  id="proactive-mode"
+                  className="input-field"
+                  value={normalizeProactiveMode(proactiveMode) || proactiveMode}
+                  onChange={(e) => setProactiveMode(normalizeProactiveMode(e.target.value) || e.target.value)}
+                >
+                  <option value="all">All — surface every background outcome</option>
+                  <option value="milestones">Milestones — milestones, errors, and parked turns only</option>
+                  <option value="guarded">Guarded — milestones plus a judge call for routine successes</option>
+                  <option value="off">Off — never interrupt</option>
+                </select>
+                <span className="form-group-hint">
+                  Off never interrupts; the approvals inbox keeps recording.
+                </span>
+              </div>
+              <div className="form-group flex-1">
+                <label htmlFor="proactive-judge-timeout">Judge Timeout (seconds)</label>
+                <input
+                  id="proactive-judge-timeout"
+                  type="number"
+                  className="input-field"
+                  min={PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS}
+                  max={PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS}
+                  step={1}
+                  value={proactiveJudgeTimeoutSeconds}
+                  onChange={(e) => setProactiveJudgeTimeoutSeconds(e.target.value)}
+                />
+                <p className="settings-field-hint" style={{ fontSize: "0.85rem", color: "var(--text-muted, #888)", marginTop: "0.25rem" }}>
+                  Seconds the guarded judge may spend before the gate fails open. Range: {PROACTIVE_JUDGE_TIMEOUT_MIN_SECONDS}–{PROACTIVE_JUDGE_TIMEOUT_MAX_SECONDS}. Default is {DEFAULT_PROACTIVE_JUDGE_TIMEOUT_SECONDS}.
+                </p>
+              </div>
+            </div>
+          </div>
+          </>
         )}
 
         {/* TAB 3: Tools & Runes */}

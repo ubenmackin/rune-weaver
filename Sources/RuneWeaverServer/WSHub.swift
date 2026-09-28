@@ -225,6 +225,45 @@ public actor WSHub {
         await fanOut(text)
     }
 
+    /// Broadcasts one goal snapshot to every connected socket.
+    ///
+    /// The DTO converts to the core snapshot so the REST list and the live push
+    /// share one JSON shape: dashboards patch the row in place instead of
+    /// refetching after every create, plan-ready, progress, status flip, or
+    /// advancement turn.
+    /// - Parameter dto: Current goal row with its progress tally.
+    public func broadcastGoal(_ dto: GoalDTO) async {
+        let text: String
+        do {
+            let frame = WSGoalUpdatedFrame(goal: dto.wsSnapshot())
+            let data = try JSONEncoder().encode(frame)
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode goal_updated frame: \(error.localizedDescription)")
+            return
+        }
+        await fanOut(text)
+    }
+
+    /// Broadcasts one proactive nudge to every connected socket.
+    ///
+    /// Best-effort like every other push: encoding failures log and drop instead
+    /// of failing the turn that volunteered the card.
+    /// - Parameter frame: Card carrying kind, title, and headline.
+    public func broadcastProactiveMessage(_ frame: WSProactiveMessageFrame) async {
+        let text: String
+        do {
+            let data = try JSONEncoder().encode(frame)
+            guard let encodedText = String(data: data, encoding: .utf8) else { return }
+            text = encodedText
+        } catch {
+            RuneWeaverLog.server.error("WSHub: failed to encode proactive_message frame: \(error.localizedDescription)")
+            return
+        }
+        await fanOut(text)
+    }
+
     /// Broadcasts an arbitrary text frame to every connected socket.
     public func broadcast(text: String) async {
         await fanOut(text)

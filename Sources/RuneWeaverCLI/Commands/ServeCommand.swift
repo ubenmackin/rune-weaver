@@ -407,6 +407,7 @@ extension ServeCommand {
             securityConfig: loaded.config.security,
             recallBudgets: loaded.config.memory.recallBudgets,
             goalsConfig: loaded.config.goals,
+            proactiveConfig: loaded.config.proactive,
             auth: auth,
             mediaSecrets: sharedSecrets,
             secrets: sharedSecrets,

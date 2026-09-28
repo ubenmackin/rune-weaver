@@ -54,6 +54,7 @@ extension RuneWeaverConfig {
         lines += renderSecurityTOML()
         lines += renderGoalsTOML()
         lines += renderBashTOML()
+        lines += renderProactiveTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -435,6 +436,20 @@ extension RuneWeaverConfig {
             lines.append("")
         }
         return lines
+    }
+
+    /// Renders the additive `[proactive]` section.
+    ///
+    /// Every key renders, including the surfacing default, so a saved file
+    /// documents the interruption policy and a round-trip never depends on an
+    /// implicit default silently diverging from what was written.
+    private func renderProactiveTOML() -> [String] {
+        [
+            "[proactive]",
+            "mode = \(Self.tomlQuoted(proactive.mode.rawValue))",
+            "judge_timeout_seconds = \(proactive.judgeTimeoutSeconds)",
+            ""
+        ]
     }
 }
 
