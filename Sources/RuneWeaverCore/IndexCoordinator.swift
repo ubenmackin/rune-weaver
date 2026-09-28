@@ -496,105 +496,6 @@ public struct IndexClosureStage: IndexSourceStage {
     }
 }
 
-// MARK: - Watermark state
-
-/// Persisted coordinator state: the last successful watermark and trigger times.
-public struct IndexRunState: Sendable, Codable, Equatable {
-    /// Instant of the last successful run, used as the index watermark.
-    public var indexAsOf: Date?
-    /// Instant the last successful run completed.
-    public var lastCompletedAt: Date?
-    /// Instant the nightly trigger last started a run.
-    public var lastNightlyStart: Date?
-
-    /// Creates run state.
-    /// - Parameters:
-    ///   - indexAsOf: Last successful watermark.
-    ///   - lastCompletedAt: Last successful completion instant.
-    ///   - lastNightlyStart: Last nightly trigger instant.
-    public init(indexAsOf: Date? = nil, lastCompletedAt: Date? = nil, lastNightlyStart: Date? = nil) {
-        self.indexAsOf = indexAsOf
-        self.lastCompletedAt = lastCompletedAt
-        self.lastNightlyStart = lastNightlyStart
-    }
-}
-
-/// JSON-backed store for the coordinator watermark and trigger times.
-///
-/// The state is tiny and read on demand, so a JSON sidecar keeps the watermark
-/// independent of the document store schema and survives restarts.
-public actor IndexRunStateStore {
-    /// Default state path, kept beside the other durable memory stores.
-    public static let defaultPath = "~/.runeweaver/index/coordinator-state.json"
-
-    /// Filesystem path of the JSON sidecar.
-    public let path: String
-
-    /// Whether the sidecar has been read into memory.
-    private var loaded = false
-    /// In-memory state snapshot.
-    private var state = IndexRunState()
-
-    /// Creates a state store.
-    /// - Parameter path: JSON sidecar path. `~` is expanded on first load.
-    public init(path: String = IndexRunStateStore.defaultPath) {
-        self.path = path
-    }
-
-    /// Returns the current state snapshot.
-    /// - Returns: The in-memory state.
-    public func snapshot() -> IndexRunState {
-        loadIfNeeded()
-        return state
-    }
-
-    /// Records a successful run, advancing the watermark and completion time.
-    /// - Parameter date: Completion instant.
-    public func recordCompleted(at date: Date) throws {
-        loadIfNeeded()
-        state.indexAsOf = date
-        state.lastCompletedAt = date
-        try persist()
-    }
-
-    /// Records that the nightly trigger started a run.
-    /// - Parameter date: Trigger instant.
-    public func recordNightlyStart(at date: Date) throws {
-        loadIfNeeded()
-        state.lastNightlyStart = date
-        try persist()
-    }
-
-    /// Clears every recorded field.
-    public func reset() throws {
-        loadIfNeeded()
-        state = IndexRunState()
-        try persist()
-    }
-
-    /// Reads the sidecar once, ignoring unreadable or corrupt state.
-    private func loadIfNeeded() {
-        guard !loaded else { return }
-        loaded = true
-        let expanded = (path as NSString).expandingTildeInPath
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: expanded)) else { return }
-        do {
-            state = try JSONDecoder().decode(IndexRunState.self, from: data)
-        } catch {
-            RuneWeaverLog.scheduler.warning("IndexRunStateStore: failed to decode index run state from '\(expanded)': \(error.localizedDescription)")
-        }
-    }
-
-    /// Writes the state to disk atomically.
-    private func persist() throws {
-        let expanded = (path as NSString).expandingTildeInPath
-        let url = URL(fileURLWithPath: expanded)
-        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let data = try JSONEncoder().encode(state)
-        try data.write(to: url, options: .atomic)
-    }
-}
-
 // MARK: - Coordinator
 
 /// Actor owning nightly and on-demand local index runs.
@@ -670,6 +571,8 @@ public actor IndexCoordinator {
     private var activeRunTask: Task<IndexRunSummary, Never>?
     /// Whether a run is in flight.
     private var running = false
+    /// Whether catch-up indexing was already attempted for this launch session.
+    private var didAttemptLaunchCatchUp = false
     /// Instant of the last emitted liveness frame.
     private var lastFrameAt: Date?
     /// Trigger of the run in flight, for the live snapshot and heartbeats.
@@ -781,30 +684,48 @@ public actor IndexCoordinator {
     ///
     /// A disabled coordinator is a no-op, as is a trigger already run on the
     /// current calendar day or one that arrives before ``nightlyHour``. The
-    /// trigger is `.nightly` when the calendar hour equals ``nightlyHour`` and
-    /// `.catchUp` for a later same-day launch that missed the nightly window;
-    /// the same-day guard applies to both so at most one automatic run fires
-    /// per calendar day. The nightly start is recorded only when the run
-    /// proceeds past the single-flight check, so a tick racing a manual run
-    /// returns skipped without suppressing the nightly retry for that day.
+    /// trigger is `.nightly` when the calendar hour equals ``nightlyHour``.
+    /// Outside the nightly hour, a missed prior nightly run is evaluated
+    /// as a `.catchUp` trigger at most once per launch session. When an index
+    /// run is already in flight, background triggers quietly return nil
+    /// instead of broadcasting skipped run noise.
     /// - Parameter date: Evaluation instant.
     /// - Returns: The run summary when a run fired, or nil when nothing happened.
     @discardableResult
     public func fireNightly(now date: Date = Date()) async -> IndexRunSummary? {
         guard config.enabled else { return nil }
+
         let calendar = Calendar.current
         let hour = calendar.component(.hour, from: date)
-        guard hour >= nightlyHour else { return nil }
-        let snapshot = await stateStore.snapshot()
-        if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
-            return nil
+        let isNightlyHour = (hour == nightlyHour)
+
+        if isNightlyHour {
+            guard !running else { return nil }
+            let snapshot = await stateStore.snapshot()
+            if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
+                return nil
+            }
+            let summary = await run(trigger: .nightly)
+            if summary.status != .skipped {
+                try? await stateStore.recordNightlyStart(at: date)
+            }
+            return summary
+        } else {
+            guard !didAttemptLaunchCatchUp else { return nil }
+            didAttemptLaunchCatchUp = true
+            guard !running else { return nil }
+
+            guard hour > nightlyHour else { return nil }
+            let snapshot = await stateStore.snapshot()
+            if let last = snapshot.lastNightlyStart, calendar.isDate(last, inSameDayAs: date) {
+                return nil
+            }
+            let summary = await run(trigger: .catchUp)
+            if summary.status != .skipped {
+                try? await stateStore.recordNightlyStart(at: date)
+            }
+            return summary
         }
-        let trigger: IndexRunTrigger = (hour == nightlyHour) ? .nightly : .catchUp
-        let summary = await run(trigger: trigger)
-        if summary.status != .skipped {
-            try? await stateStore.recordNightlyStart(at: date)
-        }
-        return summary
     }
 
     /// Runs one index pass over every enabled source.
@@ -1068,8 +989,9 @@ public actor IndexCoordinator {
         activeRunTask?.cancel()
     }
 
-    /// Clears the durable run state store.
+    /// Clears the durable run state store and resets the launch catch-up attempt flag.
     public func reset() async throws {
+        didAttemptLaunchCatchUp = false
         try await stateStore.reset()
     }
 }
