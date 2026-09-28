@@ -347,6 +347,24 @@ enum ToolsTestSupport {
             return message
         }
 
+        /// Returns a canned batch of messages for one mailbox.
+        func batchFetch(
+            credentials _: ResolvedEmailCredentials,
+            mailbox: String,
+            query: String,
+            limit _: Int
+        ) async throws -> [EmailFullMessage] {
+            if let failure {
+                throw EmailIMAPError.bridgeFailed(failure)
+            }
+            capture?.set(query)
+            mailboxCapture?.set(mailbox)
+            if let message {
+                return [message]
+            }
+            return []
+        }
+
         /// Returns canned attachment bytes for one mailbox.
         func attachment(
             credentials _: ResolvedEmailCredentials,

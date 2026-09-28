@@ -171,6 +171,8 @@ private func registerIndexResetRoute(_ app: Application) {
             throw Abort(.serviceUnavailable, reason: "Indexing is not configured.")
         }
         try await store.reset()
+        try? await context.indexCoordinator?.reset()
+        try? MailIndexCheckpointStore.reset()
         return IndexResetResponse(reset: true)
     }
 }

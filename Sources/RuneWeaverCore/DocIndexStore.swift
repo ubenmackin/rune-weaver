@@ -390,12 +390,13 @@ public actor DocIndexStore {
         }
     }
 
-    /// Clears every document, chunk, and search-index entry.
+    /// Clears every document, chunk, and search-index entry, plus incremental mail checkpoints.
     public func reset() async throws {
         let dbPath = self.dbPath
         try await SQLiteSerialIO.run(lane: .indexing) {
             try DocIndexStoreIO.reset(dbPath: dbPath)
         }
+        try? MailIndexCheckpointStore.reset()
         invalidateStatusCache()
     }
 

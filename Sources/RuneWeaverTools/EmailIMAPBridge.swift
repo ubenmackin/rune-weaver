@@ -11,9 +11,8 @@ public enum EmailIMAPError: Error, Sendable, Equatable {
     case bridgeFailed(String)
     /// A caller-side argument failed fail-closed validation before any dial.
     ///
-    /// Dedicated case so session-pool eviction matches on type instead of
-    /// string-prefixing `bridgeFailed` details; a healthy connection stays
-    /// pooled when validation rejects the arguments.
+    /// Dedicated case so callers match validation on type instead of
+    /// string-prefixing `bridgeFailed`; validation rejects before any dial.
     case validationFailed(String)
     /// The bridge output could not be decoded.
     case decodeFailed(String)
@@ -215,6 +214,14 @@ public protocol EmailIMAPGateway: Sendable {
     /// Fetches one message from one mailbox.
     func fetch(credentials: ResolvedEmailCredentials, mailbox: String, messageID: String) async throws -> EmailFullMessage
 
+    /// Fetches a batch of messages from one mailbox matching a query, newest first.
+    func batchFetch(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int
+    ) async throws -> [EmailFullMessage]
+
     /// Fetches one attachment part from one mailbox.
     func attachment(
         credentials: ResolvedEmailCredentials,
@@ -244,6 +251,21 @@ public protocol EmailIMAPGateway: Sendable {
 }
 
 public extension EmailIMAPGateway {
+    /// Default batch fetch shim for gateways that only implement individual fetch.
+    func batchFetch(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int
+    ) async throws -> [EmailFullMessage] {
+        let hits = try await search(credentials: credentials, mailbox: mailbox, query: query, limit: limit)
+        var messages: [EmailFullMessage] = []
+        for hit in hits {
+            try await messages.append(fetch(credentials: credentials, mailbox: mailbox, messageID: hit.id))
+        }
+        return messages
+    }
+
     /// Default attachment-filter shim for gateways that only implement base search.
     /// Applies the filter locally so filtered callers never silently receive unfiltered hits.
     func search(
@@ -514,6 +536,33 @@ struct EmailIMAPBridgeRequest: Encodable {
             query: nil,
             limit: nil,
             messageID: messageID,
+            attachmentIndex: nil,
+            rawMessageBase64: nil,
+            destination: nil,
+            markAsRead: nil,
+            hasAttachment: nil,
+            since: nil,
+            until: nil
+        )
+    }
+
+    /// Creates a batch fetch request.
+    static func batchFetch(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String = "INBOX",
+        query: String,
+        limit: Int
+    ) -> Self {
+        Self(
+            op: "batch_fetch",
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password,
+            mailbox: mailbox,
+            query: query,
+            limit: limit,
+            messageID: nil,
             attachmentIndex: nil,
             rawMessageBase64: nil,
             destination: nil,
@@ -827,6 +876,35 @@ public struct SubprocessIMAPGateway: EmailIMAPGateway, Sendable {
         let data = try await run(request: request)
         do {
             return try EmailBridgeParsing.parseFetchPayload(data)
+        } catch let error as EmailIMAPError {
+            throw error
+        } catch {
+            throw EmailIMAPError.decodeFailed(error.localizedDescription)
+        }
+    }
+
+    /// Fetches a batch of messages from one mailbox via the Python helper.
+    public func batchFetch(
+        credentials: ResolvedEmailCredentials,
+        mailbox: String,
+        query: String,
+        limit: Int
+    ) async throws -> [EmailFullMessage] {
+        try EmailIMAPValidation.validateMailbox(mailbox)
+        try EmailIMAPValidation.validateSearchQuery(query)
+        guard (1 ... EmailSearchArgs.maxLimit).contains(limit) else {
+            throw EmailIMAPError.validationFailed("Invalid search limit: limit must be 1...\(EmailSearchArgs.maxLimit)")
+        }
+        let trimmedMailbox = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
+        let request = EmailIMAPBridgeRequest.batchFetch(
+            credentials: credentials,
+            mailbox: trimmedMailbox,
+            query: query,
+            limit: limit
+        )
+        let data = try await run(request: request)
+        do {
+            return try EmailBridgeParsing.parseBatchFetchPayload(data)
         } catch let error as EmailIMAPError {
             throw error
         } catch {
