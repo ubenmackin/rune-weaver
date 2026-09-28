@@ -15,7 +15,7 @@ import Vapor
 ///
 /// Every field stays optional so a request carrying only one key leaves the
 /// stored shell policy untouched instead of resetting it. Rules stay ordered
-/// top-to-bottom first-match-wins, matching the stored `BashConfig` order.
+/// top-to-bottom last-match-wins, matching the stored `BashConfig` order. Put the catch-all first and specifics after.
 /// Covers the same field set as the full `BashConfig` snapshot, so a caller
 /// holding a complete policy can build the patch through `init(bash:)` and
 /// reuse the merge path without hand-mapping fields.
@@ -24,7 +24,7 @@ public struct BashSettingsUpdate: Content, Equatable {
     public var enabled: Bool?
     /// Default action when no rule matches (`allow|ask|deny`). Nil preserves the stored value.
     public var defaultAction: String?
-    /// Ordered permission rules evaluated first-match-wins. Nil preserves the stored value.
+    /// Ordered permission rules evaluated last-match-wins (last matching rule decides). Nil preserves the stored value.
     public var rules: [BashRule]?
     /// Default execution timeout in seconds (1-3600). Nil preserves the stored value.
     public var timeoutSeconds: Int?

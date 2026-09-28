@@ -582,7 +582,8 @@ public struct BashConfig: Sendable, Codable, Equatable {
     public var enabled: Bool
     /// Default action if no rule matches. Defaults to `ask`.
     public var defaultAction: BashPermissionAction
-    /// Ordered permission rules evaluated first-to-last.
+    /// Ordered permission rules evaluated top-to-bottom; the last matching rule decides.
+    /// Put the catch-all first and specifics after.
     public var rules: [BashRule]
     /// Default execution timeout in seconds.
     public var timeoutSeconds: Int

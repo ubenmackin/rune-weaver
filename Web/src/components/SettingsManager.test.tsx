@@ -905,17 +905,13 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files guard lives in the Tools Files & Access modal, so
-    // open it through the Tools category Configure entry.
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
+    // Files guard lives in the Security Files & Access section, so
+    // open it through the Security tab inline editor.
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
     await waitFor(() => {
-      expect(screen.getByText("Files & Workspace")).toBeDefined();
+      expect(screen.getByText("Files & Access")).toBeDefined();
     });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     // Multiline editor surfaces the guard boundary with example globs so a
     // first-time reader knows the one-per-line shape without opening docs.
@@ -944,17 +940,8 @@ describe("SettingsManager", () => {
       expect(screen.getByText("Files settings saved!")).toBeDefined();
     });
 
-    // Modal auto-closes after the success tick; reopen for the next edit so
-    // the follow-up steps run against a mounted editor.
-    await waitFor(
-      () => {
-        expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
-      },
-      { timeout: 3000 }
-    );
-    const reopenButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(reopenButtons.length).toBe(1);
-    await user.click(reopenButtons[0]);
+    // Security inline editor stays mounted after save, so the follow-up
+    // steps run against the same textarea without reopening a modal.
     const reopenedTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
     ) as HTMLTextAreaElement;
@@ -1022,17 +1009,13 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Reset confirmations live in the Tools Files & Access modal; Security
-    // owns sandbox isolation only and has no file editors.
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
+    // Reset confirmations live in the Security Files & Access section;
+    // Security owns both sandbox isolation and the file editors.
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
     await waitFor(() => {
-      expect(screen.getByText("Files & Workspace")).toBeDefined();
+      expect(screen.getByText("Files & Access")).toBeDefined();
     });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     const denyTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
@@ -1041,8 +1024,8 @@ describe("SettingsManager", () => {
 
     // Reset opens a shared confirmation stating counts and the form-local
     // nature; cancelling leaves the in-progress text untouched. The Cancel is
-    // scoped to the confirmation dialog because the Files modal behind it
-    // renders its own Cancel.
+    // scoped to the confirmation dialog because the Security pane behind it
+    // renders its own inline save.
     const resetDenyBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
     await user.click(resetDenyBtn);
     await waitFor(() => {
@@ -1131,18 +1114,13 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    // Files header actions live in the Tools Files & Access modal; Security
-    // keeps only sandbox isolation (Apple Container Machine) with no file
-    // editors.
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
+    // Files header actions live in the Security Files & Access section;
+    // sandbox isolation (Apple Container Machine) shares the same pane.
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
     await waitFor(() => {
-      expect(screen.getByText("Files & Workspace")).toBeDefined();
+      expect(screen.getByText("Files & Access")).toBeDefined();
     });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    await user.click(configureButtons[0]);
-    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     // Ghost treatment carries the hover and alignment tokens; secondary
     // buttons have no stylesheet entry and render misaligned, so every
@@ -1174,11 +1152,11 @@ describe("SettingsManager", () => {
       )
     ).toBe(true);
 
-    // Subsection headings keep each policy surface discoverable in the modal.
+    // Subsection headings keep each policy surface discoverable in the section.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
-    // Sandbox isolation stays in Security, never inside the Files modal.
-    expect(screen.queryByText("Apple Container Machine")).toBeNull();
+    // Sandbox isolation shares the Security pane beside the Files section.
+    expect(screen.getByText("Apple Container Machine")).toBeDefined();
 
     // Approval escalation toggle stays with its explanatory hint.
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
@@ -2298,7 +2276,7 @@ describe("SettingsManager", () => {
     expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
   });
 
-  it("saves the Files & Access modal through the shared files payload", async () => {
+  it("saves the Security Files & Access section through the shared files payload", async () => {
     const user = userEvent.setup();
     const mockTools = [
       {
@@ -2358,25 +2336,19 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
-    await user.click(toolsTabBtn);
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
 
-    // Both file tools share one Files section with a single header Configure.
+    // Security owns the single Files & Access editor through the shared
+    // files payload helper; Tools owns no files editor.
     await waitFor(() => {
-      expect(screen.getByText("Files & Workspace")).toBeDefined();
+      expect(screen.getByText("Files & Access")).toBeDefined();
     });
-    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
-    expect(configureButtons.length).toBe(1);
-    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
-    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
-    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
-    await user.click(configureButtons[0]);
 
-    // The Files modal mirrors the guard form through the shared payload helper.
-    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
+    // The Security section mirrors the guard form through the shared payload helper.
     expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
+    expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
-    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
@@ -2474,7 +2446,155 @@ describe("SettingsManager", () => {
     expect(bash["allow_network"]).toBe(false);
   });
 
-  it("keeps Files & Access out of the Security pane", async () => {
+  it("pins the bash textarea contract with ordered last-match rules", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "deny",
+        rules: [
+          { pattern: "*", action: "deny" },
+          { pattern: "swiftformat *", action: "allow" },
+        ],
+        timeout_seconds: 30,
+        allow_network: false,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    let putCount = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithBash,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithBash);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+
+    // Pinned by accessible label as a single textarea with the opencode
+    // fixture rendered in order: catch-all first, specifics after.
+    const rulesTextarea = screen.getByLabelText(
+      /Rules, one per line/i
+    ) as HTMLTextAreaElement;
+    expect(rulesTextarea.tagName).toBe("TEXTAREA");
+    expect(rulesTextarea.placeholder).toContain("* = deny");
+    expect(rulesTextarea.value).toContain("* = deny");
+    expect(rulesTextarea.value).toContain("swiftformat * = allow");
+    // Format hint pins the `pattern = action` line shape with the closed
+    // allow/ask/deny set and the top-to-bottom last-match-wins order.
+    expect(screen.getByText(/pattern = action/i)).toBeDefined();
+    expect(screen.getByText(/last matching rule wins/i)).toBeDefined();
+    // Live count follows the parsed textarea rows.
+    expect(screen.getByText(/2 rules/i)).toBeDefined();
+
+    // No row model exists for bash rules: there are no per-rule inputs or
+    // remove buttons, only the one textarea.
+    expect(screen.queryByLabelText(/Rule 1/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remove.*rule/i })).toBeNull();
+    expect(screen.getAllByLabelText(/Rules, one per line/i).length).toBe(1);
+
+    // Add Rule focuses the editor for keyboard flow without altering the
+    // parsed count by itself.
+    await user.click(screen.getByRole("button", { name: /Add Rule/i }));
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rulesTextarea);
+    });
+    expect(rulesTextarea.value.endsWith("\n")).toBe(true);
+    expect(screen.getByText(/2 rules/i)).toBeDefined();
+
+    // Blank lines and surrounding whitespace collapse on save with order
+    // preserved top-to-bottom; the wire shape is an ordered rule array.
+    // Malformed lines reject first with their editor line number and never
+    // reach the network, so the ordered save below runs from a clean form.
+    const editedTextarea = screen.getByLabelText(
+      /Rules, one per line/i
+    ) as HTMLTextAreaElement;
+    await user.clear(editedTextarea);
+    await user.type(editedTextarea, "* = deny\nnot a rule");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Line 2/i)).toBeDefined();
+    });
+    expect(putCount).toBe(0);
+
+    // An unknown action on the right also rejects with its line number.
+    // The Line 2 matcher disambiguates the validation error from the
+    // format hint, which also mentions the allow/ask/deny set.
+    await user.clear(editedTextarea);
+    await user.type(editedTextarea, "* = deny\nswiftformat * = maybe");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Line 2/i)).toBeDefined();
+    });
+    expect(
+      screen.getByText(/Line 2: action must be allow, ask, or deny/i)
+    ).toBeDefined();
+    expect(putCount).toBe(0);
+
+    // Ordered save runs last so the modal auto-close timer never strands a
+    // follow-up step: blanks collapse and order is preserved top-to-bottom.
+    await user.clear(editedTextarea);
+    await user.type(editedTextarea, "  * = deny  \n\nswiftformat * = allow\n   \n");
+    expect(screen.getByText(/2 rules/i)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
+      string,
+      unknown
+    >;
+    expect(bash["rules"]).toEqual([
+      { pattern: "*", action: "deny" },
+      { pattern: "swiftformat *", action: "allow" },
+    ]);
+  });
+
+  it("keeps Files & Access in the Security pane", async () => {
     const user = userEvent.setup();
     const settingsWithFiles = {
       ...mockSettings,
@@ -2496,15 +2616,16 @@ describe("SettingsManager", () => {
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
 
-    // Security owns sandbox isolation plus access management only; the file
-    // guard lives under Tools & Runes as its own category.
+    // Security owns sandbox isolation plus Files & Access plus access
+    // management; the file guard lives in Security as its own section.
     await waitFor(() => {
       expect(screen.getByText("Sandbox & Security Policy")).toBeDefined();
     });
-    expect(screen.queryByText("Files & Access")).toBeNull();
-    expect(screen.queryByText("Files & Workspace")).toBeNull();
-    expect(screen.queryByText("Blocked Paths")).toBeNull();
-    expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+    expect(screen.getByText("Files & Access")).toBeDefined();
+    expect(screen.getByText("Blocked Paths")).toBeDefined();
+    expect(screen.getByText("Allowed Roots")).toBeDefined();
+    expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
+    expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
     expect(screen.getByText("Apple Container Machine")).toBeDefined();
   });
 
@@ -2696,16 +2817,20 @@ describe("SettingsManager", () => {
     await user.click(configureButtons[0]);
     expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
 
-    // Removing the last rule leaves an empty list, which must fail closed
+    // Clearing the textarea leaves an empty list, which must fail closed
     // instead of falling through to the default action.
-    await user.click(screen.getByRole("button", { name: /Remove bash rule 1/i }));
-    expect(screen.getByText(/At least one rule is required/i)).toBeDefined();
+    const bashTextarea = screen.getByLabelText(
+      /Rules, one per line/i
+    ) as HTMLTextAreaElement;
+    await user.clear(bashTextarea);
+    expect(screen.getByText(/0 rules/i)).toBeDefined();
 
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
     await waitFor(() => {
       expect(screen.getByText(/Invalid bash rules/i)).toBeDefined();
     });
+    expect(screen.getByText(/At least one rule is required/i)).toBeDefined();
     expect(putCount).toBe(0);
   });
 
@@ -2772,11 +2897,12 @@ describe("SettingsManager", () => {
     await user.click(configureButtons[0]);
     expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
 
-    // Camel aliases populate the same fields as the snake keys.
+    // Camel aliases populate the same fields as the snake keys, with rules
+    // serialized as `pattern = action` lines preserving order.
     const defaultSelect = screen.getByLabelText(/Default action/i) as HTMLSelectElement;
     expect(defaultSelect.value).toBe("deny");
     expect(screen.getByDisplayValue("45")).toBeDefined();
-    expect(screen.getByDisplayValue("git *")).toBeDefined();
+    expect(screen.getByDisplayValue("git * = allow")).toBeDefined();
 
     await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
@@ -2792,6 +2918,245 @@ describe("SettingsManager", () => {
     expect(bash["timeout_seconds"]).toBe(45);
     expect(bash["allow_network"]).toBe(true);
     expect(bash["rules"]).toEqual([{ pattern: "git *", action: "allow" }]);
+  });
+
+  it("edits allowed roots via the Security textarea with live count, focus, reset, and array payload", async () => {
+    const user = userEvent.setup();
+    let sentPayload: Record<string, unknown> | null = null;
+    let putCount = 0;
+    const settingsWithFiles = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*"],
+      filesAllowRoots: ["~/custom"],
+      filesRequireApprovalOnDeny: true,
+    };
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithFiles,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: [] });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFiles);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Access")).toBeDefined();
+    });
+
+    // Roots textarea is pinned by its accessible label and stays a single
+    // multiline editor through the shared roots codec.
+    const rootsTextarea = screen.getByLabelText(
+      /Allowed roots, one per line/i
+    ) as HTMLTextAreaElement;
+    expect(rootsTextarea.tagName).toBe("TEXTAREA");
+    expect(rootsTextarea.placeholder).toContain("~");
+    expect(rootsTextarea.value).toContain("~/custom");
+    expect(screen.getByText(/1 root/i)).toBeDefined();
+    expect(screen.getByText(/Order is display-only/i)).toBeDefined();
+
+    // No row model exists for roots: there are no per-root inputs or remove
+    // buttons, only the one textarea. The single editor keeps small screens
+    // and copy-paste of root sets working.
+    expect(screen.queryByLabelText(/Root 1/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remove.*root/i })).toBeNull();
+    expect(screen.getAllByLabelText(/Allowed roots, one per line/i).length).toBe(1);
+
+    // Consumer note states the sharing boundary: allow roots bound live
+    // access only while denied paths skip everywhere including the index.
+    const consumerNote = screen.getByTestId("files-consumer-note");
+    expect(consumerNote.textContent).toContain("Allow roots bound");
+    expect(consumerNote.textContent).toContain(
+      "Denied paths are skipped everywhere including the document index"
+    );
+    expect(consumerNote.textContent).toContain("do not affect index coverage");
+
+    // Add Roots focuses the editor for keyboard flow without altering the
+    // parsed count by itself.
+    const addRootsBtn = screen.getByRole("button", { name: /Add Roots/i });
+    expect(addRootsBtn.className).toContain("ghost");
+    await user.click(addRootsBtn);
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rootsTextarea);
+    });
+    expect(rootsTextarea.value.endsWith("\n")).toBe(true);
+    expect(screen.getByText(/1 root/i)).toBeDefined();
+
+    // Reset rewrites only the form text after an explicit confirm and never
+    // persists until Save. Cancelling leaves the in-progress text untouched.
+    const resetRootsBtn = screen.getByRole("button", { name: /^Reset Roots$/i });
+    await user.click(resetRootsBtn);
+    await waitFor(() => {
+      expect(screen.getByText(/replace 1 custom root/i)).toBeDefined();
+    });
+    expect(screen.getByText(/nothing is saved until you choose Save/i)).toBeDefined();
+    const resetDialog = document.querySelector(".session-delete-modal") as HTMLElement;
+    expect(resetDialog).not.toBeNull();
+    await user.click(within(resetDialog).getByRole("button", { name: /Cancel/i }));
+    expect(
+      (screen.getByLabelText(/Allowed roots, one per line/i) as HTMLTextAreaElement).value
+    ).toContain("~/custom");
+    expect(putCount).toBe(0);
+
+    // Confirming swaps the custom root for the home default; the old value
+    // leaves the form so only the default remains visible.
+    await user.click(screen.getByRole("button", { name: /^Reset Roots$/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/replace 1 custom root/i)).toBeDefined();
+    });
+    await user.click(
+      screen.getByRole("button", { name: /Confirm reset allowed roots/i })
+    );
+    await waitFor(() => {
+      expect(screen.queryByDisplayValue("~/custom")).toBeNull();
+    });
+    expect(
+      (screen.getByLabelText(/Allowed roots, one per line/i) as HTMLTextAreaElement).value
+    ).toContain("~");
+    expect(putCount).toBe(0);
+
+    // Blank lines and surrounding whitespace collapse on save with order
+    // preserved for display; the wire shape is a trimmed string array.
+    const editedTextarea = screen.getByLabelText(
+      /Allowed roots, one per line/i
+    ) as HTMLTextAreaElement;
+    await user.clear(editedTextarea);
+    await user.type(editedTextarea, "  ~/a  \n\n~/b\n   \n");
+    expect(screen.getByText(/2 roots/i)).toBeDefined();
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    expect(sentPayload?.["filesAllowRoots"]).toEqual(["~/a", "~/b"]);
+    expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*"]);
+    expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
+    await waitFor(() => {
+      expect(screen.getByText("Files settings saved!")).toBeDefined();
+    });
+    const putsAfterSave = putCount;
+
+    // Traversal escapes fail closed with their editor line number.
+    await user.clear(editedTextarea);
+    await user.type(editedTextarea, "~/a\n../escape");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
+    });
+    expect(putCount).toBe(putsAfterSave);
+
+    // Empty means no roots: clearing the editor rejects with an error and
+    // never reaches the network.
+    await user.clear(editedTextarea);
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await waitFor(() => {
+      expect(screen.getByText(/Allowed roots cannot be empty/i)).toBeDefined();
+    });
+    expect(putCount).toBe(putsAfterSave);
+  });
+
+  it("points Tools Files to Security with no Configure button", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "files.grep",
+        description: "Search files",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFiles = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*"],
+      filesAllowRoots: ["~"],
+      filesRequireApprovalOnDeny: true,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(settingsWithFiles);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    // Tools owns the Files & Workspace category for toggles only: both file
+    // tools share one section with bulk actions but no header Configure, even
+    // though the server flags them with hasConfig. Security owns the editor,
+    // so the Tools section points there instead of opening a modal.
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
+    });
+    expect(screen.getByText("files.read")).toBeDefined();
+    expect(screen.getByText("files.grep")).toBeDefined();
+    expect(
+      screen.queryAllByRole("button", { name: /^Configure$/ }).length
+    ).toBe(0);
+    expect(screen.queryByRole("button", { name: /^Configure$/ })).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+    expect(
+      screen.getAllByRole("button", { name: /Enable All|Disable All/ }).length
+    ).toBeGreaterThan(0);
+    // No inline file editors live in Tools: the roots textarea stays in Security.
+    expect(screen.queryByLabelText(/Allowed roots, one per line/i)).toBeNull();
+    expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+
+    // The pointer target renders in Security as the single Files & Access editor.
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Access")).toBeDefined();
+    });
+    expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
+    expect(screen.getByTestId("files-consumer-note")).toBeDefined();
   });
 });
 

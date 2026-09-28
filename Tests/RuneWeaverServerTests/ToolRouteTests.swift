@@ -20,11 +20,18 @@ struct ToolRouteTests {
     @Test
     func `Files tools report settings support through buildToolInfo`() throws {
         let tools = FilesTools.makeTools(filesConfig: FilesConfig())
+        // Files & Access lives under Security, so every `files.*` tool
+        // reports no Configure action.
+        for tool in tools {
+            let listed = buildToolInfo(for: tool, isEnabled: true, recordByPluginID: [:])
+            #expect(listed.hasConfig == false)
+            #expect(listed.isEnabled == true)
+        }
         let read = tools.first { $0.name == "files.read" }
         let readTool = try #require(read)
         let info = buildToolInfo(for: readTool, isEnabled: true, recordByPluginID: [:])
         #expect(info.name == "files.read")
-        #expect(info.hasConfig == true)
+        #expect(info.hasConfig == false)
         #expect(info.isEnabled == true)
     }
 

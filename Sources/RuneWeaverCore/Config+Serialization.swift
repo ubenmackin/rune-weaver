@@ -410,7 +410,7 @@ extension RuneWeaverConfig {
     /// Every scalar key renders, including the enabled default, so a saved file
     /// documents the shell policy and a round-trip never depends on an implicit
     /// default silently diverging from what was written. Rules render as
-    /// `[[bash.rules]]` tables in stored order (top-to-bottom first-match-wins)
+    /// `[[bash.rules]]` tables in stored order (top-to-bottom last-match-wins)
     /// so a save/load cycle preserves evaluation order.
     private func renderBashTOML() -> [String] {
         var lines: [String] = [
