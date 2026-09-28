@@ -300,6 +300,10 @@ public actor RunLogStore {
     }
 
     /// Updates an existing run entry by identifier.
+    /// The row timestamp names the completion instant for settled runs and the
+    /// start instant while the run is still in flight: callers pass an explicit
+    /// stamp only when they own the completion moment, and a nil stamp keeps
+    /// the stored instant so pre-existing callers behave exactly as before.
     @discardableResult
     public func update(
         id: UUID,
@@ -307,7 +311,8 @@ public actor RunLogStore {
         response: String? = nil,
         toolActions: [ToolAction]? = nil,
         totalTokens: Int? = nil,
-        durationMs: Int? = nil
+        durationMs: Int? = nil,
+        timestamp: Date? = nil
     ) async -> RunLogEntry? {
         guard let index = entries.firstIndex(where: { $0.id == id }) else {
             return nil
@@ -321,7 +326,7 @@ public actor RunLogStore {
             kind: existing.kind,
             status: status,
             message: existing.message,
-            timestamp: existing.timestamp,
+            timestamp: timestamp ?? existing.timestamp,
             response: response.map(Self.truncatedResponse) ?? existing.response,
             toolActions: toolActions ?? existing.toolActions,
             totalTokens: totalTokens ?? existing.totalTokens,

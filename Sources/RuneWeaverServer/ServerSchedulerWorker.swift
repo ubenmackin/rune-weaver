@@ -679,15 +679,20 @@ public struct ServerIndexRunReporter: IndexRunReporting {
 
     /// Persists and broadcasts a run completion.
     ///
-    /// Falls back to appending the completed entry when the start row is not
-    /// present, so a completion never disappears because its start was pruned.
+    /// The completion event already carries the end instant, so the update
+    /// stamps it onto the start row: the finished time then reads as seconds
+    /// ago at completion instead of the run's duration ago. The start row keeps
+    /// nothing of the start except message order. Falls back to appending the
+    /// completed entry when the start row is not present, so a completion never
+    /// disappears because its start was pruned.
     /// - Parameter event: The completion event.
     public func runCompleted(_ event: IndexRunEvent) async {
         if let updated = await runs.update(
             id: event.id,
             status: event.status.rawValue,
             response: event.response,
-            durationMs: event.durationMs
+            durationMs: event.durationMs,
+            timestamp: event.timestamp
         ) {
             await hub.broadcastRun(updated)
             return

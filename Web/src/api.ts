@@ -2214,12 +2214,15 @@ export function formatIndexCount(value: unknown): string {
 
 // One-line human summary of an index run shared by the top notice and the
 // last-run strip: status plus the trigger display label, outcome counts, and
-// finish age, omitting any count the payload did not carry so a drifted
+// run age, omitting any count the payload did not carry so a drifted
 // payload still renders its status and time. The trigger label stays
 // parenthesized after the status so the `Last run <status>` prefix survives
 // verbatim, except an ok run that still recorded errors folds that count into
 // the head (`finished with N errors`) so success-with-errors never reads as a
-// clean ok plus a duplicated trailing count. A cancelled run appends the
+// clean ok plus a duplicated trailing count. A live run names its start
+// (`started … ago`) because its row still carries the start instant, while
+// every terminal status names its finish (`finished … ago`) from the persisted
+// completion instant. A cancelled run appends the
 // kept-work copy because committed batches survive the stop and the next run
 // resumes from there. A skipped run appends its reason so a skip never reads
 // as a silent no-op. Null renders the honest never-ran copy so a fresh store
@@ -2301,7 +2304,14 @@ export function describeIndexRun(
       finishedAt as string | number | null | undefined,
     );
     if (ageMs != null) {
-      parts.push(`finished ${formatRelativeAgo(ageMs)}`);
+      // A live row still carries its start instant, so it names the start and
+      // never the word finished; every settled row carries the completion
+      // instant stamped by the reporter, so it keeps the finished copy.
+      if (normalizedStatus === "running") {
+        parts.push(`started ${formatRelativeAgo(ageMs)}`);
+      } else {
+        parts.push(`finished ${formatRelativeAgo(ageMs)}`);
+      }
     }
   }
   let text = parts.join(" · ");

@@ -318,6 +318,66 @@ describe("IndexingPanel helpers", () => {
     ).toContain("3 indexed");
   });
 
+  it("names the start for live runs and never the word finished", () => {
+    // A live row still carries its start instant, so the strip names the start
+    // age while a fixed clock pins the relative copy deterministically.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-02-01T12:10:00.000Z"));
+      const startedAtSec = Math.floor(
+        new Date("2026-02-01T12:05:00.000Z").getTime() / 1000,
+      );
+      const text = describeIndexRun({
+        status: "running",
+        indexed: 2,
+        scanned: 4,
+        errors: 0,
+        finishedAt: startedAtSec,
+        trigger: "onDemand",
+      });
+      expect(text).toContain("Last run running");
+      expect(text).toContain("Manual Run");
+      expect(text).toContain("started 5m ago");
+      expect(text).not.toContain("finished");
+      // A padded status still takes the live branch instead of the finish copy.
+      const padded = describeIndexRun({
+        status: "  running  ",
+        finishedAt: startedAtSec,
+      });
+      expect(padded).toContain("started 5m ago");
+      expect(padded).not.toContain("finished");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("names the finish for terminal runs from the completion instant", () => {
+    // A settled row carries the completion instant stamped by the reporter, so
+    // the strip names the finish age with the same fixed clock as the live
+    // branch above.
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-02-01T12:10:00.000Z"));
+      const finishedAtSec = Math.floor(
+        new Date("2026-02-01T12:09:50.000Z").getTime() / 1000,
+      );
+      const text = describeIndexRun({
+        status: "ok",
+        indexed: 3,
+        scanned: 5,
+        errors: 0,
+        finishedAt: finishedAtSec,
+        trigger: "onDemand",
+      });
+      expect(text).toContain("Last run ok");
+      expect(text).toContain("Manual Run");
+      expect(text).toContain("finished 10s ago");
+      expect(text).not.toContain("started");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("groups large run counts digit-for-digit across notice and strip", () => {
     // Large stores group en-US while small counts stay plain, and the shared
     // formatter keeps the notice and the strip identical.

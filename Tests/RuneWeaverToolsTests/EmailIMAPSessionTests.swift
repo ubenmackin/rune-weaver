@@ -944,6 +944,10 @@ struct EmailIMAPSessionActorTests {
             ""
         }
 
+        func childLivenessSnapshot() -> SessionChildLiveness? {
+            nil
+        }
+
         var writeCount: Int {
             state.withLock { $0.written.count }
         }
@@ -989,6 +993,10 @@ struct EmailIMAPSessionActorTests {
 
         var retainedStderr: String {
             ""
+        }
+
+        func childLivenessSnapshot() -> SessionChildLiveness? {
+            nil
         }
 
         var terminateCount: Int {
@@ -1637,6 +1645,265 @@ struct MailSessionEventLogTests {
         #expect(!(result["error"] as? String ?? "").contains("mail.example.com"))
         #expect(!(result["error"] as? String ?? "").contains("you@example.com"))
         await session.close()
+    }
+
+    @Test
+    func `Failed open with alive child records liveness without exit code`() async throws {
+        // Intent: a freeze keeps the child alive, so the verdict names aliveness
+        // plus drain totals while leaving exit fields absent instead of zeroed.
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            liveness: SessionChildLiveness(childAlive: true, drainBytes: 0)
+        )
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        guard let result = decoded.first(where: { ($0["event"] as? String) == "session.open.result" }) else {
+            Issue.record("Expected session.open.result")
+            return
+        }
+        #expect(result["ok"] as? Bool == false)
+        #expect(result["childAlive"] as? Bool == true)
+        #expect(result["drainBytes"] as? Int == 0)
+        #expect(result["exitCode"] == nil)
+        #expect(result["terminationReason"] == nil)
+        #expect(fake.livenessSnapshotCalls == 1)
+        #expect(fake.terminateCount == 1)
+        await session.close()
+    }
+
+    @Test
+    func `Failed open with exited child records exit code plus drain bytes`() async throws {
+        // Intent: launch-death carries the exit status plus reason so a dead
+        // child never looks like a freeze; drain totals prove the drain ran.
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            stderrText: "boom",
+            liveness: SessionChildLiveness(
+                childAlive: false,
+                exitCode: 1,
+                terminationReason: "exit",
+                drainBytes: 512
+            )
+        )
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        let decoded = try collector.lines.map { try Self.decodeFields($0) }
+        guard let result = decoded.first(where: { ($0["event"] as? String) == "session.open.result" }) else {
+            Issue.record("Expected session.open.result")
+            return
+        }
+        #expect(result["childAlive"] as? Bool == false)
+        #expect(result["exitCode"] as? Int == 1)
+        #expect(result["terminationReason"] as? String == "exit")
+        #expect(result["drainBytes"] as? Int == 512)
+        #expect(fake.livenessSnapshotCalls == 1)
+        await session.close()
+    }
+
+    @Test
+    func `Failed open carries drain byte counts verbatim`() async throws {
+        // Intent: drain accounting is cumulative, so each canned total rides
+        // verbatim through the event for alive plus exited verdicts alike.
+        let cases: [SessionChildLiveness] = [
+            SessionChildLiveness(childAlive: true, drainBytes: 0),
+            SessionChildLiveness(childAlive: true, drainBytes: 128),
+            SessionChildLiveness(childAlive: false, exitCode: 2, terminationReason: "exit", drainBytes: 2048),
+            SessionChildLiveness(childAlive: false, exitCode: 137, terminationReason: "uncaughtSignal", drainBytes: 8192)
+        ]
+        for canned in cases {
+            let collector = SharedEventCollector()
+            let fake = FakeSessionLineTransport(
+                responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+                liveness: canned
+            )
+            let session = EmailIMAPSession(
+                credentials: Self.eventCredentials(),
+                transportFactory: { fake },
+                eventLog: collector.log
+            )
+            do {
+                try await session.start()
+                #expect(Bool(false), "Expected open failure")
+            } catch {
+                #expect(error.localizedDescription.contains("Could not connect"))
+            }
+            let decoded = try collector.lines.map { try Self.decodeFields($0) }
+            guard let result = decoded.first(where: { ($0["event"] as? String) == "session.open.result" }) else {
+                Issue.record("Expected session.open.result")
+                return
+            }
+            #expect(result["childAlive"] as? Bool == canned.childAlive)
+            #expect(result["drainBytes"] as? Int == canned.drainBytes)
+            if let code = canned.exitCode {
+                #expect(result["exitCode"] as? Int == code)
+            } else {
+                #expect(result["exitCode"] == nil)
+            }
+            if let reason = canned.terminationReason {
+                #expect(result["terminationReason"] as? String == reason)
+            } else {
+                #expect(result["terminationReason"] == nil)
+            }
+            await session.close()
+        }
+    }
+
+    @Test
+    func `Failed open without liveness omits fields rather than zeroing`() async throws {
+        // Intent: a transport that cannot answer leaves every liveness field
+        // absent, so missing data never masquerades as a clean exit or an
+        // empty drain.
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            liveness: nil
+        )
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        let decoded = try collector.lines.map { try Self.decodeFields($0) }
+        guard let result = decoded.first(where: { ($0["event"] as? String) == "session.open.result" }) else {
+            Issue.record("Expected session.open.result")
+            return
+        }
+        #expect(result["ok"] as? Bool == false)
+        #expect(result["childAlive"] == nil)
+        #expect(result["exitCode"] == nil)
+        #expect(result["terminationReason"] == nil)
+        #expect(result["drainBytes"] == nil)
+        #expect(fake.livenessSnapshotCalls == 1)
+        await session.close()
+    }
+
+    @Test
+    func `Failed open samples liveness before terminate`() async throws {
+        // Intent: the verdict must reflect pre-teardown state, so the seam
+        // order proves snapshot ran before terminate instead of after.
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            liveness: SessionChildLiveness(childAlive: true, drainBytes: 64)
+        )
+        let session = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        #expect(fake.livenessSnapshotCalls == 1)
+        #expect(fake.terminateCount == 1)
+        let order = fake.orderedEvents
+        #expect(order == ["snapshot", "terminate"])
+        guard let snapshotIndex = order.firstIndex(of: "snapshot"),
+              let terminateIndex = order.firstIndex(of: "terminate")
+        else {
+            Issue.record("Expected snapshot plus terminate in \(order)")
+            return
+        }
+        #expect(snapshotIndex < terminateIndex)
+        let decoded = try collector.lines.map { try Self.decodeFields($0) }
+        guard let result = decoded.first(where: { ($0["event"] as? String) == "session.open.result" }) else {
+            Issue.record("Expected session.open.result")
+            return
+        }
+        #expect(result["childAlive"] as? Bool == true)
+        #expect(result["drainBytes"] as? Int == 64)
+        await session.close()
+    }
+
+    @Test
+    func `Follow-up open distinguishes launch-death from freeze without capture`() async throws {
+        // Intent: two consecutive failures with different verdicts stay
+        // distinct — an exited child names its status while a live freeze with
+        // an empty drain names aliveness alone.
+        let collector = SharedEventCollector()
+        let log = collector.log
+        let launchDeath = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            liveness: SessionChildLiveness(
+                childAlive: false,
+                exitCode: 1,
+                terminationReason: "exit",
+                drainBytes: 256
+            )
+        )
+        let frozen = FakeSessionLineTransport(
+            responses: [#"{"ok": false, "error": "Could not connect: refused"}"#],
+            liveness: SessionChildLiveness(childAlive: true, drainBytes: 0)
+        )
+        let spawner = SharedFakeSessionFactory([launchDeath, frozen], log: log)
+        let first = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { spawner.next() },
+            eventLog: log
+        )
+        do {
+            try await first.start()
+            #expect(Bool(false), "Expected first open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        await first.close()
+        let second = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { spawner.next() },
+            eventLog: log
+        )
+        do {
+            try await second.start()
+            #expect(Bool(false), "Expected second open failure")
+        } catch {
+            #expect(error.localizedDescription.contains("Could not connect"))
+        }
+        await second.close()
+        let decoded = try collector.lines.map { try Self.decodeFields($0) }
+        let results = decoded.filter { ($0["event"] as? String) == "session.open.result" }
+        #expect(results.count == 2)
+        guard results.count == 2 else { return }
+        #expect(results[0]["childAlive"] as? Bool == false)
+        #expect(results[0]["exitCode"] as? Int == 1)
+        #expect(results[0]["drainBytes"] as? Int == 256)
+        #expect(results[1]["childAlive"] as? Bool == true)
+        #expect(results[1]["exitCode"] == nil)
+        #expect(results[1]["terminationReason"] == nil)
+        #expect(results[1]["drainBytes"] as? Int == 0)
+        #expect(launchDeath.orderedEvents == ["snapshot", "terminate"])
+        #expect(frozen.orderedEvents == ["snapshot", "terminate"])
     }
 
     @Test

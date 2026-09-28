@@ -501,12 +501,12 @@ public actor MailIndexer {
         var watermark = await checkpoints.watermark(account: context.account.name, mailbox: context.mailbox)
         // The mailbox loop owns fetch-phase liveness: an entering frame keeps
         // a long IMAP stretch visible before the first page returns. Only the
-        // mailbox name enters the frame; no subject or body ever does.
+        // account-qualified mailbox enters the frame; no subject or body ever does.
         await reporter(ToolProgress(
             message: "Indexing mail: \(cursor.report.messagesIndexed) indexed, \(cursor.report.messagesSeen) scanned",
             scanned: cursor.report.messagesSeen,
             matched: cursor.report.messagesIndexed,
-            current: context.mailbox
+            current: "\(context.account.name) - \(context.mailbox)"
         ))
         // The named owner for the open-close bracket is this method: the STATUS
         // probe plus every fetch page ride one pooled connection, with cancel,
@@ -632,7 +632,7 @@ public actor MailIndexer {
             message: "Indexing mail: \(cursor.report.messagesIndexed) indexed, \(cursor.report.messagesSeen) scanned",
             scanned: cursor.report.messagesSeen,
             matched: cursor.report.messagesIndexed,
-            current: "\(context.mailbox) (\(fresh.count) new)"
+            current: "\(context.account.name) - \(context.mailbox) (\(fresh.count) new)"
         ))
         let holdsWatermark = Self.holdsWatermark(windowComplete: windowComplete, fresh: fresh, watermark: watermark)
         if holdsWatermark {
@@ -739,7 +739,7 @@ public actor MailIndexer {
             let stamp = DispatchTime.now().uptimeNanoseconds
             if stamp &- cursor.lastReport >= ToolProgress.minimumReportIntervalNanoseconds {
                 cursor.lastReport = stamp
-                await reporter(Self.progress(report: cursor.report, mailbox: batch.context.mailbox, messageID: message.id))
+                await reporter(Self.progress(report: cursor.report, account: batch.context.account.name, mailbox: batch.context.mailbox, messageID: message.id))
             }
         }
     }
@@ -935,17 +935,22 @@ extension MailIndexer {
     }
 
     /// Builds an advisory progress line for a message.
+    ///
+    /// The current names the owning account so concurrent mailboxes stay
+    /// distinguishable while the message copy and counts match the entering
+    /// plus window frames exactly.
     /// - Parameters:
     ///   - report: Counts accumulated so far.
+    ///   - account: Account nickname owning the mailbox.
     ///   - mailbox: Mailbox being walked.
     ///   - messageID: Message being indexed.
     /// - Returns: A progress value with no secret content.
-    private static func progress(report: MailIndexRunReport, mailbox: String, messageID: String) -> ToolProgress {
+    private static func progress(report: MailIndexRunReport, account: String, mailbox: String, messageID: String) -> ToolProgress {
         ToolProgress(
             message: "Indexing mail: \(report.messagesIndexed) indexed, \(report.messagesSeen) scanned",
             scanned: report.messagesSeen,
             matched: report.messagesIndexed,
-            current: "\(mailbox)/\(messageID)"
+            current: "\(account) - \(mailbox)/\(messageID)"
         )
     }
 
