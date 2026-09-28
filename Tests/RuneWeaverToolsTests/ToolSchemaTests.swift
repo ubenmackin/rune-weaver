@@ -133,7 +133,7 @@ struct ToolSchemaTests {
                 }
                 #expect(raw.contains(#""required":["path"]"#))
             case "files.grep":
-                for key in ["pattern", "path", "include", "maxResults"] {
+                for key in ["pattern", "path", "include", "maxResults", "recursive"] {
                     #expect(properties[key] != nil, "files.grep missing property \(key)")
                 }
                 #expect(raw.contains(#""required":["pattern","path"]"#))

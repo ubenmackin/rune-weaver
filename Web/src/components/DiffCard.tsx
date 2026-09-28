@@ -8,6 +8,19 @@ import { useSharedWebSocket } from "../hooks/useSharedWebSocket";
 import UnifiedDiffView from "./UnifiedDiffView";
 import { CheckIcon, CloseIcon } from "./icons";
 
+// Client-side bound for inline staged mutations: HTTP 200 is the accepted /
+// discarded truth, so a hung engine walk must surface a retryable timeout
+// instead of leaving the card in a perpetual loading state. WebSocket
+// file_accepted / file_discarded frames stay passive reconcilers only.
+export const DIFF_CARD_ACTION_TIMEOUT_MS = 10_000;
+
+// Timeout copy doubles as the error text so the banner reads identically
+// whether the race timer or the abort rejection wins the settle.
+export const DIFF_CARD_ACCEPT_TIMEOUT_MESSAGE =
+  "Accept timed out after 10s. The file was not changed. Retry.";
+export const DIFF_CARD_DISCARD_TIMEOUT_MESSAGE =
+  "Discard timed out after 10s. The file was not changed. Retry.";
+
 interface FilesWritePayload {
   status: "staged" | "live";
   path: string;
@@ -27,6 +40,8 @@ interface DiffCardProps {
 export default function DiffCard({ action: _action, result }: DiffCardProps) {
   const [actionState, setActionState] = useState<"accepted" | "discarded" | null>(null);
   const [loading, setLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"accept" | "discard" | null>(null);
+  const [failedAction, setFailedAction] = useState<"accept" | "discard" | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const payload = useMemo<FilesWritePayload | null>(() => {
@@ -63,29 +78,75 @@ export default function DiffCard({ action: _action, result }: DiffCardProps) {
 
   const handleAccept = async () => {
     if (!payload || loading) return;
+    const targetPath = payload.path;
+    const controller = new AbortController();
     setLoading(true);
+    setPendingAction("accept");
+    setFailedAction(null);
     setErrorMsg(null);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error(DIFF_CARD_ACCEPT_TIMEOUT_MESSAGE));
+      }, DIFF_CARD_ACTION_TIMEOUT_MS);
+    });
     try {
-      await acceptStagedFile(payload.path);
+      // HTTP 200 is the accepted truth: flip the badge immediately without
+      // waiting for the detached file_accepted broadcast.
+      await Promise.race([
+        acceptStagedFile(targetPath, undefined, controller.signal),
+        timeoutPromise,
+      ]);
       setActionState("accepted");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to accept file");
+      if (controller.signal.aborted) {
+        setErrorMsg(DIFF_CARD_ACCEPT_TIMEOUT_MESSAGE);
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to accept file");
+      }
+      setFailedAction("accept");
     } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
       setLoading(false);
+      setPendingAction(null);
     }
   };
 
   const handleDiscard = async () => {
     if (!payload || loading) return;
+    const targetPath = payload.path;
+    const controller = new AbortController();
     setLoading(true);
+    setPendingAction("discard");
+    setFailedAction(null);
     setErrorMsg(null);
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error(DIFF_CARD_DISCARD_TIMEOUT_MESSAGE));
+      }, DIFF_CARD_ACTION_TIMEOUT_MS);
+    });
     try {
-      await discardStagedFile(payload.path);
+      // HTTP 200 is the discarded truth: flip the badge immediately without
+      // waiting for the detached file_discarded broadcast.
+      await Promise.race([
+        discardStagedFile(targetPath, undefined, controller.signal),
+        timeoutPromise,
+      ]);
       setActionState("discarded");
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to discard file");
+      if (controller.signal.aborted) {
+        setErrorMsg(DIFF_CARD_DISCARD_TIMEOUT_MESSAGE);
+      } else {
+        setErrorMsg(err instanceof Error ? err.message : "Failed to discard file");
+      }
+      setFailedAction("discard");
     } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
       setLoading(false);
+      setPendingAction(null);
     }
   };
 
@@ -94,6 +155,7 @@ export default function DiffCard({ action: _action, result }: DiffCardProps) {
   }
 
   const filename = payload.path.split("/").pop() || payload.path;
+  const handleRetry = failedAction === "discard" ? handleDiscard : handleAccept;
 
   return (
     <div className="diff-card-root">
@@ -134,7 +196,7 @@ export default function DiffCard({ action: _action, result }: DiffCardProps) {
                   onClick={handleAccept}
                   disabled={loading}
                 >
-                  {loading ? "Accepting…" : "Accept"}
+                  {pendingAction === "accept" && loading ? "Accepting…" : "Accept"}
                 </button>
                 <button
                   type="button"
@@ -142,7 +204,7 @@ export default function DiffCard({ action: _action, result }: DiffCardProps) {
                   onClick={handleDiscard}
                   disabled={loading}
                 >
-                  {loading ? "Discarding…" : "Discard"}
+                  {pendingAction === "discard" && loading ? "Discarding…" : "Discard"}
                 </button>
               </div>
             )}
@@ -150,7 +212,19 @@ export default function DiffCard({ action: _action, result }: DiffCardProps) {
         )}
       </div>
 
-      {errorMsg && <div className="diff-error-banner text-xs text-red-400 px-3 py-1">{errorMsg}</div>}
+      {errorMsg && (
+        <div className="diff-error-banner text-xs text-red-400 px-3 py-1">
+          <span>{errorMsg}</span>
+          <button
+            type="button"
+            className="diff-error-retry"
+            onClick={handleRetry}
+            disabled={loading}
+          >
+            Retry
+          </button>
+        </div>
+      )}
 
       <div className="diff-card-body">
         <UnifiedDiffView diff={payload.diff} maxCollapsedLines={25} />

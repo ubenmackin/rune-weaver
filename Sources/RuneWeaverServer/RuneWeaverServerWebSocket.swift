@@ -400,12 +400,21 @@ func wsEventFrameText(_ event: OrchestratorEvent, sessionID: UUID) -> String? {
 /// sessionID and viewers filter before touching state. Approval prompts keep
 /// their dedicated hub fan-out inside this path. A nil encoding drops before
 /// broadcast, and a cancelled turn emits zero further frames via the guard.
+/// Tool progress is advisory and droppable, so it leaves on a detached task
+/// while the tool loop resolves without hub latency; every other frame keeps
+/// the awaited ordering the terminal frames rely on.
 func broadcastWSEventFrame(_ event: OrchestratorEvent, sessionID: UUID, context: ServerContext) async {
     guard !Task.isCancelled else {
         return
     }
     if case let .approval(request) = event {
         await context.hub.broadcastApproval(request)
+        return
+    }
+    if case .toolProgress = event {
+        if let frameText = wsEventFrameText(event, sessionID: sessionID) {
+            Task { await context.hub.broadcast(text: frameText) }
+        }
         return
     }
     if let frameText = wsEventFrameText(event, sessionID: sessionID) {

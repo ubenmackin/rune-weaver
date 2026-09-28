@@ -284,6 +284,8 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
     public let include: String?
     /// Maximum matches to return, clamped to `1...200`.
     public let maxResults: Int
+    /// Whether to recurse into subdirectories.
+    public let recursive: Bool
 
     /// Default match count when the caller omits `maxResults`.
     public static let defaultMaxResults = 50
@@ -293,11 +295,12 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
     public static let maxPatternChars = 500
 
     /// Memberwise initializer with `maxResults` clamping.
-    public init(pattern: String, path: String, include: String? = nil, maxResults: Int = defaultMaxResults) {
+    public init(pattern: String, path: String, include: String? = nil, maxResults: Int = defaultMaxResults, recursive: Bool = true) {
         self.pattern = pattern
         self.path = path
         self.include = include
         self.maxResults = min(max(maxResults, 1), Self.maxMaxResults)
+        self.recursive = recursive
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -307,6 +310,7 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
         case maxResults
         case maxResultsSnake = "max_results"
         case limit
+        case recursive
     }
 
     /// Decodes arguments, accepting `max_results`/`limit` aliases and clamping `maxResults`.
@@ -322,7 +326,8 @@ public struct FilesGrepArgs: Sendable, Equatable, Decodable {
             ?? container.decodeIfPresent(Int.self, forKey: .maxResultsSnake)
             ?? container.decodeIfPresent(Int.self, forKey: .limit)
             ?? Self.defaultMaxResults
-        self.init(pattern: pattern, path: path, include: include, maxResults: rawMax)
+        let rec = try container.decodeIfPresent(Bool.self, forKey: .recursive) ?? true
+        self.init(pattern: pattern, path: path, include: include, maxResults: rawMax, recursive: rec)
     }
 
     /// Trimmed regex source.
@@ -505,15 +510,18 @@ public struct FilesGrepTool: Tool, Sendable {
             + "Use when the user asks to find text across files. "
             + "Pass pattern (RE2-safe regex, max 500 chars) plus a file or directory path, "
             + "optional include filename glob (e.g. *.swift), and maxResults (1-200, default 50). "
-            + "Returns matching lines with 200-char previews and a truncation flag; sensitive paths fail with an approval hint."
-    /// Function-calling contract for `pattern`, `path`, `include`, and `maxResults`.
+            + "Returns matching lines with 200-char previews and a truncation flag; sensitive paths fail with an approval hint. "
+            + "Pass recursive false to search only the immediate children of the searched directory (default true)."
+    /// Function-calling contract for `pattern`, `path`, `include`, `maxResults`, and `recursive`.
     public let inputSchema =
         JSONSchema(
             rawValue: #"{"type":"object","properties":{"pattern":{"type":"string","description":"Regular expression "#
                 + #"matched per line (RE2-safe, max 500 chars)"},"path":{"type":"string","description":"File or "#
                 + #"directory to search (\"~\" expands to the home directory)"},"include":{"type":"string","description":"Optional "#
                 + #"filename glob narrowing candidates (e.g. *.swift)"},"maxResults":{"type":"integer","description":"Maximum "#
-                + #"matches (1-200, default 50)","minimum":1,"maximum":200}},"required":["pattern","path"],"additionalProperties":false}"#
+                + #"matches (1-200, default 50)","minimum":1,"maximum":200},"recursive":{"type":"boolean","description":"Whether "#
+                + #"to recurse into subdirectories (default true). Pass false to search only the immediate children of the searched directory."}}"#
+                + #","required":["pattern","path"],"additionalProperties":false}"#
         )
     /// Always allowed at the gate level; sensitive paths escalate via the failure hint instead.
     public let permissionLevel = PermissionLevel.readOnly
@@ -718,7 +726,7 @@ public struct FilesGrepTool: Tool, Sendable {
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isDirectoryKey],
-                options: [],
+                options: args.recursive ? [] : [.skipsSubdirectoryDescendants],
                 errorHandler: { _, _ in true }
             ) else {
                 return ([], false)
@@ -726,8 +734,13 @@ public struct FilesGrepTool: Tool, Sendable {
             // `DirectoryEnumerator`'s `makeIterator()` is unavailable from async
             // contexts, so pull entries synchronously; the `await`s in the body
             // are unaffected and `skipDescendants()` still prunes descendants.
+            var visited = 0
             while let element = enumerator.nextObject() {
                 try Task.checkCancellation()
+                visited += 1
+                if visited % 50 == 0 {
+                    await Task.yield()
+                }
                 guard let url = element as? URL else {
                     continue
                 }
@@ -739,6 +752,9 @@ public struct FilesGrepTool: Tool, Sendable {
                         enumerator.skipDescendants()
                     }
                     continue
+                }
+                if !args.recursive, (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                    enumerator.skipDescendants()
                 }
                 if (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
                     continue
@@ -1043,8 +1059,13 @@ public struct FilesGlobTool: Tool, Sendable {
         // `DirectoryEnumerator`'s `makeIterator()` is unavailable from async
         // contexts, so pull entries synchronously; the `await`s in the body
         // are unaffected and `skipDescendants()` still prunes descendants.
+        var visited = 0
         while let element = enumerator.nextObject() {
             try Task.checkCancellation()
+            visited += 1
+            if visited % 50 == 0 {
+                await Task.yield()
+            }
             guard let url = element as? URL else {
                 continue
             }

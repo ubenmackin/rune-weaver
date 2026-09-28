@@ -3494,17 +3494,24 @@ export async function getStagedFiles(path?: string): Promise<StagedFilesResponse
   return fetchJson<StagedFilesResponse>(url);
 }
 
-export async function acceptStagedFile(path?: string, all?: boolean): Promise<FileActionResponse> {
+// Accepts one staged file (or all when `all` is true). The optional signal
+// lets inline review cards bound the request with a client-side timeout so a
+// hung engine walk cannot leave the card in a perpetual loading state.
+export async function acceptStagedFile(path?: string, all?: boolean, signal?: AbortSignal): Promise<FileActionResponse> {
   return fetchJson<FileActionResponse>("/files/accept", {
     method: "POST",
     body: JSON.stringify({ path, all }),
+    signal,
   });
 }
 
-export async function discardStagedFile(path?: string, all?: boolean): Promise<FileActionResponse> {
+// Discards one staged file (or all when `all` is true). Mirrors the accept
+// timeout contract above so discard cards share the same abort behavior.
+export async function discardStagedFile(path?: string, all?: boolean, signal?: AbortSignal): Promise<FileActionResponse> {
   return fetchJson<FileActionResponse>("/files/discard", {
     method: "POST",
     body: JSON.stringify({ path, all }),
+    signal,
   });
 }
 

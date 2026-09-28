@@ -516,9 +516,16 @@ public actor IndexCoordinator {
     /// the same elapsed, rate, cumulative counts, and phase/stage tokens.
     /// The nanosecond form below derives from this single value so the two
     /// can never drift apart.
-    static let heartbeatInterval: TimeInterval = 2.0
+    public static let heartbeatInterval: TimeInterval = 2.0
     /// Heartbeat cadence in nanoseconds, derived for `Task.sleep`.
     static var heartbeatIntervalNanoseconds: UInt64 {
+        UInt64(heartbeatInterval * 1_000_000_000)
+    }
+
+    /// Heartbeat cadence configured for this coordinator.
+    private let heartbeatInterval: TimeInterval
+    /// Heartbeat cadence in nanoseconds, derived for `Task.sleep`.
+    private var instanceHeartbeatIntervalNanoseconds: UInt64 {
         UInt64(heartbeatInterval * 1_000_000_000)
     }
 
@@ -607,6 +614,7 @@ public actor IndexCoordinator {
     ///   - reporter: Run lifecycle reporting seam; defaults to a null reporter.
     ///   - now: Wall-clock seam.
     ///   - nightlyHour: Hour the nightly trigger may fire; defaults to 3 AM.
+    ///   - heartbeatInterval: Cadence for stalled-run heartbeats; defaults to 2.0s.
     ///   - progress: Advisory progress sink; defaults to a no-op.
     public init(
         config: IndexConfig,
@@ -616,6 +624,7 @@ public actor IndexCoordinator {
         reporter: any IndexRunReporting = NullIndexRunReporter(),
         now: @escaping @Sendable () -> Date = { Date() },
         nightlyHour: Int = 3,
+        heartbeatInterval: TimeInterval = IndexCoordinator.heartbeatInterval,
         progress: @escaping ToolProgressReporter = ToolContext.noProgress
     ) {
         self.config = config
@@ -625,6 +634,7 @@ public actor IndexCoordinator {
         self.reporter = reporter
         self.now = now
         self.nightlyHour = min(max(nightlyHour, 0), 23)
+        self.heartbeatInterval = max(heartbeatInterval, 0.01)
         self.progress = progress
     }
 
@@ -1482,9 +1492,10 @@ private extension IndexCoordinator {
     /// - Parameter startedAt: Instant the run began.
     /// - Returns: The heartbeat task, cancelled when the run settles.
     func startHeartbeat(startedAt: Date) -> Task<Void, Never> {
-        Task<Void, Never> {
+        let intervalNanoseconds = instanceHeartbeatIntervalNanoseconds
+        return Task<Void, Never> {
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: Self.heartbeatIntervalNanoseconds)
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
                 if Task.isCancelled {
                     break
                 }

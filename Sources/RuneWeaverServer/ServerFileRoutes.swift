@@ -369,17 +369,27 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
             // Per-file failures are collected and surfaced as a non-200
             // rather than swallowed into a bare success count.
             var failures: [String] = []
+            var acceptedPaths: [String] = []
             for file in staged {
                 do {
                     try StagedFilesManager.accept(livePath: file.path, stagingPath: file.stagingPath, filesConfig: filesConfig)
                     count += 1
-                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: file.path)),
-                       let text = String(data: data, encoding: .utf8)
-                    {
-                        await req.application.runeWeaver.hub.broadcast(text: text)
-                    }
+                    acceptedPaths.append(file.path)
                 } catch {
                     failures.append("\(file.path): \(error.localizedDescription)")
+                }
+            }
+            // The HTTP response carries the mutation truth; per-file frames
+            // follow from a detached task so a slow viewer never delays the
+            // review decision.
+            let hub = req.application.runeWeaver.hub
+            Task { [hub, acceptedPaths] in
+                for path in acceptedPaths {
+                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: path)),
+                       let text = String(data: data, encoding: .utf8)
+                    {
+                        await hub.broadcast(text: text)
+                    }
                 }
             }
             if !failures.isEmpty {
@@ -401,10 +411,15 @@ private func registerFileAcceptRoute(_ filesGroup: RoutesBuilder) {
 
         try StagedFilesManager.accept(livePath: liveURL.path, stagingPath: stagingURL.path, filesConfig: filesConfig)
 
-        if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: liveURL.path)),
-           let text = String(data: data, encoding: .utf8)
-        {
-            await req.application.runeWeaver.hub.broadcast(text: text)
+        // Return the mutation result first; the frame reconciles viewers eventually.
+        let hub = req.application.runeWeaver.hub
+        let livePath = liveURL.path
+        Task { [hub, livePath] in
+            if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_accepted", path: livePath)),
+               let text = String(data: data, encoding: .utf8)
+            {
+                await hub.broadcast(text: text)
+            }
         }
 
         return FileActionResponse(status: "accepted", count: 1)
@@ -429,17 +444,27 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
             // Per-file failures are collected and surfaced as a non-200
             // rather than swallowed into a bare success count.
             var failures: [String] = []
+            var discardedPaths: [String] = []
             for file in staged {
                 do {
                     try StagedFilesManager.discard(stagingPath: file.stagingPath, filesConfig: filesConfig)
                     count += 1
-                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: file.path)),
-                       let text = String(data: data, encoding: .utf8)
-                    {
-                        await req.application.runeWeaver.hub.broadcast(text: text)
-                    }
+                    discardedPaths.append(file.path)
                 } catch {
                     failures.append("\(file.path): \(error.localizedDescription)")
+                }
+            }
+            // The HTTP response carries the mutation truth; per-file frames
+            // follow from a detached task so a slow viewer never delays the
+            // review decision.
+            let hub = req.application.runeWeaver.hub
+            Task { [hub, discardedPaths] in
+                for path in discardedPaths {
+                    if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: path)),
+                       let text = String(data: data, encoding: .utf8)
+                    {
+                        await hub.broadcast(text: text)
+                    }
                 }
             }
             if !failures.isEmpty {
@@ -461,10 +486,15 @@ private func registerFileDiscardRoute(_ filesGroup: RoutesBuilder) {
 
         try StagedFilesManager.discard(stagingPath: stagingURL.path, filesConfig: filesConfig)
 
-        if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: liveURL.path)),
-           let text = String(data: data, encoding: .utf8)
-        {
-            await req.application.runeWeaver.hub.broadcast(text: text)
+        // Return the mutation result first; the frame reconciles viewers eventually.
+        let hub = req.application.runeWeaver.hub
+        let livePath = liveURL.path
+        Task { [hub, livePath] in
+            if let data = try? JSONEncoder().encode(WSFileActionEvent(type: "file_discarded", path: livePath)),
+               let text = String(data: data, encoding: .utf8)
+            {
+                await hub.broadcast(text: text)
+            }
         }
 
         return FileActionResponse(status: "discarded", count: 1)
