@@ -170,7 +170,9 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
     /// evicts so a later open retries cleanly with no half-open leak. A
     /// successful start emits `pool.open` with the helper pid so the pool line
     /// correlates with the session `session.spawn` line via timestamp plus pid;
-    /// an open failure emits `pool.evict` with an `open-failed` reason.
+    /// an open failure emits `pool.evict` with an `open-failed` reason. Named
+    /// owner for pool claim detail is this bracket: every open emits one
+    /// `pool.claim` line with its claim wait before the handshake starts.
     /// - Parameters:
     ///   - credentials: Resolved connection fields plus password.
     ///   - mailbox: Mailbox the session will read.
@@ -179,7 +181,11 @@ public struct EmailIMAPMailIndexGateway: MailIndexGateway, Sendable {
         let trimmed = mailbox.trimmingCharacters(in: .whitespacesAndNewlines)
         let key = Self.sessionKey(account: credentials.accountName, mailbox: trimmed)
         let resolved = credentials.resolvedEmailCredentials()
+        let claimStart = Date()
         let session = await sessionPool.claim(key: key, credentials: resolved, factory: sessionFactory)
+        let claimWaitMs = Date().timeIntervalSince(claimStart) * 1000
+        let claimedPid = await session.processIdentifier
+        eventLog.logClaim(account: credentials.accountName, pid: claimedPid, mailbox: trimmed, waitMs: claimWaitMs)
         do {
             // `start()` is idempotent: the first opener spawns plus logs in
             // while later openers join the same handshake without redialing.

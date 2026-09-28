@@ -310,7 +310,11 @@ struct EmailTemporalTests {
             username: "you@example.com",
             password: "test-secret"
         )
-        let session = EmailIMAPSession(credentials: credentials, transportFactory: { fake })
+        let session = EmailIMAPSession(
+            credentials: credentials,
+            transportFactory: { fake },
+            eventLog: MailSessionEventLog(sink: { _ in })
+        )
         try await session.start()
         _ = try await session.search(mailbox: "INBOX", query: "hello", limit: 10, since: sinceDate, until: untilNoon)
         let lines = fake.writtenLines
@@ -337,7 +341,11 @@ struct EmailTemporalTests {
             username: "you@example.com",
             password: "test-secret"
         )
-        let session = EmailIMAPSession(credentials: credentials, transportFactory: { fake })
+        let session = EmailIMAPSession(
+            credentials: credentials,
+            transportFactory: { fake },
+            eventLog: MailSessionEventLog(sink: { _ in })
+        )
         try await session.start()
         _ = try await session.search(mailbox: "INBOX", query: "hello", limit: 10, since: range.since, until: range.until)
         let lines = fake.writtenLines
