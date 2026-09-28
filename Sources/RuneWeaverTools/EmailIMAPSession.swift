@@ -225,6 +225,36 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
     /// live drain bound and the log dump bound cannot drift; the 500-char
     /// timeout tail stays unchanged for readable timeout errors.
     public static let maxStderrDumpBytes = MailSessionEventLog.maxStderrDumpBytes
+
+    /// Leading argv entries handed to exec without the trailing script body.
+    ///
+    /// Single source for spawn construction and spawn-event summaries so an
+    /// interpreter-flag change cannot drift the log: the live initializer
+    /// appends the script body to this prefix while session summaries derive
+    /// counts plus previews from it. An explicit empty path collapses to the
+    /// `PATH` lookup like the initializer.
+    /// - Parameter pythonExecutable: Explicit interpreter path, or nil/empty for `python3` on `PATH`.
+    /// - Returns: Leading flags without the script body.
+    public static func argvLeading(pythonExecutable: String?) -> [String] {
+        if let pythonExecutable, !pythonExecutable.isEmpty {
+            return ["-u", "-c"]
+        }
+        return ["python3", "-u", "-c"]
+    }
+
+    /// Argv summary for the spawn event without the script body.
+    ///
+    /// Derives the count plus preview from `argvLeading` so construction and
+    /// logging share one owner; the script body stays a byte size alone.
+    /// - Parameters:
+    ///   - pythonExecutable: Explicit interpreter path, or nil/empty for `python3` on `PATH`.
+    ///   - scriptBytes: UTF-8 bytes of the script carried as the last arg.
+    /// - Returns: Argv count plus leading-flag preview.
+    public static func argvSummary(pythonExecutable: String?, scriptBytes _: Int) -> (count: Int, preview: String) {
+        let leading = argvLeading(pythonExecutable: pythonExecutable)
+        return (leading.count + 1, leading.joined(separator: " "))
+    }
+
     /// Underlying helper process. Touched only while holding `ioState`.
     private let process: Process
     /// Writable stdin handle. Written and closed only while holding `ioState`.
@@ -254,13 +284,13 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
     /// - Throws: `EmailIMAPError.pythonUnavailable` when the spawn fails.
     public init(pythonExecutable: String?, scriptSource: String) throws {
         let spawned = Process()
+        let leading = Self.argvLeading(pythonExecutable: pythonExecutable)
         if let pythonExecutable, !pythonExecutable.isEmpty {
             spawned.executableURL = URL(fileURLWithPath: pythonExecutable)
-            spawned.arguments = ["-u", "-c", scriptSource]
         } else {
             spawned.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            spawned.arguments = ["python3", "-u", "-c", scriptSource]
         }
+        spawned.arguments = leading + [scriptSource]
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
@@ -775,6 +805,10 @@ public actor EmailIMAPSession {
         }
         do {
             return try await exchange(op: op, payload: payload, timeout: Self.commandTimeoutSeconds)
+        } catch let cancel as CancellationError {
+            // Cooperative cancellation never terminates: the framing stays
+            // pooled and the outer gateway skips eviction for cancels.
+            throw cancel
         } catch let first as EmailIMAPError {
             if case .decodeFailed = first {
                 throw first
@@ -784,6 +818,11 @@ public actor EmailIMAPSession {
             }
             await terminateCurrent()
             throw first
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            throw error
         }
     }
 
@@ -1077,7 +1116,143 @@ extension EmailIMAPSession {
         return data
     }
 
+    /// Exact executable handed to exec for the current configuration.
+    ///
+    /// Mirrors the live pipe spawn so hermetic runs emit the same resolved
+    /// interpreter without dialing; only the path rides the spawn event. An
+    /// explicit empty path collapses to the `PATH` lookup like the transport
+    /// initializer so the event cannot drift from the spawn.
+    /// - Returns: Interpreter path or `/usr/bin/env` for `python3` on `PATH`.
+    private func spawnExecutable() -> String {
+        if let pythonExecutable, !pythonExecutable.isEmpty {
+            return pythonExecutable
+        }
+        return "/usr/bin/env"
+    }
+
+    /// Argv summary for the spawn event without the script body.
+    ///
+    /// Single-sourced through the transport helper so construction and
+    /// logging share one owner; only counts, previews, and sizes ride the
+    /// event while the script body stays a size alone.
+    /// - Returns: Count, preview, and script size for the spawn event.
+    private func spawnArgvSummary() -> (count: Int, preview: String, scriptBytes: Int) {
+        let scriptBytes = EmailIMAPSessionScript.source.utf8.count
+        let summary = ProcessSessionLineTransport.argvSummary(
+            pythonExecutable: pythonExecutable,
+            scriptBytes: scriptBytes
+        )
+        return (count: summary.count, preview: summary.preview, scriptBytes: scriptBytes)
+    }
+
+    /// Builds the open sent shape directly without values.
+    ///
+    /// Sizes count UTF-8 bytes so multibyte spellings stay comparable with
+    /// the wire `byteCount`; presence rides alongside so odd spellings stay
+    /// diagnosable without ever carrying host, username, or password text.
+    /// - Parameter lineByteCount: UTF-8 bytes written for the open line.
+    /// - Returns: Sizes plus presence for the open sent event.
+    private func openSentShape(lineByteCount: Int) -> MailSessionEventLog.OpenSentShape {
+        MailSessionEventLog.OpenSentShape(
+            byteCount: lineByteCount,
+            host: credentials.host,
+            port: credentials.port,
+            username: credentials.username,
+            password: credentials.password
+        )
+    }
+
+    /// Strips exact credential values from an error detail before logging.
+    ///
+    /// The helper contract keeps identity out of envelopes, but verbatim
+    /// helper details can still echo older `user@host:port` wordings; longest
+    /// first replacement keeps host, username, and password values out of
+    /// every logged field. The log layer additionally redacts email-shaped
+    /// tokens as defense in depth.
+    /// - Parameter detail: Raw error detail destined for the event log.
+    /// - Returns: Detail with credential substrings replaced.
+    private func sanitizedLogDetail(_ detail: String) -> String {
+        var result = detail
+        let secrets = [credentials.password, credentials.username, credentials.host]
+            .filter { !$0.isEmpty }
+            .sorted { $0.count > $1.count }
+        for secret in secrets {
+            result = result.replacingOccurrences(of: secret, with: "[redacted]")
+        }
+        return result
+    }
+
+    /// Reads one response line, logging the typed read outcome exactly once.
+    ///
+    /// Single owner for the read plus `session.read` emission so command and
+    /// open paths cannot drift. Success logs `first-byte` with its size;
+    /// transport failures log the classified `eof` or `timeout` outcome.
+    /// Cooperative cancellation propagates unchanged with no read event so a
+    /// cancelled wait never masquerades as a transport closure.
+    /// - Parameters:
+    ///   - transport: Line transport owning the framing.
+    ///   - op: Session operation owning the read such as `open` or `search`.
+    ///   - timeout: Seconds to wait for the single response line.
+    ///   - pid: Helper child pid when known, nil for hermetic fakes.
+    ///   - account: Owning account nickname.
+    /// - Returns: Single response line without the trailing newline.
+    private func loggedRead(
+        from transport: any SessionLineTransport,
+        op: String,
+        timeout: TimeInterval,
+        pid: Int32?,
+        account: String
+    ) async throws -> String {
+        let readStart = Date()
+        do {
+            let response = try await transport.readLine(timeout: timeout)
+            let waitMs = Date().timeIntervalSince(readStart) * 1000
+            eventLog.logRead(
+                account: account,
+                pid: pid,
+                op: op,
+                outcome: .firstByte,
+                waitMs: waitMs,
+                bytes: response.utf8.count
+            )
+            return response
+        } catch let cancel as CancellationError {
+            throw cancel
+        } catch let error as EmailIMAPError {
+            let waitMs = Date().timeIntervalSince(readStart) * 1000
+            eventLog.logRead(
+                account: account,
+                pid: pid,
+                op: op,
+                outcome: MailSessionEventLog.readOutcome(for: error),
+                waitMs: waitMs
+            )
+            throw error
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            let waitMs = Date().timeIntervalSince(readStart) * 1000
+            let mapped = EmailIMAPError.bridgeFailed("IMAP session read failed: \(error.localizedDescription)")
+            eventLog.logRead(
+                account: account,
+                pid: pid,
+                op: op,
+                outcome: MailSessionEventLog.readOutcome(for: mapped),
+                waitMs: waitMs
+            )
+            throw mapped
+        }
+    }
+
     /// Writes one line and reads one response line with a bounded wait.
+    ///
+    /// Named owner for command read detail: every command read emits one
+    /// `session.read` line with first-byte, eof, or timeout plus its wait so
+    /// stalls stay attributable without carrying payload bytes. Cooperative
+    /// cancellation propagates unchanged with no command-failure event so the
+    /// pooled caller skips its eviction path instead of treating a cancel as
+    /// a transport closure.
     /// - Parameters:
     ///   - op: Session operation.
     ///   - payload: String fields merged with `op`.
@@ -1095,35 +1270,48 @@ extension EmailIMAPSession {
             do {
                 line = try encodeLine(op: op, payload: payload)
             } catch {
+                if error is CancellationError {
+                    throw error
+                }
                 throw EmailIMAPError.bridgeFailed(
                     "Could not encode IMAP session request: \(error.localizedDescription)"
                 )
             }
             do {
                 try await current.writeLine(line)
+            } catch let cancel as CancellationError {
+                throw cancel
             } catch let error as EmailIMAPError {
                 throw error
             } catch {
+                if error is CancellationError {
+                    throw error
+                }
                 throw EmailIMAPError.bridgeFailed("IMAP session write failed: \(error.localizedDescription)")
             }
-            let response: String
-            do {
-                response = try await current.readLine(timeout: timeout)
-            } catch let error as EmailIMAPError {
-                throw error
-            } catch {
-                throw EmailIMAPError.bridgeFailed("IMAP session read failed: \(error.localizedDescription)")
-            }
+            let response = try await loggedRead(from: current, op: op, timeout: timeout, pid: pid, account: account)
             let data = try checkedEnvelope(response)
             let latencyMs = Date().timeIntervalSince(start) * 1000
             // Only sizes, latencies, and outcomes ride the event; op names the
             // exchange while query text and payloads stay out of the log.
             eventLog.logCommand(account: account, pid: pid, op: op, latencyMs: latencyMs, ok: true)
             return data
+        } catch let cancel as CancellationError {
+            throw cancel
         } catch {
+            if error is CancellationError {
+                throw error
+            }
             let latencyMs = Date().timeIntervalSince(start) * 1000
             let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            eventLog.logCommand(account: account, pid: pid, op: op, latencyMs: latencyMs, ok: false, error: detail)
+            eventLog.logCommand(
+                account: account,
+                pid: pid,
+                op: op,
+                latencyMs: latencyMs,
+                ok: false,
+                error: sanitizedLogDetail(detail)
+            )
             throw error
         }
     }
@@ -1131,8 +1319,8 @@ extension EmailIMAPSession {
     /// Logs an open failure with write-to-line latency.
     ///
     /// Single owner for open-failure logging so factory-spawn, live-spawn,
-    /// and open-exchange failures cannot drift; only the verbatim helper
-    /// detail rides the event while payloads stay out.
+    /// and open-exchange failures cannot drift; only the sanitized helper
+    /// detail rides the event while payloads and identity stay out.
     /// - Parameters:
     ///   - pid: Helper child pid when known, nil for spawn failures.
     ///   - writeStart: Attempt start for latency measurement.
@@ -1140,7 +1328,13 @@ extension EmailIMAPSession {
     private func logOpenFailure(pid: Int32?, writeStart: Date, error: Error) {
         let latencyMs = Date().timeIntervalSince(writeStart) * 1000
         let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        eventLog.logOpenResult(account: credentials.accountName, pid: pid, ok: false, error: detail, latencyMs: latencyMs)
+        eventLog.logOpenResult(
+            account: credentials.accountName,
+            pid: pid,
+            ok: false,
+            error: sanitizedLogDetail(detail),
+            latencyMs: latencyMs
+        )
     }
 
     /// Terminates a fresh transport, emitting its stderr dump, and clears started state.
@@ -1162,11 +1356,14 @@ extension EmailIMAPSession {
     /// Spawns a fresh transport and opens with a bounded wait.
     ///
     /// Failures terminate the fresh transport before throwing so a bad open
-    /// never leaks a half-open helper. The helper copy surfaces verbatim. A
-    /// close racing the handshake terminates instead of leaving a started
-    /// session behind. Spawn, sent, result, and stderr events carry only the
-    /// interpreter path, byte counts, latencies, and outcomes so the password
-    /// and request payload never enter the log.
+    /// never leaks a half-open helper. The helper copy surfaces sanitized so
+    /// identity never enters the log. A close racing the handshake terminates
+    /// instead of leaving a started session behind. Spawn, sent, read,
+    /// result, and stderr events carry only the executable, argv summary,
+    /// field shapes, latencies, and outcomes so the password and request
+    /// payload never enter the log. Cooperative cancellation propagates
+    /// unchanged with no failure event so the pooled caller skips eviction.
+    /// Named owner for open read detail is this actor.
     /// - Parameter timeout: Seconds to wait for the single open response.
     private func spawnAndOpen(timeout: TimeInterval) async throws {
         let account = credentials.accountName
@@ -1175,7 +1372,12 @@ extension EmailIMAPSession {
         if let factory {
             do {
                 next = try await factory()
+            } catch let cancel as CancellationError {
+                throw cancel
             } catch {
+                if error is CancellationError {
+                    throw error
+                }
                 logOpenFailure(pid: nil, writeStart: attemptStart, error: error)
                 if let sessionError = error as? EmailIMAPError {
                     throw sessionError
@@ -1190,7 +1392,12 @@ extension EmailIMAPSession {
                     pythonExecutable: pythonExecutable,
                     scriptSource: EmailIMAPSessionScript.source
                 )
+            } catch let cancel as CancellationError {
+                throw cancel
             } catch {
+                if error is CancellationError {
+                    throw error
+                }
                 logOpenFailure(pid: nil, writeStart: attemptStart, error: error)
                 if let sessionError = error as? EmailIMAPError {
                     throw sessionError
@@ -1203,16 +1410,37 @@ extension EmailIMAPSession {
         transport = next
         let pid = next.processIdentifier
         lastPid = pid
-        let binary = pythonExecutable ?? "python3"
-        eventLog.logSpawn(account: account, pid: pid, binaryPath: binary)
+        let executable = spawnExecutable()
+        let argv = spawnArgvSummary()
+        eventLog.logSpawn(
+            account: account,
+            pid: pid,
+            executable: executable,
+            argvCount: argv.count,
+            argvPreview: argv.preview,
+            scriptBytes: argv.scriptBytes
+        )
         let writeStart = Date()
         do {
             let line = try encodeLine(op: "open", payload: openPayload())
-            try await next.writeLine(line)
-            // Only the byte count rides the event; the open line holds the
-            // password and stays out of the log.
-            eventLog.logOpenSent(account: account, pid: pid, byteCount: line.utf8.count)
-            let response = try await next.readLine(timeout: timeout)
+            do {
+                try await next.writeLine(line)
+            } catch let cancel as CancellationError {
+                throw cancel
+            } catch {
+                if error is CancellationError {
+                    throw error
+                }
+                throw error
+            }
+            // Only shapes ride the event; the open line holds the password
+            // and stays out of the log.
+            eventLog.logOpenSent(
+                account: account,
+                pid: pid,
+                shape: openSentShape(lineByteCount: line.utf8.count)
+            )
+            let response = try await loggedRead(from: next, op: "open", timeout: timeout, pid: pid, account: account)
             let latencyMs = Date().timeIntervalSince(writeStart) * 1000
             _ = try checkedEnvelope(response)
             guard !closed else {
@@ -1230,9 +1458,24 @@ extension EmailIMAPSession {
             }
             eventLog.logOpenResult(account: account, pid: pid, ok: true, error: nil, latencyMs: latencyMs)
             started = true
+        } catch let cancel as CancellationError {
+            // A cancelled open is not a transport failure: tear down the
+            // half-open helper without a failure event or stderr dump so no
+            // `open.result ok:false` implies a server fault, then propagate
+            // the original cancellation for the pooled caller to skip evict.
+            await next.terminate()
+            transport = nil
+            started = false
+            throw cancel
         } catch {
+            if error is CancellationError {
+                await next.terminate()
+                transport = nil
+                started = false
+                throw error
+            }
             // A decode failure still records the open outcome with its detail;
-            // the caller sees the same verbatim error it would without logging.
+            // the caller sees the same sanitized error it would without logging.
             logOpenFailure(pid: pid, writeStart: writeStart, error: error)
             await terminateAndClear(next)
             if let sessionError = error as? EmailIMAPError {

@@ -312,7 +312,10 @@ struct EmailCredentialFilterTests {
             snippet: "Your verification code is 482913"
         )
         let stub = ToolsTestSupport.StubEmailGateway(hits: [hit], message: message)
-        let adapter = EmailIMAPMailIndexGateway(gateway: stub)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: stub,
+            eventLog: MailSessionEventLog(sink: { _ in })
+        )
         let credentials = MailIndexCredentials(
             accountName: "personal",
             host: "mail.yourdomain.com",
@@ -353,7 +356,11 @@ struct EmailCredentialFilterTests {
             snippet: message.body
         )
         let stub = ToolsTestSupport.StubEmailGateway(hits: [hit], message: message)
-        let adapter = EmailIMAPMailIndexGateway(gateway: stub, credentialFilterEnabled: false)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: stub,
+            credentialFilterEnabled: false,
+            eventLog: MailSessionEventLog(sink: { _ in })
+        )
         let credentials = MailIndexCredentials(
             accountName: "personal",
             host: "mail.yourdomain.com",

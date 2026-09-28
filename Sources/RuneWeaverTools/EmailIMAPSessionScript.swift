@@ -19,7 +19,7 @@ import Foundation
 /// through the shared quoter. The first command opens the connection.
 /// Embedded Python source executed via `python3 -c` with piped JSON lines.
 private let imapSessionImports = #"""
-import sys, json, imaplib, email, re, ssl
+import sys, json, imaplib, email, re, ssl, os, time, socket
 from email import policy
 from email.header import decode_header
 
@@ -27,6 +27,7 @@ from email.header import decode_header
 # Ops: open, status, search, fetch, close. Reads use BODY.PEEK.
 # Shared quoter guards spaced names; CR/LF rejected before dial.
 # First command opens; early commands fail fast; EOF ends session.
+# Helper narration rides stderr with flush; stdout stays one envelope per line.
 """#
 
 /// Session-specific framing plus the open/status/search/fetch/close dispatch.
@@ -42,25 +43,81 @@ def send(obj):
 def fail(message):
     send({"ok": False, "error": message})
 
+def _marker(text):
+    try:
+        sys.stderr.write(text + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+def _helper_now():
+    try:
+        return time.time()
+    except Exception:
+        return 0
+
+def _helper_pid():
+    try:
+        return os.getpid()
+    except Exception:
+        return 0
+
+def _safe_op(value):
+    try:
+        text = str(value or "")
+    except Exception:
+        return "unknown"
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "", text)[:32]
+    if not cleaned:
+        return "unknown"
+    return cleaned
+
 def run_session():
     # Order addresses once at startup so the first dial already prefers
     # IPv4; the helper itself never raises, so a bad socket shim cannot
     # fail the session before the first open arrives.
     prefer_ipv4()
+    # Named owner for helper narration: main loop plus open handler.
+    # Stderr carries lifecycle ink with flush; stdout stays one envelope per line.
+    # Only pids, paths, modes, ops, sizes, phases, counts, outcomes ride stderr.
+    try:
+        _marker("SESSION STARTED pid=%s exe=%s mode=session ts=%s" % (_helper_pid(), sys.executable, _helper_now()))
+    except Exception:
+        pass
     conn = None
     opened = False
+    bye_done = False
     def do_close():
-        nonlocal conn
+        nonlocal conn, bye_done
         if conn is not None:
             try:
                 conn.logout()
             except Exception:
                 pass
             conn = None
+            if not bye_done:
+                bye_done = True
+                try:
+                    _marker("SESSION BYE pid=%s ts=%s" % (_helper_pid(), _helper_now()))
+                except Exception:
+                    pass
     try:
         for line in sys.stdin:
             if not line.strip():
                 continue
+            try:
+                _raw_bytes = len(line.rstrip("\r\n").encode("utf-8", errors="replace"))
+            except Exception:
+                _raw_bytes = 0
+            try:
+                _probe = json.loads(line)
+                _probe_op = _safe_op(_probe.get("op"))
+            except Exception:
+                _probe_op = "unknown"
+            try:
+                _marker("SESSION GOT op=%s bytes=%d ts=%s pid=%s" % (_probe_op, _raw_bytes, _helper_now(), _helper_pid()))
+            except Exception:
+                pass
             try:
                 req = json.loads(line)
             except Exception:
@@ -81,25 +138,63 @@ def run_session():
                 if conn is not None:
                     fail("session already open")
                     continue
+                # Named owner for open phases: resolve plus connect plus login ink here.
+                # Resolve markers stay without a dedicated DNS lookup: the
+                # connect below already resolves, so an extra getaddrinfo
+                # would double DNS, add an unbounded hang past the Swift
+                # budget, and break hermetic runs that never stub the network.
+                try:
+                    _marker("SESSION PHASE phase=resolve-begin ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                except Exception:
+                    pass
+                _addr_count = 0
+                try:
+                    _marker("SESSION PHASE phase=resolve-end addresses=%d ts=%s pid=%s" % (_addr_count, _helper_now(), _helper_pid()))
+                except Exception:
+                    pass
+                try:
+                    _marker("SESSION PHASE phase=connect-begin ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                except Exception:
+                    pass
                 try:
                     ctx = ssl.create_default_context()
                     try:
                         conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx, timeout=30)
                     except TypeError:
                         conn = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+                    try:
+                        _marker("SESSION PHASE phase=connect-end ok=True ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                    except Exception:
+                        pass
                 except Exception as exc:
+                    try:
+                        _marker("SESSION PHASE phase=connect-end ok=False ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                    except Exception:
+                        pass
                     conn = None
-                    fail("Could not connect to %s@%s:%s: %s" % (username, host, port, exc))
+                    fail("Could not connect: %s" % (exc,))
                     continue
                 try:
+                    _marker("SESSION PHASE phase=login-begin ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                except Exception:
+                    pass
+                try:
                     conn.login(username, password)
+                    try:
+                        _marker("SESSION PHASE phase=login-end ok=True ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                    except Exception:
+                        pass
                 except Exception as exc:
+                    try:
+                        _marker("SESSION PHASE phase=login-end ok=False ts=%s pid=%s" % (_helper_now(), _helper_pid()))
+                    except Exception:
+                        pass
                     try:
                         conn.logout()
                     except Exception:
                         pass
                     conn = None
-                    fail("IMAP login failed for %s@%s:%s: %s" % (username, host, port, exc))
+                    fail("IMAP login failed: %s" % (exc,))
                     continue
                 opened = True
                 send({"ok": True})

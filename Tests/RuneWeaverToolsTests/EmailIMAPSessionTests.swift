@@ -234,12 +234,16 @@ struct EmailIMAPSessionTests {
         #expect(source.contains("op == \"close\""))
         #expect(source.contains("timeout=30"))
         #expect(source.contains("ssl.create_default_context()"))
-        #expect(source.contains("Could not connect to %s@%s:%s: %s"))
-        #expect(source.contains("IMAP login failed for %s@%s:%s: %s"))
+        #expect(source.contains("Could not connect: %s"))
+        #expect(source.contains("IMAP login failed: %s"))
+        #expect(!source.contains("Could not connect to %s@%s"))
+        #expect(!source.contains("IMAP login failed for %s@%s"))
+        #expect(!source.contains("_infos = socket.getaddrinfo"))
         #expect(source.contains("unknown session op"))
         #expect(source.contains("session not open"))
         #expect(source.contains("\"uidNext\""))
         #expect(source.contains("\"uidValidity\""))
+        #expect(source.contains("rstrip"))
         try ToolsTestSupport.assertBridgeSourceParses(source)
     }
 
@@ -393,6 +397,103 @@ struct EmailIMAPSessionTests {
         #expect(Self.countMarker("CONNECT", in: result.stderr) == 1)
         #expect(Self.countMarker("LOGIN", in: result.stderr) == 1)
         #expect(Self.countMarker("LOGOUT", in: result.stderr) == 1)
+    }
+
+    @Test
+    func `Live session emits lifecycle markers in order with timestamps`() throws {
+        // Intent: stderr narration stays ordered and timestamped while stdout framing stays exact.
+        let open = #"{"op":"open","host":"mail.example.com","port":993,"username":"you@example.com","password":"test-secret"}"#
+        let status = #"{"op":"status","mailbox":"INBOX"}"#
+        let close = #"{"op":"close"}"#
+        let result = try Self.runSession(inputLines: [open, status, close])
+        #expect(result.exitCode == 0)
+        #expect(result.stdoutLines.count == 3)
+        #expect(try Self.decodeEnvelope(result.stdoutLines[0]).ok == true)
+        let mailboxStatus = try EmailBridgeParsing.parseStatusPayload(Data(result.stdoutLines[1].utf8))
+        #expect(mailboxStatus.uidNext == 2001)
+        #expect(try Self.decodeEnvelope(result.stdoutLines[2]).ok == true)
+        let stderr = result.stderr
+        #expect(Self.countMarker("SESSION STARTED", in: stderr) == 1)
+        #expect(Self.countMarker("SESSION GOT", in: stderr) == 3)
+        #expect(Self.countMarker("SESSION PHASE", in: stderr) == 6)
+        #expect(Self.countMarker("SESSION BYE", in: stderr) == 1)
+        let sessionLines = stderr.split(separator: "\n").map(String.init).filter { $0.contains("SESSION") }
+        #expect(sessionLines.count == 11)
+        #expect(sessionLines[0].contains("STARTED"))
+        #expect(sessionLines[1].contains("GOT") && sessionLines[1].contains("op=open"))
+        #expect(sessionLines[2].contains("phase=resolve-begin"))
+        #expect(sessionLines[3].contains("phase=resolve-end") && sessionLines[3].contains("addresses="))
+        #expect(sessionLines[4].contains("phase=connect-begin"))
+        #expect(sessionLines[5].contains("phase=connect-end"))
+        #expect(sessionLines[6].contains("phase=login-begin"))
+        #expect(sessionLines[7].contains("phase=login-end"))
+        #expect(sessionLines[8].contains("GOT") && sessionLines[8].contains("op=status"))
+        #expect(sessionLines[9].contains("GOT") && sessionLines[9].contains("op=close"))
+        #expect(sessionLines[10].contains("BYE"))
+        for line in sessionLines {
+            #expect(line.contains("ts="))
+        }
+        #expect(sessionLines[0].contains("pid=") && sessionLines[0].contains("exe=") && sessionLines[0].contains("mode=session"))
+        for line in sessionLines where line.contains("GOT") {
+            #expect(line.contains("bytes="))
+        }
+        #expect(!stderr.contains("test-secret"))
+        for line in result.stdoutLines {
+            #expect(!line.contains("test-secret"))
+        }
+    }
+
+    @Test
+    func `Live session markers carry no credential body or subject bytes`() throws {
+        // Intent: helper ink never echoes secrets while stdout keeps its single-envelope shape.
+        let password = "pw-MARKER-9f8a-q7w3-secret"
+        let open = "{\"op\":\"open\",\"host\":\"mail.example.com\",\"port\":993,\"username\":\"you@example.com\",\"password\":\"\(password)\"}"
+        let fetch = #"{"op":"fetch","mailbox":"INBOX","messageID":"1"}"#
+        let close = #"{"op":"close"}"#
+        let result = try Self.runSession(inputLines: [open, fetch, close])
+        #expect(result.exitCode == 0)
+        #expect(result.stdoutLines.count == 3)
+        #expect(try Self.decodeEnvelope(result.stdoutLines[0]).ok == true)
+        let message = try EmailBridgeParsing.parseFetchPayload(Data(result.stdoutLines[1].utf8))
+        #expect(message.subject == "Hello")
+        #expect(message.body.contains("Hello body"))
+        #expect(try Self.decodeEnvelope(result.stdoutLines[2]).ok == true)
+        for line in result.stdoutLines {
+            #expect(!line.contains(password))
+        }
+        #expect(!result.stderr.contains(password))
+        #expect(!result.stderr.contains("Hello body"))
+        #expect(result.stderr.contains("SESSION STARTED"))
+        #expect(result.stderr.contains("SESSION BYE"))
+        let sessionLines = result.stderr.split(separator: "\n").map(String.init).filter { $0.contains("SESSION") }
+        for line in sessionLines {
+            #expect(line.contains("ts="))
+            #expect(!line.contains(password))
+            #expect(!line.contains("Hello body"))
+        }
+    }
+
+    @Test
+    func `Session helper byte count excludes the framing newline`() throws {
+        // Swift logs `line.utf8.count` without the delimiter, so the helper
+        // strips trailing CR/LF before sizing to keep `SESSION GOT bytes`
+        // comparable with `session.open.sent bytes`.
+        let open = #"{"op":"open","host":"mail.example.com","port":993,"username":"you@example.com","password":"test-secret"}"#
+        let result = try Self.runSession(inputLines: [open])
+        #expect(result.exitCode == 0)
+        #expect(result.stdoutLines.count == 1)
+        let gotLine = result.stderr.split(separator: "\n").map(String.init).first { $0.contains("SESSION GOT") && $0.contains("op=open") }
+        guard let gotLine else {
+            Issue.record("Expected SESSION GOT op=open in \(result.stderr)")
+            return
+        }
+        let bytesToken = gotLine.split(separator: " ").first { $0.hasPrefix("bytes=") }
+        guard let bytesToken else {
+            Issue.record("Expected bytes= in \(gotLine)")
+            return
+        }
+        let reported = Int(bytesToken.dropFirst("bytes=".count)) ?? -1
+        #expect(reported == open.utf8.count, "Helper GOT bytes must match Swift line bytes without the newline")
     }
 
     @Test
@@ -816,6 +917,167 @@ struct EmailIMAPSessionActorTests {
         #expect(fake.readCount == 1)
         #expect(try Self.writtenOp(fake.writtenLines[0]) == "open")
         await session.close()
+    }
+
+    /// Transport failing the next read with cooperative cancellation.
+    ///
+    /// Serves one canned open response then throws `CancellationError` so
+    /// cancellation propagation asserts without racing real task cancels.
+    private final class CancellingReadTransport: SessionLineTransport, Sendable {
+        private struct State: Sendable {
+            var written: [String] = []
+            var reads = 0
+            var terminates = 0
+            var openResponse: String
+        }
+
+        private let state: OSAllocatedUnfairLock<State>
+        init(openResponse: String = #"{"ok": true}"#) {
+            self.state = OSAllocatedUnfairLock(initialState: State(openResponse: openResponse))
+        }
+
+        var processIdentifier: Int32? {
+            nil
+        }
+
+        var retainedStderr: String {
+            ""
+        }
+
+        var writeCount: Int {
+            state.withLock { $0.written.count }
+        }
+
+        var terminateCount: Int {
+            state.withLock { $0.terminates }
+        }
+
+        var isTerminated: Bool {
+            state.withLock { $0.terminates > 0 }
+        }
+
+        func writeLine(_ line: String) async throws {
+            state.withLock { $0.written.append(line) }
+        }
+
+        func readLine(timeout _: TimeInterval) async throws -> String {
+            let count: Int = state.withLock { s in
+                s.reads += 1
+                return s.reads
+            }
+            if count == 1 {
+                return state.withLock { $0.openResponse }
+            }
+            throw CancellationError()
+        }
+
+        func terminate() async {
+            state.withLock { $0.terminates += 1 }
+        }
+    }
+
+    /// Transport cancelling the open read itself.
+    private final class CancellingOpenTransport: SessionLineTransport, Sendable {
+        private struct State: Sendable {
+            var terminates = 0
+        }
+
+        private let state = OSAllocatedUnfairLock(initialState: State())
+        var processIdentifier: Int32? {
+            nil
+        }
+
+        var retainedStderr: String {
+            ""
+        }
+
+        var terminateCount: Int {
+            state.withLock { $0.terminates }
+        }
+
+        func writeLine(_: String) async throws {}
+
+        func readLine(timeout _: TimeInterval) async throws -> String {
+            throw CancellationError()
+        }
+
+        func terminate() async {
+            state.withLock { $0.terminates += 1 }
+        }
+    }
+
+    @Test
+    func `Cancelled command propagates without termination or failure event`() async throws {
+        let collector = SharedEventCollector()
+        let transport = CancellingReadTransport()
+        let session = EmailIMAPSession(
+            credentials: Self.testCredentials(),
+            transportFactory: { transport },
+            eventLog: collector.log
+        )
+        try await session.start()
+        do {
+            _ = try await session.status(mailbox: "INBOX")
+            #expect(Bool(false), "Expected cancellation")
+        } catch {
+            #expect(error is CancellationError, "Cancellation must propagate unmapped, got \(error)")
+        }
+        #expect(!transport.isTerminated, "Cancelled commands must not terminate the pooled framing")
+        let lines = collector.lines
+        let decoded = try lines.map {
+            let data = Data($0.utf8)
+            let object = try JSONSerialization.jsonObject(with: data)
+            return object as? [String: Any] ?? [:]
+        }
+        let commands = decoded.filter { ($0["event"] as? String) == "session.command" }
+        #expect(commands.isEmpty, "Cancelled commands must skip the ok:false eviction path")
+        let reads = decoded.filter { ($0["event"] as? String) == "session.read" }
+        #expect(reads.count == 1, "Cancelled waits log no read outcome, only the open first-byte")
+        #expect(reads.first?["outcome"] as? String == "first-byte")
+        await session.close()
+    }
+
+    @Test
+    func `Cancelled open propagates without failure event`() async throws {
+        let collector = SharedEventCollector()
+        let transport = CancellingOpenTransport()
+        let session = EmailIMAPSession(
+            credentials: Self.testCredentials(),
+            transportFactory: { transport },
+            eventLog: collector.log
+        )
+        do {
+            try await session.start()
+            #expect(Bool(false), "Expected cancellation")
+        } catch {
+            #expect(error is CancellationError, "Cancelled opens must propagate unmapped, got \(error)")
+        }
+        let lines = collector.lines
+        let decoded = try lines.map {
+            let data = Data($0.utf8)
+            let object = try JSONSerialization.jsonObject(with: data)
+            return object as? [String: Any] ?? [:]
+        }
+        let results = decoded.filter { ($0["event"] as? String) == "session.open.result" }
+        #expect(results.isEmpty, "Cancelled opens must skip the ok:false failure event")
+        let reads = decoded.filter { ($0["event"] as? String) == "session.read" }
+        #expect(reads.isEmpty, "Cancelled open waits log no read outcome")
+        await session.close()
+    }
+
+    @Test
+    func `Transport argv summary stays single-sourced`() {
+        let nilSummary = ProcessSessionLineTransport.argvSummary(pythonExecutable: nil, scriptBytes: 123)
+        #expect(nilSummary.count == 4)
+        #expect(nilSummary.preview == "python3 -u -c")
+        let emptySummary = ProcessSessionLineTransport.argvSummary(pythonExecutable: "", scriptBytes: 123)
+        #expect(emptySummary.count == 4)
+        #expect(emptySummary.preview == "python3 -u -c")
+        let explicitSummary = ProcessSessionLineTransport.argvSummary(pythonExecutable: "/opt/bin/python3", scriptBytes: 123)
+        #expect(explicitSummary.count == 3)
+        #expect(explicitSummary.preview == "-u -c")
+        #expect(ProcessSessionLineTransport.argvLeading(pythonExecutable: nil) == ["python3", "-u", "-c"])
+        #expect(ProcessSessionLineTransport.argvLeading(pythonExecutable: "/opt/bin/python3") == ["-u", "-c"])
     }
 }
 
@@ -1279,7 +1541,7 @@ struct MailSessionEventLogTests {
     }
 
     @Test
-    func `Hermetic open emits spawn sent result in order`() async throws {
+    func `Hermetic open emits spawn sent read result in order`() async throws {
         let collector = SharedEventCollector()
         let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
         let session = EmailIMAPSession(
@@ -1289,32 +1551,51 @@ struct MailSessionEventLogTests {
         )
         try await session.start()
         let lines = collector.lines
-        #expect(lines.count == 3)
+        #expect(lines.count == 4)
         let first = try Self.decodeFields(lines[0])
         let second = try Self.decodeFields(lines[1])
         let third = try Self.decodeFields(lines[2])
+        let fourth = try Self.decodeFields(lines[3])
         #expect(Self.eventName(first) == "session.spawn")
         #expect(Self.eventName(second) == "session.open.sent")
-        #expect(Self.eventName(third) == "session.open.result")
-        for fields in [first, second, third] {
+        #expect(Self.eventName(third) == "session.read")
+        #expect(Self.eventName(fourth) == "session.open.result")
+        for fields in [first, second, third, fourth] {
             #expect(fields["ts"] as? String != nil)
             #expect(fields["account"] as? String == "personal")
             #expect(Self.parsesFractionalISO8601(fields["ts"] as? String ?? ""))
         }
-        #expect(first["binaryPath"] as? String != nil)
+        #expect(first["binaryPath"] == nil)
+        #expect(first["executable"] as? String == "/usr/bin/env")
+        #expect(first["argvCount"] as? Int == 4)
+        #expect(first["argvPreview"] as? String == "python3 -u -c")
+        #expect((first["scriptBytes"] as? Int ?? 0) > 1000)
         #expect((second["bytes"] as? Int ?? 0) > 0)
-        #expect(third["ok"] as? Bool == true)
-        let latency = third["latencyMs"] as? Double ?? -1
+        #expect(second["hostChars"] as? Int == "mail.example.com".utf8.count)
+        #expect(second["port"] as? Int == 993)
+        #expect(second["usernameChars"] as? Int == "you@example.com".utf8.count)
+        #expect(second["passwordChars"] as? Int == "pw-OPEN-9f8a-secret".utf8.count)
+        #expect(second["hasHost"] as? Bool == true)
+        #expect(second["hasUsername"] as? Bool == true)
+        #expect(second["hasPassword"] as? Bool == true)
+        #expect(third["op"] as? String == "open")
+        #expect(third["outcome"] as? String == "first-byte")
+        #expect((third["waitMs"] as? Double ?? -1) >= 0)
+        #expect((third["bytes"] as? Int ?? 0) > 0)
+        #expect(fourth["ok"] as? Bool == true)
+        let latency = fourth["latencyMs"] as? Double ?? -1
         #expect(latency >= 0)
         #expect(latency < 10000)
         for line in lines {
             #expect(!line.contains("pw-OPEN-9f8a-secret"))
+            #expect(!line.contains("you@example.com"))
+            #expect(!line.contains("mail.example.com"))
         }
         await session.close()
     }
 
     @Test
-    func `Failed open emits result plus stderr dump`() async throws {
+    func `Failed open emits read plus result plus stderr dump`() async throws {
         let collector = SharedEventCollector()
         let helperBytes = "helper-boom-marker-7c3d"
         let fake = FakeSessionLineTransport(
@@ -1333,18 +1614,69 @@ struct MailSessionEventLogTests {
             #expect(error.localizedDescription.contains("Could not connect"))
         }
         let lines = collector.lines
-        #expect(lines.count == 4)
+        #expect(lines.count == 5)
         #expect(try Self.eventName(Self.decodeFields(lines[0])) == "session.spawn")
         #expect(try Self.eventName(Self.decodeFields(lines[1])) == "session.open.sent")
-        let result = try Self.decodeFields(lines[2])
+        let read = try Self.decodeFields(lines[2])
+        #expect(Self.eventName(read) == "session.read")
+        #expect(read["op"] as? String == "open")
+        #expect(read["outcome"] as? String == "first-byte")
+        #expect((read["waitMs"] as? Double ?? -1) >= 0)
+        let result = try Self.decodeFields(lines[3])
         #expect(Self.eventName(result) == "session.open.result")
         #expect(result["ok"] as? Bool == false)
         #expect((result["error"] as? String ?? "").contains("Could not connect"))
-        let stderrEvent = try Self.decodeFields(lines[3])
+        let stderrEvent = try Self.decodeFields(lines[4])
         #expect(Self.eventName(stderrEvent) == "session.stderr")
         #expect((stderrEvent["stderr"] as? String ?? "").contains(helperBytes))
         for line in lines {
             #expect(!line.contains("pw-FAIL-4b2e-secret"))
+            #expect(!line.contains("mail.example.com"))
+            #expect(!line.contains("you@example.com"))
+        }
+        #expect(!(result["error"] as? String ?? "").contains("mail.example.com"))
+        #expect(!(result["error"] as? String ?? "").contains("you@example.com"))
+        await session.close()
+    }
+
+    @Test
+    func `Failed command sanitizes identity from result error`() async throws {
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(responses: [
+            #"{"ok": true}"#,
+            #"{"ok": false, "error": "IMAP login failed for sweep-you@example.com@sweep-mail.example.com:993: bad password"}"#
+        ])
+        let session = EmailIMAPSession(
+            credentials: ResolvedEmailCredentials(
+                accountName: "personal",
+                host: "sweep-mail.example.com",
+                port: 993,
+                username: "sweep-you@example.com",
+                password: "pw-CMD-5c6d-secret"
+            ),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        try await session.start()
+        do {
+            _ = try await session.status(mailbox: "INBOX")
+            #expect(Bool(false), "Expected command failure")
+        } catch {
+            #expect(error.localizedDescription.contains("login failed"))
+        }
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let commands = decoded.filter { Self.eventName($0) == "session.command" }
+        #expect(commands.count == 1)
+        #expect(commands[0]["ok"] as? Bool == false)
+        let detail = commands[0]["error"] as? String ?? ""
+        #expect(detail.contains("login failed"))
+        #expect(!detail.contains("sweep-mail.example.com"))
+        #expect(!detail.contains("sweep-you@example.com"))
+        for line in lines {
+            #expect(!line.contains("pw-CMD-5c6d-secret"))
+            #expect(!line.contains("sweep-mail.example.com"))
+            #expect(!line.contains("sweep-you@example.com"))
         }
         await session.close()
     }
@@ -1409,6 +1741,219 @@ struct MailSessionEventLogTests {
         #expect(url.lastPathComponent == "mail-session.jsonl")
         #expect(url.path.contains(".runeweaver/logs"))
         #expect(url.path.hasSuffix(".runeweaver/logs/mail-session.jsonl"))
+        let bundlePath = Bundle.main.bundlePath
+        #expect(!url.path.hasPrefix(bundlePath), "Live log path must never resolve inside the test bundle")
+        if let testBundle = Bundle.allBundles.first(where: { $0.bundlePath.contains("Test") }) {
+            #expect(!url.path.hasPrefix(testBundle.bundlePath))
+        }
+    }
+
+    @Test
+    func `Open sent carries shapes for odd credentials`() async throws {
+        let cases: [(host: String, username: String, password: String)] = [
+            ("", "", ""),
+            ("máil.éxample.côm", "yöu@éxample.com", "pässwörd-🔑-9f8a"),
+            (String(repeating: "h", count: 500), String(repeating: "u", count: 1000), String(repeating: "p", count: 2000))
+        ]
+        for current in cases {
+            let collector = SharedEventCollector()
+            let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+            let credentials = ResolvedEmailCredentials(
+                accountName: "personal",
+                host: current.host,
+                port: 993,
+                username: current.username,
+                password: current.password
+            )
+            let session = EmailIMAPSession(
+                credentials: credentials,
+                transportFactory: { fake },
+                eventLog: collector.log
+            )
+            try await session.start()
+            let lines = collector.lines
+            #expect(lines.count == 4)
+            let sent = try Self.decodeFields(lines[1])
+            #expect(Self.eventName(sent) == "session.open.sent")
+            #expect(sent["hostChars"] as? Int == current.host.utf8.count)
+            #expect(sent["port"] as? Int == 993)
+            #expect(sent["usernameChars"] as? Int == current.username.utf8.count)
+            #expect(sent["passwordChars"] as? Int == current.password.utf8.count)
+            #expect(sent["hasHost"] as? Bool == !current.host.isEmpty)
+            #expect(sent["hasUsername"] as? Bool == !current.username.isEmpty)
+            #expect(sent["hasPassword"] as? Bool == !current.password.isEmpty)
+            for line in lines {
+                if !current.host.isEmpty {
+                    #expect(!line.contains(current.host))
+                }
+                if !current.username.isEmpty {
+                    #expect(!line.contains(current.username))
+                }
+                if !current.password.isEmpty {
+                    #expect(!line.contains(current.password))
+                }
+            }
+            await session.close()
+        }
+    }
+
+    @Test
+    func `Read outcomes cover first-byte eof timeout`() async throws {
+        let firstByteFake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let firstByteCollector = SharedEventCollector()
+        let firstByteSession = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { firstByteFake },
+            eventLog: firstByteCollector.log
+        )
+        try await firstByteSession.start()
+        let firstLines = firstByteCollector.lines
+        let firstRead = try Self.decodeFields(firstLines[2])
+        #expect(Self.eventName(firstRead) == "session.read")
+        #expect(firstRead["outcome"] as? String == "first-byte")
+        #expect((firstRead["waitMs"] as? Double ?? -1) >= 0)
+        await firstByteSession.close()
+
+        let openTimeoutFake = FakeSessionLineTransport(responses: [#"{"ok": true}"#], hangReads: true)
+        let openTimeoutCollector = SharedEventCollector()
+        let openTimeoutSession = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { openTimeoutFake },
+            eventLog: openTimeoutCollector.log
+        )
+        do {
+            try await openTimeoutSession.start()
+            #expect(Bool(false), "Expected open timeout")
+        } catch {
+            let lines = openTimeoutCollector.lines
+            let reads = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.read" }
+            #expect(reads.count == 1)
+            #expect(reads[0]["op"] as? String == "open")
+            #expect(reads[0]["outcome"] as? String == "timeout")
+            #expect((reads[0]["waitMs"] as? Double ?? -1) >= 0)
+        }
+        await openTimeoutSession.close()
+
+        let hangingFake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let hangingCollector = SharedEventCollector()
+        let hangingSession = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { hangingFake },
+            eventLog: hangingCollector.log
+        )
+        try await hangingSession.start()
+        hangingFake.setHang(true)
+        do {
+            _ = try await hangingSession.status(mailbox: "INBOX")
+            #expect(Bool(false), "Expected timeout")
+        } catch {
+            let lines = hangingCollector.lines
+            let reads = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.read" }
+            #expect(reads.count == 2)
+            #expect(reads[0]["outcome"] as? String == "first-byte")
+            #expect(reads[1]["outcome"] as? String == "timeout")
+            #expect((reads[1]["waitMs"] as? Double ?? -1) >= 0)
+        }
+        await hangingSession.close()
+
+        let closedFake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let closedCollector = SharedEventCollector()
+        let closedSession = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { closedFake },
+            eventLog: closedCollector.log
+        )
+        try await closedSession.start()
+        closedFake.enqueue(#"{"ok": false, "error": "IMAP session connection closed"}"#)
+        do {
+            _ = try await closedSession.status(mailbox: "INBOX")
+            #expect(Bool(false), "Expected command failure")
+        } catch {
+            let lines = closedCollector.lines
+            let reads = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.read" }
+            #expect(reads.count == 2)
+            #expect(reads[0]["outcome"] as? String == "first-byte")
+            #expect(reads[1]["outcome"] as? String == "first-byte")
+        }
+        await closedSession.close()
+
+        let emptyFake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let emptyCollector = SharedEventCollector()
+        let emptySession = EmailIMAPSession(
+            credentials: Self.eventCredentials(),
+            transportFactory: { emptyFake },
+            eventLog: emptyCollector.log
+        )
+        try await emptySession.start()
+        do {
+            _ = try await emptySession.status(mailbox: "INBOX")
+            #expect(Bool(false), "Expected eof on empty queue")
+        } catch {
+            let lines = emptyCollector.lines
+            let reads = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.read" }
+            #expect(reads.count == 2)
+            #expect(reads[1]["outcome"] as? String == "eof")
+        }
+        await emptySession.close()
+    }
+
+    @Test
+    func `New fields never carry secret values`() async throws {
+        let password = "pw-SWEEP-77aa-secret-🔑"
+        let host = "sweep-mail.example.com"
+        let username = "sweep-you@example.com"
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(
+            responses: [#"{"ok": true}"#, #"{"ok": true, "mailbox": "INBOX", "uidNext": 11, "uidValidity": 1}"#],
+            pid: 9999
+        )
+        let credentials = ResolvedEmailCredentials(
+            accountName: "personal",
+            host: host,
+            port: 993,
+            username: username,
+            password: password
+        )
+        let session = EmailIMAPSession(
+            credentials: credentials,
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        try await session.start()
+        _ = try await session.status(mailbox: "INBOX")
+        await session.close()
+        let lines = collector.lines
+        #expect(lines.count >= 6)
+        for line in lines {
+            #expect(!line.contains(password))
+            #expect(!line.contains(host))
+            #expect(!line.contains(username))
+            #expect(!line.contains("sweep-you"))
+            let fields = try Self.decodeFields(line)
+            #expect(fields["password"] == nil)
+            #expect(fields["username"] == nil)
+            #expect(fields["host"] == nil)
+            #expect(fields["request"] == nil)
+            #expect(fields["body"] == nil)
+            #expect(fields["subject"] == nil)
+        }
+        let spawn = try Self.decodeFields(lines[0])
+        #expect(spawn["executable"] as? String == "/usr/bin/env")
+        #expect(spawn["argvPreview"] as? String == "python3 -u -c")
+        #expect((spawn["argvCount"] as? Int ?? 0) > 0)
+        #expect((spawn["scriptBytes"] as? Int ?? 0) > 0)
+        #expect((spawn["argvPreview"] as? String ?? "").contains("python3"))
+        let sent = try Self.decodeFields(lines[1])
+        #expect(sent["hostChars"] as? Int == host.utf8.count)
+        #expect(sent["usernameChars"] as? Int == username.utf8.count)
+        #expect(sent["passwordChars"] as? Int == password.utf8.count)
+        let reads = try lines.map { try Self.decodeFields($0) }.filter { Self.eventName($0) == "session.read" }
+        #expect(!reads.isEmpty)
+        for read in reads {
+            let outcome = read["outcome"] as? String ?? ""
+            #expect(outcome == "first-byte" || outcome == "eof" || outcome == "timeout")
+            #expect((read["waitMs"] as? Double ?? -1) >= 0)
+        }
     }
 }
 
@@ -1418,7 +1963,7 @@ struct MailSessionEventLogTests {
 /// plus fake transports carrying fixed pids, so pool open, close, and evict
 /// lines assert ordering, account plus mailbox attribution, and pid correlation
 /// with the session spawn line without dialing.
-@Suite("Mail Session Pool Events")
+@Suite("Mail Session Pool Events", .serialized)
 struct MailSessionPoolEventTests {
     /// In-memory one-shot double; pool paths ride sessions so it never dials.
     private struct PoolEventStubGateway: EmailIMAPGateway, Sendable {
@@ -1617,6 +2162,8 @@ struct MailSessionPoolEventTests {
         #expect(failing.isTerminated)
         for line in lines {
             #expect(!line.contains("test-secret"))
+            #expect(!line.contains("mail.example.com"))
+            #expect(!line.contains("you@example.com"))
         }
     }
 
@@ -1657,6 +2204,154 @@ struct MailSessionPoolEventTests {
         #expect(counter.count == 1)
         for line in lines {
             #expect(!line.contains("test-secret"))
+            #expect(!line.contains("you@mail.example.com"))
+            #expect(!line.contains("you@example.com"))
+            #expect(!line.contains("mail.example.com"))
+        }
+        let openResults = decoded.filter { Self.eventName($0) == "session.open.result" }
+        for result in openResults {
+            #expect(!(result["error"] as? String ?? "").contains("you@mail.example.com"))
+            #expect(!(result["error"] as? String ?? "").contains("you@example.com"))
+        }
+    }
+
+    @Test
+    func `Hermetic open emits claim spawn sent read result open in order`() async throws {
+        let collector = SharedEventCollector()
+        let log = collector.log
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#, #"{"ok": true}"#])
+        let counter = SharedFakeSessionFactory([fake], log: log)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolEventStubGateway(),
+            eventLog: log,
+            sessionFactory: counter.factory
+        )
+        let credentials = Self.poolCredentials()
+        try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let names = decoded.map { Self.eventName($0) }
+        guard let claimIndex = names.firstIndex(of: "pool.claim"),
+              let spawnIndex = names.firstIndex(of: "session.spawn"),
+              let sentIndex = names.firstIndex(of: "session.open.sent"),
+              let readIndex = names.firstIndex(of: "session.read"),
+              let resultIndex = names.firstIndex(of: "session.open.result"),
+              let openIndex = names.firstIndex(of: "pool.open")
+        else {
+            Issue.record("Expected claim, spawn, sent, read, result, open in \(names)")
+            return
+        }
+        #expect(claimIndex < spawnIndex)
+        #expect(spawnIndex < sentIndex)
+        #expect(sentIndex < readIndex)
+        #expect(readIndex < resultIndex)
+        #expect(resultIndex < openIndex)
+        let claim = decoded[claimIndex]
+        #expect(claim["mailbox"] as? String == "INBOX")
+        #expect((claim["waitMs"] as? Double ?? -1) >= 0)
+        #expect(Self.parsesFractionalISO8601(claim["ts"] as? String ?? ""))
+        let spawn = decoded[spawnIndex]
+        #expect(spawn["executable"] as? String == "/usr/bin/env")
+        #expect(spawn["argvCount"] as? Int == 4)
+        #expect(spawn["argvPreview"] as? String == "python3 -u -c")
+        #expect((spawn["scriptBytes"] as? Int ?? 0) > 1000)
+        let sent = decoded[sentIndex]
+        #expect(sent["hostChars"] as? Int == "mail.example.com".utf8.count)
+        #expect(sent["port"] as? Int == 993)
+        #expect(sent["usernameChars"] as? Int == "you@example.com".utf8.count)
+        #expect(sent["passwordChars"] as? Int == "test-secret".utf8.count)
+        let read = decoded[readIndex]
+        #expect(read["op"] as? String == "open")
+        #expect(read["outcome"] as? String == "first-byte")
+        #expect((read["waitMs"] as? Double ?? -1) >= 0)
+        let result = decoded[resultIndex]
+        #expect(result["ok"] as? Bool == true)
+        for line in lines {
+            #expect(!line.contains("test-secret"))
+            #expect(!line.contains("you@example.com"))
+            #expect(!line.contains("mail.example.com"))
+        }
+        await adapter.closeMailboxSession(credentials: credentials, mailbox: "INBOX")
+    }
+
+    @Test
+    func `Pool claim carries waitMs on every open bracket`() async throws {
+        let collector = SharedEventCollector()
+        let log = collector.log
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#, #"{"ok": true}"#])
+        let counter = SharedFakeSessionFactory([fake], log: log)
+        let adapter = EmailIMAPMailIndexGateway(
+            gateway: PoolEventStubGateway(),
+            eventLog: log,
+            sessionFactory: counter.factory
+        )
+        let credentials = Self.poolCredentials()
+        try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+        try await adapter.openMailboxSession(credentials: credentials, mailbox: "INBOX")
+        let lines = collector.lines
+        let decoded = try lines.map { try Self.decodeFields($0) }
+        let claims = decoded.filter { Self.eventName($0) == "pool.claim" }
+        #expect(claims.count == 2)
+        for claim in claims {
+            #expect(claim["mailbox"] as? String == "INBOX")
+            let wait = claim["waitMs"] as? Double ?? -1
+            #expect(wait >= 0)
+            #expect(wait < 10000)
+            #expect(Self.parsesFractionalISO8601(claim["ts"] as? String ?? ""))
+            #expect(claim["account"] as? String == "personal")
+        }
+        await adapter.closeMailboxSession(credentials: credentials, mailbox: "INBOX")
+    }
+
+    @Test
+    func `Bundle never writes the live mail session log`() async throws {
+        let liveURL = MailSessionEventLog.defaultLogURL()
+        #expect(liveURL.lastPathComponent == "mail-session.jsonl")
+        let bundlePath = Bundle.main.bundlePath
+        #expect(!liveURL.path.hasPrefix(bundlePath), "Live log path must never resolve inside the test bundle")
+        func liveSize(orDefault fallback: Int? = nil) -> Int {
+            guard let values = try? FileManager.default.attributesOfItem(atPath: liveURL.path),
+                  let size = values[.size] as? Int
+            else { return fallback ?? 0 }
+            return size
+        }
+        let beforeSize = liveSize()
+        let collector = SharedEventCollector()
+        let fake = FakeSessionLineTransport(responses: [#"{"ok": true}"#])
+        let session = EmailIMAPSession(
+            credentials: ResolvedEmailCredentials(
+                accountName: "personal",
+                host: "mail.example.com",
+                port: 993,
+                username: "you@example.com",
+                password: "audit-secret-never-live"
+            ),
+            transportFactory: { fake },
+            eventLog: collector.log
+        )
+        try await session.start()
+        await session.close()
+        #expect(!collector.lines.isEmpty)
+        // Poll with a timeout instead of a fixed sleep: a stray live append
+        // surfaces as a size change on any poll, while a clean hermetic run
+        // observes a stable size across the whole window without flaking on
+        // a single arbitrary delay.
+        var afterSize = beforeSize
+        let deadline = Date().addingTimeInterval(2.0)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let current = liveSize(orDefault: beforeSize)
+            #expect(current == beforeSize, "Hermetic suite must write zero bytes to the live log path")
+            afterSize = current
+            if current != beforeSize {
+                break
+            }
+        }
+        #expect(afterSize == beforeSize, "Hermetic suite must write zero bytes to the live log path")
+        for line in collector.lines {
+            #expect(!line.contains("audit-secret-never-live"))
+            #expect(!line.contains("mail.example.com"))
+            #expect(!line.contains("you@example.com"))
         }
     }
 }
