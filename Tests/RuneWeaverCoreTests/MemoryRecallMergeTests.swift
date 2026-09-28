@@ -200,4 +200,87 @@ struct MemoryRecallMergeTests {
         )
         #expect(MemoryEngine.automaticRecallContext(for: results) == nil)
     }
+
+    @Test
+    func `Injected doc lines always carry a citation suffix outside truncation`() throws {
+        // Long content forces per-hit truncation; the citation must survive it
+        // because it is appended outside the perHitChars budget.
+        let longBody = String(repeating: "harbor manifest line ", count: 40)
+        let docHit = MemoryResult(
+            content: longBody,
+            score: 0.9,
+            source: .docIndex,
+            metadata: [
+                "display_name": "bills.numbers",
+                "path": "/Users/alice/Desktop/bills.numbers",
+                "date": "2024-01-02T00:00:00Z",
+                "document_id": UUID().uuidString,
+                "ordinal": "0"
+            ]
+        )
+        let budgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, threshold: 0.1, maxChars: 2000, perHitChars: 100)
+        let context = MemoryEngine.automaticRecallContext(for: [docHit], budgets: budgets)
+        let unwrapped = try #require(context)
+        #expect(unwrapped.contains(MemoryEngine.automaticRecallHeader))
+        #expect(unwrapped.contains("[docIndex]"))
+        // Single-line squash plus ellipsis on the content half.
+        #expect(unwrapped.contains("…"))
+        // One bracketed citation suffix from hit metadata, never truncated away.
+        #expect(unwrapped.contains("[2024-01-02T00:00:00Z|/Users/alice/Desktop/bills.numbers|bills.numbers]"))
+        #expect(unwrapped.contains("bills.numbers"))
+        // The content half respects the per-hit cap: the first content line is
+        // bounded while the trailing citation rides outside it.
+        #expect(MemoryEngine.citationSuffix(for: docHit) != nil)
+
+        // A doc hit without a parent lookup still carries a fallback suffix so
+        // every injected doc line is attributable.
+        let orphan = MemoryResult(
+            content: "orphan chunk body",
+            score: 0.9,
+            source: .docIndex,
+            metadata: ["document_id": UUID().uuidString, "ordinal": "0"]
+        )
+        let orphanContext = MemoryEngine.automaticRecallContext(for: [orphan], budgets: budgets)
+        #expect(orphanContext?.contains("[") == true)
+        #expect(orphanContext?.contains("]") == true)
+
+        // Trusted tiers without citation metadata stay suffix-free.
+        let profileHit = MemoryResult(content: "My dog is named Biscuit", score: 0.9, source: .profile)
+        #expect(MemoryEngine.citationSuffix(for: profileHit) == nil)
+    }
+
+    @Test
+    func `Citation block respects per-tier caps and total maxChars`() throws {
+        var hits: [MemoryResult] = []
+        for index in 0 ..< 6 {
+            hits.append(MemoryResult(
+                content: "harbor note number \(index) " + String(repeating: "x", count: 300),
+                score: 0.9 - Double(index) * 0.01,
+                source: .docIndex,
+                metadata: [
+                    "display_name": "note-\(index).md",
+                    "path": "/tmp/note-\(index).md",
+                    "document_id": UUID().uuidString,
+                    "ordinal": "0"
+                ]
+            ))
+        }
+        // autoLimit 2 caps the injected hits with room for both citations.
+        let roomy = RecallBudgets(perTierLimit: 5, autoLimit: 2, threshold: 0.1, maxChars: 4000, perHitChars: 100)
+        let roomyContext = try #require(MemoryEngine.automaticRecallContext(for: hits, budgets: roomy))
+        #expect(roomyContext.contains(MemoryEngine.automaticRecallHeader))
+        // Only two doc lines inject despite six relevant hits.
+        #expect(roomyContext.components(separatedBy: "[docIndex]").count - 1 == 2)
+        // Every injected doc line carries its citation.
+        #expect(roomyContext.contains("note-0.md"))
+        #expect(roomyContext.contains("note-1.md"))
+        #expect(!roomyContext.contains("note-5.md"))
+
+        // Tight total budget truncates the block with an ellipsis.
+        let tight = RecallBudgets(perTierLimit: 5, autoLimit: 5, threshold: 0.1, maxChars: 300, perHitChars: 100)
+        let tightContext = try #require(MemoryEngine.automaticRecallContext(for: Array(hits.prefix(2)), budgets: tight))
+        #expect(tightContext.count <= 300)
+        #expect(tightContext.hasSuffix("…"))
+        #expect(tightContext.contains(MemoryEngine.automaticRecallHeader))
+    }
 }

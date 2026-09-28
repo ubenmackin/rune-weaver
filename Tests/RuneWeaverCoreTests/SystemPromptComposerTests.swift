@@ -251,4 +251,36 @@ struct SystemPromptComposerTests {
         #expect(slimAudit.perTool.isEmpty)
         #expect(fullAudit.perTool.count == 2)
     }
+
+    @Test
+    func `Recall plus starter pack slot order keeps lead system first`() {
+        let tools: [any Tool] = [ComposerReadStub()]
+        let prompt = SystemPromptComposer.compose(tools: tools)
+        let system = Message(role: .system, content: prompt)
+        let user1 = Message(role: .user, content: "Hi")
+        let assistant1 = Message(role: .assistant, content: "Hello!")
+        let user2 = Message(role: .user, content: "What do I like?")
+        let history = [system, user1, assistant1, user2]
+        let recall = Message(role: .system, content: "Relevant memories (use for context; do not mention unless relevant):\n[profile] tea")
+        guard let starter = RecallStarterPack.build(
+            profile: UserProfile(preferences: [Preference(key: "name", value: "Ada")]),
+            indexAsOf: nil,
+            goalLine: nil,
+            budgets: RecallBudgets()
+        ) else {
+            Issue.record("Starter pack should inject for a named profile with a disabled index")
+            return
+        }
+        let spliced = Orchestrator.stableHistoryWithRecallAndStarter(history, recall: recall, starterPack: starter)
+        #expect(spliced.count == 6)
+        #expect(spliced[0] == system)
+        #expect(spliced[0].content == prompt)
+        #expect(spliced[1] == user1)
+        #expect(spliced[2] == assistant1)
+        #expect(spliced[3] == recall)
+        #expect(spliced[4] == starter)
+        #expect(spliced[5] == user2)
+        #expect(starter.content.contains("Profile: Ada"))
+        #expect(starter.content.contains("Index as of: disabled"))
+    }
 }

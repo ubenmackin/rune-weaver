@@ -257,4 +257,40 @@ struct ContextTokenTrackingTests {
         #expect(title == "Summarize the financial quarterly report…")
         #expect(session?.displayTitle == title)
     }
+
+    @Test
+    func `Recall diagnostics injectedChars matches injected message length`() async throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let engine = MemoryEngine(
+            episodesDBPath: base.appendingPathComponent("episodes.db").path,
+            vectorDBPath: base.appendingPathComponent("vectors").path,
+            profilePath: base.appendingPathComponent("profile.json").path
+        )
+        try await engine.storeProfileFact(content: "My dog is named Biscuit", source: "chat")
+        let sessionID = UUID()
+        let (message, diagnostics) = try await engine.recallMessageWithDiagnostics(
+            for: "What is my dog Biscuit name?",
+            sessionID: sessionID,
+            budgets: RecallBudgets()
+        )
+        let injected = try #require(message)
+        #expect(diagnostics.injectedChars == injected.content.count)
+        #expect(diagnostics.hitIDs.count == diagnostics.sources.count)
+        #expect(diagnostics.hitIDs.count == diagnostics.scores.count)
+        #expect(!diagnostics.hitIDs.isEmpty)
+        // Chars accounting stays within the budgets block cap.
+        #expect(diagnostics.injectedChars <= RecallBudgets().clamped().maxChars)
+        #expect(diagnostics.injectedChars > 0)
+        // Silent-nil keeps chars at zero for the same accounting surface.
+        let (nilMessage, nilDiagnostics) = try await engine.recallMessageWithDiagnostics(
+            for: "quantum entanglement calibration xyzzy",
+            sessionID: sessionID,
+            budgets: RecallBudgets()
+        )
+        #expect(nilMessage == nil)
+        #expect(nilDiagnostics.injectedChars == 0)
+        #expect(nilDiagnostics.hitIDs.isEmpty)
+    }
 }

@@ -405,6 +405,7 @@ extension ServeCommand {
             mediaConfig: resolvedMediaConfig,
             desktopConfig: loaded.config.desktop,
             securityConfig: loaded.config.security,
+            recallBudgets: loaded.config.memory.recallBudgets,
             goalsConfig: loaded.config.goals,
             auth: auth,
             mediaSecrets: sharedSecrets,

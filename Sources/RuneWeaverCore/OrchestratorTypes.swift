@@ -286,6 +286,29 @@ public struct OrchestratorResponse: Sendable, Codable, Equatable {
     }
 }
 
+/// Resolved automatic recall plus starter footing for one turn.
+/// Named fields keep the shared turn wiring readable at call sites where an
+/// anonymous 4-tuple would trip `large_tuple` and hide which value carries
+/// diagnostics versus the deterministic plan.
+public struct TurnRecallAndStarter: Sendable, Equatable {
+    /// Recall message for the stable slot, nil when the turn stays silent.
+    public let recall: Message?
+    /// Trusted starter pack for the second stable slot, nil when absent.
+    public let starterPack: Message?
+    /// Per-turn recall observability, safe to log.
+    public let diagnostics: RecallDiagnostics
+    /// Deterministic plan that produced the recall.
+    public let plan: RecallPlan
+
+    /// Creates resolved turn recall and starter footing.
+    public init(recall: Message?, starterPack: Message?, diagnostics: RecallDiagnostics, plan: RecallPlan) {
+        self.recall = recall
+        self.starterPack = starterPack
+        self.diagnostics = diagnostics
+        self.plan = plan
+    }
+}
+
 /// Failures raised by ``Orchestrator``.
 public enum OrchestratorError: Error, Sendable, Equatable {
     /// The input text was empty or whitespace-only.
@@ -351,6 +374,9 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
     /// Recall context active when the turn parked, so resumed synthesis keeps the
     /// same prefix instead of dropping prior-run state.
     public let recall: Message?
+    /// Starter footing active when the turn parked, so resumed synthesis reuses
+    /// the turn's pack verbatim instead of recomposing from the live engine.
+    public let starterPack: Message?
     /// Per-turn batch identifier shared by siblings parked together.
     public let batchID: UUID
     /// Zero-based LLM round that produced this gated call, so resumed turns can
@@ -375,6 +401,7 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         toolCall: ToolInput,
         systemPrompt: String? = nil,
         recall: Message? = nil,
+        starterPack: Message? = nil,
         batchID: UUID = UUID(),
         roundIndex: Int? = nil,
         billedTokens: Int? = nil,
@@ -387,6 +414,7 @@ public struct ParkedNarratedApproval: Sendable, Equatable {
         self.toolCall = toolCall
         self.systemPrompt = systemPrompt
         self.recall = recall
+        self.starterPack = starterPack
         self.batchID = batchID
         self.roundIndex = roundIndex
         // Default derives one past the gated batch so callers that only know the
@@ -424,6 +452,9 @@ struct ParkGatedCallsContext {
     let priorBilledTokens: Int?
     let systemPrompt: String?
     let recall: Message?
+    /// Starter footing threaded from the turn's request so parking preserves
+    /// the turn's pack verbatim across resume instead of recomposing.
+    let starterPack: Message?
     let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
     /// Chronological round for the gated batch: one past the structured batch in
     /// mixed turns, otherwise one past all prior tool rounds so reloads interleave
@@ -442,6 +473,10 @@ struct TurnLoopRequest {
     let workingMessages: [Message]
     let tools: [any Tool]
     let recall: Message?
+    /// Starter footing built once at turn start and reused verbatim every
+    /// tool round so a mid-turn profile or index change never shifts the
+    /// prefix mid-loop.
+    let starterPack: Message?
     let sessionID: UUID
     let systemPrompt: String?
     let onEvent: (@Sendable (OrchestratorEvent) async -> Void)?
@@ -452,6 +487,35 @@ struct TurnLoopRequest {
     /// Whether this turn previews without mutating. Dry runs never park so gated
     /// calls keep their ToolBus preview path instead of filing approvals.
     var isDryRun: Bool = false
+
+    /// Creates a turn-loop request threading the turn's recall and starter pack.
+    init(
+        workingMessages: [Message],
+        tools: [any Tool],
+        recall: Message?,
+        starterPack: Message? = nil,
+        sessionID: UUID,
+        systemPrompt: String?,
+        onEvent: (@Sendable (OrchestratorEvent) async -> Void)?,
+        initialToolActions: [ToolAction] = [],
+        priorBilledTokens: Int? = nil,
+        initialToolRounds: Int = 0,
+        initialLlmRoundIndex: Int = 0,
+        isDryRun: Bool = false
+    ) {
+        self.workingMessages = workingMessages
+        self.tools = tools
+        self.recall = recall
+        self.starterPack = starterPack
+        self.sessionID = sessionID
+        self.systemPrompt = systemPrompt
+        self.onEvent = onEvent
+        self.initialToolActions = initialToolActions
+        self.priorBilledTokens = priorBilledTokens
+        self.initialToolRounds = initialToolRounds
+        self.initialLlmRoundIndex = initialLlmRoundIndex
+        self.isDryRun = isDryRun
+    }
 }
 
 /// Outcome of one bounded tool-loop run.

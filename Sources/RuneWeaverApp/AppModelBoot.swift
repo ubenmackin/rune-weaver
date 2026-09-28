@@ -234,6 +234,7 @@ extension AppModel {
             mediaConfig: pipeline.config.media,
             desktopConfig: pipeline.config.desktop,
             securityConfig: pipeline.config.security,
+            recallBudgets: pipeline.config.memory.recallBudgets,
             goalsConfig: pipeline.config.goals,
             auth: pipeline.auth,
             mediaSecrets: pipeline.secrets,

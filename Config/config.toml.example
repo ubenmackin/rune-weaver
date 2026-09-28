@@ -118,6 +118,16 @@ embedding_model = "all-MiniLM-L6-v2"
 # "provider" (active chat model embeddings), or "none" (keyword-only, no vectors).
 # Switching chat models under "provider" may require a vector reset due to width pinning.
 embedding_backend = "apple"
+# Recall budgets bounding automatic and explicit recall fan-out. Flat keys under
+# [memory]; absent keys keep the documented defaults. Out-of-range values clamp
+# to the nearest bound instead of refusing to boot.
+# recall_per_tier_limit = 5  # Max hits fetched per tier before merging (1-50).
+# recall_auto_limit = 5  # Max hits injected as system context per auto turn (1-50).
+# recall_threshold = 0.1  # Min calibrated score for an injected hit (0.0-1.0).
+# recall_max_chars = 2000  # Max chars for the injected recall block, header included (200-16000).
+# recall_per_hit_chars = 500  # Max chars kept per hit before ellipsis truncation (100-2000).
+# recall_doc_pool_multiplier = 4  # Extra vector candidates scanned per returned document page (1-8).
+# recall_episodic_weight = 0.25  # Weight mapping episodic rank onto the shared recall scale (0.0-1.0).
 
 [voice]
 stt_provider = "whisper"

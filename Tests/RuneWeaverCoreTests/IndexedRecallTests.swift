@@ -330,4 +330,79 @@ struct IndexedRecallTests {
         let hitUndated = try #require(hitsUndated.first { $0.metadata["document_id"] == storedUndated.id.uuidString })
         #expect(hitUndated.metadata["date"] == nil)
     }
+
+    @Test
+    func `Widened pool keeps recent vectors while old keyword still surfaces`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Old-but-relevant doc: unique keyword token, keyword-only so the
+        // newest-first vector pool of one can never hold it.
+        try await storeChunk(in: store, externalID: "old-atlas", text: "ancient cartography atlas compassrose")
+        // Newer vector docs share the query embedding axis but not the keyword.
+        for index in 0 ..< 4 {
+            try await storeChunk(
+                in: store,
+                externalID: "new-ledger-\(index)",
+                text: "recent ledger entry number \(index)",
+                embedding: [1.0, 0.0]
+            )
+        }
+
+        // Narrow pool (multiplier 1, clamped 1 => pool 1): the vector read holds
+        // only the newest row, yet the keyword union must still surface the old atlas.
+        let narrowBudgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, maxChars: 2000, perHitChars: 500, docPoolMultiplier: 1)
+        let narrow = await engine.recallDocuments(
+            query: "cartography compassrose",
+            embedding: [1.0, 0.0],
+            limit: 5,
+            budgets: narrowBudgets
+        )
+        #expect(narrow.contains { $0.content.contains("ancient cartography") })
+        #expect(narrow.contains { $0.content.contains("recent ledger") })
+
+        // Widened pool (multiplier 4): recent vectors stay visible alongside the old hit.
+        let wideBudgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, maxChars: 2000, perHitChars: 500, docPoolMultiplier: 4)
+        let wide = await engine.recallDocuments(
+            query: "ledger",
+            embedding: [1.0, 0.0],
+            limit: 5,
+            budgets: wideBudgets
+        )
+        #expect(wide.contains { $0.content.contains("recent ledger") })
+        #expect(wide.allSatisfy { $0.source == .docIndex })
+    }
+
+    @Test
+    func `RRF fusion prefers the dual-list hit over vector-only`() async throws {
+        let (engine, store, base) = makeIndexedRecallEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+
+        // Identical embeddings keep cosine equal, so only the keyword list plus
+        // the RRF boost can separate them: the chunk in both lists must win
+        // over the vector-only near-match.
+        try await storeChunk(
+            in: store,
+            externalID: "dual",
+            text: "harbor manifest compassrose voyage",
+            embedding: [1.0, 0.0]
+        )
+        try await storeChunk(
+            in: store,
+            externalID: "vector-only",
+            text: "zeta quantum ledger",
+            embedding: [1.0, 0.0]
+        )
+
+        let budgets = RecallBudgets(perTierLimit: 5, autoLimit: 5, maxChars: 2000, perHitChars: 500, docPoolMultiplier: 4)
+        let results = await engine.recallDocuments(
+            query: "harbor compassrose",
+            embedding: [1.0, 0.0],
+            limit: 5,
+            budgets: budgets
+        )
+        #expect(results.count == 2)
+        #expect(results.first?.content.contains("compassrose") == true)
+        #expect(results.last?.content.contains("zeta") == true)
+    }
 }

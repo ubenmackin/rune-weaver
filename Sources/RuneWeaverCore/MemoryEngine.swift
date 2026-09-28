@@ -34,6 +34,72 @@ public struct MemoryResult: Sendable, Codable, Equatable {
     }
 }
 
+/// Observability for one recall pass, safe to log (IDs and scores only, never content).
+public extension MemoryEngine {
+    /// Recall diagnostics carried alongside hits for per-turn observability.
+    struct RecallDiagnostics: Sendable, Equatable {
+        /// Stable identifiers for retrieved hits, in rank order.
+        public let hitIDs: [String]
+        /// Source raw values for retrieved hits, in rank order.
+        public let sources: [String]
+        /// Calibrated scores for retrieved hits, in rank order.
+        public let scores: [Double]
+        /// Characters that would be (or were) injected into model context.
+        public let injectedChars: Int
+        /// True when the document index was skipped for this pass.
+        public let skippedDocIndex: Bool
+
+        /// Creates recall diagnostics.
+        public init(hitIDs: [String], sources: [String], scores: [Double], injectedChars: Int, skippedDocIndex: Bool) {
+            self.hitIDs = hitIDs
+            self.sources = sources
+            self.scores = scores
+            self.injectedChars = injectedChars
+            self.skippedDocIndex = skippedDocIndex
+        }
+
+        /// Zero-hit diagnostics for silent-nil recalls, preserving the skip flag.
+        public static func zero(skippedDocIndex: Bool = false) -> Self {
+            Self(hitIDs: [], sources: [], scores: [], injectedChars: 0, skippedDocIndex: skippedDocIndex)
+        }
+
+        /// Safe single-line summary with counts plus scores plus skip flag, never content.
+        public var logLine: String {
+            "hits=\(hitIDs.count) injectedChars=\(injectedChars) skippedDocIndex=\(skippedDocIndex) ids=\(hitIDs) sources=\(sources) scores=\(scores)"
+        }
+    }
+}
+
+/// Top-level alias so call sites can spell the diagnostics without the owner prefix.
+public typealias RecallDiagnostics = MemoryEngine.RecallDiagnostics
+
+public extension MemoryEngine {
+    /// Stable identifier for one recall hit, never content.
+    static func recallHitID(for result: MemoryResult, at index: Int) -> String {
+        if let id = result.metadata["id"]?.trimmingCharacters(in: .whitespacesAndNewlines), !id.isEmpty {
+            return id
+        }
+        if let documentID = result.metadata["document_id"]?.trimmingCharacters(in: .whitespacesAndNewlines), !documentID.isEmpty {
+            return documentID
+        }
+        if let key = result.metadata["key"]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty {
+            return "preference:\(singleLineSquashed(key))"
+        }
+        return "\(result.source.rawValue):\(index)"
+    }
+
+    /// Builds diagnostics for retrieved hits with the given injection-char estimate.
+    static func recallDiagnostics(for hits: [MemoryResult], injectedChars: Int, skippedDocIndex: Bool) -> RecallDiagnostics {
+        RecallDiagnostics(
+            hitIDs: hits.enumerated().map { recallHitID(for: $1, at: $0) },
+            sources: hits.map(\.source.rawValue),
+            scores: hits.map(\.score),
+            injectedChars: injectedChars,
+            skippedDocIndex: skippedDocIndex
+        )
+    }
+}
+
 /// A long-lived fact about the user held in the profile.
 public struct UserFact: Sendable, Codable, Equatable, Identifiable {
     /// Unique identifier for this fact.
@@ -868,12 +934,23 @@ public extension MemoryEngine {
     }
 
     /// Maximum memories injected as system context on one chat turn.
+    ///
+    /// Legacy default for the threshold-based `automaticRecallContext` and
+    /// `automaticRecallMessage` overloads below. The budgets-aware overloads
+    /// read `RecallBudgets.autoLimit` instead; see `RecallBudgets` for the
+    /// single source on the auto path.
     static let automaticRecallLimit = 5
 
     /// Minimum calibrated score for an injected recall hit.
+    ///
+    /// Legacy default for the threshold-based overloads. The budgets-aware
+    /// overloads read `RecallBudgets.threshold` instead.
     static let automaticRecallThreshold = 0.1
 
     /// Maximum characters for the injected recall block, header included.
+    ///
+    /// Legacy default for the threshold-based overloads. The budgets-aware
+    /// overloads read `RecallBudgets.maxChars` instead.
     static let automaticRecallMaxChars = 2000
 
     /// Header labeling injected recall as system context.
@@ -932,6 +1009,18 @@ public extension MemoryEngine {
         return bannerRange.lowerBound < beginRange.lowerBound && beginRange.lowerBound < endRange.lowerBound
     }
 
+    /// Truncates one recall block to `maxChars`, preserving the `maxChars == 1` edge.
+    ///
+    /// Single source for the header-plus-lines block cap so the
+    /// threshold-based and budgets-aware overloads cannot drift.
+    static func truncateRecallBlock(_ block: String, maxChars: Int) -> String {
+        guard block.count > maxChars else { return block }
+        if maxChars == 1 {
+            return "…"
+        }
+        return String(block.prefix(maxChars - 1)) + "…"
+    }
+
     /// Builds source-labeled recall context, token-bounded with truncation.
     ///
     /// Tool-mirror and index lines wrap their compact payload in the
@@ -942,7 +1031,9 @@ public extension MemoryEngine {
     /// neutralizes inner copies); tool mirrors skip only when the full block
     /// structure is already present. Trusted tiers pass through with the
     /// historical shape, and a disabled labeler passes through
-    /// byte-identically for debugging.
+    /// byte-identically for debugging. Doc lines always carry one trailing
+    /// citation suffix `[date|path|display_name]` built from hit metadata
+    /// outside the truncation budget so it is never truncated away.
     static func automaticRecallContext(
         for results: [MemoryResult],
         threshold: Double = automaticRecallThreshold,
@@ -952,39 +1043,9 @@ public extension MemoryEngine {
         guard maxChars > 0 else { return nil }
         let relevant = results.filter { $0.score >= threshold }
         guard !relevant.isEmpty else { return nil }
-        let lines = relevant.map { result -> String in
-            let singleLine = result.content
-                .replacingOccurrences(of: "\n", with: " ")
-                .replacingOccurrences(of: "\t", with: " ")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let compact = singleLine.count > 500 ? String(singleLine.prefix(500)) + "…" : singleLine
-            if labelingEnabled, shouldLabelRecallResult(result) {
-                if isUntrustedRecallSource(result.source) {
-                    let sourceTag: String = {
-                        if let name = result.metadata["display_name"], !name.isEmpty {
-                            if let path = result.metadata["path"], !path.isEmpty {
-                                return "recall:\(result.source.rawValue):\(name) (\(path))"
-                            }
-                            return "recall:\(result.source.rawValue):\(name)"
-                        }
-                        return "recall:\(result.source.rawValue)"
-                    }()
-                    let labeled = ContentTrustLabeler.label(toolName: sourceTag, content: compact)
-                    return "[\(result.source.rawValue)] \(labeled)"
-                }
-                if !isAlreadyLabeledRecallPayload(compact) {
-                    let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
-                    return "[\(result.source.rawValue)] \(labeled)"
-                }
-            }
-            return "[\(result.source.rawValue)] \(compact)"
-        }
+        let lines = relevant.map { recallLine(for: $0, perHitChars: RecallBudgets().clamped().perHitChars, labelingEnabled: labelingEnabled) }
         let block = ([automaticRecallHeader] + lines).joined(separator: "\n")
-        guard block.count > maxChars else { return block }
-        if maxChars == 1 {
-            return "…"
-        }
-        return String(block.prefix(maxChars - 1)) + "…"
+        return truncateRecallBlock(block, maxChars: maxChars)
     }
 
     /// Wraps recall hits as an injectable system message.
@@ -998,6 +1059,156 @@ public extension MemoryEngine {
             return nil
         }
         return Message(role: .system, content: text)
+    }
+
+    /// Builds source-labeled recall context bounded by recall budgets.
+    ///
+    /// Budgets-aware entry for automatic recall: threshold, block cap,
+    /// per-hit truncation, and injected-hit cap all come from the clamped
+    /// budgets so file-load and live paths agree. Each hit keeps single-line
+    /// squash plus `…` at `perHitChars`, preserves one trailing citation
+    /// suffix `[date|path|display_name]` outside that truncation budget, and
+    /// the whole block keeps the header plus `maxChars` total truncation.
+    /// Labeling mirrors the threshold-based helper above.
+    static func automaticRecallContext(
+        for results: [MemoryResult],
+        budgets: RecallBudgets,
+        labelingEnabled: Bool = true
+    ) -> String? {
+        let clamped = budgets.clamped()
+        guard clamped.maxChars > 0 else { return nil }
+        let relevant = results.filter { $0.score >= clamped.threshold }
+        guard !relevant.isEmpty else { return nil }
+        let capped = Array(relevant.prefix(clamped.autoLimit))
+        guard !capped.isEmpty else { return nil }
+        let lines = capped.map { recallLine(for: $0, perHitChars: clamped.perHitChars, labelingEnabled: labelingEnabled) }
+        let block = ([automaticRecallHeader] + lines).joined(separator: "\n")
+        return truncateRecallBlock(block, maxChars: clamped.maxChars)
+    }
+
+    /// One recall line with per-hit truncation plus a preserved citation suffix.
+    ///
+    /// Content is squashed to one line and truncated to `perHitChars` with
+    /// `…`; the citation suffix is appended outside that budget so it is never
+    /// truncated away. Untrusted payloads label only the content bytes while
+    /// the `[source]` prefix and the trailing citation stay outside as
+    /// engine-authored routing.
+    static func recallLine(for result: MemoryResult, perHitChars: Int, labelingEnabled: Bool) -> String {
+        let singleLine = singleLineSquashed(result.content)
+        let compact = singleLine.count > perHitChars ? String(singleLine.prefix(perHitChars)) + "…" : singleLine
+        let citation = citationSuffix(for: result)
+        if labelingEnabled, shouldLabelRecallResult(result) {
+            if isUntrustedRecallSource(result.source) {
+                let labeled = ContentTrustLabeler.label(toolName: recallSourceTag(for: result), content: compact)
+                if let citation {
+                    return "[\(result.source.rawValue)] \(labeled) \(citation)"
+                }
+                return "[\(result.source.rawValue)] \(labeled)"
+            }
+            // Check the emitted truncated payload, not the pre-truncation line:
+            // a stored tool-mirror block truncated to `perHitChars` can lose
+            // its closing delimiter, so a full-content check would skip
+            // re-labeling and emit an unclosed block. Re-wrapping the
+            // truncated bytes keeps the delimiters well-formed (labeling
+            // sanitizes inner copies).
+            if !isAlreadyLabeledRecallPayload(compact) {
+                let labeled = ContentTrustLabeler.label(toolName: "recall:\(result.source.rawValue)", content: compact)
+                if let citation {
+                    return "[\(result.source.rawValue)] \(labeled) \(citation)"
+                }
+                return "[\(result.source.rawValue)] \(labeled)"
+            }
+        }
+        if let citation {
+            if compact.isEmpty {
+                return "[\(result.source.rawValue)] \(citation)"
+            }
+            return "[\(result.source.rawValue)] \(compact) \(citation)"
+        }
+        return "[\(result.source.rawValue)] \(compact)"
+    }
+
+    /// Squashes recall content to a single trimmed line.
+    static func singleLineSquashed(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\t", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Engine-authored attribution for the untrusted data-only block.
+    static func recallSourceTag(for result: MemoryResult) -> String {
+        if let name = result.metadata["display_name"], !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmedName = singleLineSquashed(name)
+            if let path = result.metadata["path"], !path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return "recall:\(result.source.rawValue):\(trimmedName) (\(singleLineSquashed(path)))"
+            }
+            return "recall:\(result.source.rawValue):\(trimmedName)"
+        }
+        return "recall:\(result.source.rawValue)"
+    }
+
+    /// One trailing citation suffix from hit metadata, never truncated away.
+    ///
+    /// Exactly one bracketed suffix per hit: available `date`, `path`, and
+    /// `display_name` fields joined with `|` as `[date|path|display_name]`.
+    /// Doc-index lines always carry a suffix (falling back to the chunk's
+    /// `document_id` when the parent lookup missed); other tiers carry one
+    /// only when they already hold such metadata.
+    static func citationSuffix(for result: MemoryResult) -> String? {
+        var parts: [String] = []
+        if let date = result.metadata["date"]?.trimmingCharacters(in: .whitespacesAndNewlines), !date.isEmpty {
+            let squashed = singleLineSquashed(date)
+            if !squashed.isEmpty {
+                parts.append(squashed)
+            }
+        }
+        if let path = result.metadata["path"]?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            let squashed = singleLineSquashed(path)
+            if !squashed.isEmpty {
+                parts.append(squashed)
+            }
+        }
+        if let displayName = result.metadata["display_name"]?.trimmingCharacters(in: .whitespacesAndNewlines), !displayName.isEmpty {
+            let squashed = singleLineSquashed(displayName)
+            if !squashed.isEmpty {
+                parts.append(squashed)
+            }
+        }
+        if parts.isEmpty {
+            guard result.source == .docIndex else { return nil }
+            if let documentID = result.metadata["document_id"]?.trimmingCharacters(in: .whitespacesAndNewlines), !documentID.isEmpty {
+                return "[\(singleLineSquashed(documentID))]"
+            }
+            return "[indexed document]"
+        }
+        return "[\(parts.joined(separator: "|"))]"
+    }
+
+    /// Wraps recall hits as an injectable system message bounded by recall budgets.
+    static func automaticRecallMessage(
+        for results: [MemoryResult],
+        budgets: RecallBudgets,
+        labelingEnabled: Bool = true
+    ) -> Message? {
+        guard let text = automaticRecallContext(for: results, budgets: budgets, labelingEnabled: labelingEnabled) else {
+            return nil
+        }
+        return Message(role: .system, content: text)
+    }
+
+    /// Injected subset of retrieved hits in rank order.
+    ///
+    /// Single source for recall observability: threshold-filtered plus
+    /// `autoLimit`-capped, matching what `automaticRecallContext(for:budgets:)`
+    /// and `automaticRecallMessage(for:budgets:)` actually inject. Retrieved
+    /// hits stay pre-threshold (deduped, up to `perTier * 4`); diagnostics
+    /// report this injected subset so `recallWithDiagnostics` and
+    /// `recallMessageWithDiagnostics` log the same injected set by path.
+    static func injectedRecallHits(from results: [MemoryResult], budgets: RecallBudgets) -> [MemoryResult] {
+        let clamped = budgets.clamped()
+        let relevant = results.filter { $0.score >= clamped.threshold }
+        return Array(relevant.prefix(clamped.autoLimit))
     }
 }
 
@@ -1040,32 +1251,118 @@ public extension MemoryEngine {
     }
 
     /// Resolves automatic recall for one user turn, failure-isolated except cancellation.
+    ///
+    /// Temporal plus freshness-aware entry: the caller builds one `RecallPlan`
+    /// via `MemoryQueryRouter.plan` and passes `RecallBudgets` alongside it.
+    /// The plan window bounds `recall(query:embedding:limit:since:until:)`,
+    /// `skipDocIndex` drops document hits via post-filter so the skip flag
+    /// stays honest without extra index I/O, and a
+    /// forced `LiveSearchOverride.shouldUseLiveSearch` filters remaining
+    /// document hits so profile and semantic hits still inject.
+    /// Embedding is best-effort: cancellation propagates while other errors
+    /// fall back to nil for the keyword path. Empty queries, store errors,
+    /// and below-threshold hits yield nil without failing the turn.
     func recallMessage(
         for query: String,
         sessionID: UUID,
         embedder: (any EmbeddingsBackend)? = nil,
-        labelingEnabled: Bool = true
+        labelingEnabled: Bool = true,
+        budgets: RecallBudgets = RecallBudgets(),
+        plan: RecallPlan? = nil
     ) async throws -> Message? {
-        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        // `embedQuery` isolates embedding failures internally (falling back
-        // to nil) and only rethrows cancellation, so a bare await suffices.
-        let embedding: [Float]? = if let embedder {
-            try await embedder.embedQuery(query)
-        } else {
-            nil
+        let (message, _) = try await recallMessageWithDiagnostics(
+            for: query,
+            sessionID: sessionID,
+            embedder: embedder,
+            labelingEnabled: labelingEnabled,
+            budgets: budgets,
+            plan: plan
+        )
+        return message
+    }
+
+    /// Resolves automatic recall while reporting observability alongside the message.
+    ///
+    /// Retrieved-vs-injected: the intermediate `recall` hits are the retrieved
+    /// set (deduped, pre-threshold, up to `perTier * 4`); diagnostics describe
+    /// the injected set (threshold-filtered plus `autoLimit`-capped via
+    /// `injectedRecallHits`, matching what the returned message injects and
+    /// what `recallWithDiagnostics` reports, so both paths log the same
+    /// injected `hits/ids/scores`). Diagnostics carry hit identifiers plus
+    /// sources plus scores plus the injected char count plus the doc-index
+    /// skip flag, never content.
+    /// Silent-nil recalls (empty query, embedding fallback, store error, or
+    /// below-threshold hits) return nil with zero-hit diagnostics so callers
+    /// still emit one observability line per turn.
+    func recallMessageWithDiagnostics(
+        for query: String,
+        sessionID: UUID,
+        embedder: (any EmbeddingsBackend)? = nil,
+        labelingEnabled: Bool = true,
+        budgets: RecallBudgets = RecallBudgets(),
+        plan: RecallPlan? = nil
+    ) async throws -> (Message?, RecallDiagnostics) {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let skipped = (plan?.skipDocIndex ?? false) || docIndexStore == nil
+            return (nil, RecallDiagnostics.zero(skippedDocIndex: skipped))
         }
+        let effectiveBudgets = budgets.clamped()
+        // Thread the caller's budgets into the default plan so `perTier`
+        // and `expandedQuery` derive from the same clamped value the turn
+        // fans out with instead of the default budgets.
+        let effectivePlan = plan ?? MemoryQueryRouter.plan(for: query, currentDate: Date(), budgets: effectiveBudgets)
+        let skipped = effectivePlan.skipDocIndex || docIndexStore == nil
+        let recallQuery = effectivePlan.expandedQuery.isEmpty ? query : effectivePlan.expandedQuery
+        var embedding: [Float]?
         do {
-            let results = try await recall(
-                query: query,
-                embedding: embedding,
-                limit: Self.automaticRecallLimit
-            )
-            let filtered = Self.filteredRecallResults(results, query: query, sessionID: sessionID)
-            return Self.automaticRecallMessage(for: filtered, labelingEnabled: labelingEnabled)
+            if let embedder {
+                embedding = try await embedder.embedQuery(recallQuery)
+            } else {
+                embedding = nil
+            }
         } catch let error as CancellationError {
             throw error
         } catch {
-            return nil
+            embedding = nil
+        }
+        do {
+            // `plan.perTier` is the single source for fan-out; budgets still
+            // govern threshold, caps, and weights downstream.
+            let results = try await recall(
+                query: recallQuery,
+                embedding: embedding,
+                limit: effectivePlan.perTier,
+                since: effectivePlan.since,
+                until: effectivePlan.until,
+                budgets: effectiveBudgets,
+                skipDocIndex: effectivePlan.skipDocIndex
+            )
+            let windowed: [MemoryResult] = if effectivePlan.skipDocIndex {
+                results.filter { $0.source != .docIndex }
+            } else if await LiveSearchOverride.shared.shouldUseLiveSearch(for: query) {
+                // In this branch the plan did not request a skip, so a live
+                // verdict here can only come from the forced override. Doc
+                // hits filter out explicitly so a zero threshold cannot
+                // re-admit them via `score >= threshold` while profile and
+                // semantic hits still inject.
+                results.filter { $0.source != .docIndex }
+            } else {
+                results
+            }
+            let filtered = Self.filteredRecallResults(windowed, query: query, sessionID: sessionID)
+            let message = Self.automaticRecallMessage(for: filtered, budgets: effectiveBudgets, labelingEnabled: labelingEnabled)
+            let injectedChars = message?.content.count ?? 0
+            // When the block is nil (no relevant hits) report zero hits so
+            // silent-nil turns still emit a zero-hit line. The injected set
+            // shares `injectedRecallHits` with `recallWithDiagnostics` so both
+            // paths report the same threshold plus `autoLimit` capped hits.
+            let reported: [MemoryResult] = message == nil ? [] : Self.injectedRecallHits(from: filtered, budgets: effectiveBudgets)
+            let diagnostics = Self.recallDiagnostics(for: reported, injectedChars: injectedChars, skippedDocIndex: skipped)
+            return (message, diagnostics)
+        } catch let error as CancellationError {
+            throw error
+        } catch {
+            return (nil, RecallDiagnostics.zero(skippedDocIndex: skipped))
         }
     }
 }

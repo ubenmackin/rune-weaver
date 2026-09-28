@@ -384,6 +384,22 @@ extension TOMLNode {
         return number
     }
 
+    /// Strict optional number: nil when absent, throws when present but
+    /// not a number. Integers widen to `Double` (so `recall_threshold = 1`
+    /// reads as `1.0`) while strings, booleans, and arrays throw instead of
+    /// silently defaulting, matching the `jpeg_quality` number agreement.
+    func strictDouble(_ key: String, field: String) throws -> Double? {
+        guard let value = values[key] else { return nil }
+        switch value {
+        case let .double(number):
+            return number
+        case let .integer(number):
+            return Double(number)
+        default:
+            throw ConfigError.validationError(field: field, message: "must be a number")
+        }
+    }
+
     /// Strict optional string list: nil when absent, throws when present
     /// but not an inline string array so wrong-typed values never silently
     /// clear the deny list.
@@ -550,6 +566,37 @@ extension RuneWeaverConfig {
         if let backend = try memory.strictString("embedding_backend", field: "memory.embedding_backend") {
             config.memory.embeddingBackend = backend
         }
+        // Recall budgets stay flat `recall_*` keys under `[memory]` so the
+        // file shape mirrors the surrounding scalar knobs; absent keys keep
+        // the documented defaults. Decode stays type-only for wrong-typed
+        // values, then fail-open clamps here so a stray digit degrades to the
+        // nearest bound instead of refusing to boot; live engine paths clamp
+        // again at use via `RecallBudgets.clamped()`.
+        if let perTier = try memory.strictInt("recall_per_tier_limit", field: "memory.recall_per_tier_limit") {
+            config.memory.recallBudgets.perTierLimit = perTier
+        }
+        if let auto = try memory.strictInt("recall_auto_limit", field: "memory.recall_auto_limit") {
+            config.memory.recallBudgets.autoLimit = auto
+        }
+        if let threshold = try memory.strictDouble("recall_threshold", field: "memory.recall_threshold") {
+            config.memory.recallBudgets.threshold = threshold
+        }
+        if let maxChars = try memory.strictInt("recall_max_chars", field: "memory.recall_max_chars") {
+            config.memory.recallBudgets.maxChars = maxChars
+        }
+        if let perHit = try memory.strictInt("recall_per_hit_chars", field: "memory.recall_per_hit_chars") {
+            config.memory.recallBudgets.perHitChars = perHit
+        }
+        if let multiplier = try memory.strictInt("recall_doc_pool_multiplier", field: "memory.recall_doc_pool_multiplier") {
+            config.memory.recallBudgets.docPoolMultiplier = multiplier
+        }
+        if let weight = try memory.strictDouble("recall_episodic_weight", field: "memory.recall_episodic_weight") {
+            config.memory.recallBudgets.episodicWeight = weight
+        }
+        // Fail-open clamp at load so a stray digit degrades to the nearest
+        // bound instead of refusing to boot; live paths clamp again at use,
+        // and validation below documents (not re-throws) this posture.
+        config.memory.recallBudgets = config.memory.recallBudgets.clamped()
     }
 
     private static func decodeVoice(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {

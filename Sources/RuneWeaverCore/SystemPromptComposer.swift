@@ -683,6 +683,13 @@ public enum LiveSearchGuidance: Sendable {
     public static let forceLiveFlagName = "forceLiveSearch"
 
     /// Query terms that imply state the durable index may not hold yet.
+    ///
+    /// Canonical freshness source for display and matching: `prefersLiveSearch`
+    /// derives its verdict from this list (single-token entries via
+    /// whole-word match, two-token phrases via the adjacent-token rule) so the
+    /// list cannot drift from matching. Word-boundary helpers below are the
+    /// single owner for freshness matching; `MemoryQueryRouter` delegates
+    /// one-way here and never owns a parallel copy.
     public static let freshnessTerms = [
         "today",
         "this-morning",
@@ -694,11 +701,61 @@ public enum LiveSearchGuidance: Sendable {
     ]
 
     /// Whether a query asks for state the durable index may not hold yet.
+    ///
+    /// Derived from `freshnessTerms` so adding or removing a term changes the
+    /// verdict without a parallel hardcoded list. Single-token terms match
+    /// whole-word (so `todayish` and `todays` stay quiet); hyphen and space
+    /// phrase spellings share one adjacent-token rule.
     /// - Parameter query: Raw user query.
     /// - Returns: True when live tools should be preferred over indexed recall.
     public static func prefersLiveSearch(for query: String) -> Bool {
         let lowered = query.lowercased()
-        return freshnessTerms.contains { lowered.contains($0) }
+        for term in freshnessTerms where matchesFreshnessTerm(term, in: lowered) {
+            return true
+        }
+        return false
+    }
+
+    /// Whether one canonical freshness term matches the query.
+    ///
+    /// Single-token terms use the whole-word boundary; two-token phrases use
+    /// the adjacent-token boundary so hyphen and space spellings agree.
+    private static func matchesFreshnessTerm(_ term: String, in lowered: String) -> Bool {
+        let tokens = term.split { !$0.isLetter }.map { String($0) }
+        if tokens.count == 1, let word = tokens.first {
+            return containsWord(word, in: lowered)
+        }
+        if tokens.count == 2 {
+            return containsAdjacentPair(first: tokens[0], second: tokens[1], in: lowered)
+        }
+        return false
+    }
+
+    /// Whole-word match so `may` inside another token never fires.
+    ///
+    /// Single owner for the freshness word boundary: `MemoryQueryRouter`
+    /// delegates here so `todayish` and `todays` stay quiet in both the
+    /// doc-index skip and the day window.
+    static func containsWord(_ word: String, in lowered: String) -> Bool {
+        lowered.split { !$0.isLetter }.map { String($0) }.contains(word)
+    }
+
+    /// Adjacent `this` + `morning` tokens so both spellings share one boundary rule.
+    ///
+    /// Single owner for the morning phrase: `MemoryQueryRouter` delegates
+    /// here so hyphen and space spellings stay quiet or fire together.
+    static func containsThisMorning(in lowered: String) -> Bool {
+        containsAdjacentPair(first: "this", second: "morning", in: lowered)
+    }
+
+    /// Adjacent token pair sharing the whole-word letter boundary.
+    private static func containsAdjacentPair(first: String, second: String, in lowered: String) -> Bool {
+        let tokens = lowered.split { !$0.isLetter }.map { String($0) }
+        guard tokens.count >= 2 else { return false }
+        for index in 0 ..< (tokens.count - 1) where tokens[index] == first && tokens[index + 1] == second {
+            return true
+        }
+        return false
     }
 }
 

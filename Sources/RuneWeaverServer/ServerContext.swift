@@ -406,6 +406,10 @@ extension ServerContext {
         let approvals: ApprovalQueue
         let embedder: (any EmbeddingsBackend)?
         let securityConfig: SecurityConfig
+        /// Recall budgets bounding automatic recall fan-out. Carries the
+        /// clamped `[memory] recall_*` values from config so headless and
+        /// served turns inject with file config instead of defaults.
+        let recallBudgets: RecallBudgets
         let durable: DurableServerStores
         let notifier: (any SchedulerNotifier)?
         let indexCoordinator: IndexCoordinator?
@@ -504,7 +508,8 @@ extension ServerContext {
             embedder: args.embedder,
             compactionThresholdPercent: args.engineConfig.compactionThresholdPercent,
             steeringQueue: steeringQueue,
-            securityConfig: args.securityConfig
+            securityConfig: args.securityConfig,
+            recallBudgets: args.recallBudgets
         )
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: args.durable.scheduler,
@@ -548,6 +553,7 @@ extension ServerContext {
         mediaConfig: MediaConfig? = nil,
         desktopConfig: DesktopConfig = DesktopConfig(),
         securityConfig: SecurityConfig = SecurityConfig(),
+        recallBudgets: RecallBudgets = RecallBudgets(),
         goalsConfig: GoalsConfig = GoalsConfig(),
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
@@ -603,6 +609,7 @@ extension ServerContext {
             systemPrompt: systemPrompt, engineConfig: engineConfig,
             memoryEngine: memoryEngine, approvals: services.approvals,
             embedder: embedder, securityConfig: securityConfig,
+            recallBudgets: recallBudgets.clamped(),
             durable: services.durable, notifier: notifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
             goalEngine: services.goalEngine

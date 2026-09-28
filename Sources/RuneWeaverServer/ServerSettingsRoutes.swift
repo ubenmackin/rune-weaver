@@ -119,6 +119,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         let prebuiltIndexComponents = try await preflightLiveIndexPolicy(savedConfig: config, context: liveContext, patchPresent: body.index != nil)
         try config.save(to: url)
         await applyLiveOrchestratorTuning(body: body, context: liveContext)
+        await applyLiveRecallBudgets(body: body, config: config, context: liveContext)
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
         await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
@@ -298,6 +299,15 @@ private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: S
     if let compactionThresholdPercent = body.compactionThresholdPercent {
         await context.orchestrator.updateCompactionPercent(compactionThresholdPercent)
     }
+}
+
+/// Pushes persisted recall budgets into the live orchestrator so saved values take effect without a restart.
+/// A save without recall keys is a no-op, so unrelated edits never touch the
+/// live budgets; the merged config carries the clamped values so the live
+/// engine and the persisted file agree even on edge inputs.
+private func applyLiveRecallBudgets(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    guard body.carriesRecallPatch else { return }
+    await context.orchestrator.updateRecallBudgets(config.memory.recallBudgets)
 }
 
 /// Re-registers one tool while keeping its live enablement.

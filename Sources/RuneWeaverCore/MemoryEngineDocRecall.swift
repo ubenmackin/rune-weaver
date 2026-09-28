@@ -14,9 +14,61 @@ import Foundation
 
 public extension MemoryEngine {
     /// Recalls across episodic, semantic, document-index, and profile tiers.
-    func recall(query: String, embedding: [Float]? = nil, limit: Int = 10, since: Date? = nil, until: Date? = nil) async throws -> [MemoryResult] {
-        guard limit > 0 else { return [] }
-        let perTier = min(limit, Self.maxPerTierResults)
+    ///
+    /// `skipDocIndex` mirrors the plan-level freshness skip so direct callers
+    /// report the same miss-vs-skip observability as the automatic path; when
+    /// true the document fetch is skipped and `skippedDocIndex` reports true.
+    func recall(
+        query: String,
+        embedding: [Float]? = nil,
+        limit: Int = 10,
+        since: Date? = nil,
+        until: Date? = nil,
+        budgets: RecallBudgets = RecallBudgets(),
+        skipDocIndex: Bool = false
+    ) async throws -> [MemoryResult] {
+        let (hits, _) = try await recallWithDiagnostics(
+            query: query,
+            embedding: embedding,
+            limit: limit,
+            since: since,
+            until: until,
+            budgets: budgets,
+            skipDocIndex: skipDocIndex
+        )
+        return hits
+    }
+
+    /// Recalls across tiers while reporting observability alongside hits.
+    ///
+    /// Retrieved-vs-injected: `hits` are the retrieved set (deduped,
+    /// pre-threshold, up to `perTier * 4` for tool and merge use) while
+    /// `diagnostics` describe the injected set (threshold-filtered plus
+    /// `autoLimit`-capped via `injectedRecallHits`, matching what
+    /// `automaticRecallContext` actually injects and what
+    /// `recallMessageWithDiagnostics` reports, so both paths log the same
+    /// injected `hits/ids/scores`). Diagnostics carry hit identifiers plus
+    /// sources plus scores plus the would-inject char estimate plus the
+    /// doc-index skip flag, never content.
+    /// `injectedChars` estimates the budgets-aware context block length for the
+    /// injected hits; `skippedDocIndex` is true when the caller requested a
+    /// plan-level skip or no document store is configured, matching
+    /// `recallMessageWithDiagnostics`, so callers can distinguish an empty
+    /// index or a freshness skip from a miss.
+    func recallWithDiagnostics(
+        query: String,
+        embedding: [Float]? = nil,
+        limit: Int = 10,
+        since: Date? = nil,
+        until: Date? = nil,
+        budgets: RecallBudgets = RecallBudgets(),
+        skipDocIndex: Bool = false
+    ) async throws -> ([MemoryResult], RecallDiagnostics) {
+        let skipped = skipDocIndex || docIndexStore == nil
+        guard limit > 0 else { return ([], RecallDiagnostics.zero(skippedDocIndex: skipped)) }
+        let clampedBudgets = budgets.clamped()
+        let perTier = min(min(limit, clampedBudgets.perTierLimit), Self.maxPerTierResults)
+        guard perTier > 0 else { return ([], RecallDiagnostics.zero(skippedDocIndex: skipped)) }
         let episodic = try await searchEpisodes(query: query, limit: perTier, since: since, until: until)
         let semanticRaw = await querySemantic(query: query, embedding: embedding ?? [], limit: perTier)
         let semantic: [MemoryResult] = if (embedding ?? []).isEmpty {
@@ -25,48 +77,77 @@ public extension MemoryEngine {
             semanticRaw
         }
         let profile = profileResults(query: query, limit: perTier)
-        let docIndex = await recallDocuments(query: query, embedding: embedding, limit: perTier, since: since, until: until)
+        let docIndex: [MemoryResult] = if skipDocIndex {
+            []
+        } else {
+            await recallDocuments(
+                query: query,
+                embedding: embedding,
+                limit: perTier,
+                since: since,
+                until: until,
+                budgets: clampedBudgets
+            )
+        }
         let merged = episodic + semantic + docIndex + profile
-        let calibrated = merged.map { Self.calibrated($0) }
+        let calibrated = merged.map { Self.calibrated($0, episodicWeight: clampedBudgets.episodicWeight) }
         let sorted = calibrated.sorted(by: Self.recallOrder)
         // `perTier` is capped at `maxPerTierResults` (1000) above, so
         // `perTier * 4` cannot overflow.
         let cap = perTier * 4
-        return Array(Self.dedupe(sorted).prefix(cap))
+        let hits = Array(Self.dedupe(sorted).prefix(cap))
+        let context = Self.automaticRecallContext(for: hits, budgets: clampedBudgets)
+        let injectedChars = context?.count ?? 0
+        // Diagnostics report the injected set so this path logs the same
+        // `hits/ids/scores` as `recallMessageWithDiagnostics`; a nil block
+        // reports zero hits for silent-nil parity.
+        let injected: [MemoryResult] = context == nil ? [] : Self.injectedRecallHits(from: hits, budgets: clampedBudgets)
+        let diagnostics = Self.recallDiagnostics(for: injected, injectedChars: injectedChars, skippedDocIndex: skipped)
+        return (hits, diagnostics)
     }
 
     /// Recalls document-index chunks by unioning keyword and vector candidates.
     ///
     /// The FTS5 keyword path and the cosine path over stored chunk embeddings
-    /// are merged onto the shared calibrated recall scale and reranked with a
-    /// token-overlap term, a recency prior, and an exact name-or-path bonus. A
-    /// missing query embedding or a failed vector read still returns the
-    /// keyword hits, so retrieval never fails a turn. The vector scan is a
-    /// bounded newest-first pool, so recent writes stay visible at scale.
+    /// are unioned newest-first, reciprocal-rank-fused (`rrf = 1/(60+rank)` per
+    /// list, summed when a chunk appears in both), then reranked with the
+    /// shared `0.6*max+0.2*overlap+0.1*recency+0.1*exact` blend plus the RRF
+    /// boost and calibrated by the doc-index tier weight. A missing query
+    /// embedding or a failed vector read still returns the keyword hits, so
+    /// retrieval never fails a turn. The vector scan is a bounded
+    /// newest-first pool widened by budgets, so recent writes stay visible at
+    /// scale while an old-but-relevant keyword hit still surfaces via union.
     /// - Parameters:
     ///   - query: Raw user query.
     ///   - embedding: Query embedding for the vector path, or nil for keyword-only.
     ///   - limit: Maximum chunk results.
     ///   - since: Inclusive lower bound on the parent document event time, or nil for unbounded.
     ///   - until: Exclusive upper bound on the parent document event time, or nil for unbounded.
+    ///   - budgets: Recall budgets carrying the doc-pool multiplier and per-tier cap.
     /// - Returns: Calibrated doc-index results carrying the index watermark.
     func recallDocuments(
         query: String,
         embedding: [Float]? = nil,
         limit: Int = 5,
         since: Date? = nil,
-        until: Date? = nil
+        until: Date? = nil,
+        budgets: RecallBudgets = RecallBudgets()
     ) async -> [MemoryResult] {
         guard limit > 0, let docIndexStore else { return [] }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
-        let clamped = min(limit, Self.maxPerTierResults)
-        // Keep the vector scan wider than the returned page so a strong
-        // semantic match is not crowded out by keyword hits. The store caps
-        // the pool to the newest rows, keeping recent writes visible at scale.
+        let clampedBudgets = budgets.clamped()
+        let clamped = min(min(limit, clampedBudgets.perTierLimit), Self.maxPerTierResults)
+        guard clamped > 0 else { return [] }
+        // Widen the vector scan beyond the returned page so a strong semantic
+        // match is not crowded out by keyword hits. The store caps the pool to
+        // the newest rows, keeping recent writes visible at scale; the keyword
+        // union keeps an old-but-relevant hit recallable outside that pool.
         // The dated window filters candidates before ranking so calibration,
         // watermark, and per-tier caps stay unchanged.
-        let pool = min(max(clamped * Self.docIndexCandidateMultiplier, clamped), Self.maxPerTierResults)
+        // `docPoolMultiplier` clamps to `1...8`, so the widened pool never
+        // shrinks below `clamped` and needs no lower bound.
+        let pool = min(clamped * clampedBudgets.docPoolMultiplier, Self.maxPerTierResults)
         let keyword = await (try? docIndexStore.searchKeyword(query: trimmed, limit: pool, since: since, until: until)) ?? []
         let vectors = await (try? docIndexStore.chunkVectors(limit: pool, since: since, until: until)) ?? []
         let queryEmbedding = (embedding?.isEmpty == false) ? embedding : nil
@@ -80,7 +161,8 @@ public extension MemoryEngine {
             query: trimmed,
             queryTokens: Tokenization.tokenize(trimmed),
             documents: documents,
-            indexAsOf: stats?.indexAsOf
+            indexAsOf: stats?.indexAsOf,
+            episodicWeight: clampedBudgets.episodicWeight
         )
         return Array(ranked.prefix(clamped))
     }
@@ -142,9 +224,13 @@ extension MemoryEngine {
     private static let profileTierWeight = 1.0
 
     /// Applies the tier weight for a recall hit's source.
-    private static func calibrated(_ result: MemoryResult) -> MemoryResult {
+    ///
+    /// The episodic weight comes from the clamped recall budgets so the
+    /// `recall_episodic_weight` file knob reaches the shared scale; the
+    /// remaining tier weights stay fixed.
+    private static func calibrated(_ result: MemoryResult, episodicWeight: Double = episodicTierWeight) -> MemoryResult {
         let weight: Double = switch result.source {
-        case .episodic: Self.episodicTierWeight
+        case .episodic: episodicWeight
         case .semantic: Self.semanticTierWeight
         case .docIndex: Self.docIndexTierWeight
         case .profile: Self.profileTierWeight
@@ -177,7 +263,11 @@ extension MemoryEngine {
         }
     }
 
-    /// Orders merged recall hits by score, then tier priority, then doc-chunk identity.
+    /// Orders merged recall hits by score, then tier priority, then stable identity.
+    ///
+    /// Equal-score equal-priority hits fall back to a deterministic
+    /// `source.rawValue`, then `metadata["id"]`, then `content` comparison so
+    /// repeated turns sort identically instead of leaving Swift sort order undefined.
     private static func recallOrder(_ lhs: MemoryResult, _ rhs: MemoryResult) -> Bool {
         if lhs.score != rhs.score {
             return lhs.score > rhs.score
@@ -189,6 +279,17 @@ extension MemoryEngine {
         }
         if lhs.source == .docIndex, rhs.source == .docIndex {
             return docIndexResultOrder(lhs, rhs)
+        }
+        if lhs.source.rawValue != rhs.source.rawValue {
+            return lhs.source.rawValue < rhs.source.rawValue
+        }
+        let lhsID = lhs.metadata["id"] ?? ""
+        let rhsID = rhs.metadata["id"] ?? ""
+        if lhsID != rhsID {
+            return lhsID < rhsID
+        }
+        if lhs.content != rhs.content {
+            return lhs.content < rhs.content
         }
         return false
     }
@@ -203,10 +304,16 @@ extension MemoryEngine {
         let vectorScore: Double
         /// Newest-first position in the union, driving the recency prior.
         let order: Int
+        /// One-based keyword rank, nil when keyword-absent.
+        let keywordRank: Int?
+        /// One-based cosine rank, nil when vector-absent.
+        let vectorRank: Int?
+        /// Reciprocal-rank-fusion boost `sum(1/(60+rank))` over present lists.
+        let rrf: Double
     }
 
-    /// Extra vector candidates scanned per returned page.
-    private static let docIndexCandidateMultiplier = 4
+    /// RRF damping constant keeping the fusion boost small beside the rerank blend.
+    private static let docIndexRRFK = 60.0
 
     /// Base retrieval weight in the doc-index rerank, leaving room for bonuses.
     private static let docIndexBaseWeight = 0.6
@@ -220,11 +327,23 @@ extension MemoryEngine {
     /// Exact name-or-path bonus in the doc-index rerank.
     private static let docIndexExactMatchWeight = 0.1
 
+    /// Reciprocal-rank score for one list rank, zero when absent.
+    private static func rrfScore(rank: Int?) -> Double {
+        guard let rank else { return 0 }
+        return 1.0 / (docIndexRRFK + Double(rank))
+    }
+
     /// Unions keyword and vector candidates into one newest-first list.
     ///
     /// Vector chunks arrive newest-first from the bounded store pool, so they
     /// keep that order before the keyword-only hits are appended. The resulting
     /// position is the recency prior because both reads break ties toward newer rows.
+    /// The single fusion is an additive RRF boost: each present list contributes
+    /// `1/(60+rank)` (keyword rank from FTS order, vector rank from cosine order),
+    /// summed when a chunk appears in both, then added to the existing
+    /// `0.6*max+0.2*overlap+0.1*recency+0.1*exact` blend before tier calibration.
+    /// Keyword-only chunks outside the newest-first vector pool still union in,
+    /// so an old-but-relevant match survives a narrow pool.
     private static func docIndexCandidates(
         keyword: [IndexedChunk],
         vectors: [IndexedChunk],
@@ -238,39 +357,76 @@ extension MemoryEngine {
             guard let rank = keywordRanks[chunk.id] else { return 0 }
             return 1.0 / Double(rank)
         }
-        var candidates: [DocIndexCandidate] = []
+        var scoredVectors: [(chunk: IndexedChunk, cosine: Double)] = []
         if let queryEmbedding, !queryEmbedding.isEmpty {
             for chunk in vectors {
                 let cosine = VectorStore.cosineSimilarity(queryEmbedding, chunk.embedding)
                 guard cosine > 0 else { continue }
-                candidates.append(DocIndexCandidate(
-                    chunk: chunk,
-                    keywordScore: keywordScore(for: chunk),
-                    vectorScore: min(max(cosine, 0), 1),
-                    order: candidates.count
-                ))
+                scoredVectors.append((chunk: chunk, cosine: min(max(cosine, 0), 1)))
             }
         }
-        var seen = Set(candidates.map(\.chunk.id))
+        let cosineOrdered = scoredVectors.sorted { lhs, rhs in
+            if lhs.cosine != rhs.cosine {
+                return lhs.cosine > rhs.cosine
+            }
+            return lhs.chunk.id.uuidString < rhs.chunk.id.uuidString
+        }
+        var vectorRanks: [UUID: Int] = [:]
+        for (index, entry) in cosineOrdered.enumerated() where vectorRanks[entry.chunk.id] == nil {
+            vectorRanks[entry.chunk.id] = index + 1
+        }
+        var cosineByID: [UUID: Double] = [:]
+        for entry in scoredVectors where cosineByID[entry.chunk.id] == nil {
+            cosineByID[entry.chunk.id] = entry.cosine
+        }
+        var candidates: [DocIndexCandidate] = []
+        var seen = Set<UUID>()
+        for entry in scoredVectors {
+            let id = entry.chunk.id
+            guard !seen.contains(id) else { continue }
+            seen.insert(id)
+            let keywordRank = keywordRanks[id]
+            let vectorRank = vectorRanks[id]
+            let rrf = rrfScore(rank: keywordRank) + rrfScore(rank: vectorRank)
+            candidates.append(DocIndexCandidate(
+                chunk: entry.chunk,
+                keywordScore: keywordScore(for: entry.chunk),
+                vectorScore: cosineByID[id] ?? 0,
+                order: candidates.count,
+                keywordRank: keywordRank,
+                vectorRank: vectorRank,
+                rrf: rrf
+            ))
+        }
         for chunk in keyword where !seen.contains(chunk.id) {
             seen.insert(chunk.id)
+            let keywordRank = keywordRanks[chunk.id]
+            let rrf = rrfScore(rank: keywordRank)
             candidates.append(DocIndexCandidate(
                 chunk: chunk,
                 keywordScore: keywordScore(for: chunk),
                 vectorScore: 0,
-                order: candidates.count
+                order: candidates.count,
+                keywordRank: keywordRank,
+                vectorRank: nil,
+                rrf: rrf
             ))
         }
         return candidates
     }
 
     /// Calibrates and reranks doc-index candidates, stamping the index watermark and document metadata.
+    ///
+    /// `episodicWeight` threads through from the clamped recall budgets for
+    /// call-site uniformity with the merged path; doc-index hits calibrate
+    /// with the fixed doc-index tier weight.
     private static func rankedDocIndexResults(
         _ candidates: [DocIndexCandidate],
         query: String,
         queryTokens: Set<String>,
         documents: [UUID: IndexedDocument] = [:],
-        indexAsOf: Date?
+        indexAsOf: Date?,
+        episodicWeight: Double = episodicTierWeight
     ) -> [MemoryResult] {
         let total = candidates.count
         let watermark = indexAsOf.map { indexWatermark($0) }
@@ -280,7 +436,7 @@ extension MemoryEngine {
             let recency = docIndexRecency(order: candidate.order, total: total)
             let exact = hasExactNameOrPathMatch(query: query, chunkText: candidate.chunk.text) ? 1.0 : 0.0
             let bonus = docIndexOverlapWeight * overlap + docIndexRecencyWeight * recency + docIndexExactMatchWeight * exact
-            let score = min(max(base + bonus, 0.0), 1.0)
+            let fused = min(max(base + bonus + candidate.rrf, 0.0), 1.0)
             var metadata: [String: String] = [
                 "id": candidate.chunk.id.uuidString,
                 "document_id": candidate.chunk.documentID.uuidString,
@@ -307,12 +463,12 @@ extension MemoryEngine {
             }
             return MemoryResult(
                 content: candidate.chunk.text,
-                score: score,
+                score: fused,
                 source: .docIndex,
                 metadata: metadata
             )
         }
-        return scored.map { Self.calibrated($0) }.sorted { lhs, rhs in
+        return scored.map { Self.calibrated($0, episodicWeight: episodicWeight) }.sorted { lhs, rhs in
             if lhs.score != rhs.score {
                 return lhs.score > rhs.score
             }
@@ -335,16 +491,46 @@ extension MemoryEngine {
 
     /// Whether the query names a file or path that appears verbatim in the chunk.
     ///
-    /// Exact-name and path tokens are literal fragments (they carry a dot or a
-    /// slash), so a substring hit is a strong signal that this chunk is the
-    /// document the user pointed at rather than a topical near-match.
+    /// Exact-name and path tokens are literal fragments with a file-like
+    /// shape (a stem plus a dot plus an extension, or a slash-delimited path
+    /// with a minimum length), so a substring hit is a strong signal that
+    /// this chunk is the document the user pointed at rather than a topical
+    /// near-match. Bare dotted prose (`e.g.`, `i.e.`, `v1.2`) carries a dot
+    /// but no file shape and earns no bonus.
     private static func hasExactNameOrPathMatch(query: String, chunkText: String) -> Bool {
         let loweredChunk = chunkText.lowercased()
         let tokens = query.split { $0.isWhitespace || $0.isNewline }.map { String($0).lowercased() }
         return tokens.contains { token in
-            guard token.contains(".") || token.contains("/") else { return false }
-            return loweredChunk.contains(token)
+            let candidate = token.trimmingCharacters(in: CharacterSet(charactersIn: "\"'()[]{}<>,;:!?…"))
+            guard isFileLikeToken(candidate) else { return false }
+            return loweredChunk.contains(candidate)
         }
+    }
+
+    /// Whether a query token has a file-like shape before any substring test.
+    ///
+    /// Slash tokens need a minimum length with the slash away from the edges
+    /// (so `src/foo` qualifies); dot tokens need a stem plus a dot plus a
+    /// short alphabetic extension (so `report.pdf` qualifies while `e.g.`,
+    /// `i.e.`, and `v1.2` do not).
+    private static func isFileLikeToken(_ token: String) -> Bool {
+        guard !token.isEmpty else { return false }
+        if token.contains("/") {
+            guard token.count >= 3 else { return false }
+            guard !token.hasPrefix("/"), !token.hasSuffix("/") else { return false }
+            return token.contains { $0.isLetter || $0.isNumber }
+        }
+        guard token.contains(".") else { return false }
+        guard token.count >= 4 else { return false }
+        guard !token.hasPrefix("."), !token.hasSuffix(".") else { return false }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return false }
+        guard parts.allSatisfy({ !$0.isEmpty }) else { return false }
+        guard let ext = parts.last else { return false }
+        guard ext.count >= 1, ext.count <= 5 else { return false }
+        guard ext.contains(where: \.isLetter) else { return false }
+        guard ext.allSatisfy({ $0.isLetter || $0.isNumber }) else { return false }
+        return true
     }
 
     /// Deterministic doc-chunk order: document, then position within it, then id.

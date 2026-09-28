@@ -292,7 +292,8 @@ struct ChatCommand: AsyncParsableCommand {
             memoryEngine: memoryEngine,
             embedder: embedder,
             sessionTokens: CLILockedValue(0),
-            securityConfig: loaded.config.security
+            securityConfig: loaded.config.security,
+            recallBudgets: loaded.config.memory.recallBudgets
         )
         await runChatREPL(
             provider: active,
@@ -410,6 +411,10 @@ private struct ChatTurnContext: Sendable {
     let sessionTokens: CLILockedValue<Int>
     /// Defense policy carrying the `[security] untrusted_labeling` off-switch.
     let securityConfig: SecurityConfig
+    /// Recall budgets bounding automatic recall fan-out. Carries the clamped
+    /// `[memory] recall_*` values from config so terminal turns inject with
+    /// file config instead of defaults.
+    let recallBudgets: RecallBudgets
 }
 
 /// Builds the session trailer line for one assistant turn.
@@ -843,6 +848,33 @@ private func handleChunkedStructuredTurn(
     return nil
 }
 
+/// Resolves auto-recall plus starter footing for one CLI turn in one place.
+/// Routes through the Orchestrator-owned turn wiring so the chunked and text
+/// paths share one plan plus recall plus starter with the service turn;
+/// terminal turns honor `[memory] recall_*` instead of defaults without
+/// duplicating the wiring. Diagnostics log the same injected-set line as the
+/// service turn.
+/// - Parameters:
+///   - query: Current user text driving the recall plan.
+///   - context: Shared turn dependencies carrying budgets and the memory engine.
+/// - Returns: Recall message plus starter pack for `stableHistoryWithRecallAndStarter`.
+private func resolveRecallAndStarter(
+    query: String,
+    context: ChatTurnContext
+) async throws -> (recall: Message?, starterPack: Message?) {
+    let wired = try await Orchestrator.resolveTurnRecallAndStarter(
+        engine: context.memoryEngine,
+        query: query,
+        sessionID: context.sessionID,
+        embedder: context.embedder,
+        labelingEnabled: context.securityConfig.untrustedLabeling,
+        budgets: context.recallBudgets,
+        currentDate: Date()
+    )
+    RuneWeaverLog.memory.info("\(Orchestrator.recallDiagnosticsLogLine(wired.diagnostics))")
+    return (wired.recall, wired.starterPack)
+}
+
 /// Runs one assistant turn via chunk streaming with tool-call visibility.
 private func runChunkedTurn(
     provider: any ChunkStreamingProvider,
@@ -860,12 +892,7 @@ private func runChunkedTurn(
     }
     let validTools = filteredTools.valid
     let definitions = validTools.map { ToolDefinition($0) }
-    let recall = try await context.memoryEngine.recallMessage(
-        for: query,
-        sessionID: context.sessionID,
-        embedder: context.embedder,
-        labelingEnabled: context.securityConfig.untrustedLabeling
-    )
+    let (recall, starterPack) = try await resolveRecallAndStarter(query: query, context: context)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var progress = ChunkedTurnProgress(snapshot: historySnapshot, rounds: 0)
     while true {
@@ -876,7 +903,7 @@ private func runChunkedTurn(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
-        let history = Orchestrator.stableHistoryWithRecall(baseHistory, recall: recall)
+        let history = Orchestrator.stableHistoryWithRecallAndStarter(baseHistory, recall: recall, starterPack: starterPack)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         let draft = await drainChunkedStream(
             provider: provider,
@@ -1058,12 +1085,7 @@ private func runTextTurn(
         cliPrintError(OrchestratorToolLoop.degradedToolWarning(for: skipped))
     }
     let validTextTools = filteredTextTools.valid
-    let recall = try await context.memoryEngine.recallMessage(
-        for: query,
-        sessionID: context.sessionID,
-        embedder: context.embedder,
-        labelingEnabled: context.securityConfig.untrustedLabeling
-    )
+    let (recall, textStarterPack) = try await resolveRecallAndStarter(query: query, context: context)
     let historySnapshot = await context.conversations.session(id: context.sessionID)?.messages ?? []
     var toolRounds = 0
     while true {
@@ -1077,7 +1099,7 @@ private func runTextTurn(
             for: context.sessionID,
             systemPrompt: context.systemPrompt
         )
-        let history = Orchestrator.stableHistoryWithRecall(baseHistory, recall: recall)
+        let history = Orchestrator.stableHistoryWithRecallAndStarter(baseHistory, recall: recall, starterPack: textStarterPack)
         print(TerminalStyle.assistant("weaver> "), terminator: "")
         let draft = await drainTextStream(
             provider: provider,

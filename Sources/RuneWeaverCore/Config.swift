@@ -332,6 +332,112 @@ public struct LLMConfig: Sendable, Codable, Equatable {
     }
 }
 
+/// `[memory]` recall budgets bounding automatic and explicit recall fan-out.
+///
+/// Single source for the budgets-aware auto-recall path: per-tier fetch caps,
+/// the auto injection cap, the calibrated score floor, the total and per-hit
+/// char budgets, the document pool widening factor, and the episodic tier
+/// weight. The budgets-aware `MemoryEngine` overloads read only this struct
+/// on the auto path; the `automaticRecallLimit/threshold/maxChars` statics
+/// remain as defaults for the legacy threshold-based overloads.
+public struct RecallBudgets: Sendable, Codable, Equatable {
+    /// Maximum hits fetched per tier before merging. Clamped `1...50`.
+    public var perTierLimit: Int
+    /// Maximum hits injected as system context on one auto turn. Clamped `1...50`.
+    public var autoLimit: Int
+    /// Minimum calibrated score for an injected recall hit. Clamped `0...1`.
+    public var threshold: Double
+    /// Maximum characters for the injected recall block, header included. Clamped `200...16000`.
+    public var maxChars: Int
+    /// Maximum characters kept per hit before ellipsis truncation. Clamped `100...2000`.
+    public var perHitChars: Int
+    /// Extra vector candidates scanned per returned document page. Clamped `1...8`.
+    public var docPoolMultiplier: Int
+    /// Weight mapping episodic rank scores onto the shared recall scale. Clamped `0...1`.
+    public var episodicWeight: Double
+
+    /// Bounds for `perTierLimit` and `autoLimit`.
+    public static let limitBounds = 1 ... 50
+    /// Bounds for `threshold` and `episodicWeight`.
+    public static let scoreBounds = 0.0 ... 1.0
+    /// Bounds for `maxChars`.
+    public static let maxCharsBounds = 200 ... 16000
+    /// Bounds for `perHitChars`.
+    public static let perHitCharsBounds = 100 ... 2000
+    /// Bounds for `docPoolMultiplier`.
+    public static let docPoolMultiplierBounds = 1 ... 8
+
+    /// Default hits fetched per tier before merging.
+    public static let defaultPerTierLimit = 5
+    /// Default hits injected as system context on one auto turn.
+    public static let defaultAutoLimit = 5
+    /// Default minimum calibrated score for an injected recall hit.
+    public static let defaultThreshold = 0.1
+    /// Default maximum characters for the injected recall block.
+    public static let defaultMaxChars = 2000
+    /// Default maximum characters kept per hit before truncation.
+    public static let defaultPerHitChars = 500
+    /// Default extra vector candidates scanned per returned document page.
+    public static let defaultDocPoolMultiplier = 4
+    /// Default weight mapping episodic rank scores onto the shared recall scale.
+    public static let defaultEpisodicWeight = 0.25
+
+    /// Creates recall budgets.
+    public init(
+        perTierLimit: Int = defaultPerTierLimit,
+        autoLimit: Int = defaultAutoLimit,
+        threshold: Double = defaultThreshold,
+        maxChars: Int = defaultMaxChars,
+        perHitChars: Int = defaultPerHitChars,
+        docPoolMultiplier: Int = defaultDocPoolMultiplier,
+        episodicWeight: Double = defaultEpisodicWeight
+    ) {
+        self.perTierLimit = perTierLimit
+        self.autoLimit = autoLimit
+        self.threshold = threshold
+        self.maxChars = maxChars
+        self.perHitChars = perHitChars
+        self.docPoolMultiplier = docPoolMultiplier
+        self.episodicWeight = episodicWeight
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case perTierLimit = "per_tier_limit"
+        case autoLimit = "auto_limit"
+        case threshold
+        case maxChars = "max_chars"
+        case perHitChars = "per_hit_chars"
+        case docPoolMultiplier = "doc_pool_multiplier"
+        case episodicWeight = "episodic_weight"
+    }
+
+    /// Decodes recall budgets, defaulting every omitted key.
+    /// - Parameter decoder: Decoder for the config document.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        perTierLimit = try container.decodeIfPresent(Int.self, forKey: .perTierLimit) ?? Self.defaultPerTierLimit
+        autoLimit = try container.decodeIfPresent(Int.self, forKey: .autoLimit) ?? Self.defaultAutoLimit
+        threshold = try container.decodeIfPresent(Double.self, forKey: .threshold) ?? Self.defaultThreshold
+        maxChars = try container.decodeIfPresent(Int.self, forKey: .maxChars) ?? Self.defaultMaxChars
+        perHitChars = try container.decodeIfPresent(Int.self, forKey: .perHitChars) ?? Self.defaultPerHitChars
+        docPoolMultiplier = try container.decodeIfPresent(Int.self, forKey: .docPoolMultiplier) ?? Self.defaultDocPoolMultiplier
+        episodicWeight = try container.decodeIfPresent(Double.self, forKey: .episodicWeight) ?? Self.defaultEpisodicWeight
+    }
+
+    /// Encodes recall budgets.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(perTierLimit, forKey: .perTierLimit)
+        try container.encode(autoLimit, forKey: .autoLimit)
+        try container.encode(threshold, forKey: .threshold)
+        try container.encode(maxChars, forKey: .maxChars)
+        try container.encode(perHitChars, forKey: .perHitChars)
+        try container.encode(docPoolMultiplier, forKey: .docPoolMultiplier)
+        try container.encode(episodicWeight, forKey: .episodicWeight)
+    }
+}
+
 /// `[memory]` — episodic and semantic memory storage locations.
 public struct MemoryConfig: Sendable, Codable, Equatable {
     /// JSON store path for semantic memory (LanceDB-compatible shape) holding
@@ -344,6 +450,14 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
     public var embeddingModel: String
     /// Embedding backend selector.
     public var embeddingBackend: String
+    /// Recall budgets bounding automatic and explicit recall fan-out.
+    ///
+    /// The budgets-aware `MemoryEngine` auto path reads this struct; file keys
+    /// land as flat `recall_*` entries under `[memory]`. `MemoryConfig` itself
+    /// nests them as the `recall_budgets` object in its Codable form, while the
+    /// settings DTO exposes the same values as flat `memoryRecall*` fields so
+    /// dashboard payloads stay version-tolerant without sharing the nesting.
+    public var recallBudgets: RecallBudgets
 
     /// `embedding_backend` selector that disables vectors (keyword-only recall).
     public static let embeddingBackendNone = "none"
@@ -363,12 +477,14 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         vectorDBPath: String = "~/.runeweaver/memory/vectors",
         episodesDBPath: String = MemoryConfig.defaultEpisodesDBPath,
         embeddingModel: String = "all-MiniLM-L6-v2",
-        embeddingBackend: String = MemoryConfig.embeddingBackendApple
+        embeddingBackend: String = MemoryConfig.embeddingBackendApple,
+        recallBudgets: RecallBudgets = RecallBudgets()
     ) {
         self.vectorDBPath = vectorDBPath
         self.episodesDBPath = episodesDBPath
         self.embeddingModel = embeddingModel
         self.embeddingBackend = embeddingBackend
+        self.recallBudgets = recallBudgets
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -376,6 +492,7 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         case episodesDBPath = "episodes_db_path"
         case embeddingModel = "embedding_model"
         case embeddingBackend = "embedding_backend"
+        case recallBudgets = "recall_budgets"
     }
 
     /// Decodes a memory config, defaulting an absent backend to `apple`.
@@ -385,6 +502,7 @@ public struct MemoryConfig: Sendable, Codable, Equatable {
         self.episodesDBPath = try container.decode(String.self, forKey: .episodesDBPath)
         self.embeddingModel = try container.decode(String.self, forKey: .embeddingModel)
         self.embeddingBackend = try container.decodeIfPresent(String.self, forKey: .embeddingBackend) ?? Self.embeddingBackendApple
+        self.recallBudgets = try container.decodeIfPresent(RecallBudgets.self, forKey: .recallBudgets) ?? RecallBudgets()
     }
 }
 
