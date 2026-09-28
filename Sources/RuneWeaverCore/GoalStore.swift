@@ -54,6 +54,13 @@ public protocol GoalStoring: Sendable {
     func markAdvanced(goalID: UUID, nextDueAt: Date?) async throws
     /// Moves a goal to a new lifecycle state and records the matching event.
     func setStatus(goalID: UUID, status: GoalStatus) async throws
+    /// Edits a goal's title, statement, and cadence in place, returning the updated row.
+    func updateDetails(
+        goalID: UUID,
+        title: String?,
+        statement: String?,
+        stepIntervalMinutes: Int?
+    ) async throws -> Goal
     /// Appends a freeform or typed audit entry.
     @discardableResult
     func appendEvent(goalID: UUID, kind: GoalEventKind, message: String) async throws -> GoalEvent
@@ -182,6 +189,45 @@ public actor GoalStore: GoalStoring {
         let dbPath = self.dbPath
         try await SQLiteSerialIO.run {
             try SQLiteGoalStore.setStatus(goalID: goalID, status: status, dbPath: dbPath)
+        }
+    }
+
+    /// Edits a goal's title, statement, and cadence in place.
+    ///
+    /// Nil leaves its column untouched so partial patches never wipe a field
+    /// with an absent key; the stamp always refreshes so list ordering observes
+    /// the edit. Unknown goals throw `notFound` instead of silently inserting.
+    /// A present cadence outside the steady range fails instead of truncating
+    /// so direct store callers get the same bound the routes enforce.
+    /// - Parameters:
+    ///   - goalID: Goal to edit.
+    ///   - title: New title, or nil to keep the stored one.
+    ///   - statement: New statement, or nil to keep the stored one.
+    ///   - stepIntervalMinutes: New cadence hint, or nil to keep the stored one.
+    /// - Returns: Updated goal snapshot.
+    public func updateDetails(
+        goalID: UUID,
+        title: String?,
+        statement: String?,
+        stepIntervalMinutes: Int?
+    ) async throws -> Goal {
+        if let stepIntervalMinutes,
+           stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
+           || stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
+        {
+            throw GoalStoreError.persistenceFailed(
+                "stepIntervalMinutes must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(stepIntervalMinutes))"
+            )
+        }
+        let dbPath = self.dbPath
+        return try await SQLiteSerialIO.run {
+            try SQLiteGoalStore.updateDetails(
+                goalID: goalID,
+                title: title,
+                statement: statement,
+                stepIntervalMinutes: stepIntervalMinutes,
+                dbPath: dbPath
+            )
         }
     }
 
@@ -563,6 +609,72 @@ public actor GoalStore: GoalStoring {
             }
         }
 
+        /// Edits title, statement, and cadence columns in place.
+        ///
+        /// Nil preserves its column via `COALESCE` so partial patches never wipe
+        /// a field; at least one non-nil column is expected from the route layer,
+        /// which validates blanks before reaching storage. A present cadence
+        /// outside the steady range throws instead of truncating through the
+        /// integer bind so the store boundary enforces the same bound as routes.
+        static func updateDetails(
+            goalID: UUID,
+            title: String?,
+            statement: String?,
+            stepIntervalMinutes: Int?,
+            dbPath: String
+        ) throws -> Goal {
+            if let stepIntervalMinutes,
+               stepIntervalMinutes < GoalsConfig.minStepIntervalMinutes
+               || stepIntervalMinutes > GoalsConfig.maxStepIntervalMinutes
+            {
+                throw GoalStoreError.persistenceFailed(
+                    "stepIntervalMinutes must be between \(GoalsConfig.minStepIntervalMinutes) and \(GoalsConfig.maxStepIntervalMinutes) (got \(stepIntervalMinutes))"
+                )
+            }
+            let handle = try open(dbPath: dbPath)
+            defer { sqlite3_close(handle) }
+            var updateStatement: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                handle,
+                "UPDATE goals SET title = COALESCE(?, title), statement = COALESCE(?, statement), "
+                    + "step_interval_minutes = COALESCE(?, step_interval_minutes), updated_at = ? WHERE id = ?;",
+                -1,
+                &updateStatement,
+                nil
+            ) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare goal edit")
+            }
+            defer { sqlite3_finalize(updateStatement) }
+            bindText(updateStatement, index: 1, value: title)
+            bindText(updateStatement, index: 2, value: statement)
+            if let stepIntervalMinutes {
+                sqlite3_bind_int(updateStatement, 3, Int32(stepIntervalMinutes))
+            } else {
+                sqlite3_bind_null(updateStatement, 3)
+            }
+            let now = Date()
+            sqlite3_bind_double(updateStatement, 4, now.timeIntervalSince1970)
+            bindText(updateStatement, index: 5, value: goalID.uuidString)
+            guard sqlite3_step(updateStatement) == SQLITE_DONE else {
+                throw GoalStoreError.persistenceFailed("Could not edit goal \(goalID)")
+            }
+            guard sqlite3_changes(handle) > 0 else {
+                throw GoalStoreError.notFound("No goal \(goalID)")
+            }
+            var readStatement: OpaquePointer?
+            let sql = "SELECT id, title, statement, status, step_interval_minutes, next_due_at, origin_session_id, created_at, updated_at "
+                + "FROM goals WHERE id = ?;"
+            guard sqlite3_prepare_v2(handle, sql, -1, &readStatement, nil) == SQLITE_OK else {
+                throw GoalStoreError.persistenceFailed("Could not prepare edited goal read")
+            }
+            defer { sqlite3_finalize(readStatement) }
+            bindText(readStatement, index: 1, value: goalID.uuidString)
+            guard sqlite3_step(readStatement) == SQLITE_ROW, let updated = readGoal(readStatement) else {
+                throw GoalStoreError.notFound("No goal \(goalID)")
+            }
+            return updated
+        }
+
         /// Counts goals currently in the active state.
         static func activeGoalCount(dbPath: String) throws -> Int {
             let expanded = (dbPath as NSString).expandingTildeInPath
@@ -667,6 +779,16 @@ public actor GoalStore: GoalStoring {
         }
 
         static func setStatus(goalID _: UUID, status _: GoalStatus, dbPath _: String) throws {
+            throw GoalStoreError.storeUnavailable("SQLite unavailable")
+        }
+
+        static func updateDetails(
+            goalID _: UUID,
+            title _: String?,
+            statement _: String?,
+            stepIntervalMinutes _: Int?,
+            dbPath _: String
+        ) throws -> Goal {
             throw GoalStoreError.storeUnavailable("SQLite unavailable")
         }
 

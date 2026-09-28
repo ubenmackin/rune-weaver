@@ -230,7 +230,8 @@ public final class ServerContext: Sendable {
         desktopConfig: DesktopConfig = DesktopConfig(),
         goals: GoalStore? = nil,
         goalEngine: GoalEngine? = nil,
-        goalsConfig: GoalsConfig = GoalsConfig()
+        goalsConfig: GoalsConfig = GoalsConfig(),
+        proactiveConfig: ProactiveConfig = ProactiveConfig()
     ) {
         self.config = config
         self.conversations = conversations
@@ -260,6 +261,9 @@ public final class ServerContext: Sendable {
         }
         self.goals = resolvedGoals
         self.goalEngine = resolvedEngine
+        // The interruption gate rides the stored `[proactive]` policy with the
+        // serving provider as its guarded judge; an explicit worker still wins
+        // untouched for tests that hand-build one without goals.
         self.schedulerWorker = schedulerWorker ?? ServerSchedulerWorker(
             scheduler: scheduler,
             runs: runs,
@@ -270,7 +274,9 @@ public final class ServerContext: Sendable {
             toolBus: toolBus,
             indexCoordinator: indexCoordinator,
             goalStore: resolvedGoals,
-            goalEngine: resolvedEngine
+            goalEngine: resolvedEngine,
+            proactiveConfig: proactiveConfig,
+            judgeLLM: servingLLM
         )
         let pStore = pluginStore ?? ToolRegistryStore(dbPath: defaultDBPath)
         self.pluginStore = pStore
@@ -415,6 +421,8 @@ extension ServerContext {
         let indexCoordinator: IndexCoordinator?
         let goalStore: GoalStore
         let goalEngine: GoalEngine
+        /// Interruption policy from `[proactive]` so the worker gate matches file config.
+        let proactiveConfig: ProactiveConfig
     }
 
     private static func bootstrapServices(
@@ -511,6 +519,8 @@ extension ServerContext {
             securityConfig: args.securityConfig,
             recallBudgets: args.recallBudgets
         )
+        // The serving provider doubles as the guarded judge so file mode plus
+        // judge travel together from boot instead of defaulting to surfacing all.
         let schedulerWorker = ServerSchedulerWorker(
             scheduler: args.durable.scheduler,
             runs: args.durable.runs,
@@ -522,7 +532,9 @@ extension ServerContext {
             notifier: args.notifier,
             indexCoordinator: args.indexCoordinator,
             goalStore: args.goalStore,
-            goalEngine: args.goalEngine
+            goalEngine: args.goalEngine,
+            proactiveConfig: args.proactiveConfig,
+            judgeLLM: args.llm
         )
         return RuntimeEngines(orchestrator: orchestrator, schedulerWorker: schedulerWorker, steeringQueue: steeringQueue)
     }
@@ -555,6 +567,7 @@ extension ServerContext {
         securityConfig: SecurityConfig = SecurityConfig(),
         recallBudgets: RecallBudgets = RecallBudgets(),
         goalsConfig: GoalsConfig = GoalsConfig(),
+        proactiveConfig: ProactiveConfig = ProactiveConfig(),
         auth: ServerAuth? = nil,
         browserGateway: (any BrowserPlaywrightGateway)? = nil,
         searchTransport: (any WebSearchTransport)? = nil,
@@ -612,7 +625,8 @@ extension ServerContext {
             recallBudgets: recallBudgets.clamped(),
             durable: services.durable, notifier: notifier,
             indexCoordinator: indexCoordinator, goalStore: services.goalStore,
-            goalEngine: services.goalEngine
+            goalEngine: services.goalEngine,
+            proactiveConfig: proactiveConfig
         )
         let engines = makeExecutionEngines(args: engineArgs)
         let context = ServerContext(
@@ -655,7 +669,8 @@ extension ServerContext {
             desktopConfig: desktopConfig,
             goals: services.goalStore,
             goalEngine: services.goalEngine,
-            goalsConfig: goalsConfig
+            goalsConfig: goalsConfig,
+            proactiveConfig: proactiveConfig
         )
         await finalizeServerContext(context, sandboxConfig: sandboxConfig, onApprovalRequested: onApprovalRequested)
         return context

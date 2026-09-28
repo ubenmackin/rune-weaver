@@ -3,7 +3,10 @@
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
 // budgets, media/browser/web/API tools, desktop, bash/files policies, and
-// index policy take effect without a restart. `[server]` bind keys persist
+// index policy take effect without a restart. `[goals]` and `[proactive]`
+// persist to the file through the same partial-patch merge but take effect on
+// restart: the pursuit engine and the scheduler worker hold their policy from
+// boot with no live-reload path. `[server]` bind keys persist
 // to the file but never live-reload the socket or the middleware set: they
 // return `requiresRestart` so the dashboard shows a pending-vs-live restart
 // banner instead of pretending the new bind is live. `[files]` saves apply
@@ -92,7 +95,13 @@ private func handlePutSettings(req: Request) async throws -> Response {
         // so any provider delta (including supportsVision) leaves the live
         // model stale until restart.
         let providersChanged = config.llm.providers != oldLLMConfig.providers
-        let needsRestart = serverChanged || llmChanged || providersChanged
+        // `[goals]` and `[proactive]` persist to the file through the same
+        // partial-patch merge but take effect on restart: the pursuit engine
+        // and the scheduler worker hold their policy from boot with no
+        // live-reload path. Any patch carrying those keys must advertise a
+        // restart instead of silently claiming live.
+        let goalsOrProactiveChanged = body.goals != nil || body.proactive != nil
+        let needsRestart = serverChanged || llmChanged || providersChanged || goalsOrProactiveChanged
         let liveContext = req.application.runeWeaver
         // Fail-closed bind guard: a changed non-loopback hostname persists
         // only when an owner token resolves. Without one the save is

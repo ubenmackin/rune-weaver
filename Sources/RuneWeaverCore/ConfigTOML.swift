@@ -437,6 +437,7 @@ extension RuneWeaverConfig {
         try Self.decodeSecurity(root, into: &config)
         try Self.decodeGoals(root, into: &config)
         try Self.decodeBash(root, into: &config)
+        try Self.decodeProactive(root, into: &config)
         self = config
     }
 
@@ -1003,6 +1004,29 @@ extension RuneWeaverConfig {
             // persists because validation requires at least one rule, so a
             // saved file always round-trips the same evaluation order.
             config.bash.rules = rules
+        }
+    }
+
+    /// Decodes the additive `[proactive]` section, defaulting omitted keys.
+    ///
+    /// An absent table keeps the surfacing default so existing files load
+    /// untouched; present-but-wrong-typed values throw instead of silently
+    /// defaulting, matching the `[goals]` decode style, and range checks land
+    /// in validation so decode stays type-only.
+    static func decodeProactive(_ root: TOMLNode, into config: inout RuneWeaverConfig) throws {
+        guard let proactive = root.tables["proactive"] else { return }
+        if let rawMode = try proactive.strictString("mode", field: "proactive.mode") {
+            let lowered = rawMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard let mode = ProactiveMode(rawValue: lowered) else {
+                throw ConfigError.validationError(
+                    field: "proactive.mode",
+                    message: "must be one of \(ProactiveMode.allCases.map(\.rawValue).joined(separator: ", ")) (got '\(rawMode)')"
+                )
+            }
+            config.proactive.mode = mode
+        }
+        if let timeout = try proactive.strictInt("judge_timeout_seconds", field: "proactive.judge_timeout_seconds") {
+            config.proactive.judgeTimeoutSeconds = timeout
         }
     }
 }

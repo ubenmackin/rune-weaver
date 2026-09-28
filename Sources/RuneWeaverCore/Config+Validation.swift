@@ -30,6 +30,7 @@ extension RuneWeaverConfig {
         try validateSecuritySection()
         try validateGoalsSection()
         try validateBashSection()
+        try validateProactiveSection()
     }
 
     private func validateEngineSection() throws {
@@ -954,6 +955,23 @@ extension RuneWeaverConfig {
 
     private func validateBashSection() throws {
         try bash.validate()
+    }
+
+    /// Validates the `[proactive]` section.
+    ///
+    /// The judge budget bounds one guarded model round trip so a stray digit
+    /// fails at load instead of holding the scheduler tick; the mode itself
+    /// is already closed by its enum, with the TOML decoder rejecting unknown
+    /// strings at the same dotted field.
+    private func validateProactiveSection() throws {
+        if proactive.judgeTimeoutSeconds < ProactiveConfig.minJudgeTimeoutSeconds
+            || proactive.judgeTimeoutSeconds > ProactiveConfig.maxJudgeTimeoutSeconds
+        {
+            throw ConfigError.validationError(
+                field: "proactive.judge_timeout_seconds",
+                message: "must be between \(ProactiveConfig.minJudgeTimeoutSeconds) and \(ProactiveConfig.maxJudgeTimeoutSeconds) (got \(proactive.judgeTimeoutSeconds))"
+            )
+        }
     }
 }
 

@@ -1004,3 +1004,300 @@ public struct WSToolProgressFrame: Codable, Sendable, Equatable {
         self.current = ToolProgress.relativeCurrent(try? container.decode(String.self, forKey: .current))
     }
 }
+
+// MARK: - Goal pursuit and proactive outreach frames
+
+// Outbound live kinds beyond chat turns: `goal_updated` carries the current
+// goal snapshot so dashboards refresh one row without refetching the list,
+// while `proactive_message` carries an owner-visible nudge (kind, title,
+// headline) that the engine volunteers outside any turn. Both ride the shared
+// broadcast fan-out so ordering and best-effort delivery stay single-sourced
+// with every other hub event; older clients drop the unknown `type` without
+// rendering. The snapshot is the single-sourced goal row: the REST layer
+// aliases it instead of redeclaring the fields, so live frames and list
+// reloads reconcile to the same row. Kept in core so REST and worker turns
+// share one encoding.
+//
+// Canonical wire spellings per identifier family: goal identifiers encode as
+// `goalId`, origin sessions as `originSessionId`, sessions as `sessionID`,
+// and runs as `runID`. Every alias-tolerant decode routes through the shared
+// `BrowserNavigateWire.decodeFirst` helper so the three historical spellings
+// (`goalId`/`goalID`/`goal_id`, and likewise for sessions and origins) converge
+// without triplicating the fallback chain per type; encode uses only the
+// canonical key.
+
+/// Finished-versus-planned tally for one goal.
+///
+/// Done counts only `done` steps so a blocked or skipped step never inflates
+/// the numerator; the denominator is the whole plan so an empty plan reads as
+/// 0/0 instead of a misleading 100%.
+public struct WSGoalProgress: Codable, Sendable, Equatable {
+    /// Steps finished.
+    public let done: Int
+    /// Steps in the plan.
+    public let total: Int
+
+    /// Creates a progress tally, clamping drifted negatives to zero so a
+    /// handcrafted frame never renders a negative fraction.
+    public init(done: Int, total: Int) {
+        self.done = max(0, done)
+        self.total = max(0, total)
+    }
+}
+
+/// Wire snapshot of one goal for `goal_updated` frames.
+///
+/// Mirrors the REST goal shape so live pushes and list reloads agree on keys.
+/// Dates travel as server instants; the origin session stays optional because
+/// headless and imported goals may have no owning conversation.
+public struct WSGoalSnapshot: Codable, Sendable, Equatable {
+    /// Stable goal identifier.
+    public let id: UUID
+    /// Short human-readable title.
+    public let title: String
+    /// Fuller statement of intent.
+    public let statement: String
+    /// Lifecycle state raw value (`active`, `paused`, `needs_input`, ...).
+    public let status: String
+    /// Finished-versus-planned tally.
+    public let progress: WSGoalProgress
+    /// Cadence hint in minutes between due advancements.
+    public let stepIntervalMinutes: Int
+    /// Next time the goal becomes due; nil means no schedule.
+    public let nextDueAt: Date?
+    /// Session that originated the goal, when known.
+    public let originSessionID: UUID?
+    /// When the goal was first persisted.
+    public let createdAt: Date
+    /// When the goal row last changed.
+    public let updatedAt: Date
+
+    /// Creates a snapshot.
+    public init(
+        id: UUID,
+        title: String,
+        statement: String,
+        status: String,
+        progress: WSGoalProgress,
+        stepIntervalMinutes: Int,
+        nextDueAt: Date? = nil,
+        originSessionID: UUID? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.title = title
+        self.statement = statement
+        self.status = status
+        self.progress = progress
+        self.stepIntervalMinutes = stepIntervalMinutes
+        self.nextDueAt = nextDueAt
+        self.originSessionID = originSessionID
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    /// Coding keys for the snapshot.
+    enum CodingKeys: String, CodingKey {
+        /// Stable goal identifier.
+        case id
+        /// Short title.
+        case title
+        /// Fuller statement.
+        case statement
+        /// Lifecycle state.
+        case status
+        /// Progress tally.
+        case progress
+        /// Cadence hint.
+        case stepIntervalMinutes
+        /// Next due instant.
+        case nextDueAt
+        /// Origin session under the canonical wire spelling.
+        case originSessionId
+        /// Origin session under the legacy capital-ID spelling.
+        case originSessionID
+        /// Origin session under the snake_case spelling.
+        case originSessionSnake = "origin_session_id"
+        /// Creation instant.
+        case createdAt
+        /// Last-change instant.
+        case updatedAt
+    }
+
+    /// Decodes tolerantly across the origin-session spellings so payloads
+    /// written with any of the three historical keys land on one field instead
+    /// of failing the push. Routes through the shared alias helper so the
+    /// snapshot and the REST row converge without duplicating the fallback.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(UUID.self, forKey: .id)
+        self.title = try container.decode(String.self, forKey: .title)
+        self.statement = try container.decode(String.self, forKey: .statement)
+        self.status = try container.decode(String.self, forKey: .status)
+        self.progress = try container.decode(WSGoalProgress.self, forKey: .progress)
+        self.stepIntervalMinutes = try container.decode(Int.self, forKey: .stepIntervalMinutes)
+        self.nextDueAt = try container.decodeIfPresent(Date.self, forKey: .nextDueAt)
+        // Canonical `originSessionId` wins when several spellings ride together.
+        let originSessionID: UUID? = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.originSessionId, .originSessionID, .originSessionSnake]
+        )
+        self.originSessionID = originSessionID
+        self.createdAt = try container.decode(Date.self, forKey: .createdAt)
+        self.updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+    }
+
+    /// Encodes under the canonical wire spellings so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(title, forKey: .title)
+        try container.encode(statement, forKey: .statement)
+        try container.encode(status, forKey: .status)
+        try container.encode(progress, forKey: .progress)
+        try container.encode(stepIntervalMinutes, forKey: .stepIntervalMinutes)
+        try container.encodeIfPresent(nextDueAt, forKey: .nextDueAt)
+        try container.encodeIfPresent(originSessionID, forKey: .originSessionId)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(updatedAt, forKey: .updatedAt)
+    }
+}
+
+/// Goal change broadcast sent by the engine over WebSocket.
+///
+/// Emitted on create, plan-ready, step progress, status flips, and advancement
+/// turns so dashboards patch one row instead of refetching the list. The goal
+/// rides whole (not as an identifier) because the push is the refresh: a row
+/// that only carried an identifier would force the extra fetch the push was
+/// meant to avoid.
+public struct WSGoalUpdatedFrame: Codable, Sendable, Equatable {
+    /// Always `"goal_updated"`.
+    public let type: String
+    /// Current goal snapshot.
+    public let goal: WSGoalSnapshot
+
+    /// Creates a goal update frame.
+    public init(goal: WSGoalSnapshot) {
+        self.type = "goal_updated"
+        self.goal = goal
+    }
+
+    /// Coding keys for the update frame.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Current goal snapshot.
+        case goal
+    }
+
+    /// Decodes an update frame, defaulting a missing discriminator for back-compat.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "goal_updated"
+        self.goal = try container.decode(WSGoalSnapshot.self, forKey: .goal)
+    }
+}
+
+/// Owner-visible nudge volunteered by the engine outside any turn.
+///
+/// Kind names the trigger family (for example a due goal or a parked wait)
+/// while title plus headline carry the one-line card the dashboard renders;
+/// the optional session and goal links let the card deep-link without a second
+/// lookup. Blank kind, title, or headline fail decoding here exactly where the
+/// dashboard guard drops them, instead of rendering an empty card.
+public struct WSProactiveMessageFrame: Codable, Sendable, Equatable {
+    /// Always `"proactive_message"`.
+    public let type: String
+    /// Trigger family naming why the engine volunteered this card.
+    public let kind: String
+    /// Short card title.
+    public let title: String
+    /// One-line card body.
+    public let headline: String
+    /// Owning session for deep-linking, when the nudge belongs to one turn.
+    public var sessionID: UUID?
+    /// Owning goal for deep-linking, when the nudge belongs to one goal.
+    public var goalID: UUID?
+
+    /// Creates a proactive message frame.
+    public init(kind: String, title: String, headline: String, sessionID: UUID? = nil, goalID: UUID? = nil) {
+        self.type = "proactive_message"
+        self.kind = kind
+        self.title = title
+        self.headline = headline
+        self.sessionID = sessionID
+        self.goalID = goalID
+    }
+
+    /// Coding keys for the proactive frame.
+    ///
+    /// Canonical spellings per identifier family: sessions encode as
+    /// `sessionID`, goals as `goalId`. The remaining cases stay decode-only
+    /// so historical payloads still land without forking the encoded shape.
+    enum CodingKeys: String, CodingKey {
+        /// Frame discriminator.
+        case type
+        /// Trigger family.
+        case kind
+        /// Short card title.
+        case title
+        /// One-line card body.
+        case headline
+        /// Owning session.
+        case sessionID
+        /// Owning goal under the canonical spelling.
+        case goalId
+        /// Owning goal under the legacy capital-ID spelling.
+        case goalID
+        /// Owning goal under the snake_case spelling.
+        case goalSnake = "goal_id"
+    }
+
+    /// Decodes a proactive frame, defaulting a missing discriminator while
+    /// rejecting blank card text so a drifted payload fails here exactly where
+    /// the dashboard guard drops it. Goal aliases converge through the shared
+    /// helper so the frame and the snapshot share one fallback.
+    /// - Parameter decoder: Source decoder.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.type = try container.decodeIfPresent(String.self, forKey: .type) ?? "proactive_message"
+        let kind = try container.decode(String.self, forKey: .kind)
+        guard !kind.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: container, debugDescription: "kind must be non-blank")
+        }
+        self.kind = kind
+        let title = try container.decode(String.self, forKey: .title)
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .title, in: container, debugDescription: "title must be non-blank")
+        }
+        self.title = title
+        let headline = try container.decode(String.self, forKey: .headline)
+        guard !headline.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw DecodingError.dataCorruptedError(forKey: .headline, in: container, debugDescription: "headline must be non-blank")
+        }
+        self.headline = headline
+        self.sessionID = try container.decodeIfPresent(UUID.self, forKey: .sessionID)
+        // Canonical `goalId` wins when several spellings ride together.
+        let goalID: UUID? = BrowserNavigateWire.decodeFirst(
+            container,
+            keys: [.goalId, .goalID, .goalSnake]
+        )
+        self.goalID = goalID
+    }
+
+    /// Encodes under the canonical spellings so older decoders see no new key.
+    /// - Parameter encoder: Destination encoder.
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(title, forKey: .title)
+        try container.encode(headline, forKey: .headline)
+        try container.encodeIfPresent(sessionID, forKey: .sessionID)
+        try container.encodeIfPresent(goalID, forKey: .goalId)
+    }
+}
