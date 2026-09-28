@@ -1542,26 +1542,127 @@ struct MailIndexerTests {
         let frames = await recorder.snapshot()
         // Entering, window-fetched, and finished frames surround the fetch so
         // a long IMAP stretch never reads stuck; per-message frames stay
-        // throttled and may not appear on a fast run.
+        // throttled and may not appear on a fast run. Every mail current names
+        // the owning account so concurrent mailboxes stay distinguishable.
         #expect(frames.count >= 3)
         #expect(frames[0].message == "Indexing mail: 0 indexed, 0 scanned")
         #expect(frames[0].scanned == 0)
         #expect(frames[0].matched == 0)
-        #expect(frames[0].current == "INBOX")
+        #expect(frames[0].current == "mailtest - INBOX")
         #expect(frames[1].message == "Indexing mail: 0 indexed, 0 scanned")
         #expect(frames[1].scanned == 0)
         #expect(frames[1].matched == 0)
-        #expect((frames[1].current ?? "").contains("INBOX"))
-        #expect((frames[1].current ?? "").contains("2"))
+        #expect(frames[1].current == "mailtest - INBOX (2 new)")
         #expect(frames.last?.message.contains("Mail indexing finished") == true)
         for index in 1 ..< frames.count {
             #expect(frames[index].scanned >= frames[index - 1].scanned)
             #expect(frames[index].matched >= frames[index - 1].matched)
         }
-        // No subject or body text ever enters a frame; only the mailbox name does.
+        // No subject or body text ever enters a frame; only the account plus mailbox does.
         #expect(!frames.contains { $0.message.contains(bodyMarker) })
         #expect(!frames.contains { ($0.current ?? "").contains(bodyMarker) })
         #expect(!frames.contains { $0.message.contains("Subject") })
+    }
+
+    @Test
+    func `Per-message frames carry the account-qualified current with unchanged copy`() async throws {
+        let base = makeTempBase()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let store = DocIndexStore(dbPath: base.appendingPathComponent("index.db").path)
+        let checkpoints = MailIndexCheckpointStore(path: base.appendingPathComponent("cp.json").path)
+        let recorder = ProgressRecorder()
+        // Delayed double forcing the throttled per-message emit deterministically:
+        // the first page parks past the report interval, so the first indexed
+        // message always emits instead of staying throttled on a fast run.
+        struct DelayedArchiveGateway: MailIndexGateway {
+            /// Messages backing every page, already newest-first.
+            let messages: [MailIndexMessage]
+
+            /// Creates a delayed gateway.
+            /// - Parameter messages: Canned messages in newest-first order.
+            init(messages: [MailIndexMessage]) {
+                self.messages = messages
+            }
+
+            /// Returns the Archive mailbox without touching the network.
+            func mailboxes(credentials _: MailIndexCredentials) async throws -> [String] {
+                ["Archive"]
+            }
+
+            /// Parks past the report interval, then serves the newest window.
+            func messages(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                limit: Int,
+                mode _: MailFetchMode,
+                beforeUID: Int? = nil
+            ) async throws -> [MailIndexMessage] {
+                if beforeUID == nil {
+                    try await Task.sleep(nanoseconds: 600_000_000)
+                    return Array(messages.prefix(limit))
+                }
+                let upper = (beforeUID ?? 1) - 1
+                guard upper >= 1 else { return [] }
+                let lower = max(1, upper - EmailIMAPMailIndexGateway.uidWindowWidth + 1)
+                let filtered = messages.filter {
+                    let uid = MailIndexer.uid(of: $0.id)
+                    return uid > 0 && uid >= lower && uid <= upper
+                }
+                return Array(filtered.prefix(limit))
+            }
+
+            /// Never serves attachment bytes; the per-message test uses attachment-free mail.
+            func attachment(
+                credentials _: MailIndexCredentials,
+                mailbox _: String,
+                messageID _: String,
+                attachmentIndex _: Int,
+                mode _: MailFetchMode
+            ) async throws -> MailIndexAttachmentData {
+                throw StubGatewayError.missingAttachment
+            }
+        }
+
+        try await withTestPassword {
+            let indexer = makeIndexer(
+                gateway: DelayedArchiveGateway(messages: [
+                    makeMessage(id: "2", subject: "Second", body: "per-message body two unique"),
+                    makeMessage(id: "1", subject: "First", body: "per-message body one unique")
+                ]),
+                store: store,
+                checkpoints: checkpoints
+            )
+            _ = try await indexer.run(reporter: { progress in await recorder.record(progress) })
+        }
+
+        let frames = await recorder.snapshot()
+        #expect(frames.count >= 4)
+        // Entering frame names the account plus mailbox with unchanged copy and counts.
+        #expect(frames[0].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[0].scanned == 0)
+        #expect(frames[0].matched == 0)
+        #expect(frames[0].current == "mailtest - Archive")
+        // Window frame carries the same copy plus the fresh count, still qualified.
+        #expect(frames[1].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[1].scanned == 0)
+        #expect(frames[1].matched == 0)
+        #expect(frames[1].current == "mailtest - Archive (2 new)")
+        // At least the first indexed message emits once the interval elapses.
+        let perMessage = frames.filter { ($0.current ?? "").contains("/") }
+        #expect(!perMessage.isEmpty)
+        #expect(perMessage.first?.current == "mailtest - Archive/1")
+        #expect(perMessage.first?.message == "Indexing mail: 1 indexed, 1 scanned")
+        #expect(perMessage.first?.scanned == 1)
+        #expect(perMessage.first?.matched == 1)
+        for frame in perMessage {
+            #expect((frame.current ?? "").hasPrefix("mailtest - Archive/"))
+            #expect(frame.message == "Indexing mail: \(frame.matched) indexed, \(frame.scanned) scanned")
+        }
+        #expect(frames.last?.message.contains("Mail indexing finished") == true)
+        // Only account plus mailbox plus message ID enter a current; no body or subject does.
+        #expect(!frames.contains { ($0.current ?? "").contains("per-message body") })
+        #expect(!frames.contains { ($0.current ?? "").contains("First") })
+        #expect(!frames.contains { ($0.current ?? "").contains("Second") })
     }
 
     @Test
@@ -2038,13 +2139,20 @@ struct MailIndexerTests {
         // frames each appear exactly once despite two retries.
         let frames = await progress.snapshot()
         #expect(frames.count >= 3)
-        #expect(frames[0].current == "INBOX")
-        #expect((frames[1].current ?? "").contains("INBOX"))
+        #expect(frames[0].current == "mailtest - INBOX")
+        #expect(frames[0].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[0].scanned == 0)
+        #expect(frames[0].matched == 0)
+        #expect(frames[1].current == "mailtest - INBOX (1 new)")
+        #expect(frames[1].message == "Indexing mail: 0 indexed, 0 scanned")
+        #expect(frames[1].scanned == 0)
+        #expect(frames[1].matched == 0)
         #expect(frames.last?.message.contains("Mail indexing finished") == true)
-        let enteringFrames = frames.filter { $0.current == "INBOX" }
+        let enteringFrames = frames.filter { $0.current == "mailtest - INBOX" }
         #expect(enteringFrames.count == 1)
         let windowFrames = frames.filter { ($0.current ?? "").contains("new)") }
         #expect(windowFrames.count == 1)
+        #expect(windowFrames.first?.current == "mailtest - INBOX (1 new)")
     }
 
     @Test

@@ -34,6 +34,14 @@ public protocol SessionLineTransport: Sendable {
     /// 500-char timeout tail stays separate; fakes mirror the seam with canned
     /// text so dump coverage stays hermetic.
     var retainedStderr: String { get }
+    /// Samples child liveness before termination, nil when unanswerable.
+    ///
+    /// The live pipe derives aliveness from the running state plus exit status
+    /// and drain totals; hermetic fakes serve canned verdicts. A nil verdict
+    /// means no child exists to inspect, so callers omit liveness fields
+    /// rather than recording zeroes that would masquerade as a dead child.
+    /// - Returns: Liveness verdict, or nil when the transport cannot answer.
+    func childLivenessSnapshot() -> SessionChildLiveness?
     /// Writes one JSON document line to the session helper.
     /// - Parameter line: Single JSON document without a trailing newline.
     func writeLine(_ line: String) async throws
@@ -159,6 +167,88 @@ public enum SessionLineTimeout {
     }
 }
 
+/// Child liveness verdict for a failed session open.
+///
+/// Captured before termination so follow-up diagnosis can tell a launch-death
+/// (child already exited with a status) from a pre-main freeze (child still
+/// alive with no response line). The drain total proves whether the background
+/// stderr drain observed helper output at all, even when retention caps or an
+/// empty tail would otherwise hide it.
+public struct SessionChildLiveness: Sendable {
+    /// Whether the helper child was still running when sampled.
+    public let childAlive: Bool
+    /// Exit status when the child had already exited, nil while alive.
+    ///
+    /// Absent rather than zeroed while alive so a live freeze never
+    /// masquerades as a clean exit.
+    public let exitCode: Int?
+    /// Termination reason when dead (`exit` or `uncaughtSignal`), nil while alive.
+    ///
+    /// Distinguishes a clean exit from a signal kill without carrying any
+    /// payload or identity.
+    public let terminationReason: String?
+    /// Total stderr bytes observed by the background drain.
+    ///
+    /// Cumulative rather than retained, so a positive total proves the drain
+    /// functioned even when caps trimmed the visible tail.
+    public let drainBytes: Int
+
+    /// Creates a liveness verdict.
+    /// - Parameters:
+    ///   - childAlive: Whether the child was still running when sampled.
+    ///   - exitCode: Exit status when dead, nil while alive.
+    ///   - terminationReason: Termination reason when dead, nil while alive.
+    ///   - drainBytes: Total stderr bytes observed by the drain.
+    public init(childAlive: Bool, exitCode: Int? = nil, terminationReason: String? = nil, drainBytes: Int) {
+        self.childAlive = childAlive
+        self.exitCode = exitCode
+        self.terminationReason = terminationReason
+        self.drainBytes = drainBytes
+    }
+}
+
+extension MailSessionEventLog {
+    /// Records the open outcome with an optional child liveness snapshot.
+    ///
+    /// Liveness fields ride alongside the existing error so one
+    /// `session.open.result` line tells launch-death from a freeze: `childAlive`
+    /// plus `drainBytes` always ride when the transport could answer, while
+    /// `exitCode` plus `terminationReason` ride only when already exited. A nil
+    /// snapshot omits every liveness field rather than zeroing it, so a missing
+    /// child never masquerades as a clean exit with an empty drain.
+    /// - Parameters:
+    ///   - account: Owning account nickname.
+    ///   - pid: Helper child pid when known.
+    ///   - ok: Whether the open handshake succeeded.
+    ///   - error: Sanitized helper detail when `ok` is false.
+    ///   - latencyMs: Milliseconds from write to response line.
+    ///   - liveness: Child verdict sampled before termination, nil when unanswerable.
+    func logOpenResult(
+        account: String,
+        pid: Int32?,
+        ok: Bool,
+        error: String?,
+        latencyMs: Double,
+        liveness: SessionChildLiveness?
+    ) {
+        var fields: [String: Any] = ["ok": ok, "latencyMs": latencyMs]
+        if let error, !ok {
+            fields["error"] = Self.redactedErrorDetail(error)
+        }
+        if let liveness {
+            fields["childAlive"] = liveness.childAlive
+            fields["drainBytes"] = liveness.drainBytes
+            if let exitCode = liveness.exitCode {
+                fields["exitCode"] = exitCode
+            }
+            if let reason = liveness.terminationReason {
+                fields["terminationReason"] = reason
+            }
+        }
+        emit(event: "session.open.result", account: account, pid: pid, fields: fields)
+    }
+}
+
 /// Retained tail of helper stderr for timeout diagnostics.
 ///
 /// The live drain appends incrementally and keeps only the newest bytes so a
@@ -267,6 +357,13 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
     private let stderrTail: SessionStderrTail
     /// Retained stderr dump feeding failure events. Appended only by the drain.
     private let stderrDump: SessionStderrTail
+    /// Total stderr bytes observed by the background drain.
+    ///
+    /// Named owner for drain accounting is this transport: incremented for every
+    /// chunk the drain reads, so a zero total proves the drain saw nothing while
+    /// a positive total proves it functioned even when retention caps trimmed
+    /// the visible tail. Lives behind a lock because the drain appends off-pool.
+    private let drainedBytes: OSAllocatedUnfairLock<Int>
     /// Buffered stdout bytes awaiting a newline boundary.
     private let pending = OSAllocatedUnfairLock(initialState: Data())
     /// Termination and handle closure state.
@@ -300,8 +397,10 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
         let stderrReading = stderrPipe.fileHandleForReading
         let tailStore = SessionStderrTail(cap: Self.maxStderrTailChars)
         let dumpStore = SessionStderrTail(cap: Self.maxStderrDumpBytes)
+        let drainCounter = OSAllocatedUnfairLock(initialState: 0)
         self.stderrTail = tailStore
         self.stderrDump = dumpStore
+        self.drainedBytes = drainCounter
         // Drain diagnostics off-pool so stderr never blocks the helper while
         // retaining the last words for timeout errors plus the fuller dump for
         // failure events. Closing this handle in `terminate` (or on natural
@@ -318,6 +417,7 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
                 guard let chunk, !chunk.isEmpty else { break }
                 tailStore.append(chunk)
                 dumpStore.append(chunk)
+                drainCounter.withLock { $0 += chunk.count }
             }
         }
         self.process = spawned
@@ -461,6 +561,32 @@ public final class ProcessSessionLineTransport: SessionLineTransport, Sendable {
         stderrDump.snapshot()
     }
 
+    /// Samples child liveness plus drain totals without touching termination state.
+    ///
+    /// Reads the running state directly so a pre-terminate sample distinguishes
+    /// launch-death from a freeze; exit status and reason ride only when already
+    /// exited, keeping alive verdicts free of stale statuses. Always answers
+    /// once spawned, so the open-failure path omits nothing for live pipes.
+    /// - Returns: Liveness verdict with the current drain total.
+    public func childLivenessSnapshot() -> SessionChildLiveness? {
+        let drained = drainedBytes.withLock { $0 }
+        if process.isRunning {
+            return SessionChildLiveness(childAlive: true, drainBytes: drained)
+        }
+        let code = Int(process.terminationStatus)
+        let reason = switch process.terminationReason {
+        case .exit: "exit"
+        case .uncaughtSignal: "uncaughtSignal"
+        @unknown default: "unknown"
+        }
+        return SessionChildLiveness(
+            childAlive: false,
+            exitCode: code,
+            terminationReason: reason,
+            drainBytes: drained
+        )
+    }
+
     /// Blocks the calling thread until one newline-terminated line arrives.
     ///
     /// The stdout handle is captured under `ioState` and read outside it so a
@@ -525,6 +651,9 @@ public final class FakeSessionLineTransport: SessionLineTransport, Sendable {
         var terminates = 0
         var reads = 0
         var timeouts: [TimeInterval] = []
+        var liveness: SessionChildLiveness?
+        var livenessCalls = 0
+        var orderedEvents: [String] = []
     }
 
     private let state: OSAllocatedUnfairLock<State>
@@ -574,19 +703,39 @@ public final class FakeSessionLineTransport: SessionLineTransport, Sendable {
         state.withLock { MailSessionEventLog.cappedDump($0.stderrText) }
     }
 
+    /// Number of liveness snapshot calls observed.
+    public var livenessSnapshotCalls: Int {
+        state.withLock { $0.livenessCalls }
+    }
+
+    /// Ordered `snapshot` plus `terminate` markers for ordering assertions.
+    ///
+    /// Records the seam call order so tests prove the session sampled liveness
+    /// before tearing down the child instead of inferring it from counts alone.
+    public var orderedEvents: [String] {
+        state.withLock { $0.orderedEvents }
+    }
+
+    /// Canned liveness verdict served on snapshot, nil when unanswerable.
+    public var cannedLiveness: SessionChildLiveness? {
+        state.withLock { $0.liveness }
+    }
+
     /// Creates an in-memory transport with canned responses.
     /// - Parameters:
     ///   - responses: Response lines served first-in first-out, one per read.
     ///   - hangReads: When true, every read reports a timeout instead of serving the queue.
     ///   - stderrText: Canned stderr tail appended to timeout errors, mirroring the live drain.
     ///   - pid: Hermetic pid for spawn correlation, nil keeps runs pid-free.
-    public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "", pid: Int32? = nil) {
+    ///   - liveness: Canned child verdict for open-failure snapshots, nil omits liveness fields.
+    public init(responses: [String] = [], hangReads: Bool = false, stderrText: String = "", pid: Int32? = nil, liveness: SessionChildLiveness? = nil) {
         self.state = OSAllocatedUnfairLock(
             initialState: State(
                 responses: responses,
                 hang: hangReads,
                 stderrText: stderrText,
-                pid: pid
+                pid: pid,
+                liveness: liveness
             )
         )
     }
@@ -612,6 +761,31 @@ public final class FakeSessionLineTransport: SessionLineTransport, Sendable {
     public func setStderr(_ text: String) {
         state.withLock { fakeState in
             fakeState.stderrText = text
+        }
+    }
+
+    /// Sets the canned liveness verdict for upcoming open-failure snapshots.
+    ///
+    /// A nil verdict mirrors a transport that cannot answer, so the session
+    /// omits liveness fields rather than zeroing them.
+    /// - Parameter liveness: Verdict to serve, or nil when unanswerable.
+    public func setLiveness(_ liveness: SessionChildLiveness?) {
+        state.withLock { fakeState in
+            fakeState.liveness = liveness
+        }
+    }
+
+    /// Serves the canned liveness verdict while recording call order.
+    ///
+    /// Recording the snapshot marker lets ordering tests prove the session
+    /// sampled before terminating; a nil verdict keeps the hermetic run free
+    /// of liveness fields.
+    /// - Returns: Canned verdict, or nil when the transport cannot answer.
+    public func childLivenessSnapshot() -> SessionChildLiveness? {
+        state.withLock { fakeState in
+            fakeState.livenessCalls += 1
+            fakeState.orderedEvents.append("snapshot")
+            return fakeState.liveness
         }
     }
 
@@ -650,6 +824,7 @@ public final class FakeSessionLineTransport: SessionLineTransport, Sendable {
         state.withLock { fakeState in
             fakeState.terminated = true
             fakeState.terminates += 1
+            fakeState.orderedEvents.append("terminate")
         }
     }
 }
@@ -1320,12 +1495,16 @@ extension EmailIMAPSession {
     ///
     /// Single owner for open-failure logging so factory-spawn, live-spawn,
     /// and open-exchange failures cannot drift; only the sanitized helper
-    /// detail rides the event while payloads and identity stay out.
+    /// detail rides the event while payloads and identity stay out. Named owner
+    /// for the child liveness snapshot is the spawn-and-open failure path: it
+    /// samples before termination so launch-death and freeze stay distinct,
+    /// while a nil verdict omits liveness fields rather than zeroing them.
     /// - Parameters:
     ///   - pid: Helper child pid when known, nil for spawn failures.
     ///   - writeStart: Attempt start for latency measurement.
     ///   - error: Failure under test.
-    private func logOpenFailure(pid: Int32?, writeStart: Date, error: Error) {
+    ///   - liveness: Child verdict sampled before termination, nil when unanswerable.
+    private func logOpenFailure(pid: Int32?, writeStart: Date, error: Error, liveness: SessionChildLiveness? = nil) {
         let latencyMs = Date().timeIntervalSince(writeStart) * 1000
         let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         eventLog.logOpenResult(
@@ -1333,7 +1512,8 @@ extension EmailIMAPSession {
             pid: pid,
             ok: false,
             error: sanitizedLogDetail(detail),
-            latencyMs: latencyMs
+            latencyMs: latencyMs,
+            liveness: liveness
         )
     }
 
@@ -1363,7 +1543,10 @@ extension EmailIMAPSession {
     /// field shapes, latencies, and outcomes so the password and request
     /// payload never enter the log. Cooperative cancellation propagates
     /// unchanged with no failure event so the pooled caller skips eviction.
-    /// Named owner for open read detail is this actor.
+    /// Named owner for open read detail is this actor. Named owner for the
+    /// child liveness snapshot is this failure path: every open failure samples
+    /// the transport before termination so `session.open.result` carries
+    /// `childAlive`, `exitCode`, and `drainBytes` when answerable.
     /// - Parameter timeout: Seconds to wait for the single open response.
     private func spawnAndOpen(timeout: TimeInterval) async throws {
         let account = credentials.accountName
@@ -1444,6 +1627,9 @@ extension EmailIMAPSession {
             let latencyMs = Date().timeIntervalSince(writeStart) * 1000
             _ = try checkedEnvelope(response)
             guard !closed else {
+                // Sample before teardown so the close-won verdict still names
+                // the child state instead of a post-terminate absence.
+                let racedLiveness = next.childLivenessSnapshot()
                 await next.terminate()
                 transport = nil
                 started = false
@@ -1452,7 +1638,8 @@ extension EmailIMAPSession {
                     pid: pid,
                     ok: false,
                     error: "session not open",
-                    latencyMs: latencyMs
+                    latencyMs: latencyMs,
+                    liveness: racedLiveness
                 )
                 throw EmailIMAPError.bridgeFailed("session not open")
             }
@@ -1476,7 +1663,11 @@ extension EmailIMAPSession {
             }
             // A decode failure still records the open outcome with its detail;
             // the caller sees the same sanitized error it would without logging.
-            logOpenFailure(pid: pid, writeStart: writeStart, error: error)
+            // Sampled before `terminateAndClear` so the verdict reflects the
+            // pre-teardown child: alive means a freeze with no response line,
+            // exited with a status means launch-death.
+            let failureLiveness = next.childLivenessSnapshot()
+            logOpenFailure(pid: pid, writeStart: writeStart, error: error, liveness: failureLiveness)
             await terminateAndClear(next)
             if let sessionError = error as? EmailIMAPError {
                 throw sessionError

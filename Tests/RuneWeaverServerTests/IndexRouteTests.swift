@@ -1495,3 +1495,180 @@ struct IndexStatusLastErrorsTests {
         }
     }
 }
+
+// MARK: - Completion timestamps
+
+/// Covers completion-timestamp ownership for index run rows: the store keeps
+/// the stored instant when no stamp is supplied so long-standing callers read
+/// exactly as before, while an explicit stamp replaces it so a finished run
+/// can name its end instead of its start.
+@Suite("Run Log Completion Timestamps")
+struct RunLogCompletionTimestampTests {
+    @Test
+    func `Update without a stamp preserves the stored instant`() async throws {
+        let store = RunLogStore()
+        // A fixed start instant keeps the assertion deterministic instead of
+        // racing the wall clock between append and update.
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let entry = RunLogEntry(
+            kind: ServerIndexRunReporter.kind,
+            status: IndexRunStatus.running.rawValue,
+            message: "Index run started (onDemand)",
+            timestamp: startedAt
+        )
+        await store.append(entry)
+        // No stamp means the row keeps its start instant, so every caller that
+        // never owned the completion moment behaves exactly as before.
+        let updated = await store.update(id: entry.id, status: IndexRunStatus.ok.rawValue, response: "done")
+        let stored = try #require(updated)
+        #expect(stored.timestamp == startedAt)
+        #expect(stored.status == IndexRunStatus.ok.rawValue)
+        #expect(await store.entry(id: entry.id)?.timestamp == startedAt)
+    }
+
+    @Test
+    func `Update with an explicit stamp replaces the stored instant`() async throws {
+        let store = RunLogStore()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        // A 35-minute pass proves the end instant survives: without stamping,
+        // the strip would read the duration ago instead of seconds ago.
+        let finishedAt = startedAt.addingTimeInterval(35 * 60)
+        let entry = RunLogEntry(
+            kind: ServerIndexRunReporter.kind,
+            status: IndexRunStatus.running.rawValue,
+            message: "Index run started (onDemand)",
+            timestamp: startedAt
+        )
+        await store.append(entry)
+        let updated = await store.update(
+            id: entry.id,
+            status: IndexRunStatus.ok.rawValue,
+            response: "Index run ok: 3 indexed, 5 scanned, 0 errors",
+            durationMs: 2_100_000,
+            timestamp: finishedAt
+        )
+        let stored = try #require(updated)
+        #expect(stored.timestamp == finishedAt)
+        #expect(stored.status == IndexRunStatus.ok.rawValue)
+        #expect(await store.entry(id: entry.id)?.timestamp == finishedAt)
+    }
+}
+
+/// Covers the reporter stamping the completion instant onto the start row: the
+/// start event opens the row at the start time and the completion event moves
+/// that same row to the end time, so the status strip reads finished seconds
+/// ago even for a long run while live rows still name their start.
+@Suite("Index Reporter Completion Timestamps")
+struct IndexReporterCompletionTimestampTests {
+    @Test
+    func `runCompleted stamps the completion instant onto the start row`() async throws {
+        let runs = RunLogStore()
+        let hub = WSHub()
+        let reporter = ServerIndexRunReporter(runs: runs, hub: hub)
+        let id = UUID()
+        let sessionID = UUID()
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let finishedAt = startedAt.addingTimeInterval(35 * 60)
+        await reporter.runStarted(IndexRunEvent(
+            id: id,
+            sessionID: sessionID,
+            trigger: .onDemand,
+            status: .running,
+            message: "Index run started (onDemand)",
+            timestamp: startedAt
+        ))
+        // The start row opens at the start instant while the run is live.
+        #expect(await runs.entry(id: id)?.timestamp == startedAt)
+        #expect(await runs.entry(id: id)?.status == IndexRunStatus.running.rawValue)
+        await reporter.runCompleted(IndexRunEvent(
+            id: id,
+            sessionID: sessionID,
+            trigger: .onDemand,
+            status: .ok,
+            message: "Index run ok: 3 indexed, 5 scanned, 0 errors",
+            timestamp: finishedAt,
+            response: "Index run ok: 3 indexed, 5 scanned, 0 errors\nTrigger: onDemand",
+            durationMs: 2_100_000
+        ))
+        // Completion moves that same row to the end instant instead of
+        // appending a second row, so exactly one row remains.
+        let rows = await runs.list(kind: ServerIndexRunReporter.kind)
+        #expect(rows.count == 1)
+        let row = try #require(await runs.entry(id: id))
+        #expect(row.status == IndexRunStatus.ok.rawValue)
+        #expect(row.timestamp == finishedAt)
+        // The message stays the start line while the status advances, proving
+        // the completion updated the start row rather than replacing it.
+        #expect(row.message.contains("Index run started"))
+    }
+
+    @Test
+    func `Fallback append stamps the completion instant when the start row is missing`() async throws {
+        let runs = RunLogStore()
+        let hub = WSHub()
+        let reporter = ServerIndexRunReporter(runs: runs, hub: hub)
+        let id = UUID()
+        let sessionID = UUID()
+        let finishedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        // No start row exists (pruned or never recorded), so completion must
+        // still persist with its own end instant rather than disappearing.
+        await reporter.runCompleted(IndexRunEvent(
+            id: id,
+            sessionID: sessionID,
+            trigger: .onDemand,
+            status: .ok,
+            message: "Index run ok: 3 indexed, 5 scanned, 0 errors",
+            timestamp: finishedAt,
+            response: "Index run ok: 3 indexed, 5 scanned, 0 errors\nTrigger: onDemand",
+            durationMs: 1000
+        ))
+        let row = try #require(await runs.entry(id: id))
+        #expect(row.timestamp == finishedAt)
+        #expect(row.status == IndexRunStatus.ok.rawValue)
+    }
+
+    @Test
+    func `Status strip carries the completion instant as its finish time`() async throws {
+        try await withIndexTestApp { app in
+            let context = makeIndexTestContext()
+            app.runeWeaver = context
+            registerRuneWeaverRoutes(app)
+
+            let reporter = ServerIndexRunReporter(runs: context.runs, hub: context.hub)
+            let id = UUID()
+            let sessionID = UUID()
+            let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+            let finishedAt = startedAt.addingTimeInterval(35 * 60)
+            await reporter.runStarted(IndexRunEvent(
+                id: id,
+                sessionID: sessionID,
+                trigger: .onDemand,
+                status: .running,
+                message: "Index run started (onDemand)",
+                timestamp: startedAt
+            ))
+            await reporter.runCompleted(IndexRunEvent(
+                id: id,
+                sessionID: sessionID,
+                trigger: .onDemand,
+                status: .ok,
+                message: "Index run ok: 7 indexed, 1 vectors, 6 keyword-only, 10 scanned, 0 errors",
+                timestamp: finishedAt,
+                response: "Index run ok: 7 indexed, 1 vectors, 6 keyword-only, 10 scanned, 0 errors\nTrigger: onDemand",
+                durationMs: 2_100_000
+            ))
+
+            let status = try await indexRequest(app: app, method: .GET, path: "/index/status")
+            #expect(status.status == .ok)
+            let lastRun = try status.content.decode(IndexStatusResponse.self).lastRun
+            let strip = try #require(lastRun)
+            #expect(strip.status == IndexRunStatus.ok.rawValue)
+            #expect(strip.indexed == 7)
+            #expect(strip.scanned == 10)
+            // The strip finish time is the persisted end instant, not the start
+            // the row opened with, so a long run still reads as just finished.
+            let endInterval = try #require(strip.finishedAt?.timeIntervalSince1970)
+            #expect(abs(endInterval - finishedAt.timeIntervalSince1970) < 1.0)
+        }
+    }
+}
