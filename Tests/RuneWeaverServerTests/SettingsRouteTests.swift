@@ -398,4 +398,315 @@ struct SettingsRouteTests {
         // chunks never trip the status gate; update both together.
         #expect(maxSecretStatusKeys == 500)
     }
+
+    @Test
+    func `SettingsResponse and UpdateSettingsRequest map bash configuration`() throws {
+        var config = RuneWeaverConfig.default
+        let rules = [
+            BashRule(pattern: "git *", action: .allow),
+            BashRule(pattern: "*", action: .ask)
+        ]
+        let update = UpdateSettingsRequest(
+            bash: BashSettingsUpdate(
+                enabled: false,
+                defaultAction: "deny",
+                rules: rules,
+                timeoutSeconds: 120,
+                allowNetwork: true
+            )
+        )
+
+        try update.apply(to: &config)
+        #expect(config.bash.enabled == false)
+        #expect(config.bash.defaultAction == .deny)
+        #expect(config.bash.rules == rules)
+        #expect(config.bash.timeoutSeconds == 120)
+        #expect(config.bash.allowNetwork == true)
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.bash == config.bash)
+        #expect(response.bash.rules == rules)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects unknown bash default action`() {
+        var config = RuneWeaverConfig.default
+        let preserved = config.bash
+
+        // Unknown actions fail closed so invalid strings never persist
+        // and silently widen the shell policy later.
+        do {
+            try UpdateSettingsRequest(
+                bash: BashSettingsUpdate(defaultAction: "bogus")
+            ).apply(to: &config)
+            Issue.record("Expected a validation error for an unknown bash default action")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "bash.default_action" else {
+                Issue.record("Expected bash.default_action validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+        #expect(config.bash == preserved)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects bash timeout outside bounds`() {
+        // Timeout stays 1-3600 so a zero hang or an unbounded run never
+        // persists through the settings route.
+        for invalid in [0, -5, 3601] {
+            var config = RuneWeaverConfig.default
+            let preserved = config.bash.timeoutSeconds
+            do {
+                try UpdateSettingsRequest(
+                    bash: BashSettingsUpdate(timeoutSeconds: invalid)
+                ).apply(to: &config)
+                Issue.record("Expected a validation error for bash timeout \(invalid)")
+            } catch let error as ConfigError {
+                guard case let .validationError(field, _) = error, field == "bash.timeout_seconds" else {
+                    Issue.record("Expected bash.timeout_seconds validation, got \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Expected ConfigError, got \(type(of: error))")
+            }
+            #expect(config.bash.timeoutSeconds == preserved)
+        }
+    }
+
+    @Test
+    func `UpdateSettingsRequest files patch persists and preserves omitted fields`() throws {
+        var config = RuneWeaverConfig.default
+        config.files.denyPatterns = [".env*"]
+        config.files.allowRoots = ["~"]
+        config.files.requireApprovalOnDeny = true
+
+        // A patch carrying two keys leaves the third stored value untouched
+        // instead of resetting it.
+        try UpdateSettingsRequest(
+            filesDenyPatterns: [".env*", "*.pem"],
+            filesRequireApprovalOnDeny: false
+        ).apply(to: &config)
+        #expect(config.files.denyPatterns == [".env*", "*.pem"])
+        #expect(config.files.allowRoots == ["~"])
+        #expect(config.files.requireApprovalOnDeny == false)
+
+        let response = SettingsResponse(config: config, configPath: "/test/config.toml")
+        #expect(response.filesDenyPatterns == [".env*", "*.pem"])
+        #expect(response.filesAllowRoots == ["~"])
+        #expect(response.filesRequireApprovalOnDeny == false)
+    }
+
+    @Test
+    func `UpdateSettingsRequest nil bash and files patches are no-ops`() throws {
+        var config = RuneWeaverConfig.default
+        config.bash.enabled = false
+        config.bash.defaultAction = .deny
+        config.bash.timeoutSeconds = 120
+        config.files.denyPatterns = ["custom*"]
+        config.files.allowRoots = ["~/custom"]
+
+        // A nil patch preserves every stored bash and files value so a
+        // dashboard edit elsewhere never resets the shell or guard policy.
+        try UpdateSettingsRequest(engineName: "Kept Bash Files").apply(to: &config)
+        #expect(config.engine.name == "Kept Bash Files")
+        #expect(config.bash.enabled == false)
+        #expect(config.bash.defaultAction == .deny)
+        #expect(config.bash.timeoutSeconds == 120)
+        #expect(config.files.denyPatterns == ["custom*"])
+        #expect(config.files.allowRoots == ["~/custom"])
+    }
+
+    @Test
+    func `Bash and files reload preserves enabled state`() async {
+        // Boot ships bash disabled in this probe, so a policy reload never
+        // has to re-introduce an absent tool. The tool-state toggle stays
+        // the sole authority for enablement.
+        let bus = ToolBus()
+        let initialBash = BashTool(bashConfig: BashConfig(), filesConfig: FilesConfig())
+        await bus.register(tool: initialBash, isEnabled: false)
+        #expect(await bus.tool(named: "bash.exec") != nil)
+        #expect(await bus.isToolEnabled(named: "bash.exec") == false)
+
+        // Enabling through the tool-state toggle sticks with no config gate
+        // overriding it.
+        await bus.enableTool(named: "bash.exec")
+        #expect(await bus.isToolEnabled(named: "bash.exec") == true)
+
+        // A policy change re-registers with preserved state (still enabled),
+        // keeping live state across the reload.
+        var updatedBash = BashConfig()
+        updatedBash.timeoutSeconds = 120
+        let reloadedBash = BashTool(bashConfig: updatedBash, filesConfig: FilesConfig())
+        let bashEnabled = await bus.isToolEnabled(named: reloadedBash.name)
+        await bus.register(tool: reloadedBash, isEnabled: bashEnabled)
+        #expect(await bus.tool(named: "bash.exec") != nil)
+        #expect(await bus.isToolEnabled(named: "bash.exec") == true)
+
+        // Files tools follow the same pattern: re-registration keeps the
+        // live toggle while the fresh guard policy rides the new instance.
+        for tool in FilesTools.makeTools(filesConfig: FilesConfig()) {
+            await bus.register(tool: tool, isEnabled: false)
+        }
+        #expect(await bus.tool(named: "files.read") != nil)
+        await bus.enableTool(named: "files.read")
+        #expect(await bus.isToolEnabled(named: "files.read") == true)
+
+        var updatedFiles = FilesConfig()
+        updatedFiles.denyPatterns = [".env*"]
+        for tool in FilesTools.makeTools(filesConfig: updatedFiles) {
+            let isEnabled = await bus.isToolEnabled(named: tool.name)
+            await bus.register(tool: tool, isEnabled: isEnabled)
+        }
+        #expect(await bus.tool(named: "files.read") != nil)
+        #expect(await bus.isToolEnabled(named: "files.read") == true)
+        #expect(await bus.isToolEnabled(named: "files.grep") == false)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects empty bash rules`() {
+        var config = RuneWeaverConfig.default
+        let preserved = config.bash
+
+        // An empty rule list would diverge on save/load (zero tables reload
+        // as the default star rule), so it fails closed instead of persisting.
+        do {
+            try UpdateSettingsRequest(
+                bash: BashSettingsUpdate(rules: [])
+            ).apply(to: &config)
+            Issue.record("Expected a validation error for empty bash rules")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "bash.rules" else {
+                Issue.record("Expected bash.rules validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+        #expect(config.bash == preserved)
+    }
+
+    @Test
+    func `UpdateSettingsRequest rejects blank bash rule pattern`() {
+        var config = RuneWeaverConfig.default
+        let preserved = config.bash
+
+        // A whitespace-only pattern never matches (the matcher trims to ""),
+        // so it fails closed matching the file-load path.
+        do {
+            try UpdateSettingsRequest(
+                bash: BashSettingsUpdate(rules: [BashRule(pattern: "   ", action: .allow)])
+            ).apply(to: &config)
+            Issue.record("Expected a validation error for a blank bash rule pattern")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "bash.rules[0].pattern" else {
+                Issue.record("Expected bash.rules[0].pattern validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+        #expect(config.bash == preserved)
+    }
+
+    @Test
+    func `RuneWeaverConfig validation rejects empty and blank bash rules`() {
+        // Core validation single-sources the PUT checks so file-load and the
+        // settings route agree with the same field and message.
+        var emptyConfig = RuneWeaverConfig.default
+        emptyConfig.bash.rules = []
+        do {
+            try emptyConfig.validate()
+            Issue.record("Expected a validation error for empty bash rules")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "bash.rules" else {
+                Issue.record("Expected bash.rules validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+
+        var blankConfig = RuneWeaverConfig.default
+        blankConfig.bash.rules = [BashRule(pattern: "   ", action: .ask)]
+        do {
+            try blankConfig.validate()
+            Issue.record("Expected a validation error for a blank bash rule pattern")
+        } catch let error as ConfigError {
+            guard case let .validationError(field, _) = error, field == "bash.rules[0].pattern" else {
+                Issue.record("Expected bash.rules[0].pattern validation, got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected ConfigError, got \(type(of: error))")
+        }
+    }
+
+    @Test
+    func `Bash TOML round-trips default star rule`() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("settings_bash_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // The default star rule must survive save/load without widening or
+        // narrowing, pinning the single-rule evaluation order.
+        let fileURL = tempDir.appendingPathComponent("config.toml")
+        var config = RuneWeaverConfig.default
+        config.bash.rules = [BashRule(pattern: "*", action: .ask)]
+        try config.save(to: fileURL)
+
+        let reloaded = try RuneWeaverConfig.load(from: fileURL)
+        #expect(reloaded.bash.rules == [BashRule(pattern: "*", action: .ask)])
+    }
+
+    @Test
+    func `BashSettingsUpdate decodes camelCase aliases and encodes snake_case`() throws {
+        let decoder = JSONDecoder()
+        let encoder = JSONEncoder()
+
+        // Snake_case stays canonical.
+        let snakePayload = "{\"default_action\":\"deny\",\"timeout_seconds\":120,\"allow_network\":true}"
+        let snake = try decoder.decode(
+            BashSettingsUpdate.self,
+            from: Data(snakePayload.utf8)
+        )
+        #expect(snake.defaultAction == "deny")
+        #expect(snake.timeoutSeconds == 120)
+        #expect(snake.allowNetwork == true)
+
+        // CamelCase aliases mirror the dashboard contract.
+        let camelPayload = "{\"defaultAction\":\"deny\",\"timeoutSeconds\":120,\"allowNetwork\":true}"
+        let camel = try decoder.decode(
+            BashSettingsUpdate.self,
+            from: Data(camelPayload.utf8)
+        )
+        #expect(camel.defaultAction == "deny")
+        #expect(camel.timeoutSeconds == 120)
+        #expect(camel.allowNetwork == true)
+
+        // Snake wins when both spellings arrive so the contracts cannot fork.
+        let bothPayload = "{\"default_action\":\"deny\",\"defaultAction\":\"allow\","
+            + "\"timeout_seconds\":120,\"timeoutSeconds\":5,"
+            + "\"allow_network\":true,\"allowNetwork\":false}"
+        let both = try decoder.decode(
+            BashSettingsUpdate.self,
+            from: Data(bothPayload.utf8)
+        )
+        #expect(both.defaultAction == "deny")
+        #expect(both.timeoutSeconds == 120)
+        #expect(both.allowNetwork == true)
+
+        // Encode preserves snake_case so saved payloads keep the file shape.
+        let encoded = try encoder.encode(
+            BashSettingsUpdate(defaultAction: "deny", timeoutSeconds: 120, allowNetwork: true)
+        )
+        let text = String(data: encoded, encoding: .utf8) ?? ""
+        #expect(text.contains("default_action"))
+        #expect(text.contains("timeout_seconds"))
+        #expect(text.contains("allow_network"))
+        #expect(!text.contains("defaultAction"))
+        #expect(!text.contains("timeoutSeconds"))
+        #expect(!text.contains("allowNetwork"))
+    }
 }

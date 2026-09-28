@@ -2,8 +2,8 @@
 //
 // Purpose: carries the full settings snapshot for `GET /settings` plus the
 // partial update for `PUT /settings` so dashboard edits preserve every field
-// the request omits while engine, server bind, media, index, and desktop
-// patches merge in one place.
+// the request omits while engine, server bind, media, index, desktop,
+// browser, bash, and files patches merge in one place.
 // Scope: REST bodies and merge policy only; range and shape checks stay with
 // the config validation layer and live-reload decisions stay with the
 // settings routes.
@@ -56,6 +56,8 @@ public struct SettingsResponse: Content, Equatable {
     public let index: IndexConfig
     /// macOS desktop vision and gated control policy.
     public let desktop: DesktopConfig
+    /// Granular shell execution policy.
+    public let bash: BashConfig
     /// HTTP bind interface from `[server] hostname`. Changing it needs a restart
     /// because the socket and the Host gate are fixed at boot.
     public let serverHostname: String
@@ -105,6 +107,7 @@ public struct SettingsResponse: Content, Equatable {
         self.media = config.media
         self.index = config.index
         self.desktop = config.desktop
+        self.bash = config.bash
         self.serverHostname = config.server.hostname
         self.serverPort = config.server.port
         self.serverAllowedHosts = config.server.allowedHosts
@@ -147,6 +150,7 @@ public struct SettingsResponse: Content, Equatable {
         case media
         case index
         case desktop
+        case bash
         case serverHostname
         case serverPort
         case serverAllowedHosts
@@ -194,6 +198,7 @@ public struct SettingsResponse: Content, Equatable {
         media = try container.decodeIfPresent(MediaConfig.self, forKey: .media) ?? MediaConfig()
         index = try container.decodeIfPresent(IndexConfig.self, forKey: .index) ?? IndexConfig()
         desktop = try container.decodeIfPresent(DesktopConfig.self, forKey: .desktop) ?? DesktopConfig()
+        bash = try container.decodeIfPresent(BashConfig.self, forKey: .bash) ?? BashConfig()
         serverHostname = try container.decodeIfPresent(String.self, forKey: .serverHostname) ?? ServerEndpointConfig.defaultHostname
         serverPort = try container.decodeIfPresent(Int.self, forKey: .serverPort) ?? ServerEndpointConfig.defaultPort
         serverAllowedHosts = try container.decodeIfPresent([String].self, forKey: .serverAllowedHosts) ?? []
@@ -239,6 +244,7 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(media, forKey: .media)
         try container.encode(index, forKey: .index)
         try container.encode(desktop, forKey: .desktop)
+        try container.encode(bash, forKey: .bash)
         try container.encode(serverHostname, forKey: .serverHostname)
         try container.encode(serverPort, forKey: .serverPort)
         try container.encode(serverAllowedHosts, forKey: .serverAllowedHosts)
@@ -287,6 +293,8 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let index: IndexSettingsUpdate?
     /// Partial desktop patch; a nil patch preserves the stored `[desktop]` section.
     public let desktop: DesktopSettingsUpdate?
+    /// Partial bash patch; a nil patch preserves the stored `[bash]` section.
+    public let bash: BashSettingsUpdate?
     /// Bind interface override for `[server] hostname`. Nil preserves the stored value.
     public let serverHostname: String?
     /// Bind port override for `[server] port`. Nil preserves the stored value.
@@ -329,6 +337,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         media: MediaSettingsUpdate? = nil,
         index: IndexSettingsUpdate? = nil,
         desktop: DesktopSettingsUpdate? = nil,
+        bash: BashSettingsUpdate? = nil,
         serverHostname: String? = nil,
         serverPort: Int? = nil,
         serverAllowedHosts: [String]? = nil
@@ -367,6 +376,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.media = media
         self.index = index
         self.desktop = desktop
+        self.bash = bash
         self.serverHostname = serverHostname
         self.serverPort = serverPort
         self.serverAllowedHosts = serverAllowedHosts
@@ -388,6 +398,7 @@ public struct UpdateSettingsRequest: Content, Equatable {
         applyMedia(to: &config.media)
         applyIndex(to: &config.index)
         applyDesktop(to: &config.desktop)
+        try applyBash(to: &config.bash)
         try applyServer(to: &config.server)
     }
 

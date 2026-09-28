@@ -53,6 +53,7 @@ extension RuneWeaverConfig {
         lines += renderDesktopTOML()
         lines += renderSecurityTOML()
         lines += renderGoalsTOML()
+        lines += renderBashTOML()
         return lines.joined(separator: "\n")
     }
 
@@ -402,6 +403,31 @@ extension RuneWeaverConfig {
             "plan_timeout_seconds = \(goals.planTimeoutSeconds)",
             ""
         ]
+    }
+
+    /// Renders the additive `[bash]` section.
+    ///
+    /// Every scalar key renders, including the enabled default, so a saved file
+    /// documents the shell policy and a round-trip never depends on an implicit
+    /// default silently diverging from what was written. Rules render as
+    /// `[[bash.rules]]` tables in stored order (top-to-bottom first-match-wins)
+    /// so a save/load cycle preserves evaluation order.
+    private func renderBashTOML() -> [String] {
+        var lines: [String] = [
+            "[bash]",
+            "enabled = \(bash.enabled ? "true" : "false")",
+            "default_action = \(Self.tomlQuoted(bash.defaultAction.rawValue))",
+            "timeout_seconds = \(bash.timeoutSeconds)",
+            "allow_network = \(bash.allowNetwork ? "true" : "false")",
+            ""
+        ]
+        for rule in bash.rules {
+            lines.append("[[bash.rules]]")
+            lines.append("pattern = \(Self.tomlQuoted(rule.pattern))")
+            lines.append("action = \(Self.tomlQuoted(rule.action.rawValue))")
+            lines.append("")
+        }
+        return lines
     }
 }
 

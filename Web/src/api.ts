@@ -1636,6 +1636,89 @@ export interface DesktopSettingsUpdate {
   blocked_apps?: string[];
 }
 
+// Sandboxed shell execution policy mirroring the engine `BashConfig`
+// (Sources/RuneWeaverCore/Config.swift). Rules stay ordered top-to-bottom
+// first-match-wins; the timeout is bounded 1-3600 seconds. Only policy knobs
+// live here; the enabled flag mirrors the stored `[bash]` section.
+export interface BashRuleData {
+  pattern: string;
+  action: string;
+}
+
+// Full bash snapshot on `GET /settings`, mirroring the engine `BashConfig`.
+// The canonical wire keys are snake_case; the engine also accepts the
+// camelCase aliases through the same dual-alias decode as providers, so
+// either spelling reads. The dashboard sends snake_case and reads either
+// spelling so file-configured values survive a dashboard PUT instead of
+// being stripped to nil.
+export interface BashConfigData {
+  enabled: boolean;
+  default_action: string;
+  defaultAction?: string;
+  rules: BashRuleData[];
+  timeout_seconds: number;
+  timeoutSeconds?: number;
+  allow_network: boolean;
+  allowNetwork?: boolean;
+}
+
+// Partial bash patch for `PUT /settings`, mirroring the engine
+// `BashSettingsUpdate`. Every field is optional so a request carrying one
+// key leaves the rest of the stored `[bash]` section untouched. The dashboard
+// sends the snake_case keys the engine persists; the engine also accepts the
+// camelCase aliases through the dual-alias decode, so either spelling writes.
+export interface BashSettingsUpdate {
+  enabled?: boolean;
+  default_action?: string;
+  defaultAction?: string;
+  rules?: BashRuleData[];
+  timeout_seconds?: number;
+  timeoutSeconds?: number;
+  allow_network?: boolean;
+  allowNetwork?: boolean;
+}
+
+// Bash defaults mirror BashConfig in Sources/RuneWeaverCore/Config.swift
+// (enabled, defaultAction, defaultRules, defaultTimeoutSeconds,
+// allowNetwork). The server owns the values; this mirror seeds the fresh form
+// before the first GET /settings fetch and the contract test pins it so drift
+// fails loudly. DEFAULT_BASH_CONFIG stays derived from the pieces below so
+// the pieces remain the single source.
+export const DEFAULT_BASH_ENABLED = true;
+export const DEFAULT_BASH_DEFAULT_ACTION = "ask";
+export const DEFAULT_BASH_TIMEOUT_SECONDS = 30;
+export const DEFAULT_BASH_ALLOW_NETWORK = false;
+
+// Bash timeout bounds mirror BashConfig.minTimeoutSeconds/maxTimeoutSeconds
+// in Sources/RuneWeaverCore/Config+Validation.swift and the PUT merge in
+// Sources/RuneWeaverServer/ServerBashDTOs.swift. The server owns the 1-3600
+// bound; this mirror is the single source for the client validator so the two
+// cannot drift. The contract test pins both ends.
+export const BASH_TIMEOUT_MIN_SECONDS = 1;
+export const BASH_TIMEOUT_MAX_SECONDS = 3600;
+
+// Mirror of BashConfig.defaultRules; update by hand alongside the Swift
+// default. The contract test pins the catch-all so drift fails loudly.
+export const DEFAULT_BASH_RULES: BashRuleData[] = [
+  { pattern: "*", action: "ask" },
+];
+
+// Combined bash default mirroring BashConfig. The fresh form seeds from this
+// object so the editor matches the boundary the engine enforces before the
+// first settings fetch.
+export const DEFAULT_BASH_CONFIG: BashConfigData = {
+  enabled: DEFAULT_BASH_ENABLED,
+  default_action: DEFAULT_BASH_DEFAULT_ACTION,
+  rules: DEFAULT_BASH_RULES.map((rule) => ({ ...rule })),
+  timeout_seconds: DEFAULT_BASH_TIMEOUT_SECONDS,
+  allow_network: DEFAULT_BASH_ALLOW_NETWORK,
+};
+
+// Closed set of valid bash permission actions, mirroring BashPermissionAction
+// on the engine. Single source for the client validator and the Bash modal
+// option lists so the two cannot drift.
+export const BASH_PERMISSION_ACTIONS = ["allow", "ask", "deny"] as const;
+
 // Manual mirrors of DesktopConfig defaults in Sources/RuneWeaverCore/Config.swift.
 export const DEFAULT_DESKTOP_MAX_IMAGE_DIMENSION = 1280;
 export const DEFAULT_DESKTOP_JPEG_QUALITY = 0.75;
@@ -2384,6 +2467,9 @@ export interface SettingsResponse {
   // Native desktop vision and gated control under [desktop]; optional for
   // back-compat with older engines that predate the section.
   desktop?: DesktopConfigData;
+  // Sandboxed shell execution policy under [bash]; optional for back-compat
+  // with older engines that predate the section.
+  bash?: BashConfigData;
   // HTTP bind from [server]; optional for back-compat with older engines that
   // predate the bind keys. Absent degrades to the loopback defaults so the
   // Network pane never renders blank.
@@ -2439,6 +2525,8 @@ export interface UpdateSettingsInput {
   index?: IndexSettingsUpdate;
   // Partial desktop patch; an omitted patch preserves the stored [desktop] section.
   desktop?: DesktopSettingsUpdate;
+  // Partial bash patch; an omitted patch preserves the stored [bash] section.
+  bash?: BashSettingsUpdate;
   // Bind patch for [server]; an omitted patch preserves the stored section.
   // The engine persists these to the file and returns requiresRestart without
   // live-reloading the bind, so the dashboard shows a restart banner.

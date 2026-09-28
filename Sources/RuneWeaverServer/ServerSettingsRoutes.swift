@@ -2,11 +2,12 @@
 //
 // Owns `GET`/`PUT /settings`: load, merge, validate, and persist the engine
 // config, then push the saved values into the live engine so orchestrator
-// budgets, media/browser/web/API tools, desktop policy, and index policy take
-// effect without a restart. `[server]` bind keys persist to the file but never
-// live-reload the socket or the middleware set: they return `requiresRestart`
-// so the dashboard shows a pending-vs-live restart banner instead of
-// pretending the new bind is live.
+// budgets, media/browser/web/API tools, desktop, bash/files policies, and
+// index policy take effect without a restart. `[server]` bind keys persist
+// to the file but never live-reload the socket or the middleware set: they
+// return `requiresRestart` so the dashboard shows a pending-vs-live restart
+// banner instead of pretending the new bind is live. `[files]` saves apply
+// live the same way and never claim a restart.
 
 import Foundation
 import RuneWeaverCore
@@ -121,6 +122,7 @@ private func handlePutSettings(req: Request) async throws -> Response {
         await reloadLiveMediaTools(body: body, config: config, context: liveContext)
         await reloadLiveNetworkTools(body: body, config: config, context: liveContext)
         await reloadLiveDesktopTools(body: body, config: config, context: liveContext)
+        await reloadLiveBashFilesTools(body: body, config: config, context: liveContext)
         try await reloadLiveIndexPolicy(body: body, config: config, context: liveContext, prebuilt: prebuiltIndexComponents)
         // The bind and the Host middleware stay on the boot values: a
         // `[server]` save persists to the file and returns `requiresRestart`
@@ -298,6 +300,20 @@ private func applyLiveOrchestratorTuning(body: UpdateSettingsRequest, context: S
     }
 }
 
+/// Re-registers one tool while keeping its live enablement.
+///
+/// Live reload swaps the tool implementation for fresh config without
+/// disturbing operator intent: the persisted tool-state toggle stays the sole
+/// authority for enablement, so the fresh definition inherits the current
+/// bus state instead of resetting to enabled.
+/// - Parameters:
+///   - tool: Freshly built tool replacing the live registration.
+///   - context: Live server context owning the tool bus.
+private func reregisterPreservingToggle(_ tool: any Tool, on context: ServerContext) async {
+    let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
+    await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+}
+
 /// Reloads media tools when media settings changed so Sonarr / Radarr picks up URLs without a restart.
 /// Stored transports ride along so hermetic doubles survive a settings PUT instead of resetting to live defaults.
 private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
@@ -305,8 +321,7 @@ private func reloadLiveMediaTools(body: UpdateSettingsRequest, config: RuneWeave
     for tool in MediaTools.makeTools(
         mediaConfig: config.media, transport: context.mediaTransport, secrets: context.mediaSecrets
     ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        await reregisterPreservingToggle(tool, on: context)
     }
 }
 
@@ -374,8 +389,7 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
             llmServerURLs: appLLMOrigins,
             allowlistedOrigins: browserOrigins
         ) {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+            await reregisterPreservingToggle(tool, on: context)
         }
     } else {
         for tool in BrowserTools.makeTools(
@@ -384,8 +398,7 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
             llmServerURLs: appLLMOrigins,
             allowlistedOrigins: browserOrigins
         ) {
-            let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-            await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+            await reregisterPreservingToggle(tool, on: context)
         }
     }
     for tool in WebTools.makeTools(
@@ -395,8 +408,7 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
         fetchTransport: context.fetchTransport,
         ensurer: context.searchEnsurer
     ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        await reregisterPreservingToggle(tool, on: context)
     }
     for tool in ApiRequestTools.makeTools(
         browserConfig: config.browser,
@@ -405,8 +417,7 @@ private func reloadLiveNetworkTools(body: UpdateSettingsRequest, config: RuneWea
         transport: context.apiTransport,
         secrets: context.secrets
     ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        await reregisterPreservingToggle(tool, on: context)
     }
 }
 
@@ -425,8 +436,46 @@ private func reloadLiveDesktopTools(body: UpdateSettingsRequest, config: RuneWea
         captureBridge: context.desktopCaptureBridge,
         controlBridge: context.desktopControlBridge
     ) {
-        let isEnabled = await context.toolBus.isToolEnabled(named: tool.name)
-        await context.toolBus.register(tool: tool, isEnabled: isEnabled)
+        await reregisterPreservingToggle(tool, on: context)
+    }
+}
+
+/// Reconciles the live bash and files tools with the persisted policies so saved values take effect without a restart.
+/// Follows the desktop reload pattern: a save without any bash or files key
+/// is a no-op, and each re-registered tool keeps its live enabled state. Both
+/// policies swap into the context atomically so concurrent turns never see a
+/// fresh shell beside a stale workspace guard, then the file tools refresh
+/// first and the bash tool registers exactly once against the fresh pair for
+/// its working-directory guard. Email tools follow only on a files patch when
+/// mail accounts are configured and already on the bus.
+/// - Parameters:
+///   - body: Decoded settings patch selecting which policies move.
+///   - config: Persisted config carrying the fresh policies.
+///   - context: Live server context receiving the swap.
+private func reloadLiveBashFilesTools(body: UpdateSettingsRequest, config: RuneWeaverConfig, context: ServerContext) async {
+    let hasBashPatch = body.bash != nil
+    let hasFilesPatch = body.filesDenyPatterns != nil || body.filesAllowRoots != nil || body.filesRequireApprovalOnDeny != nil
+    guard hasBashPatch || hasFilesPatch else { return }
+    context.setBashFiles(bash: config.bash, files: config.files)
+    let live = context.bashFilesSnapshot()
+    if hasFilesPatch {
+        for tool in FilesTools.makeTools(filesConfig: live.files) {
+            await reregisterPreservingToggle(tool, on: context)
+        }
+    }
+    let bashTool = BashTool(bashConfig: live.bash, filesConfig: live.files)
+    await reregisterPreservingToggle(bashTool, on: context)
+    if hasFilesPatch, !config.email.accounts.isEmpty {
+        if await context.toolBus.tool(named: "email.search") != nil {
+            for tool in EmailTools.makeTools(
+                emailConfig: config.email,
+                sandboxConfig: config.sandbox,
+                filesConfig: live.files,
+                securityConfig: config.security
+            ) {
+                await reregisterPreservingToggle(tool, on: context)
+            }
+        }
     }
 }
 

@@ -17,6 +17,17 @@ private struct LiveIndexPair: Sendable {
     var coordinator: IndexCoordinator?
 }
 
+/// Atomic shell plus workspace policy pair refreshed by settings saves.
+/// Bash carries the working-directory guard from the files policy, so the two
+/// must move together: a split write would let a fresh bash tool enforce a
+/// stale allow-root set (or vice versa) for the window between writes.
+private struct BashFilesPair: Sendable {
+    /// Shell execution policy carrying enablement, rules, and timeouts.
+    var bash: BashConfig
+    /// Workspace access policy bounding reads and the bash guard.
+    var files: FilesConfig
+}
+
 /// Stand-in provider for goal engine defaults when no serving model is wired.
 /// Direct contexts in tests often pass no `servingLLM`; planning through this
 /// backend yields no text so the engine keeps its resilient fallback plan
@@ -76,8 +87,27 @@ public final class ServerContext: Sendable {
     public let toolStates: ToolStateStore
     /// Sandbox staging retention configuration bounding `pending/`, `approved/`, and `attachments/`.
     public let sandboxConfig: SandboxConfig
-    /// File access policy bounding read/write operations.
-    public let filesConfig: FilesConfig
+    /// Atomic bash plus files policy pair refreshed by settings saves.
+    /// One lock covers both so concurrent readers never observe a fresh bash
+    /// policy beside a stale files guard (or vice versa) mid-save, mirroring
+    /// `liveIndexBox`.
+    private let bashFilesBox: OSAllocatedUnfairLock<BashFilesPair>
+    /// Live `[files]` access policy bounding read/write operations.
+    /// Settings PUTs refresh it in place so saved deny patterns, allow
+    /// roots, and approval escalation take effect without a restart.
+    public var filesConfig: FilesConfig {
+        get { bashFilesBox.withLock { $0.files } }
+        set { bashFilesBox.withLock { $0.files = newValue } }
+    }
+
+    /// Live `[bash]` shell execution policy carrying enablement, default
+    /// action, ordered rules, timeout, and network knobs. Settings PUTs
+    /// refresh it in place so saved values take effect without a restart.
+    public var bashConfig: BashConfig {
+        get { bashFilesBox.withLock { $0.bash } }
+        set { bashFilesBox.withLock { $0.bash = newValue } }
+    }
+
     /// Periodic scheduler reclaiming expired and over-cap staged files.
     public let sandboxCleanup: SandboxCleanupScheduler
     /// Browser policy carrying the SearXNG base URL for the search lifecycle routes.
@@ -181,6 +211,7 @@ public final class ServerContext: Sendable {
         sandboxConfig: SandboxConfig = SandboxConfig(),
         sandboxCleanup: SandboxCleanupScheduler? = nil,
         filesConfig: FilesConfig = FilesConfig(),
+        bashConfig: BashConfig = BashConfig(),
         browserConfig: BrowserConfig = BrowserConfig(),
         indexCoordinator: IndexCoordinator? = nil,
         indexStore: DocIndexStore? = nil,
@@ -246,7 +277,7 @@ public final class ServerContext: Sendable {
         self.pluginDiscovery = pluginDiscovery ?? PluginDiscoveryService(pluginsDirectory: PluginDiscoveryService.defaultPluginsDirectory(), store: pStore)
         self.toolStates = toolStates ?? ToolStateStore(dbPath: defaultDBPath)
         self.sandboxConfig = sandboxConfig
-        self.filesConfig = filesConfig
+        self.bashFilesBox = OSAllocatedUnfairLock(initialState: BashFilesPair(bash: bashConfig, files: filesConfig))
         self.sandboxCleanup = sandboxCleanup ?? SandboxCleanupScheduler()
         self.browserConfig = browserConfig
         self.servingLLM = servingLLM
@@ -301,6 +332,23 @@ public final class ServerContext: Sendable {
     /// - Returns: The live store and coordinator as one generation.
     public func liveIndexSnapshot() -> (store: DocIndexStore?, coordinator: IndexCoordinator?) {
         liveIndexBox.withLock { ($0.store, $0.coordinator) }
+    }
+
+    /// Swaps the live bash and files policies atomically so concurrent turns
+    /// never observe a fresh shell policy beside a stale workspace guard.
+    /// - Parameters:
+    ///   - bash: Shell policy to serve.
+    ///   - files: Workspace policy to serve.
+    public func setBashFiles(bash: BashConfig, files: FilesConfig) {
+        bashFilesBox.withLock { $0 = BashFilesPair(bash: bash, files: files) }
+    }
+
+    /// Atomically snapshots the live bash and files policies so a reload
+    /// builds its tools from one consistent generation, mirroring
+    /// `liveIndexSnapshot`.
+    /// - Returns: The live shell and workspace policies as one generation.
+    public func bashFilesSnapshot() -> (bash: BashConfig, files: FilesConfig) {
+        bashFilesBox.withLock { ($0.bash, $0.files) }
     }
 }
 
@@ -580,6 +628,7 @@ extension ServerContext {
             toolStates: services.pluginStack.states,
             sandboxConfig: sandboxConfig,
             filesConfig: toolConfigs.files,
+            bashConfig: toolConfigs.bash,
             browserConfig: browserConfig,
             indexCoordinator: indexCoordinator,
             indexStore: indexStore,
