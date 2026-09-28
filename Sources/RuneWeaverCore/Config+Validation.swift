@@ -459,6 +459,13 @@ extension RuneWeaverConfig {
                 message: "must be one of \(allowedBackends.joined(separator: ", ")) (got '\(memory.embeddingBackend)')"
             )
         }
+        // Recall budgets deliberately fail open, unlike the fail-closed
+        // neighboring bounds: file-load already clamped in `decodeMemory` and
+        // the settings PUT clamps on merge, so an out-of-range `recall_*`
+        // reaches here at the nearest bound and never throws — a stray digit
+        // degrades recall fan-out instead of refusing to boot or save. Live
+        // engine paths clamp again at use via `RecallBudgets.clamped()` for
+        // hand-built configs. No range throw here by design.
     }
 
     private func validateVoiceSection() throws {
@@ -966,6 +973,31 @@ public extension GoalsConfig {
             maxActiveGoals: min(max(maxActiveGoals, Self.minActiveGoalsBound), Self.maxActiveGoalsBound),
             maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
             planTimeoutSeconds: max(1, planTimeoutSeconds)
+        )
+    }
+}
+
+/// Bounds enforcement for recall budgets at every fail-open clamp site.
+///
+/// File-load clamps in `decodeMemory`, the settings PUT clamps on merge, and
+/// this covers hand-built configs plus live engine paths, so a stray digit
+/// degrades to the nearest bound rather than refusing to boot, save, or run.
+/// All sites share the same range constants on `RecallBudgets` so the
+/// fail-open posture cannot drift.
+public extension RecallBudgets {
+    /// Returns a copy clamped into the documented ranges.
+    /// - Returns: Budgets with limits pulled inside `1...50`, threshold and
+    ///   weight inside `0...1`, `maxChars` inside `200...16000`,
+    ///   `perHitChars` inside `100...2000`, and multiplier inside `1...8`.
+    func clamped() -> RecallBudgets {
+        RecallBudgets(
+            perTierLimit: min(max(perTierLimit, Self.limitBounds.lowerBound), Self.limitBounds.upperBound),
+            autoLimit: min(max(autoLimit, Self.limitBounds.lowerBound), Self.limitBounds.upperBound),
+            threshold: min(max(threshold, Self.scoreBounds.lowerBound), Self.scoreBounds.upperBound),
+            maxChars: min(max(maxChars, Self.maxCharsBounds.lowerBound), Self.maxCharsBounds.upperBound),
+            perHitChars: min(max(perHitChars, Self.perHitCharsBounds.lowerBound), Self.perHitCharsBounds.upperBound),
+            docPoolMultiplier: min(max(docPoolMultiplier, Self.docPoolMultiplierBounds.lowerBound), Self.docPoolMultiplierBounds.upperBound),
+            episodicWeight: min(max(episodicWeight, Self.scoreBounds.lowerBound), Self.scoreBounds.upperBound)
         )
     }
 }

@@ -176,6 +176,7 @@ extension Orchestrator {
         let workingMessages = await refreshedWorkingMessages(
             sessionID: sessionID,
             recall: parked.recall,
+            starterPack: parked.starterPack,
             systemPrompt: prompt
         )
         var pendingEpisodic: [(content: String, role: Message.Role)] = []
@@ -185,6 +186,7 @@ extension Orchestrator {
             workingMessages: workingMessages,
             tools: tools,
             recall: parked.recall,
+            starterPack: parked.starterPack,
             sessionID: sessionID,
             systemPrompt: prompt,
             onEvent: onEvent,
@@ -504,6 +506,7 @@ extension Orchestrator {
             priorBilledTokens: request.priorBilledTokens,
             systemPrompt: request.systemPrompt,
             recall: request.recall,
+            starterPack: request.starterPack,
             onEvent: request.onEvent,
             gatedRoundIndex: turn.toolRounds,
             contextTokens: turn.contextTokens,
@@ -581,6 +584,7 @@ extension Orchestrator {
                     toolCall: call,
                     systemPrompt: context.systemPrompt,
                     recall: context.recall,
+                    starterPack: context.starterPack,
                     batchID: batchID,
                     roundIndex: effectiveGatedRound,
                     billedTokens: turnTotalTokens,

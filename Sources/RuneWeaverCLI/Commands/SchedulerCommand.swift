@@ -248,7 +248,8 @@ struct SchedulerRunCommand: AsyncParsableCommand {
             memoryEngine: memoryEngine,
             embedder: embedder,
             compactionThresholdPercent: loaded.config.engine.compactionThresholdPercent,
-            securityConfig: loaded.config.security
+            securityConfig: loaded.config.security,
+            recallBudgets: loaded.config.memory.recallBudgets
         )
         let capturedBus = toolBus
         let pollChecker: SchedulerPollChecker = { rule in

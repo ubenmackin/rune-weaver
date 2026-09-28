@@ -226,4 +226,81 @@ struct TemporalFilterTests {
         let unbounded = try TemporalFilter.parse(since: nil, until: nil)
         #expect(TemporalFilter.matches(macEpoch: nil, in: unbounded))
     }
+
+    @Test
+    func `Recall plan parses July month window without skipping docs`() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let currentDate = try #require(calendar.date(from: DateComponents(year: 2026, month: 7, day: 15, hour: 12)))
+        let plan = MemoryQueryRouter.plan(for: "July vacation", currentDate: currentDate)
+        let expected = try TemporalFilter.parse(since: "2026-07-01", until: "2026-08-01")
+        #expect(plan.since == expected.since)
+        #expect(plan.until == expected.until)
+        #expect(plan.skipDocIndex == false)
+    }
+
+    @Test
+    func `Recall plan freshness windows today and skips docs`() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let currentDate = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 13, hour: 12)))
+        let todayStart = calendar.startOfDay(for: currentDate)
+        let tomorrowStart = try #require(calendar.date(byAdding: .day, value: 1, to: todayStart))
+        let todayPlan = MemoryQueryRouter.plan(for: "what arrived today?", currentDate: currentDate)
+        #expect(todayPlan.since == todayStart)
+        #expect(todayPlan.until == tomorrowStart)
+        #expect(todayPlan.skipDocIndex == true)
+
+        let unreadPlan = MemoryQueryRouter.plan(for: "anything unread?", currentDate: currentDate)
+        #expect(unreadPlan.since == nil)
+        #expect(unreadPlan.until == nil)
+        #expect(unreadPlan.skipDocIndex == true)
+
+        let plainPlan = MemoryQueryRouter.plan(for: "sourdough recipe", currentDate: currentDate)
+        #expect(plainPlan.since == nil)
+        #expect(plainPlan.until == nil)
+        #expect(plainPlan.skipDocIndex == false)
+    }
+
+    @Test
+    func `Recall plan windows yesterday and single dates`() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let currentDate = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 14, hour: 12)))
+        let yesterdayPlan = MemoryQueryRouter.plan(for: "what did we discuss yesterday?", currentDate: currentDate)
+        let expectedYesterday = try TemporalFilter.parse(since: "2026-09-13", until: "2026-09-14")
+        #expect(yesterdayPlan.since == expectedYesterday.since)
+        #expect(yesterdayPlan.until == expectedYesterday.until)
+
+        let singlePlan = MemoryQueryRouter.plan(for: "notes from 2026-09-13", currentDate: currentDate)
+        let expectedSingle = try TemporalFilter.parse(since: "2026-09-13", until: "2026-09-14")
+        #expect(singlePlan.since == expectedSingle.since)
+        #expect(singlePlan.until == expectedSingle.until)
+    }
+
+    @Test
+    func `Recall plan folds mailbox aliases and leaves blank unbounded`() {
+        let currentDate = Date()
+        let sentPlan = MemoryQueryRouter.plan(for: "Sent Items from Alice", currentDate: currentDate)
+        #expect(sentPlan.expandedQuery.contains("sent"))
+        #expect(!sentPlan.expandedQuery.contains("sent items"))
+
+        let blankPlan = MemoryQueryRouter.plan(for: "   ", currentDate: currentDate)
+        #expect(blankPlan.since == nil)
+        #expect(blankPlan.until == nil)
+    }
+
+    @Test
+    func `Recall plan keeps todayish and todays quiet without skipping docs`() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let currentDate = try #require(calendar.date(from: DateComponents(year: 2026, month: 9, day: 13, hour: 12)))
+        for query in ["todayish update", "todays agenda"] {
+            #expect(!LiveSearchGuidance.prefersLiveSearch(for: query))
+            let plan = MemoryQueryRouter.plan(for: query, currentDate: currentDate)
+            #expect(plan.since == nil)
+            #expect(plan.until == nil)
+            #expect(plan.skipDocIndex == false)
+        }
+    }
 }

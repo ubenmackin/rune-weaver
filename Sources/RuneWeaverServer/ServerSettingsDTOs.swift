@@ -31,6 +31,20 @@ public struct SettingsResponse: Content, Equatable {
     public let memoryEpisodesDBPath: String
     public let memoryEmbeddingModel: String
     public let memoryEmbeddingBackend: String
+    /// Maximum hits fetched per recall tier before merging (`[memory] recall_per_tier_limit`).
+    public let memoryRecallPerTierLimit: Int
+    /// Maximum hits injected as system context on one auto turn (`[memory] recall_auto_limit`).
+    public let memoryRecallAutoLimit: Int
+    /// Minimum calibrated score for an injected recall hit (`[memory] recall_threshold`).
+    public let memoryRecallThreshold: Double
+    /// Maximum characters for the injected recall block (`[memory] recall_max_chars`).
+    public let memoryRecallMaxChars: Int
+    /// Maximum characters kept per hit before ellipsis truncation (`[memory] recall_per_hit_chars`).
+    public let memoryRecallPerHitChars: Int
+    /// Extra vector candidates scanned per returned document page (`[memory] recall_doc_pool_multiplier`).
+    public let memoryRecallDocPoolMultiplier: Int
+    /// Weight mapping episodic rank scores onto the shared recall scale (`[memory] recall_episodic_weight`).
+    public let memoryRecallEpisodicWeight: Double
     public let voiceSTTProvider: String
     public let voiceWhisperModel: String
     public let voiceTTSProvider: String
@@ -84,6 +98,13 @@ public struct SettingsResponse: Content, Equatable {
         self.memoryEpisodesDBPath = config.memory.episodesDBPath
         self.memoryEmbeddingModel = config.memory.embeddingModel
         self.memoryEmbeddingBackend = config.memory.embeddingBackend
+        self.memoryRecallPerTierLimit = config.memory.recallBudgets.perTierLimit
+        self.memoryRecallAutoLimit = config.memory.recallBudgets.autoLimit
+        self.memoryRecallThreshold = config.memory.recallBudgets.threshold
+        self.memoryRecallMaxChars = config.memory.recallBudgets.maxChars
+        self.memoryRecallPerHitChars = config.memory.recallBudgets.perHitChars
+        self.memoryRecallDocPoolMultiplier = config.memory.recallBudgets.docPoolMultiplier
+        self.memoryRecallEpisodicWeight = config.memory.recallBudgets.episodicWeight
         self.voiceSTTProvider = config.voice.sttProvider
         self.voiceWhisperModel = config.voice.whisperModel
         self.voiceTTSProvider = config.voice.ttsProvider
@@ -127,6 +148,13 @@ public struct SettingsResponse: Content, Equatable {
         case memoryEpisodesDBPath
         case memoryEmbeddingModel
         case memoryEmbeddingBackend
+        case memoryRecallPerTierLimit
+        case memoryRecallAutoLimit
+        case memoryRecallThreshold
+        case memoryRecallMaxChars
+        case memoryRecallPerHitChars
+        case memoryRecallDocPoolMultiplier
+        case memoryRecallEpisodicWeight
         case voiceSTTProvider
         case voiceWhisperModel
         case voiceTTSProvider
@@ -175,6 +203,13 @@ public struct SettingsResponse: Content, Equatable {
         memoryEpisodesDBPath = try container.decodeIfPresent(String.self, forKey: .memoryEpisodesDBPath) ?? ""
         memoryEmbeddingModel = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingModel) ?? ""
         memoryEmbeddingBackend = try container.decodeIfPresent(String.self, forKey: .memoryEmbeddingBackend) ?? "apple"
+        memoryRecallPerTierLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerTierLimit) ?? RecallBudgets.defaultPerTierLimit
+        memoryRecallAutoLimit = try container.decodeIfPresent(Int.self, forKey: .memoryRecallAutoLimit) ?? RecallBudgets.defaultAutoLimit
+        memoryRecallThreshold = try container.decodeIfPresent(Double.self, forKey: .memoryRecallThreshold) ?? RecallBudgets.defaultThreshold
+        memoryRecallMaxChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallMaxChars) ?? RecallBudgets.defaultMaxChars
+        memoryRecallPerHitChars = try container.decodeIfPresent(Int.self, forKey: .memoryRecallPerHitChars) ?? RecallBudgets.defaultPerHitChars
+        memoryRecallDocPoolMultiplier = try container.decodeIfPresent(Int.self, forKey: .memoryRecallDocPoolMultiplier) ?? RecallBudgets.defaultDocPoolMultiplier
+        memoryRecallEpisodicWeight = try container.decodeIfPresent(Double.self, forKey: .memoryRecallEpisodicWeight) ?? RecallBudgets.defaultEpisodicWeight
         voiceSTTProvider = try container.decodeIfPresent(String.self, forKey: .voiceSTTProvider) ?? ""
         voiceWhisperModel = try container.decodeIfPresent(String.self, forKey: .voiceWhisperModel) ?? ""
         voiceTTSProvider = try container.decodeIfPresent(String.self, forKey: .voiceTTSProvider) ?? ""
@@ -221,6 +256,13 @@ public struct SettingsResponse: Content, Equatable {
         try container.encode(memoryEpisodesDBPath, forKey: .memoryEpisodesDBPath)
         try container.encode(memoryEmbeddingModel, forKey: .memoryEmbeddingModel)
         try container.encode(memoryEmbeddingBackend, forKey: .memoryEmbeddingBackend)
+        try container.encode(memoryRecallPerTierLimit, forKey: .memoryRecallPerTierLimit)
+        try container.encode(memoryRecallAutoLimit, forKey: .memoryRecallAutoLimit)
+        try container.encode(memoryRecallThreshold, forKey: .memoryRecallThreshold)
+        try container.encode(memoryRecallMaxChars, forKey: .memoryRecallMaxChars)
+        try container.encode(memoryRecallPerHitChars, forKey: .memoryRecallPerHitChars)
+        try container.encode(memoryRecallDocPoolMultiplier, forKey: .memoryRecallDocPoolMultiplier)
+        try container.encode(memoryRecallEpisodicWeight, forKey: .memoryRecallEpisodicWeight)
         try container.encode(voiceSTTProvider, forKey: .voiceSTTProvider)
         try container.encode(voiceWhisperModel, forKey: .voiceWhisperModel)
         try container.encode(voiceTTSProvider, forKey: .voiceTTSProvider)
@@ -268,6 +310,20 @@ public struct UpdateSettingsRequest: Content, Equatable {
     public let memoryEpisodesDBPath: String?
     public let memoryEmbeddingModel: String?
     public let memoryEmbeddingBackend: String?
+    /// Per-tier fetch cap override for `[memory] recall_per_tier_limit`. Nil preserves the stored value.
+    public let memoryRecallPerTierLimit: Int?
+    /// Auto-injection cap override for `[memory] recall_auto_limit`. Nil preserves the stored value.
+    public let memoryRecallAutoLimit: Int?
+    /// Score floor override for `[memory] recall_threshold`. Nil preserves the stored value.
+    public let memoryRecallThreshold: Double?
+    /// Recall block budget override for `[memory] recall_max_chars`. Nil preserves the stored value.
+    public let memoryRecallMaxChars: Int?
+    /// Per-hit truncation override for `[memory] recall_per_hit_chars`. Nil preserves the stored value.
+    public let memoryRecallPerHitChars: Int?
+    /// Document pool widening override for `[memory] recall_doc_pool_multiplier`. Nil preserves the stored value.
+    public let memoryRecallDocPoolMultiplier: Int?
+    /// Episodic tier weight override for `[memory] recall_episodic_weight`. Nil preserves the stored value.
+    public let memoryRecallEpisodicWeight: Double?
     public let voiceSTTProvider: String?
     public let voiceWhisperModel: String?
     public let voiceTTSProvider: String?
@@ -314,6 +370,13 @@ public struct UpdateSettingsRequest: Content, Equatable {
         memoryEpisodesDBPath: String? = nil,
         memoryEmbeddingModel: String? = nil,
         memoryEmbeddingBackend: String? = nil,
+        memoryRecallPerTierLimit: Int? = nil,
+        memoryRecallAutoLimit: Int? = nil,
+        memoryRecallThreshold: Double? = nil,
+        memoryRecallMaxChars: Int? = nil,
+        memoryRecallPerHitChars: Int? = nil,
+        memoryRecallDocPoolMultiplier: Int? = nil,
+        memoryRecallEpisodicWeight: Double? = nil,
         voiceSTTProvider: String? = nil,
         voiceWhisperModel: String? = nil,
         voiceTTSProvider: String? = nil,
@@ -353,6 +416,13 @@ public struct UpdateSettingsRequest: Content, Equatable {
         self.memoryEpisodesDBPath = memoryEpisodesDBPath
         self.memoryEmbeddingModel = memoryEmbeddingModel
         self.memoryEmbeddingBackend = memoryEmbeddingBackend
+        self.memoryRecallPerTierLimit = memoryRecallPerTierLimit
+        self.memoryRecallAutoLimit = memoryRecallAutoLimit
+        self.memoryRecallThreshold = memoryRecallThreshold
+        self.memoryRecallMaxChars = memoryRecallMaxChars
+        self.memoryRecallPerHitChars = memoryRecallPerHitChars
+        self.memoryRecallDocPoolMultiplier = memoryRecallDocPoolMultiplier
+        self.memoryRecallEpisodicWeight = memoryRecallEpisodicWeight
         self.voiceSTTProvider = voiceSTTProvider
         self.voiceWhisperModel = voiceWhisperModel
         self.voiceTTSProvider = voiceTTSProvider
@@ -409,6 +479,16 @@ public struct UpdateSettingsRequest: Content, Equatable {
         serverHostname != nil || serverPort != nil || serverAllowedHosts != nil
     }
 
+    /// Whether this request carries any `[memory] recall_*` budget key.
+    /// The settings route uses this to push the merged budgets into the live
+    /// orchestrator without a restart; a save without recall keys leaves the
+    /// live engine untouched.
+    public var carriesRecallPatch: Bool {
+        memoryRecallPerTierLimit != nil || memoryRecallAutoLimit != nil || memoryRecallThreshold != nil
+            || memoryRecallMaxChars != nil || memoryRecallPerHitChars != nil
+            || memoryRecallDocPoolMultiplier != nil || memoryRecallEpisodicWeight != nil
+    }
+
     /// Whether a hostname binds loopback only. Non-loopback binds need a
     /// resolvable owner token and fail closed otherwise. Single-sourced through
     /// `ServerConfig.isLoopbackHostname` so a hostname that saves as loopback
@@ -461,6 +541,38 @@ public struct UpdateSettingsRequest: Content, Equatable {
         }
         if let memoryEmbeddingModel {
             memory.embeddingModel = memoryEmbeddingModel
+        }
+        // Recall budgets merge field-by-field so a dashboard edit to one knob
+        // never resets the rest of the `[memory] recall_*` section, then clamp
+        // into the documented ranges so the persisted file mirrors the live
+        // engine contract even if a caller passes an edge value — fail-open
+        // like file-load (`decodeMemory`), never a save refusal. A save
+        // without recall keys is a no-op and preserves the stored budgets
+        // verbatim. Validation documents this posture; live paths clamp again
+        // at use via `RecallBudgets.clamped()`.
+        if let memoryRecallPerTierLimit {
+            memory.recallBudgets.perTierLimit = memoryRecallPerTierLimit
+        }
+        if let memoryRecallAutoLimit {
+            memory.recallBudgets.autoLimit = memoryRecallAutoLimit
+        }
+        if let memoryRecallThreshold {
+            memory.recallBudgets.threshold = memoryRecallThreshold
+        }
+        if let memoryRecallMaxChars {
+            memory.recallBudgets.maxChars = memoryRecallMaxChars
+        }
+        if let memoryRecallPerHitChars {
+            memory.recallBudgets.perHitChars = memoryRecallPerHitChars
+        }
+        if let memoryRecallDocPoolMultiplier {
+            memory.recallBudgets.docPoolMultiplier = memoryRecallDocPoolMultiplier
+        }
+        if let memoryRecallEpisodicWeight {
+            memory.recallBudgets.episodicWeight = memoryRecallEpisodicWeight
+        }
+        if carriesRecallPatch {
+            memory.recallBudgets = memory.recallBudgets.clamped()
         }
     }
 

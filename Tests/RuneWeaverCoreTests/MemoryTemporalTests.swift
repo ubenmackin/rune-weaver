@@ -384,4 +384,33 @@ struct MemoryTemporalTests {
         )
         #expect(capped.count == 1)
     }
+
+    @Test
+    func `July vacation auto-recall is windowed to July`() async throws {
+        let (engine, store, episodes, base) = makeTemporalEngine()
+        defer { try? FileManager.default.removeItem(at: base) }
+        let window = try julyWindow()
+        let july = try julyMid()
+        let august = try augustMid()
+        try await storeTemporalDoc(in: store, externalID: "july-vacation", text: "harbor julyvacationtoken july vacation festival", mtime: july)
+        try await storeTemporalDoc(in: store, externalID: "august-vacation", text: "harbor julyvacationtoken august vacation festival", mtime: august)
+        try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyvacationtoken july vacation walk", timestamp: july))
+        try await episodes.store(Episode(sessionID: UUID(), role: .user, content: "harbor julyvacationtoken august vacation walk", timestamp: august))
+
+        let currentDate = try julyMid()
+        let plan = MemoryQueryRouter.plan(for: "July vacation julyvacationtoken", currentDate: currentDate)
+        #expect(plan.since == window.since)
+        #expect(plan.until == window.until)
+        #expect(plan.skipDocIndex == false)
+
+        let message = try await engine.recallMessage(
+            for: "July vacation julyvacationtoken",
+            sessionID: UUID(),
+            budgets: RecallBudgets(),
+            plan: plan
+        )
+        let content = try #require(message?.content)
+        #expect(content.contains("july"))
+        #expect(!content.contains("august"))
+    }
 }
