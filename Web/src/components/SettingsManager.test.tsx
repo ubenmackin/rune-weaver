@@ -930,17 +930,23 @@ describe("SettingsManager", () => {
     await user.type(denyTextarea, "  .env*  \n\n*.pem\n   \n.ssh/*  ");
     expect(screen.getByText(/3 patterns/i)).toBeDefined();
 
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    // Single page Save owns the Files & Access persist: no section-level
+    // Save Configuration remains in Security, so the page save payload
+    // carries the files keys.
+    expect(
+      screen.queryByRole("button", { name: /Save Configuration/i })
+    ).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*", "*.pem", ".ssh/*"]);
     await waitFor(() => {
-      expect(screen.getByText("Files settings saved!")).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
 
-    // Security inline editor stays mounted after save, so the follow-up
+    // Security editor stays mounted after the page save, so the follow-up
     // steps run against the same textarea without reopening a modal.
     const reopenedTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
@@ -951,7 +957,7 @@ describe("SettingsManager", () => {
     const putsBeforeTraversal = putCount;
     await user.clear(reopenedTextarea);
     await user.type(reopenedTextarea, ".env*\n../escape\n*.pem");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
       expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
     });
@@ -960,7 +966,7 @@ describe("SettingsManager", () => {
     // Empty means allow all in scope: clearing the editor saves an empty
     // array and surfaces the allow-all hint instead of an error.
     await user.clear(reopenedTextarea);
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
       expect(sentPayload?.["filesDenyPatterns"]).toEqual([]);
     });
@@ -1072,7 +1078,7 @@ describe("SettingsManager", () => {
     expect(screen.getAllByDisplayValue("~").length).toBeGreaterThan(0);
   });
 
-  it("uses ghost icon buttons in Reset-then-Add order for files and roots", async () => {
+  it("uses ghost icon buttons for files and roots resets with no Add actions", async () => {
     const user = userEvent.setup();
     const settingsWithFiles = {
       ...mockSettings,
@@ -1124,33 +1130,21 @@ describe("SettingsManager", () => {
 
     // Ghost treatment carries the hover and alignment tokens; secondary
     // buttons have no stylesheet entry and render misaligned, so every
-    // header action must use the shared ghost icon style.
-    const resetDefaultsBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
-    const addPatternBtn = screen.getByRole("button", { name: /Add Pattern/i });
-    for (const btn of [resetDefaultsBtn, addPatternBtn]) {
-      expect(btn.className).toContain("ghost");
-      expect(btn.className).toContain("icon-text-btn");
-    }
-    // Reset precedes Add to match the roots subsection below it.
+    // header action must use the shared ghost icon style. No Add actions
+    // remain: both subsections edit through the single textarea, so Reset
+    // is the only header action per subsection.
     expect(
-      Boolean(
-        resetDefaultsBtn.compareDocumentPosition(addPatternBtn) &
-          Node.DOCUMENT_POSITION_FOLLOWING
-      )
-    ).toBe(true);
+      screen.queryByRole("button", { name: /Add Pattern/i })
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add Root/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add Roots/i })).toBeNull();
+    const resetDefaultsBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
+    expect(resetDefaultsBtn.className).toContain("ghost");
+    expect(resetDefaultsBtn.className).toContain("icon-text-btn");
 
     const resetRootsBtn = screen.getByRole("button", { name: /Reset Roots/i });
-    const addRootBtn = screen.getByRole("button", { name: /Add Root/i });
-    for (const btn of [resetRootsBtn, addRootBtn]) {
-      expect(btn.className).toContain("ghost");
-      expect(btn.className).toContain("icon-text-btn");
-    }
-    expect(
-      Boolean(
-        resetRootsBtn.compareDocumentPosition(addRootBtn) &
-          Node.DOCUMENT_POSITION_FOLLOWING
-      )
-    ).toBe(true);
+    expect(resetRootsBtn.className).toContain("ghost");
+    expect(resetRootsBtn.className).toContain("icon-text-btn");
 
     // Subsection headings keep each policy surface discoverable in the section.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
@@ -2350,7 +2344,16 @@ describe("SettingsManager", () => {
     expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
 
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    // Single page Save owns the persist with no section Save Configuration;
+    // the header scope note states the sharing boundary once and no
+    // consumer note remains.
+    expect(
+      screen.queryByRole("button", { name: /Save Configuration/i })
+    ).toBeNull();
+    expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
+    expect(screen.queryByTestId("files-consumer-note")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
@@ -2920,7 +2923,7 @@ describe("SettingsManager", () => {
     expect(bash["rules"]).toEqual([{ pattern: "git *", action: "allow" }]);
   });
 
-  it("edits allowed roots via the Security textarea with live count, focus, reset, and array payload", async () => {
+  it("edits allowed roots via the Security textarea with live count, reset, and array payload", async () => {
     const user = userEvent.setup();
     let sentPayload: Record<string, unknown> | null = null;
     let putCount = 0;
@@ -2980,25 +2983,16 @@ describe("SettingsManager", () => {
     expect(screen.queryByRole("button", { name: /Remove.*root/i })).toBeNull();
     expect(screen.getAllByLabelText(/Allowed roots, one per line/i).length).toBe(1);
 
-    // Consumer note states the sharing boundary: allow roots bound live
-    // access only while denied paths skip everywhere including the index.
-    const consumerNote = screen.getByTestId("files-consumer-note");
-    expect(consumerNote.textContent).toContain("Allow roots bound");
-    expect(consumerNote.textContent).toContain(
-      "Denied paths are skipped everywhere including the document index"
-    );
-    expect(consumerNote.textContent).toContain("do not affect index coverage");
+    // Header scope note states the sharing boundary once directly under
+    // Files & Access: allow roots bound live access while denied paths skip
+    // everywhere including the index, and no consumer note remains.
+    expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
+    expect(screen.getByText(/do not affect index coverage/i)).toBeDefined();
+    expect(screen.queryByTestId("files-consumer-note")).toBeNull();
 
-    // Add Roots focuses the editor for keyboard flow without altering the
-    // parsed count by itself.
-    const addRootsBtn = screen.getByRole("button", { name: /Add Roots/i });
-    expect(addRootsBtn.className).toContain("ghost");
-    await user.click(addRootsBtn);
-    await waitFor(() => {
-      expect(document.activeElement).toBe(rootsTextarea);
-    });
-    expect(rootsTextarea.value.endsWith("\n")).toBe(true);
-    expect(screen.getByText(/1 root/i)).toBeDefined();
+    // No Add Roots action remains: the single textarea is the only editor.
+    expect(screen.queryByRole("button", { name: /Add Roots/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Add Pattern/i })).toBeNull();
 
     // Reset rewrites only the form text after an explicit confirm and never
     // persists until Save. Cancelling leaves the in-progress text untouched.
@@ -3035,13 +3029,17 @@ describe("SettingsManager", () => {
 
     // Blank lines and surrounding whitespace collapse on save with order
     // preserved for display; the wire shape is a trimmed string array.
+    // Single page Save owns the persist with no section Save Configuration.
+    expect(
+      screen.queryByRole("button", { name: /Save Configuration/i })
+    ).toBeNull();
     const editedTextarea = screen.getByLabelText(
       /Allowed roots, one per line/i
     ) as HTMLTextAreaElement;
     await user.clear(editedTextarea);
     await user.type(editedTextarea, "  ~/a  \n\n~/b\n   \n");
     expect(screen.getByText(/2 roots/i)).toBeDefined();
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
       expect(sentPayload).not.toBeNull();
     });
@@ -3049,14 +3047,14 @@ describe("SettingsManager", () => {
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*"]);
     expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
     await waitFor(() => {
-      expect(screen.getByText("Files settings saved!")).toBeDefined();
+      expect(screen.getByText("Settings saved.")).toBeDefined();
     });
     const putsAfterSave = putCount;
 
     // Traversal escapes fail closed with their editor line number.
     await user.clear(editedTextarea);
     await user.type(editedTextarea, "~/a\n../escape");
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
       expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
     });
@@ -3065,7 +3063,7 @@ describe("SettingsManager", () => {
     // Empty means no roots: clearing the editor rejects with an error and
     // never reaches the network.
     await user.clear(editedTextarea);
-    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => {
       expect(screen.getByText(/Allowed roots cannot be empty/i)).toBeDefined();
     });
@@ -3150,13 +3148,17 @@ describe("SettingsManager", () => {
     expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
 
     // The pointer target renders in Security as the single Files & Access editor.
+    // The header scope note states the sharing boundary once directly under
+    // the heading with no consumer note.
     const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
     await user.click(securityTabBtn);
     await waitFor(() => {
       expect(screen.getByText("Files & Access")).toBeDefined();
     });
     expect(screen.getByLabelText(/Allowed roots, one per line/i)).toBeDefined();
-    expect(screen.getByTestId("files-consumer-note")).toBeDefined();
+    expect(screen.getByText(/Allow roots bound/i)).toBeDefined();
+    expect(screen.getByText(/do not affect index coverage/i)).toBeDefined();
+    expect(screen.queryByTestId("files-consumer-note")).toBeNull();
   });
 });
 

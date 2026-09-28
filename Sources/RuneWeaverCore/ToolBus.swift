@@ -392,6 +392,7 @@ public actor ToolBus {
                 )
             }
         }
+        var approved = false
         switch tool.permissionLevel {
         case .readOnly, .trusted:
             if let gate = permissionGate {
@@ -411,6 +412,7 @@ public actor ToolBus {
                     if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                         return denial
                     }
+                    approveIfAuthorized(context: context, approved: &approved)
                 }
             }
         case .requiresApproval:
@@ -425,9 +427,12 @@ public actor ToolBus {
                     // stays best-effort inside the gate, so a store failure
                     // never blocks the already-authorized tool call. Dry-run
                     // previews never execute, so they leave counters alone.
+                    // The covering grant is the authorization, so propagate it
+                    // into the tool context for non-dry-run calls.
                     if !context.dryRun {
                         let descriptor = ActionDescriptor.descriptor(for: effectiveCall, tool: tool)
                         await gate.recordUse(for: descriptor)
+                        approved = true
                     }
                 case let .denied(reason):
                     return .failure(
@@ -439,12 +444,26 @@ public actor ToolBus {
                     if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
                         return denial
                     }
+                    approveIfAuthorized(context: context, approved: &approved)
                 }
-            } else if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
-                return denial
+            } else {
+                if let denial = await resolveApproval(tool: tool, call: effectiveCall, context: context) {
+                    return denial
+                }
+                approveIfAuthorized(context: context, approved: &approved)
             }
         }
-        let effectiveContext = progressContext(for: effectiveCall, base: context)
+        let baseContext: ToolContext = if approved {
+            ToolContext(
+                conversationID: context.conversationID,
+                dryRun: context.dryRun,
+                approved: true,
+                progress: context.progress
+            )
+        } else {
+            context
+        }
+        let effectiveContext = progressContext(for: effectiveCall, base: baseContext)
         return await runRegisteredTool(tool: tool, call: effectiveCall, context: effectiveContext)
     }
 
@@ -532,8 +551,22 @@ public actor ToolBus {
     ///   - base: Caller-supplied context whose sink receives the report.
     /// - Returns: A context that forwards progress attributed to `call`.
     private func progressContext(for call: ToolInput, base: ToolContext) -> ToolContext {
-        ToolContext(conversationID: base.conversationID, dryRun: base.dryRun) { report in
+        ToolContext(conversationID: base.conversationID, dryRun: base.dryRun, approved: base.approved) { report in
             await base.progress(report.attributed(callID: call.callID, toolName: call.toolName))
+        }
+    }
+
+    /// Propagates handler authorization into the tool context.
+    ///
+    /// Handler approval for a non-dry-run call is the authorization, so the
+    /// tool runs with the approved flag. Centralizes the post-`resolveApproval`
+    /// propagation so the read-only, gated, and no-gate branches cannot drift.
+    /// - Parameters:
+    ///   - context: Invocation context carrying the dry-run flag.
+    ///   - approved: Flag flipped when the handler authorized the call.
+    private func approveIfAuthorized(context: ToolContext, approved: inout Bool) {
+        if !context.dryRun, approvalHandler != nil {
+            approved = true
         }
     }
 

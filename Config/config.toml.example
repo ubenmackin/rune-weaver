@@ -258,6 +258,9 @@ jpeg_quality = 0.75
 blocked_apps = ["Terminal", "iTerm2", "Keychain Access", "System Settings", "System Preferences", "1Password", "Bitwarden"]
 
 [bash]
+# Commands run in the engine home directory by default, with an optional
+# per-call `cwd` override inside allowed roots, confined by the Seatbelt
+# sandbox (sandbox-exec, deny-default; not Apple Container).
 # Granular shell execution policy. Rules evaluate top-to-bottom and the
 # last matching rule decides (last-match-wins): put the catch-all first
 # and specifics after, otherwise a leading specific is shadowed by the

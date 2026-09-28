@@ -1,7 +1,6 @@
-// Rune Weaver Tools — Security evaluation, chaining detection, and pattern matching for bash execution.
+// Rune Weaver Core — Security evaluation, chaining detection, and pattern matching for bash execution.
 
 import Foundation
-import RuneWeaverCore
 
 #if canImport(Darwin)
     import Darwin
@@ -45,6 +44,20 @@ public struct BashDecision: Sendable, Equatable {
         self.isChained = isChained
         self.reason = reason
         self.matchedPattern = matchedPattern
+        self.command = command
+    }
+}
+
+/// Minimal `bash.exec` command arguments for rule evaluation.
+/// Single decoder for the `command` field shared by the permission gate and
+/// the tool, so trimming and wire-shape handling stay anchored in one place
+/// instead of drifting between two parallel structs.
+public struct BashCommandArgs: Codable, Sendable, Equatable {
+    /// Shell command string to evaluate.
+    public let command: String
+
+    /// Creates command args.
+    public init(command: String) {
         self.command = command
     }
 }

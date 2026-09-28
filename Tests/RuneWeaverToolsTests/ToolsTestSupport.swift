@@ -22,6 +22,19 @@ enum ToolsTestSupport {
         ])
     }
 
+    /// Smoke-test shell policy for the tool suite.
+    /// Default deny with `*` ask, `echo` allow, and `rm` deny in rule order.
+    static func smokeBashConfig() -> BashConfig {
+        BashConfig(
+            defaultAction: .deny,
+            rules: [
+                BashRule(pattern: "*", action: .ask),
+                BashRule(pattern: "echo", action: .allow),
+                BashRule(pattern: "rm", action: .deny)
+            ]
+        )
+    }
+
     /// Canned search hits parsed from the shared fixture, newest-first.
     static func sharedSearchHits() throws -> [EmailSearchHit] {
         try EmailBridgeParsing.parseSearchPayload(Data(searchFixture.utf8))

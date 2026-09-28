@@ -407,7 +407,7 @@ extension Orchestrator {
             // Parked calls bypass the bus, so the call identity the bus would have
             // stamped is applied here before the report becomes an event; a report
             // is advisory and never affects the turn's outcome.
-            let context = ToolContext(conversationID: sessionID) { progress in
+            let context = ToolContext(conversationID: sessionID, approved: true) { progress in
                 await onEvent?(.toolProgress(progress.attributed(callID: call.callID, toolName: call.toolName)))
             }
             let output = try await tool.execute(

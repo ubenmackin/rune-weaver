@@ -242,6 +242,7 @@ struct ChatCommand: AsyncParsableCommand {
             store: trustStore,
             pluginsDir: URL(fileURLWithPath: (loaded.config.plugins.pluginsDir as NSString).expandingTildeInPath)
         )
+        await permissionGate.updateBashConfig(loaded.config.bash)
         // Prune expired trust grants during the session so expired rows do
         // not linger for the life of the REPL; stopped explicitly on exit.
         await permissionGate.startPeriodicCleanup()

@@ -718,3 +718,67 @@ struct PermissionGatePersistenceTests {
         #expect(await gate.isTrusted(otherDescriptor) == false)
     }
 }
+
+/// Smoke-test contract for the permission gate consulting shell rules before parking.
+@Suite("Bash Smoke Gate Contract")
+struct BashSmokeGateContractTests {
+    /// Probe tool standing in for `bash.exec` on the gate path.
+    private struct SmokeBashTool: Tool, Sendable {
+        /// Canonical shell tool name the gate branches on.
+        let name = "bash.exec"
+        /// Human-readable summary shown in approval prompts.
+        let description = "Smoke-test shell probe."
+        /// Accepts any object; the gate reads only the command field.
+        let inputSchema = JSONSchema(rawValue: #"{"type":"object"}"#)
+        /// Shell execution always parks unless a rule allows or denies first.
+        let permissionLevel = PermissionLevel.requiresApproval
+        /// Probe never executes; the gate verdict is the assertion target.
+        func execute(input: ToolInput, context _: ToolContext) async throws -> ToolOutput {
+            .success("smoke-ok", callID: input.callID)
+        }
+    }
+
+    /// Gate wired to the smoke-test shell policy.
+    private func makeSmokeGate() async -> PermissionGate {
+        let gate = PermissionGate()
+        await gate.updateBashConfig(BashGateTestSupport.smokeBashConfig())
+        return gate
+    }
+
+    /// Allowed echo runs with no prompt.
+    @Test
+    func `echo Hello World is allowed without prompting`() async {
+        let gate = await makeSmokeGate()
+        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"echo Hello World"}"#)
+        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
+        guard case .allowed = verdict else {
+            Issue.record("Expected echo Hello World to be allowed, got \(verdict)")
+            return
+        }
+    }
+
+    /// Unlisted touch parks for approval.
+    @Test
+    func `touch parks for approval`() async {
+        let gate = await makeSmokeGate()
+        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"touch ~/helloWorld.txt"}"#)
+        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
+        guard case .requiresApproval = verdict else {
+            Issue.record("Expected touch ~/helloWorld.txt to require approval, got \(verdict)")
+            return
+        }
+    }
+
+    /// Denied rm refuses without prompting.
+    @Test
+    func `rm is denied without prompting`() async {
+        let gate = await makeSmokeGate()
+        let call = ToolInput(toolName: "bash.exec", argumentsJSON: #"{"command":"rm ~/helloWorld.txt"}"#)
+        let verdict = await gate.checkPermission(toolCall: call, tool: SmokeBashTool())
+        guard case let .denied(reason) = verdict else {
+            Issue.record("Expected rm ~/helloWorld.txt to be denied, got \(verdict)")
+            return
+        }
+        #expect(!reason.isEmpty)
+    }
+}

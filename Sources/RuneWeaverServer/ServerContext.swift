@@ -563,6 +563,7 @@ extension ServerContext {
         runs: RunLogStore? = nil,
         hub: WSHub? = nil
     ) async -> ServerContext {
+        await permissionGate.updateBashConfig(bashConfig)
         let services = await bootstrapServices(
             permissionGate: permissionGate,
             schedulerConfig: schedulerConfig,
