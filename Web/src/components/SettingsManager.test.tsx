@@ -3,7 +3,18 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import SettingsManager, { SECRET_STATUS_CHUNK_SIZE } from "./SettingsManager";
+import SettingsManager, { SECRET_STATUS_CHUNK_SIZE, getToolCategory } from "./SettingsManager";
+import {
+  BASH_PERMISSION_ACTIONS,
+  BASH_TIMEOUT_MAX_SECONDS,
+  BASH_TIMEOUT_MIN_SECONDS,
+  DEFAULT_BASH_ALLOW_NETWORK,
+  DEFAULT_BASH_CONFIG,
+  DEFAULT_BASH_DEFAULT_ACTION,
+  DEFAULT_BASH_ENABLED,
+  DEFAULT_BASH_RULES,
+  DEFAULT_BASH_TIMEOUT_SECONDS,
+} from "../api";
 import { resetSharedRunsForTesting } from "../hooks/useRunningRuns";
 import { jsonResponse } from "../test-utils/http";
 
@@ -847,19 +858,42 @@ describe("SettingsManager", () => {
   it("edits blocked paths via textarea with live count and trims blanks on save", async () => {
     const user = userEvent.setup();
     let sentPayload: Record<string, unknown> | null = null;
+    let putCount = 0;
     const settingsWithFiles = {
       ...mockSettings,
       filesDenyPatterns: [".env*", "*.pem"],
       filesAllowRoots: ["~"],
       filesRequireApprovalOnDeny: true,
     };
-    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    const mockTools = [
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
       if (init?.method === "PUT") {
+        putCount += 1;
         sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
         return jsonResponse({
           ...settingsWithFiles,
           ...sentPayload,
         });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
       }
       return jsonResponse(settingsWithFiles);
     });
@@ -871,8 +905,17 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Files guard lives in the Tools Files & Access modal, so
+    // open it through the Tools category Configure entry.
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     // Multiline editor surfaces the guard boundary with example globs so a
     // first-time reader knows the one-per-line shape without opening docs.
@@ -891,31 +934,49 @@ describe("SettingsManager", () => {
     await user.type(denyTextarea, "  .env*  \n\n*.pem\n   \n.ssh/*  ");
     expect(screen.getByText(/3 patterns/i)).toBeDefined();
 
-    const saveButton = screen.getByRole("button", { name: "Save" });
-    await user.click(saveButton);
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
 
     await waitFor(() => {
-      expect(screen.getByText("Settings saved.")).toBeDefined();
+      expect(sentPayload).not.toBeNull();
     });
     expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*", "*.pem", ".ssh/*"]);
+    await waitFor(() => {
+      expect(screen.getByText("Files settings saved!")).toBeDefined();
+    });
+
+    // Modal auto-closes after the success tick; reopen for the next edit so
+    // the follow-up steps run against a mounted editor.
+    await waitFor(
+      () => {
+        expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+      },
+      { timeout: 3000 }
+    );
+    const reopenButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(reopenButtons.length).toBe(1);
+    await user.click(reopenButtons[0]);
+    const reopenedTextarea = screen.getByLabelText(
+      /Deny patterns, one per line/i
+    ) as HTMLTextAreaElement;
 
     // Traversal escapes fail closed with their editor line number so the
     // author can jump straight to the offending glob.
-    await user.clear(denyTextarea);
-    await user.type(denyTextarea, ".env*\n../escape\n*.pem");
-    await user.click(saveButton);
+    const putsBeforeTraversal = putCount;
+    await user.clear(reopenedTextarea);
+    await user.type(reopenedTextarea, ".env*\n../escape\n*.pem");
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
     await waitFor(() => {
       expect(screen.getByText(/Line 2.*\.\./i)).toBeDefined();
     });
+    expect(putCount).toBe(putsBeforeTraversal);
 
     // Empty means allow all in scope: clearing the editor saves an empty
     // array and surfaces the allow-all hint instead of an error.
-    await user.clear(denyTextarea);
-    await user.click(saveButton);
+    await user.clear(reopenedTextarea);
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
     await waitFor(() => {
-      expect(screen.getByText("Settings saved.")).toBeDefined();
+      expect(sentPayload?.["filesDenyPatterns"]).toEqual([]);
     });
-    expect(sentPayload?.["filesDenyPatterns"]).toEqual([]);
     expect(
       screen.getByText(/allow all in-scope paths/i)
     ).toBeDefined();
@@ -929,10 +990,31 @@ describe("SettingsManager", () => {
       filesAllowRoots: ["~/custom"],
       filesRequireApprovalOnDeny: true,
     };
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => jsonResponse(settingsWithFiles))
-    );
+    const mockTools = [
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const urlStr = String(url);
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFiles);
+    });
+    vi.stubGlobal("fetch", fetchMock);
 
     render(<SettingsManager />);
 
@@ -940,8 +1022,17 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Reset confirmations live in the Tools Files & Access modal; Security
+    // owns sandbox isolation only and has no file editors.
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     const denyTextarea = screen.getByLabelText(
       /Deny patterns, one per line/i
@@ -949,14 +1040,18 @@ describe("SettingsManager", () => {
     expect(denyTextarea.value).toContain("custom*");
 
     // Reset opens a shared confirmation stating counts and the form-local
-    // nature; cancelling leaves the in-progress text untouched.
+    // nature; cancelling leaves the in-progress text untouched. The Cancel is
+    // scoped to the confirmation dialog because the Files modal behind it
+    // renders its own Cancel.
     const resetDenyBtn = screen.getByRole("button", { name: /Reset to Defaults/i });
     await user.click(resetDenyBtn);
     await waitFor(() => {
       expect(screen.getByText(/replace 1 custom pattern/i)).toBeDefined();
     });
     expect(screen.getByText(/nothing is saved until you choose Save/i)).toBeDefined();
-    await user.click(screen.getByRole("button", { name: /Cancel/i }));
+    const denyConfirmDialog = document.querySelector(".session-delete-modal") as HTMLElement;
+    expect(denyConfirmDialog).not.toBeNull();
+    await user.click(within(denyConfirmDialog).getByRole("button", { name: /Cancel/i }));
     expect((screen.getByLabelText(/Deny patterns, one per line/i) as HTMLTextAreaElement).value).toContain(
       "custom*"
     );
@@ -1002,9 +1097,32 @@ describe("SettingsManager", () => {
       filesAllowRoots: ["~"],
       filesRequireApprovalOnDeny: true,
     };
+    const mockTools = [
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => jsonResponse(settingsWithFiles))
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        return jsonResponse(settingsWithFiles);
+      })
     );
 
     render(<SettingsManager />);
@@ -1013,8 +1131,18 @@ describe("SettingsManager", () => {
       expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
     });
 
-    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
-    await user.click(securityTabBtn);
+    // Files header actions live in the Tools Files & Access modal; Security
+    // keeps only sandbox isolation (Apple Container Machine) with no file
+    // editors.
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+    await waitFor(() => {
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
 
     // Ghost treatment carries the hover and alignment tokens; secondary
     // buttons have no stylesheet entry and render misaligned, so every
@@ -1046,10 +1174,11 @@ describe("SettingsManager", () => {
       )
     ).toBe(true);
 
-    // Subsection headings keep each policy surface discoverable in one pane.
+    // Subsection headings keep each policy surface discoverable in the modal.
     expect(screen.getByText("Blocked Paths")).toBeDefined();
     expect(screen.getByText("Allowed Roots")).toBeDefined();
-    expect(screen.getByText("Apple Container Machine")).toBeDefined();
+    // Sandbox isolation stays in Security, never inside the Files modal.
+    expect(screen.queryByText("Apple Container Machine")).toBeNull();
 
     // Approval escalation toggle stays with its explanatory hint.
     expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
@@ -2090,6 +2219,580 @@ describe("SettingsManager", () => {
     });
     expect(screen.getByText("browser.navigate")).toBeDefined();
   });
+
+  it("routes bash.exec to the Bash & Shell category with its own pill and Configure", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "email.read",
+        description: "Read email messages",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: false,
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Bash groups under its own section rather than falling through to
+    // Other Tools, with a dedicated pill beside the email pill.
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    expect(screen.getByText("Email & Mailboxes")).toBeDefined();
+    expect(screen.queryByText("Other Tools")).toBeNull();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
+    expect(screen.getByText("bash.exec")).toBeDefined();
+    expect(document.querySelectorAll(".tools-category-pill").length).toBe(3);
+    const pillsBar = document.querySelector(".tools-category-pills");
+    expect(pillsBar).not.toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).getByText("Email")).toBeDefined();
+    // Only the bash row earns a header button: the server hasConfig flag is
+    // the sole authority, so the email section stays clean.
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    await user.click(configureButtons[0]);
+
+    // Header Configure opens the Bash editor, never the fallback.
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+  });
+
+  it("saves the Files & Access modal through the shared files payload", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "files.read",
+        description: "Read a file",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "files.grep",
+        description: "Search files",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithFiles = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*"],
+      filesAllowRoots: ["~"],
+      filesRequireApprovalOnDeny: true,
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithFiles,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithFiles);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Both file tools share one Files section with a single header Configure.
+    await waitFor(() => {
+      expect(screen.getByText("Files & Workspace")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    expect(configureButtons[0].closest(".tool-category-actions")).not.toBeNull();
+    expect(configureButtons[0].closest(".builtin-tool-card")).toBeNull();
+    expect(document.querySelectorAll(".builtin-tool-card button").length).toBe(0);
+    await user.click(configureButtons[0]);
+
+    // The Files modal mirrors the guard form through the shared payload helper.
+    expect(screen.getByRole("heading", { name: /Configure Files & Access/i })).toBeDefined();
+    expect(screen.getByLabelText(/Deny patterns, one per line/i)).toBeDefined();
+    expect(screen.getByLabelText(/Require approval on deny/i)).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    expect(sentPayload?.["filesDenyPatterns"]).toEqual([".env*"]);
+    expect(sentPayload?.["filesAllowRoots"]).toEqual(["~"]);
+    expect(sentPayload?.["filesRequireApprovalOnDeny"]).toBe(true);
+  });
+
+  it("saves the Bash & Shell modal with the ordered bash payload", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        allow_network: false,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithBash,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithBash);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+
+    // The Bash modal carries the full shell policy: enable, default action,
+    // ordered rules, timeout, and network isolation.
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+    expect(screen.getByLabelText(/Default action/i)).toBeDefined();
+    expect(screen.getByLabelText(/Timeout \(seconds\)/i)).toBeDefined();
+    expect(screen.queryByText(/No configuration UI is available/i)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
+      string,
+      unknown
+    >;
+    expect(bash).toBeDefined();
+    expect(bash["enabled"]).toBe(true);
+    expect(bash["default_action"]).toBe("ask");
+    expect(bash["rules"]).toEqual([{ pattern: "*", action: "ask" }]);
+    expect(bash["timeout_seconds"]).toBe(30);
+    expect(bash["allow_network"]).toBe(false);
+  });
+
+  it("keeps Files & Access out of the Security pane", async () => {
+    const user = userEvent.setup();
+    const settingsWithFiles = {
+      ...mockSettings,
+      filesDenyPatterns: [".env*", "*.pem"],
+      filesAllowRoots: ["~"],
+      filesRequireApprovalOnDeny: true,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse(settingsWithFiles))
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const securityTabBtn = screen.getByRole("tab", { name: /Security/i });
+    await user.click(securityTabBtn);
+
+    // Security owns sandbox isolation plus access management only; the file
+    // guard lives under Tools & Runes as its own category.
+    await waitFor(() => {
+      expect(screen.getByText("Sandbox & Security Policy")).toBeDefined();
+    });
+    expect(screen.queryByText("Files & Access")).toBeNull();
+    expect(screen.queryByText("Files & Workspace")).toBeNull();
+    expect(screen.queryByText("Blocked Paths")).toBeNull();
+    expect(screen.queryByLabelText(/Deny patterns, one per line/i)).toBeNull();
+    expect(screen.getByText("Apple Container Machine")).toBeDefined();
+  });
+
+  it("keeps bash.exec out of Other Tools", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+      {
+        name: "custom.widget",
+        description: "Custom utility",
+        permissionLevel: "readOnly",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: false,
+      },
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string | URL | Request) => {
+        const urlStr = String(url);
+        if (urlStr.includes("/plugins")) {
+          return jsonResponse({ plugins: [] });
+        }
+        if (urlStr.includes("/tools")) {
+          return jsonResponse({ tools: mockTools });
+        }
+        return jsonResponse(mockSettings);
+      })
+    );
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    // Bash lands in its own section while the unknown prefix falls through
+    // to Other Tools; neither section borrows the other's tool.
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    expect(screen.getByText("Other Tools")).toBeDefined();
+    expect(document.querySelectorAll(".tool-category-section").length).toBe(2);
+    const pillsBar = document.querySelector(".tools-category-pills");
+    expect(pillsBar).not.toBeNull();
+    expect(within(pillsBar as HTMLElement).getByText("Bash")).toBeDefined();
+    expect(within(pillsBar as HTMLElement).getByText("Other")).toBeDefined();
+    const sections = Array.from(document.querySelectorAll(".tool-category-section"));
+    const bashSection = sections.find((section) =>
+      section.textContent?.includes("Bash & Shell")
+    );
+    const otherSection = sections.find((section) =>
+      section.textContent?.includes("Other Tools")
+    );
+    expect(bashSection?.textContent).toContain("bash.exec");
+    expect(bashSection?.textContent).not.toContain("custom.widget");
+    expect(otherSection?.textContent).toContain("custom.widget");
+    expect(otherSection?.textContent).not.toContain("bash.exec");
+  });
+
+  it("routes colliding external names to Other while keeping builtin bash.exec in Bash", () => {
+    const builtinBash = {
+      name: "bash.exec",
+      description: "Run shell commands",
+      permissionLevel: "requiresApproval",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: true,
+      pluginID: null,
+      source: "builtin",
+      integrityStatus: "valid",
+      hasConfig: true,
+    };
+    const pluginBashEvil = {
+      name: "bash.evil",
+      description: "External colliding name",
+      permissionLevel: "readOnly",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: false,
+      pluginID: "external.plugin",
+      source: "plugin",
+      integrityStatus: "valid",
+    };
+    const pluginFilesEvil = {
+      name: "files.evil",
+      description: "External colliding name",
+      permissionLevel: "readOnly",
+      inputSchema: "{}",
+      isEnabled: true,
+      isBuiltIn: false,
+      pluginID: "external.plugin",
+      source: "plugin",
+      integrityStatus: "valid",
+    };
+    // Builtin shell entry stays in its section even with the provenance gate.
+    expect(getToolCategory(builtinBash)).toBe("bash");
+    // External names never join builtin sections regardless of prefix.
+    expect(getToolCategory(pluginBashEvil)).toBe("other");
+    expect(getToolCategory(pluginFilesEvil)).toBe("other");
+    // String fallback has no provenance, so only exact known builtin names
+    // resolve; colliding or unknown names fall through to Other.
+    expect(getToolCategory("bash.exec")).toBe("bash");
+    expect(getToolCategory("files.read")).toBe("files");
+    expect(getToolCategory("bash.evil")).toBe("other");
+    expect(getToolCategory("files.evil")).toBe("other");
+    expect(getToolCategory("custom.widget")).toBe("other");
+  });
+
+  it("rejects an empty bash rule list before any network write", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        default_action: "ask",
+        rules: [{ pattern: "*", action: "ask" }],
+        timeout_seconds: 30,
+        allow_network: false,
+      },
+    };
+    let putCount = 0;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        putCount += 1;
+        const sent = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithBash,
+          ...sent,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithBash);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+
+    // Removing the last rule leaves an empty list, which must fail closed
+    // instead of falling through to the default action.
+    await user.click(screen.getByRole("button", { name: /Remove bash rule 1/i }));
+    expect(screen.getByText(/At least one rule is required/i)).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Invalid bash rules/i)).toBeDefined();
+    });
+    expect(putCount).toBe(0);
+  });
+
+  it("reads camelCase bash aliases while sending snake_case keys", async () => {
+    const user = userEvent.setup();
+    const mockTools = [
+      {
+        name: "bash.exec",
+        description: "Run shell commands",
+        permissionLevel: "requiresApproval",
+        inputSchema: "{}",
+        isEnabled: true,
+        isBuiltIn: true,
+        pluginID: null,
+        source: "builtin",
+        integrityStatus: "valid",
+        hasConfig: true,
+      },
+    ];
+    const settingsWithCamelBash = {
+      ...mockSettings,
+      bash: {
+        enabled: true,
+        defaultAction: "deny",
+        rules: [{ pattern: "git *", action: "allow" }],
+        timeoutSeconds: 45,
+        allowNetwork: true,
+      },
+    };
+    let sentPayload: Record<string, unknown> | null = null;
+    const fetchMock = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const urlStr = String(url);
+      if (init?.method === "PUT") {
+        sentPayload = JSON.parse(init.body as string) as Record<string, unknown>;
+        return jsonResponse({
+          ...settingsWithCamelBash,
+          ...sentPayload,
+        });
+      }
+      if (urlStr.includes("/tools")) {
+        return jsonResponse({ tools: mockTools });
+      }
+      if (urlStr.includes("/plugins")) {
+        return jsonResponse({ plugins: [] });
+      }
+      return jsonResponse(settingsWithCamelBash);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<SettingsManager />);
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("gemma-4-9b")).toBeDefined();
+    });
+
+    const toolsTabBtn = screen.getByRole("tab", { name: /Tools and Runes/i });
+    await user.click(toolsTabBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText("Bash & Shell")).toBeDefined();
+    });
+    const configureButtons = await screen.findAllByRole("button", { name: /^Configure$/ });
+    expect(configureButtons.length).toBe(1);
+    await user.click(configureButtons[0]);
+    expect(screen.getByRole("heading", { name: /Configure Bash & Shell/i })).toBeDefined();
+
+    // Camel aliases populate the same fields as the snake keys.
+    const defaultSelect = screen.getByLabelText(/Default action/i) as HTMLSelectElement;
+    expect(defaultSelect.value).toBe("deny");
+    expect(screen.getByDisplayValue("45")).toBeDefined();
+    expect(screen.getByDisplayValue("git *")).toBeDefined();
+
+    await user.click(screen.getByRole("button", { name: /Save Configuration/i }));
+
+    await waitFor(() => {
+      expect(sentPayload).not.toBeNull();
+    });
+    const bash = (sentPayload as unknown as Record<string, unknown>)["bash"] as Record<
+      string,
+      unknown
+    >;
+    expect(bash).toBeDefined();
+    expect(bash["default_action"]).toBe("deny");
+    expect(bash["timeout_seconds"]).toBe(45);
+    expect(bash["allow_network"]).toBe(true);
+    expect(bash["rules"]).toEqual([{ pattern: "git *", action: "allow" }]);
+  });
 });
 
 describe("secret status chunk contract", () => {
@@ -2099,6 +2802,30 @@ describe("secret status chunk contract", () => {
     // must stay equal at 500 so badge-probe chunks never trip the status gate;
     // update both together.
     expect(SECRET_STATUS_CHUNK_SIZE).toBe(500);
+  });
+});
+
+describe("bash defaults and bounds contract", () => {
+  it("pins the bash mirrors to the engine BashConfig", () => {
+    // Single cross-language contract: the server owns the defaults in
+    // `Sources/RuneWeaverCore/Config.swift` (BashConfig) and the bounds in
+    // `Sources/RuneWeaverCore/Config+Validation.swift` plus
+    // `Sources/RuneWeaverServer/ServerBashDTOs.swift`; these mirrors must
+    // stay equal so the fresh form and the client validator never drift from
+    // the engine. Update both together.
+    expect(DEFAULT_BASH_ENABLED).toBe(true);
+    expect(DEFAULT_BASH_DEFAULT_ACTION).toBe("ask");
+    expect(DEFAULT_BASH_TIMEOUT_SECONDS).toBe(30);
+    expect(DEFAULT_BASH_ALLOW_NETWORK).toBe(false);
+    expect(DEFAULT_BASH_RULES).toEqual([{ pattern: "*", action: "ask" }]);
+    expect(DEFAULT_BASH_CONFIG.enabled).toBe(DEFAULT_BASH_ENABLED);
+    expect(DEFAULT_BASH_CONFIG.default_action).toBe(DEFAULT_BASH_DEFAULT_ACTION);
+    expect(DEFAULT_BASH_CONFIG.timeout_seconds).toBe(DEFAULT_BASH_TIMEOUT_SECONDS);
+    expect(DEFAULT_BASH_CONFIG.allow_network).toBe(DEFAULT_BASH_ALLOW_NETWORK);
+    expect(DEFAULT_BASH_CONFIG.rules).toEqual(DEFAULT_BASH_RULES);
+    expect([...BASH_PERMISSION_ACTIONS]).toEqual(["allow", "ask", "deny"]);
+    expect(BASH_TIMEOUT_MIN_SECONDS).toBe(1);
+    expect(BASH_TIMEOUT_MAX_SECONDS).toBe(3600);
   });
 });
 

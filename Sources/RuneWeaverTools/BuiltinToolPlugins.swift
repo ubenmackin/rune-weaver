@@ -1,7 +1,7 @@
 // Rune Weaver Tools — Built-in tool plugin registration surface.
 //
-// Single-sources the full built-in suite (Email, Files, Memory, Goals, Web, Browser,
-// API, Media) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
+// Single-sources the full built-in suite (Email, Messages, Files, Bash, Memory,
+// Goals, Web, Browser, API, Media, Desktop) shared by CLI, the menu-bar app, and serve. `CLIShared.makeToolBus`,
 // `AppModel`, and `ServerContext.make` all build through this helper so the
 // registry cannot drift between entry points. Web, browser, and API tools run
 // under one `[browser]` policy; `api.request` additionally exempts the
@@ -20,7 +20,7 @@ public enum BuiltinToolPlugins {
     }
 
     /// All built-in tool names across every suite in registration order
-    /// (email, messages, files, memory, goals, web, browser, api, media, desktop).
+    /// (email, messages, files, bash, memory, goals, web, browser, api, media, desktop).
     public static var allToolNames: [String] {
         EmailTools.toolNames
             + MessagesTools.toolNames
@@ -84,7 +84,7 @@ public enum BuiltinToolPlugins {
             )
     }
 
-    /// Builds the full built-in tool suite (Email, Files, Memory, Goals, Web, Browser, API, Media, Desktop)
+    /// Builds the full built-in tool suite (Email, Messages, Files, Bash, Memory, Goals, Web, Browser, API, Media, Desktop)
     /// from component configurations.
     ///
     /// Goal tools join only when both the engine and store arrive; nil keeps them
@@ -133,9 +133,9 @@ public enum BuiltinToolPlugins {
         }
         tools += MessagesTools.makeTools(chatDatabasePath: chatDatabasePath, gateway: messagesGateway)
         tools += FilesTools.makeTools(filesConfig: filesConfig ?? FilesConfig())
-        if bashConfig.enabled {
-            tools.append(BashTool(bashConfig: bashConfig, filesConfig: filesConfig ?? FilesConfig()))
-        }
+        // Bash always registers so GET /tools stays stable; a disabled
+        // config fails closed inside BashTool.execute via its enabled guard.
+        tools.append(BashTool(bashConfig: bashConfig, filesConfig: filesConfig ?? FilesConfig()))
         if let memoryEngine {
             tools += MemoryTools.makeTools(engine: memoryEngine, embedder: embedder)
         }

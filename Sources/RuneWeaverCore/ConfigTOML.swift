@@ -940,14 +940,21 @@ extension RuneWeaverConfig {
                 guard let pattern = try node.strictString("pattern", field: "bash.rules[\(idx)].pattern") else {
                     throw ConfigError.validationError(field: "bash.rules[\(idx)].pattern", message: "missing required")
                 }
+                // Single-sourced through `BashRule.validate(index:)` so
+                // file-load, the settings PUT, and core validation agree on
+                // the blank-pattern field and message. The placeholder action
+                // is unchecked; only the pattern matters here.
+                try BashRule(pattern: pattern, action: .ask).validate(index: idx)
                 let actionStr = try node.strictString("action", field: "bash.rules[\(idx)].action") ?? "ask"
                 guard let action = BashPermissionAction(rawValue: actionStr.lowercased()) else {
                     throw ConfigError.validationError(field: "bash.rules[\(idx)].action", message: "must be allow, ask, or deny")
                 }
                 rules.append(BashRule(pattern: pattern, action: action))
             }
-            // An explicit empty rule list clears the built-in default so an
-            // empty `[[bash.rules]]` section falls through to `defaultAction`.
+            // A present rule list replaces the built-in default in stored
+            // order; an absent key preserves the default. An empty list never
+            // persists because validation requires at least one rule, so a
+            // saved file always round-trips the same evaluation order.
             config.bash.rules = rules
         }
     }

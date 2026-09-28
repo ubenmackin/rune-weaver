@@ -946,12 +946,7 @@ extension RuneWeaverConfig {
     }
 
     private func validateBashSection() throws {
-        if bash.timeoutSeconds < 1 || bash.timeoutSeconds > 3600 {
-            throw ConfigError.validationError(
-                field: "bash.timeout_seconds",
-                message: "must be between 1 and 3600 (got \(bash.timeoutSeconds))"
-            )
-        }
+        try bash.validate()
     }
 }
 
@@ -972,6 +967,87 @@ public extension GoalsConfig {
             maxStepsPerGoal: min(max(maxStepsPerGoal, Self.minStepsPerGoalBound), Self.maxStepsPerGoalBound),
             planTimeoutSeconds: max(1, planTimeoutSeconds)
         )
+    }
+}
+
+/// Single-sourced bash rule validation shared by file-load, the settings
+/// PUT, and TOML decoding so the three paths cannot drift on fields or
+/// messages.
+public extension BashRule {
+    /// Validates one rule's pattern, rejecting blank values.
+    ///
+    /// The matcher trims surrounding whitespace before comparing, so a
+    /// whitespace-only pattern never matches and fails closed here instead
+    /// of persisting a dead rule.
+    /// - Parameter index: Position in `BashConfig.rules` for diagnostics.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when the pattern is blank.
+    func validate(index: Int) throws {
+        if pattern.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            throw ConfigError.validationError(
+                field: "bash.rules[\(index)].pattern",
+                message: "must not be blank"
+            )
+        }
+    }
+}
+
+/// Single-sourced bash policy validation shared by file-load, the settings
+/// PUT, and TOML decoding so the three paths agree on fields and messages.
+public extension BashConfig {
+    /// Minimum execution timeout in seconds, keeping runs bounded.
+    static var minTimeoutSeconds: Int {
+        1
+    }
+
+    /// Maximum execution timeout in seconds, keeping runs bounded.
+    static var maxTimeoutSeconds: Int {
+        3600
+    }
+
+    /// Validates the stored bash policy, throwing a descriptive error on failure.
+    ///
+    /// Covers the rule list and the timeout together so file-load and any
+    /// full-snapshot check share one contract.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when the rule
+    ///   list is empty, a rule pattern is blank, or the timeout is out of bounds.
+    func validate() throws {
+        try Self.validateRules(rules)
+        try Self.validateTimeoutSeconds(timeoutSeconds)
+    }
+
+    /// Validates an ordered rule list, requiring at least one non-blank pattern.
+    ///
+    /// A present list replaces the built-in default in stored order, so an
+    /// empty list fails closed instead of persisting a policy that reloads
+    /// as the default star rule.
+    /// - Parameter rules: Ordered permission rules evaluated first-match-wins.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when the list
+    ///   is empty or a pattern is blank.
+    static func validateRules(_ rules: [BashRule]) throws {
+        if rules.isEmpty {
+            throw ConfigError.validationError(
+                field: "bash.rules",
+                message: "must contain at least one rule"
+            )
+        }
+        for (index, rule) in rules.enumerated() {
+            try rule.validate(index: index)
+        }
+    }
+
+    /// Validates the default execution timeout in seconds.
+    ///
+    /// Bounds keep a zero hang or an unbounded run from persisting through
+    /// any write path.
+    /// - Parameter timeoutSeconds: Default execution timeout in seconds.
+    /// - Throws: ``ConfigError/validationError(field:message:)`` when outside 1-3600.
+    static func validateTimeoutSeconds(_ timeoutSeconds: Int) throws {
+        if timeoutSeconds < minTimeoutSeconds || timeoutSeconds > maxTimeoutSeconds {
+            throw ConfigError.validationError(
+                field: "bash.timeout_seconds",
+                message: "must be between \(minTimeoutSeconds) and \(maxTimeoutSeconds) (got \(timeoutSeconds))"
+            )
+        }
     }
 }
 
